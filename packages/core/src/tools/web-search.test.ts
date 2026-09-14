@@ -8,7 +8,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { ToolErrorType } from './tool-error.js';
-import { WebSearchTool, evaluateWebSearchGate } from './web-search.js';
+import {
+  CITATION_RULES,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  WebSearchTool,
+  evaluateWebSearchGate,
+  resolveWebSearchTimeoutMs,
+} from './web-search.js';
 import { generateCustomEnvKey } from '../providers/presets/custom-provider.js';
 import { findProviderByCredentials } from '../providers/all-providers.js';
 import { alibabaStandardProvider } from '../providers/presets/alibaba-standard.js';
@@ -48,6 +54,7 @@ interface ConfigOverrides {
     webExtractor?: boolean;
     baseUrl?: string;
     apiKeyEnv?: string;
+    timeoutMs?: number;
   };
   models?: Array<{
     id: string;
@@ -222,10 +229,12 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
         webExtractor: true,
+        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
       });
     }
   });
@@ -453,10 +462,12 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
         webExtractor: true,
+        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
       });
     }
   });
@@ -640,6 +651,29 @@ describe('evaluateWebSearchGate auto derivation', () => {
     extra: Partial<ConfigOverrides> = {},
   ) => makeConfig({ settings: undefined, models, primaryModel, ...extra });
 
+  it('carries a configured budget on the automatic path', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    // A budget-only setting must not turn the automatic path into an
+    // explicit one.
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, { settings: { timeoutMs: 90_000 } }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.timeoutMs).toBe(90_000);
+    }
+  });
+
+  it('normalizes an out-of-range budget on the automatic path', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, { settings: { timeoutMs: 0 } }),
+    );
+    expect(gate.ok && gate.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+  });
+
   it('derives the backend from a Standard API Key entry', () => {
     expect(
       findProviderByCredentials(STANDARD.baseUrl, STANDARD.envKey)?.id,
@@ -649,12 +683,14 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         // Not the primary model id: the search runs on the documented
         // search model at the same endpoint.
         modelId: 'qwen3.8-flash',
         apiKeyEnvKey: STANDARD.envKey,
         baseUrl: STANDARD.baseUrl,
         webExtractor: true,
+        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
       });
     }
   });
@@ -2000,5 +2036,283 @@ describe('WebSearchTool execute', () => {
     const schema = tool.schema;
     expect(schema.description).toContain('July 2026');
     vi.useRealTimers();
+  });
+});
+
+describe('WebSearchTool citations', () => {
+  it('asks the model to cite bare URLs without titles', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('as bare URLs, one per line');
+    expect(content).toContain('cannot be verified');
+    expect(content).not.toContain('as markdown links');
+  });
+
+  it('shows a bare URL citation example in the tool description', () => {
+    const description = new WebSearchTool(makeConfig()).schema.description;
+    expect(description).toContain(
+      '- https://www.cms.gov/files/document/r12951cp.pdf',
+    );
+    expect(description).toContain('do not wrap them in markdown links');
+    expect(description).not.toContain('](https://');
+  });
+});
+
+describe('WebSearchTool budget', () => {
+  it('uses a configured budget and falls back to the default for unusable values', () => {
+    expect(resolveWebSearchTimeoutMs(undefined)).toBe(120_000);
+    expect(resolveWebSearchTimeoutMs(30_000)).toBe(30_000);
+    expect(resolveWebSearchTimeoutMs(600_000)).toBe(600_000);
+    // Rejected rather than clamped: a typo must not become a long wait.
+    for (const unusable of [0, -1, 1.5, Number.NaN, 600_001, 1.5e9]) {
+      expect(resolveWebSearchTimeoutMs(unusable)).toBe(
+        DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+      );
+    }
+  });
+
+  it('carries a configured budget on the explicit and env-declared paths', () => {
+    const explicit = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 90_000 },
+      }),
+    );
+    const envDeclared = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+          timeoutMs: 45_000,
+        },
+        models: [],
+      }),
+    );
+    expect(explicit.ok && explicit.backend.timeoutMs).toBe(90_000);
+    expect(envDeclared.ok && envDeclared.backend.timeoutMs).toBe(45_000);
+  });
+
+  it('normalizes an out-of-range budget on the explicit and env-declared paths', () => {
+    // settings.json is not re-validated at load, so the gate read sites are
+    // the only guard keeping a hand-edited value from reaching the backend.
+    const explicit = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 0 },
+      }),
+    );
+    const envDeclared = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+          timeoutMs: 0,
+        },
+        models: [],
+      }),
+    );
+    expect(explicit.ok && explicit.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+    expect(envDeclared.ok && envDeclared.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+  });
+
+  it('times out on the configured budget rather than a fixed one', async () => {
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            // A stream that never finishes on its own, like a slow search.
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 200 },
+      }),
+    );
+    expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(result.error?.message).toBe('Web search timed out after 0.2s.');
+    // The SDK's own request timeout follows the same budget.
+    expect((mockCtorOpts.current as { timeout: number }).timeout).toBe(200);
+  });
+
+  it('salvages the partial result when the budget expires after a search ran', async () => {
+    // terminalFailure tries partial salvage before the timeout arm: a search
+    // that spent its budget after collecting evidence must return it.
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+            yield {
+              type: 'response.output_item.done',
+              item: { ...EXTRACTOR_ITEM, output: 'x'.repeat(20_000) },
+            };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 200 },
+      }),
+    );
+    expect(result.error).toBeUndefined();
+    const content = result.llmContent as string;
+    expect(content).toContain('[Partial result:');
+    expect(content).toContain('[Raw page content salvaged');
+    expect(content).toContain('Truncated to 6000 characters.');
+  });
+
+  it('reports cancellation instead of salvaging when the caller aborts', async () => {
+    // terminalFailure checks the caller's signal before the salvage arm: an
+    // aborted search must not hand the model salvaged partial evidence.
+    const controller = new AbortController();
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+              controller.abort();
+            });
+          },
+        }),
+    );
+    const tool = new WebSearchTool(makeConfig());
+    const result = await tool
+      .build({ query: 'test query' })
+      .execute(controller.signal);
+    expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(result.error?.message).toBe('Web search cancelled.');
+    expect(result.llmContent).not.toContain('[Partial result:');
+  });
+});
+
+describe('WebSearchTool extractor fallback', () => {
+  const streamDyingAfterPageRead = (pageText: string) => ({
+    async *[Symbol.asyncIterator]() {
+      yield { type: 'response.created' };
+      yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+      yield {
+        type: 'response.output_item.done',
+        item: { ...EXTRACTOR_ITEM, output: pageText },
+      };
+      throw new Error('stream reset');
+    },
+  });
+
+  it('labels salvaged page text as raw page content', async () => {
+    mockCreate.mockResolvedValueOnce(streamDyingAfterPageRead('page content'));
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain(
+      "[Raw page content salvaged from the search agent's page reads — its narrated answer did not arrive.]",
+    );
+    expect(content).toContain('page content');
+    expect(content).not.toContain('Truncated to');
+  });
+
+  it('does not split a surrogate pair when salvaged page text is truncated', async () => {
+    // The fixture length leans on the 41-unit '[Extracted content — goal:
+    // verify facts]\n' prefix collectFromItems prepends: 41 + 5958 'a's
+    // places the emoji's high surrogate exactly at the 6000-unit cut.
+    mockCreate.mockResolvedValueOnce(
+      streamDyingAfterPageRead('a'.repeat(5_958) + '\u{1F600}'),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('Truncated to 6000 characters.]');
+    // No high surrogate without its low surrogate anywhere in the payload.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(content)).toBe(false);
+  });
+
+  it('bounds salvaged page text when the narration never arrived', async () => {
+    mockCreate.mockResolvedValueOnce(
+      streamDyingAfterPageRead('x'.repeat(20_000)),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('Truncated to 6000 characters.]');
+    expect(content).toContain('x'.repeat(5_000));
+    expect(content).not.toContain('x'.repeat(6_000));
+  });
+
+  it('never uses page text when the narration arrived', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          { ...EXTRACTOR_ITEM, output: 'unrelated page body' },
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('The answer is 42.');
+    expect(content).not.toContain('unrelated page body');
+    expect(content).not.toContain('[Raw page content');
+  });
+});
+
+describe('WebSearchTool citation invariants', () => {
+  it('renders every evidence bullet as a bare URL and nothing else', async () => {
+    // The citation policy tells the model the page lists give URLs only; a
+    // bullet carrying anything else would contradict it silently.
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    const evidence = content.slice(
+      content.indexOf('Opened evidence pages'),
+      content.indexOf('Queries executed'),
+    );
+    const bullets = evidence
+      .split('\n')
+      .filter((line) => line.startsWith('- '));
+    expect(bullets.length).toBeGreaterThanOrEqual(2);
+    for (const bullet of bullets) {
+      expect(bullet).toMatch(/^- https?:\/\/\S+$/);
+    }
+  });
+
+  it('states the citation rules once for the description and the result footer', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    const description =
+      new WebSearchTool(makeConfig()).schema.description ?? '';
+    const critical = description.slice(
+      description.indexOf('CRITICAL REQUIREMENT'),
+      description.indexOf('  - Example format:'),
+    );
+    expect(
+      critical.split('\n').filter((line) => line.startsWith('  - ')),
+    ).toEqual(CITATION_RULES.map((rule) => `  - ${rule}`));
+    // Exactly the rules, then the safety footer: an exception added to the
+    // footer alone would leave two contradictory policies in one context.
+    expect(content).toContain(
+      `\n\nCitation policy: ${CITATION_RULES.map((rule) => `${rule}.`).join(' ')}\n\n[Safety:`,
+    );
   });
 });

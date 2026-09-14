@@ -37,8 +37,8 @@ import { isolateHostGitConfig } from './lib/test-utils.js';
 import { sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
-  mkdirSync,
   realpathSync,
+  mkdirSync,
   writeFileSync,
   appendFileSync,
   symlinkSync,
@@ -73,6 +73,13 @@ const GLOBS = [
   'packages/channels/telegram',
   '!packages/desktop-shell',
 ];
+
+// Skipped on win32, and not for convenience: `mountRootFor` refuses every
+// absolute Windows path (a drive letter is a colon, which the `-v` grammar
+// cannot spell), so containment is unavailable there BY DESIGN and these gates
+// never speak. The assertions would fail for that reason and nothing else —
+// first inside the merge queue, where the Windows lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
 describe('isWorkspaceMember', () => {
   it('places the integration-tests directory outside every workspace', () => {
@@ -567,6 +574,40 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  itWhereContainmentExists(
+    'refuses a probe tree whose admin entry sits inside the mounted dir',
+    () => {
+      // THROUGH the production call site, not at predicate level. Every other
+      // fixture here builds its tree under a bare `tmpdir()`, which contains no
+      // `.qwen/tmp` segment, so `mountRootFor` answers null and the gate
+      // short-circuits before its logic runs — the wiring could be deleted, or
+      // handed the wrong arguments, and the whole suite would stay green.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-mounted-')));
+      const probeTree = join(root, '.qwen', 'tmp', 'review-pr-1-probe');
+      try {
+        mkdirSync(probeTree, { recursive: true });
+        writeFileSync(join(probeTree, 'a.ts'), 'gone.clear();\n');
+        asCheckout(probeTree);
+        // The shape the round-trip gate cannot see: `.git` replaced by a
+        // pointer into the mount. `asCheckout` leaves a `.git` DIRECTORY, which
+        // is itself one of the two refused shapes — so this covers the branch
+        // the identity gates all sit behind.
+        const r = runOneMutant(
+          probeTree,
+          { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+          ['a.test.ts'],
+        );
+
+        expect(r.verdict).toBe('inconclusive');
+        expect(r.detail).toContain('review temp dir');
+        expect(readFileSync(join(probeTree, 'a.ts'), 'utf8')).toBe(
+          'gone.clear();\n',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
   it('refuses to run through a repo-LOCAL content filter, and only a local one', () => {
     // The restore rewrites every tracked file in this tree, and a checkout
     // EXECUTES `filter.<name>.smudge` whenever it does — the same surface
@@ -747,6 +788,16 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     const isolation = isolateHostGitConfig();
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      // The runner-stage observation below is `findVitestBin`'s throw, and a
+      // bare tmpdir only throws "not found" when nothing up-tree provides
+      // vitest — a node_modules above the runner's TMPDIR (observed on
+      // self-hosted CI, where jobs share one /tmp) resolves one, the probe
+      // then runs for real, and the detail names no vitest. Plant a shadow
+      // vitest that declares no bin: the innermost node_modules wins
+      // resolution on every host, so the throw is deterministic.
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(join(vitestDir, 'package.json'), '{}');
       asCheckout(dir);
       appendFileSync(
         join(dir, '.git', 'config'),
@@ -767,9 +818,10 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
 
       expect(detail).not.toContain('could not read to the bottom');
       expect(detail).not.toContain('content filter');
-      // And it reached the runner, which this bare fixture does not have: the
-      // screen PASSED, rather than the run failing for some other reason — the
-      // difference between "did not refuse" and "proceeded".
+      // And it reached the runner stage, where the shadow vitest above makes
+      // `findVitestBin` throw: the screen PASSED, rather than the run failing
+      // for some other reason — the difference between "did not refuse" and
+      // "proceeded".
       expect(detail).toContain('vitest');
     } finally {
       isolation.dispose();

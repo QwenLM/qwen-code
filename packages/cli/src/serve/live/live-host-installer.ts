@@ -70,6 +70,7 @@ export interface LiveHostReleaseManifest {
 
 interface InstalledLiveHost {
   version: string;
+  protocolVersion: number;
 }
 
 export interface LiveHostInstallerDeps {
@@ -183,6 +184,11 @@ async function inspectApp(appPath: string): Promise<InstalledLiveHost> {
   if (!VERSION_PATTERN.test(version)) {
     throw new Error('Qwen Live Host version is invalid.');
   }
+  const rawProtocolVersion = await readBundleValue(
+    appPath,
+    'QwenLiveProtocolVersion',
+  ).catch(() => '0');
+  const protocolVersion = Number(rawProtocolVersion);
   await run('/usr/bin/codesign', [
     '--verify',
     '--deep',
@@ -204,7 +210,16 @@ async function inspectApp(appPath: string): Promise<InstalledLiveHost> {
     throw new Error('Qwen Live Host signing identity is invalid.');
   }
   await run('/usr/sbin/spctl', ['-a', '-t', 'exec', appPath]);
-  return { version };
+  return {
+    version,
+    protocolVersion: Number.isSafeInteger(protocolVersion)
+      ? protocolVersion
+      : 0,
+  };
+}
+
+function isCompatibleInstalledHost(host: InstalledLiveHost): boolean {
+  return host.protocolVersion === LIVE_HOST_PROTOCOL_VERSION;
 }
 
 async function inspectInstalledHost(): Promise<InstalledLiveHost | undefined> {
@@ -360,7 +375,10 @@ async function installLatestHost(
     await fsp.mkdir(extractedPath, { mode: 0o700 });
     await run('/usr/bin/ditto', ['-x', '-k', archivePath, extractedPath]);
     const candidate = await inspectApp(candidatePath);
-    if (candidate.version !== manifest.version) {
+    if (
+      candidate.version !== manifest.version ||
+      !isCompatibleInstalledHost(candidate)
+    ) {
       throw new Error('Live Host package version does not match its manifest.');
     }
     onStatus({ state: 'installing', version: manifest.version });
@@ -375,7 +393,10 @@ async function installLatestHost(
     await fsp.rename(stagingPath, LIVE_HOST_APP_PATH);
     installedCandidate = true;
     const installed = await inspectApp(LIVE_HOST_APP_PATH);
-    if (installed.version !== manifest.version) {
+    if (
+      installed.version !== manifest.version ||
+      !isCompatibleInstalledHost(installed)
+    ) {
       throw new Error('Installed Live Host version is invalid.');
     }
     if (movedExisting) {
@@ -438,9 +459,10 @@ export class LiveHostInstaller {
     this.status = { state: 'checking' };
     try {
       const installed = await this.inspectInstalled();
-      this.status = installed
-        ? { state: 'installed', version: installed.version }
-        : { state: 'missing' };
+      this.status =
+        installed && isCompatibleInstalledHost(installed)
+          ? { state: 'installed', version: installed.version }
+          : { state: 'missing' };
     } catch (error) {
       this.setError(errorMessage(error), true);
     }
@@ -465,6 +487,12 @@ export class LiveHostInstaller {
       const installed = await this.inspectInstalled();
       if (!installed)
         return this.setError('Qwen Live Host is not installed.', true);
+      if (!isCompatibleInstalledHost(installed)) {
+        return this.setError(
+          `Qwen Live Host protocol v${installed.protocolVersion} is incompatible; v${LIVE_HOST_PROTOCOL_VERSION} is required.`,
+          true,
+        );
+      }
       this.status = { state: 'launching', version: installed.version };
       await this.launchHost();
       this.status = { state: 'installed', version: installed.version };
@@ -484,7 +512,9 @@ export class LiveHostInstaller {
       this.status = { state: 'checking' };
       const installed = force ? undefined : await this.inspectInstalled();
       const ready =
-        installed ??
+        (installed && isCompatibleInstalledHost(installed)
+          ? installed
+          : undefined) ??
         (await this.installLatest(currentArchitecture, (status) => {
           this.status = { ...status };
         }));

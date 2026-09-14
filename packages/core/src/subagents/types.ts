@@ -45,7 +45,7 @@ export type SubagentLevel =
 
 /**
  * Declares that a subagent's turn is executed by an external agent process
- * speaking ACP, rather than by the in-process reasoning loop.
+ * speaking ACP or Codex app-server, rather than the in-process reasoning loop.
  *
  * `parseAgentExecutor` validates this strictly: an unrecognized `kind`, a
  * missing/blank `command`, or a malformed `args` yields `undefined`. The
@@ -55,8 +55,8 @@ export type SubagentLevel =
  * deliberate divergence from the lenient drop used for `mcpServers` and `hooks`.
  */
 export interface SubagentExecutorSpec {
-  /** Executor kind. `acp` is the only supported value today. */
-  kind: 'acp';
+  /** Protocol used by the external executable. */
+  kind: 'acp' | 'codex';
   /** Executable to run, resolved on PATH. */
   command: string;
   /** Arguments passed to `command`. Omitted when the definition declares none. */

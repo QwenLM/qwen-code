@@ -123,6 +123,21 @@ describe('flattenPeerLabel', () => {
     expect(flattenPeerLabel('a\u202eb')).not.toContain('\u202e');
     expect(flattenPeerLabel('x\ufeffy')).not.toContain('\ufeff');
     expect(flattenPeerLabel('hid\u200dden text')).toBe('hid den text');
+    // By category, not by a list: tag characters, the Mongolian vowel
+    // separator and interlinear annotation marks are format characters too.
+    expect(flattenPeerLabel('voice\u{E0041}\u{E0042}bridge')).toBe(
+      'voice bridge',
+    );
+    expect(flattenPeerLabel('a\u180eb')).toBe('a b');
+    expect(flattenPeerLabel('a\ufff9b\ufffbc')).toBe('a b c');
+  });
+
+  it('caps a label in code points, never splitting a surrogate pair', () => {
+    const flattened = flattenPeerLabel('\u{1F600}'.repeat(250));
+    const points = Array.from(flattened);
+    expect(points).toHaveLength(200);
+    expect(points.at(-2)).toBe('\u{1F600}');
+    expect(points.at(-1)).toBe('\u2026');
   });
 });
 

@@ -32,12 +32,13 @@
 5950 live-host.yml
 7642 main-ci-failure-issue.yml
 1686 npm-cache.yml
+2709 pnpm-lock-freshness.yml
 2489 pnpm-worktree-smoke.yml
 7299 pr-force-push-reminder.yml
 6495 pr-self-report-label.yml
 9646 qwen-autofix-fork-bridge.yml
 5942 qwen-autofix-fork-signal.yml
-469259 qwen-autofix.yml
+469165 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
 261105 qwen-code-pr-review.yml
 79041 qwen-fleet-shepherd.yml

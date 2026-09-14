@@ -150,6 +150,46 @@ describe('OpenTuiLoadingIndicator', () => {
     expect(text).toContain('…');
     expect(text).not.toContain('别催我');
   });
+
+  it('estimates tokens from the streamed character count', () => {
+    const { container } = render(
+      <OpenTuiLoadingIndicator
+        streaming
+        streamingCharsRef={{ current: 400 }}
+        isReceivingContent
+      />,
+    );
+    expect(container.textContent).toContain('↓ 100 tokens');
+  });
+
+  it('points the arrow up while no content has arrived yet', () => {
+    const { container } = render(
+      <OpenTuiLoadingIndicator
+        streaming
+        streamingCharsRef={{ current: 400 }}
+        isReceivingContent={false}
+      />,
+    );
+    expect(container.textContent).toContain('↑ 100 tokens');
+  });
+
+  it('omits the token segment until characters have streamed', () => {
+    const { container } = render(
+      <OpenTuiLoadingIndicator streaming streamingCharsRef={{ current: 0 }} />,
+    );
+    expect(container.textContent).not.toContain('tokens');
+  });
+
+  it('omits the token segment on a narrow terminal, like ink', () => {
+    mocks.state.dimensions = { width: 40, height: 40 };
+    const { container } = render(
+      <OpenTuiLoadingIndicator
+        streaming
+        streamingCharsRef={{ current: 400 }}
+      />,
+    );
+    expect(container.textContent).not.toContain('tokens');
+  });
 });
 
 describe('OpenTuiFooter', () => {
@@ -159,16 +199,38 @@ describe('OpenTuiFooter', () => {
     mocks.state.dimensions = { width: 110, height: 40 };
   });
 
-  it('truncates the status row to the terminal width instead of wrapping', () => {
+  it('wraps the status row onto a second line instead of truncating it', () => {
+    mocks.state.dimensions = { width: 50, height: 40 };
+    const { container } = render(
+      <OpenTuiFooter
+        config={fakeConfig()}
+        streaming={false}
+        sessionName="my-session"
+      />,
+    );
+    const rows = [...container.querySelectorAll('span')].map(
+      (row) => row.textContent ?? '',
+    );
+    expect(rows).toEqual([
+      '➜ qwen-code · my-session · git:(main) · ',
+      'qwen3-coder-plus',
+    ]);
+    expect(container.textContent).not.toContain('…');
+  });
+
+  it('caps the status row at two lines like ink’s overflow-hidden box', () => {
     mocks.state.dimensions = { width: 40, height: 40 };
     mocks.state.gitBranch = 'a-very-long-branch-name-that-cannot-fit';
     const { container } = render(
       <OpenTuiFooter config={fakeConfig()} streaming={false} />,
     );
-    const line = (container.textContent ?? '').trim();
-    expect(line.length).toBeLessThanOrEqual(40);
-    expect(line.endsWith('…')).toBe(true);
-    expect(line).not.toContain('qwen3-coder-plus');
+    const rows = [...container.querySelectorAll('span')].map(
+      (row) => row.textContent ?? '',
+    );
+    // The wrap yields three lines here; ink hides the third rather than letting
+    // the footer grow, so the model segment is genuinely lost at this width.
+    expect(rows).toHaveLength(2);
+    expect(container.textContent).not.toContain('qwen3-coder-plus');
   });
 
   it('renders the project name, git branch and model', () => {
@@ -208,9 +270,9 @@ describe('OpenTuiFooter', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('auto-accept edits');
     expect(text).not.toContain('Auto-edit mode');
-    // shift+tab is not bound to cycle modes in this renderer, so ink's
-    // `(shift + tab to cycle)` suffix would be a dead affordance here.
-    expect(text).not.toContain('shift + tab');
+    // ink's AutoAcceptIndicator suffixes the mode with the cycle shortcut, and
+    // the composer now binds it.
+    expect(text).toContain('auto-accept edits (shift + tab to cycle)');
 
     rerender(
       <OpenTuiFooter
@@ -220,6 +282,41 @@ describe('OpenTuiFooter', () => {
       />,
     );
     expect(container.textContent).toContain('YOLO mode');
+  });
+
+  it('prefixes the default mode with ink’s pause glyph', () => {
+    const { container } = render(
+      <OpenTuiFooter
+        config={fakeConfig()}
+        streaming={false}
+        approvalMode={ApprovalMode.DEFAULT}
+      />,
+    );
+    expect(container.textContent).toContain('⏸ Ask permissions');
+  });
+
+  it('words the cycle hint for Windows, where Shift+Tab is not distinguishable', () => {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      const { container } = render(
+        <OpenTuiFooter
+          config={fakeConfig()}
+          streaming
+          approvalMode={ApprovalMode.AUTO}
+        />,
+      );
+      expect(container.textContent).toContain('Auto mode (tab to cycle)');
+      expect(container.textContent).not.toContain('shift + tab');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
   });
 
   it('orders the hint row as steer, mode, queue', () => {
@@ -232,8 +329,48 @@ describe('OpenTuiFooter', () => {
       />,
     );
     expect(container.textContent).toContain(
-      'Enter to steer · Ctrl+Q to queue · Auto mode · ⏳ 2 queued',
+      'Enter to steer · Ctrl+Q to queue · Auto mode (shift + tab to cycle) ⏳ 2 queued',
     );
+  });
+
+  it('gives shell mode the hint slot ink’s ShellModeIndicator holds', () => {
+    const { container } = render(
+      <OpenTuiFooter
+        config={fakeConfig()}
+        streaming
+        queueLength={2}
+        approvalMode={ApprovalMode.AUTO_EDIT}
+        shellModeActive
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('shell mode enabled (esc to disable)');
+    expect(text).not.toContain('Enter to steer');
+    expect(text).not.toContain('auto-accept edits');
+    // The queue badge is a separate child of ink's hint row, so it survives
+    // the mode taking the slot ahead of it.
+    expect(text).toContain('⏳ 2 queued');
+  });
+
+  it('gives the armed quit warning the footer, dropping the status row', () => {
+    const { container } = render(
+      <OpenTuiFooter
+        config={fakeConfig()}
+        streaming={false}
+        approvalMode={ApprovalMode.YOLO}
+        queueLength={2}
+        exitHint="Press Ctrl+C again to exit."
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Press Ctrl+C again to exit.');
+    expect(text).not.toContain('qwen3-coder-plus');
+    expect(text).not.toContain('git:(main)');
+    expect(text).not.toContain('YOLO');
+    // The queue badge is a sibling of the hint the warning replaces, not part
+    // of it, so it stays visible while the warning is armed — joined by the
+    // single space its leading literal space produces in ink.
+    expect(text).toContain('Press Ctrl+C again to exit. ⏳ 2 queued');
   });
 
   it('shows the context indicator only after tokens are used', () => {

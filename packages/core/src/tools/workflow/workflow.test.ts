@@ -26,9 +26,31 @@ import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budge
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
+import { WORKFLOW_AUTHORING_SKILL_NAME } from '../../skills/workflow-authoring-skill.js';
 
+/**
+ * The tool description has two shapes, chosen at construction: it points at
+ * the `workflow-authoring` skill when the model can load it, and inlines the
+ * whole reference when it cannot. A bare `{}` would take the inline branch,
+ * so the default fixture models the ordinary session: skills on, Skill tool
+ * registered. `workflow-description.test.ts` covers the other shape.
+ */
 function fakeConfig(): Config {
-  return {} as unknown as Config;
+  return {
+    getSkillManager: () => ({ getCachedSkills: () => null }),
+    getToolRegistry: () => ({
+      getAllToolNames: () => [ToolNames.SKILL, ToolNames.WORKFLOW],
+      getTool: () => undefined,
+    }),
+    isSkillEnabled: () => true,
+  } as unknown as Config;
+}
+
+function paramDescription(tool: WorkflowTool, name: string): string {
+  const schema = tool.schema.parametersJsonSchema as {
+    properties: Record<string, { description: string }>;
+  };
+  return schema.properties[name].description;
 }
 
 /**
@@ -77,11 +99,12 @@ describe('WorkflowTool', () => {
     );
   });
 
-  // The description is what makes the model pick pipeline() over a barrier
-  // and verify a finding before reporting it. A refactor that drops the
-  // policy prose leaves a runtime nobody drives well, and no other test
-  // would notice — so anchor the load-bearing claims.
-  it('description carries both the runtime facts and the orchestration policy', () => {
+  // The description is what makes the model call this tool for the right
+  // request and plan around the right limits. The authoring contract moved
+  // to the `workflow-authoring` skill — see SKILL.test.ts for the anchors
+  // that live there now, and the `not.toMatch` block below for the ones
+  // that must NOT come back here.
+  it('description carries the opt-in rule and the runtime facts', () => {
     const { description } = new WorkflowTool(fakeConfig());
     // Every env knob the description names is anchored. The four that the
     // orchestrator exports are anchored *through the exported constant*, so
@@ -91,7 +114,7 @@ describe('WorkflowTool', () => {
     // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
     // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
     for (const anchor of [
-      'min(16, cpus-2)',
+      'min(16, availableParallelism()-2)',
       MAX_WORKFLOW_AGENTS_ENV,
       MAX_WORKFLOW_CONCURRENCY_ENV,
       WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
@@ -103,22 +126,9 @@ describe('WorkflowTool', () => {
     ]) {
       expect(description).toContain(anchor);
     }
-    // The per-call options this half of the description advertises are
-    // anchored too — a refactor that drops their sentences leaves the
-    // capabilities undiscoverable from the tool surface and no other test
-    // would notice.
-    expect(description).toContain('workingDir');
-    expect(description).toMatch(/no-progress stall watchdog/);
-    // One anchor per policy section — dropping any whole section has to
-    // turn this test red, which is the regression it exists to catch.
+    // Why a workflow at all — the one line of policy that stays, because it
+    // is what stops the model reaching for orchestration by reflex.
     expect(description).toMatch(/Parallelism on its own is not a reason/);
-    expect(description).toMatch(/only before the orchestration step/);
-    expect(description).toMatch(/Common single-phase shapes/);
-    expect(description).toMatch(/Default to `pipeline\(\)`/);
-    expect(description).toMatch(/A barrier is right only when/);
-    expect(description).toMatch(/refute/);
-    expect(description).toMatch(/against everything already seen/);
-    expect(description).toMatch(/log\(\)` what was dropped/);
     // Limits the model has to plan around rather than discover from a
     // mid-run failure — the numbers themselves, not just the knob names.
     // Anchored *through* the exported constant rather than as a literal:
@@ -131,8 +141,6 @@ describe('WorkflowTool', () => {
     // `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
     // this one is still a hand-synced literal on both sides.
     expect(description).toMatch(/30-minute wall-clock cap/);
-    expect(description).toMatch(/nests one level only/);
-    expect(description).toMatch(/read `budget\.total`/);
     // The `/workflows` capability list is the one part of the description
     // that trails the runtime: #8320 added cooperative pause/resume to the
     // dialog while this branch was moving the description into a constant,
@@ -149,25 +157,27 @@ describe('WorkflowTool', () => {
     // path back, and resumes by re-sending the whole source.
     expect(description).toMatch(/Every run hands back its runId/);
     expect(description).toMatch(/read it before diagnosing/);
-    // The null/throw split is the contract a script is written against: a
-    // model that does not know `agent()` can resolve to `null` writes code
-    // that treats a failed agent's absence as a value.
+    // The journal writes a `started` line per dispatch and a `result` or
+    // `failed` line after it, so any per-agent count here would be wrong. The
+    // skill states the line taxonomy; the description only says to read it.
+    expect(description).not.toMatch(/journal holds one/);
+    // The null/throw split stays here rather than moving to the skill: it
+    // governs how the model READS a result, which every turn that touches a
+    // workflow result needs, not just the turn that writes the script.
     expect(description).toMatch(
       /`agent\(\)` resolves to `null` when that admitted agent fails on its own/,
     );
     expect(description).toMatch(/exhausted stall retries/);
     expect(description).not.toMatch(/user stopped it/);
-    expect(description).toMatch(/Call-shape validation failures/);
     expect(description).toMatch(
-      /Run-level rejections no later call could survive/,
-    );
-    expect(description).toMatch(
-      /named, with its error, in the run's failures list/,
-    );
-    expect(description).toMatch(
-      /a `null` returned by an ordinary thunk or stage is not an agent dispatch/,
+      /run-level rejections no later call could survive/i,
     );
   });
+
+  // Which guidance left this description for the `workflow-authoring` skill is
+  // pinned in one two-way table in `skills/bundled/workflow-authoring/
+  // SKILL.test.ts`: every anchor is asserted present in the skill and absent
+  // from this description, with whitespace collapsed on both sides.
 
   // Both parameter descriptions describe the same persisted file — the one
   // `resumeFromRunId` tells the model to edit. A change on one side that
@@ -635,36 +645,91 @@ await agent('scan package.json')
     expect(text).not.toContain('Workflow failed');
   });
 
-  // The tool description is not the only model-visible copy of the caps —
-  // the `script` parameter description states them a second time, and a
-  // model reading one tool call sees both. Anchoring only the tool
-  // description lets a maintainer raise a cap, watch the test above go
-  // green again, and stop while `script` still advertises the old number.
-  it('script parameter description states the same caps as the tool description', () => {
+  // The caps used to be stated twice — once in the tool description and
+  // again in `script` — and a maintainer raising one could leave the other
+  // advertising the old number. There is now exactly one model-visible copy
+  // in the tool surface, and the detail lives in the skill. This pins that:
+  // the second copy must not grow back, and the one that remains must be
+  // the interpolated constant.
+  it('states each cap once, in the tool description only', () => {
     const tool = new WorkflowTool(fakeConfig());
     const schema = tool.schema.parametersJsonSchema as {
       properties: { script: { description: string } };
     };
     const scriptDescription = schema.properties.script.description;
-    expect(scriptDescription).toContain(
-      `At most ${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run`,
+
+    expect(tool.description).toContain(
+      `up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
     );
-    expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
-    expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
-    expect(scriptDescription).toContain('it resolves to null');
-    expect(scriptDescription).toContain(
-      'subagent completed without calling StructuredOutput (after 2 in-conversation nudges)',
+    for (const cap of [
+      String(DEFAULT_MAX_AGENTS_PER_RUN),
+      MAX_WORKFLOW_AGENTS_ENV,
+      MAX_WORKFLOW_CONCURRENCY_ENV,
+    ]) {
+      expect(scriptDescription).not.toContain(cap);
+    }
+    // The per-option error strings a script has to check for moved with the
+    // options themselves; the skill's test asserts they are there.
+    expect(scriptDescription).not.toContain(
+      'subagent completed without calling StructuredOutput',
     );
-    expect(scriptDescription).toContain('run-level token/agent-cap refusal');
+    expect(scriptDescription).not.toContain('agent type');
+    // Regression pins from the throw-to-null settlement change (#11196): a
+    // resurrected "throws" claim would contradict the description beside it.
     expect(scriptDescription).not.toContain('Unresolved names throw');
     expect(scriptDescription).not.toContain("'remote' throws");
+    // What `script` still owns: the shape of the source itself, and where
+    // to go for the rest.
+    expect(scriptDescription).toContain('async IIFE');
     expect(scriptDescription).toContain(
-      'Unresolved names make the admitted agent() resolve to null',
+      'Pass THUNKS to parallel(), not eager calls',
     );
-    // Both halves must agree on the agent cap, whatever it is.
-    expect(tool.description).toContain(
-      `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    expect(scriptDescription).toContain('all of `Date`');
+    expect(scriptDescription).toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+  });
+
+  // Every model-visible string in the tool surface is paid for on every turn,
+  // so each has a budget. The headroom is a paragraph, not a sentence: one
+  // legitimate clause fits, a block of option prose pasted back does not.
+  it.each([
+    ['the description', (tool: WorkflowTool) => tool.description, 4_500],
+    ['script', (tool: WorkflowTool) => paramDescription(tool, 'script'), 900],
+    [
+      'scriptPath',
+      (tool: WorkflowTool) => paramDescription(tool, 'scriptPath'),
+      950,
+    ],
+    ['args', (tool: WorkflowTool) => paramDescription(tool, 'args'), 250],
+    [
+      'resumeFromRunId',
+      (tool: WorkflowTool) => paramDescription(tool, 'resumeFromRunId'),
+      850,
+    ],
+    [
+      'run_in_background',
+      (tool: WorkflowTool) => paramDescription(tool, 'run_in_background'),
+      450,
+    ],
+  ])('keeps %s within its per-turn budget', (_name, read, budget) => {
+    expect(read(new WorkflowTool(fakeConfig())).length).toBeLessThanOrEqual(
+      budget,
     );
+  });
+
+  // The inline fallback is large by construction — it carries the whole
+  // reference — and grows whenever the reference does. It still needs a
+  // ceiling, or growth passes every other assertion about its size.
+  it('keeps the inline fallback description within its budget', () => {
+    const tool = new WorkflowTool({
+      ...fakeConfig(),
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.WORKFLOW],
+        getTool: () => undefined,
+      }),
+    } as unknown as Config);
+
+    expect(tool.authoringSurface).toBe('inline');
+    expect(tool.description.length).toBeLessThanOrEqual(24_000);
   });
 
   it('rejects build() when script is missing', () => {
@@ -753,6 +818,60 @@ await agent('scan package.json')
         run_in_background: true,
       }),
     ).toThrow(/interactive TUI/i);
+  });
+
+  // A retry of a saved workflow whose file is no longer readable falls back to
+  // the run's inline source and passes no name — the ACP retry path. The runner
+  // still resolves the name from the resumed run, so the notice says to copy
+  // the saved workflow, and must not also say "fix the script". The same
+  // holds for a foreground resume, whose trailer carries the same advice.
+  it('keeps the authoring hint off a saved workflow resumed from its inline source', async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-session-hint-'),
+    );
+    const registry = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const config = {
+      ...fakeConfig(),
+      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    const script = 'throw new Error("boom");';
+
+    try {
+      const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
+      expect(tool.authoringSurface).toBe('pointer');
+      const first = (await tool
+        .buildSessionOwnedBackground({ script }, 'review-and-fix')
+        .execute(new AbortController().signal)) as { workflowRunId?: string };
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
+      const runId = first.workflowRunId;
+      expect(runId).toMatch(/^wf_/);
+
+      await tool
+        .buildSessionOwnedBackground({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(2));
+      const retryText = completion.mock.calls[1][1] as string;
+      expect(retryText).toContain(
+        'This reads the saved /review-and-fix workflow',
+      );
+      expect(retryText).not.toContain('hint:');
+
+      const foreground = await tool
+        .build({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      const trailer = (foreground.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(trailer).toContain('this reads the saved workflow');
+      expect(trailer).not.toContain('hint:');
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
   });
 
   it('starts a session-owned background run outside the interactive TUI', async () => {
@@ -1758,6 +1877,15 @@ await agent('scan package.json')
         storage,
         getWorkflowRunRegistry: () => registry,
         getSkipWorkflowUsageWarning: () => true,
+        // Same shape as `fakeConfig()`: an ordinary session where the
+        // authoring reference is a skill the model can load, which is what
+        // the failure hint tells it to do.
+        getSkillManager: () => ({ getCachedSkills: () => null }),
+        getToolRegistry: () => ({
+          getAllToolNames: () => [ToolNames.SKILL, ToolNames.WORKFLOW],
+          getTool: () => undefined,
+        }),
+        isSkillEnabled: () => true,
       } as unknown as Config;
       return { config, storage };
     }
@@ -1960,6 +2088,95 @@ await agent('scan package.json')
       expect(parts[1].text).toContain('logs (last ');
       expect(parts[1].text).toContain('about to fail');
       expect(result.error?.message).toContain('--- workflow run ---');
+      // A script that threw is a script to rewrite, and the description only
+      // points at the reference — the model may never have read it.
+      expect(parts[1].text).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
+    // Telling the model to load a skill it cannot reach is worse than saying
+    // nothing: the reference is already inlined in the description it read.
+    // Both halves are asserted on the same tool, so the hint and the shape of
+    // the description cannot drift apart.
+    it('points at the inlined reference when the skill is unreachable', async () => {
+      const { config } = storedConfig();
+      Object.assign(config, {
+        getToolRegistry: () => ({
+          getAllToolNames: () => [ToolNames.WORKFLOW],
+          getTool: () => undefined,
+        }),
+      });
+      const tool = new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      });
+      const result = await tool
+        .build({ script: 'throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(tool.description).toContain('# Workflow authoring reference');
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain(
+        "hint: See the authoring reference in this tool's description",
+      );
+      expect(trailer).not.toContain('hint: Load the');
+    });
+
+    // The description is fixed when the tool is built. A `/skills` toggle
+    // after that must not flip the hint into describing a different
+    // description than the one the model is holding.
+    it('keeps the hint consistent with the description after a mid-session toggle', async () => {
+      const { config } = storedConfig();
+      const tool = new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      });
+      Object.assign(config, { isSkillEnabled: () => false });
+
+      const result = await tool
+        .build({ script: 'throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(tool.description).toContain(
+        `load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
+    // A script that never compiled is the earliest and most common
+    // first-attempt failure, and it returns no trailer — the hint has to ride
+    // on the message itself.
+    it('carries the hint on a script that fails to compile', async () => {
+      const result = await new WorkflowTool(fakeConfig())
+        .build({ script: "const target: string = 'x';\nawait agent(target);" })
+        .execute(new AbortController().signal);
+
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(text).toContain('was not launched');
+      expect(text).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+      expect(result.error?.message).toContain('hint:');
+    });
+
+    // The hint belongs to a failure, not to every run: a successful trailer
+    // that told the model to go read the reference would be noise on the
+    // path that needs it least.
+    it('adds no authoring hint to a successful run', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'fine',
+      })
+        .build({ script: "return await agent('x');" })
+        .execute(new AbortController().signal);
+
+      expect(
+        (result.llmContent as Array<{ text: string }>)[1].text,
+      ).not.toContain('hint:');
     });
 
     it('does not offer to restart a user-cancelled foreground run', async () => {
@@ -1989,6 +2206,7 @@ await agent('scan package.json')
       expect(text).toContain('Workflow cancelled');
       expect(text).toContain('1 cancelled');
       expect(text).not.toContain('resume: Workflow(');
+      expect(text).not.toContain('hint:');
       expect(result.error).toBeDefined();
     });
 
@@ -2008,6 +2226,9 @@ await agent('scan package.json')
 
       expect(trailer).toContain('this reads the saved workflow');
       expect(trailer).not.toContain('edit that file first');
+      // "Fix the script, and retry" would contradict the resume advice to
+      // copy the saved workflow before changing it.
+      expect(trailer).not.toContain('hint:');
     });
 
     it('does not promise replay when the journal path is unavailable', async () => {
@@ -2147,6 +2368,28 @@ await agent('scan package.json')
         '1 cached',
       );
     });
+    // The trailer tells the model to resume by passing the generated copy
+    // back as `scriptPath`. That copy is still the model's script, so a
+    // failure there keeps the hint the first run had.
+    it('keeps the hint when a generated script is re-run by path and fails', async () => {
+      const { config } = storedConfig();
+      const dispatch = async () => 'unused';
+      const first = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'throw new Error("first");' })
+        .execute(new AbortController().signal);
+      expect(first.scriptPath).toBeDefined();
+
+      const second = await new WorkflowTool(config, { dispatch })
+        .build({ scriptPath: first.scriptPath! })
+        .execute(new AbortController().signal);
+
+      const trailer = (second.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain('edit that generated copy first');
+      expect(trailer).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
     it('carries the original args in the resume call', async () => {
       const { config } = storedConfig();
       const result = await new WorkflowTool(config, {

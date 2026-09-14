@@ -11,7 +11,17 @@ import { escapeJsonTagCharacters } from '../utils/formatters.js';
 export type GoalContinuationUsage = Pick<
   GoalRecord,
   'tokensUsed' | 'tokenBudget' | 'turnCount'
->;
+> & {
+  /** Turns this Goal may finish before it stops; absent when unbounded. */
+  turnBudget?: number;
+  /**
+   * Active time elapsed so far and the ceiling on it, in milliseconds. Sent
+   * as a pair or not at all: elapsed time with nothing to measure it against
+   * is a figure the model cannot act on.
+   */
+  activeTimeMs?: number;
+  activeTimeBudgetMs?: number;
+};
 
 interface GoalContinuationHints {
   /**
@@ -102,15 +112,36 @@ const OBJECTIVE_UPDATED_LINE =
  */
 function renderBudgetLine(usage: GoalContinuationUsage): string {
   const used = usage.tokensUsed.toLocaleString('en-US');
-  const spend =
+  const segments = [
     usage.tokenBudget === undefined
-      ? `${used} tokens used, with no budget on this Goal`
+      ? `${used} tokens used, with no token budget on this Goal`
       : `${used} of ${usage.tokenBudget.toLocaleString('en-US')} tokens used, ${Math.max(
           0,
           usage.tokenBudget - usage.tokensUsed,
-        ).toLocaleString('en-US')} remaining`;
-  const turns = `${usage.turnCount} Goal ${usage.turnCount === 1 ? 'turn' : 'turns'} finished`;
-  return `Token budget: ${spend}; ${turns}.`;
+        ).toLocaleString('en-US')} remaining`,
+    usage.turnBudget === undefined
+      ? `${usage.turnCount} Goal ${usage.turnCount === 1 ? 'turn' : 'turns'} finished`
+      : `${usage.turnCount} of ${usage.turnBudget.toLocaleString('en-US')} Goal turns finished`,
+  ];
+  // The elapsed clock ships only with the ceiling it is measured against.
+  // Active minutes on a Goal that has no time budget would be a figure on
+  // every turn that nothing acts on.
+  if (
+    usage.activeTimeBudgetMs !== undefined &&
+    usage.activeTimeMs !== undefined
+  ) {
+    segments.push(
+      `${renderActiveMinutes(usage.activeTimeMs)} of ${renderActiveMinutes(
+        usage.activeTimeBudgetMs,
+      )} active minutes used`,
+    );
+  }
+  return `Budget: ${segments.join('; ')}.`;
+}
+
+/** Milliseconds as the minutes the active-time budget is expressed in. */
+function renderActiveMinutes(ms: number): string {
+  return (ms / 60_000).toLocaleString('en-US', { maximumFractionDigits: 1 });
 }
 
 /**
@@ -142,9 +173,13 @@ const COMPLETION_AUDIT_LINE =
  * Sent once per spend window, on the continuation the budget gate grants
  * after the window is spent. The Goal stops when this turn ends, so the
  * hand-off is the last thing the model delivers autonomously.
+ *
+ * Which ceiling was reached is left to the budget line above rather than
+ * named here: the hosts carry a plain `windDown` flag, and the figures the
+ * model needs to say what stopped it are already on the line before this one.
  */
 const WIND_DOWN_LINES = [
-  'The autonomous token budget for this Goal window is spent. This is the final turn before the Goal stops and waits for the user; do not start new work.',
+  'An autonomous budget for this Goal window is spent -- the budget line above says which. This is the final turn before the Goal stops and waits for the user; do not start new work.',
   'Deliver a concise hand-off: what was accomplished, citing evidence references from get_goal; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
 ];
 

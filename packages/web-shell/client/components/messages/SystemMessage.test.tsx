@@ -32,6 +32,43 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 }
 
 describe('SystemMessage — prompt_cancelled marker', () => {
+  it.each([
+    ['zh-CN', 10999, '你在 11 秒后取消了请求'],
+    ['zh-CN', 999, '你在 1 秒后取消了请求'],
+    ['zh-CN', 0, '你在 0 秒后取消了请求'],
+    ['zh-CN', 7069, '你在 8 秒后取消了请求'],
+    ['en', 10999, 'You cancelled this request after 11 seconds'],
+  ] as const)('renders elapsed seconds in %s', (language, elapsedMs, text) => {
+    const container = render(
+      <SystemMessage
+        content=""
+        variant="info"
+        source="prompt_cancelled"
+        data={{ elapsedMs }}
+      />,
+      language,
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(text);
+  });
+
+  it.each(['1000', -1, NaN, Infinity])(
+    'falls back for invalid elapsed time %s',
+    (elapsedMs) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="prompt_cancelled"
+          data={{ elapsedMs }}
+        />,
+        'zh-CN',
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        '你已取消请求',
+      );
+    },
+  );
+
   it('renders the user-cancelled marker as a status region', () => {
     const container = render(
       <SystemMessage content="" variant="info" source="prompt_cancelled" />,
@@ -64,20 +101,46 @@ describe('SystemMessage — prompt_cancelled marker', () => {
 
 describe('SystemMessage — goal status', () => {
   it.each([
-    ['en', 'Goal usage limited', 'Last check: token budget reached'],
-    ['zh-CN', '目标用量受限', '上次检查: token budget reached'],
+    [
+      'usage_limited',
+      'en',
+      'Goal usage limited',
+      'token budget reached',
+      'Last check: token budget reached',
+    ],
+    [
+      'usage_limited',
+      'zh-CN',
+      '目标用量受限',
+      'token budget reached',
+      '上次检查: token budget reached',
+    ],
+    [
+      'blocked',
+      'en',
+      'Goal blocked',
+      'approval required',
+      'Last check: approval required',
+    ],
+    [
+      'blocked',
+      'zh-CN',
+      '目标已阻塞',
+      'approval required',
+      '上次检查: approval required',
+    ],
   ] as const)(
-    'renders a usage-limited goal distinctly in %s',
-    (language, title, reason) => {
+    'renders a %s goal distinctly in %s',
+    (kind, language, title, lastReason, reason) => {
       const container = render(
         <SystemMessage
           content=""
           variant="info"
           source="goal"
           data={{
-            kind: 'usage_limited',
+            kind,
             condition: 'finish the evaluation',
-            lastReason: 'token budget reached',
+            lastReason,
           }}
         />,
         language,

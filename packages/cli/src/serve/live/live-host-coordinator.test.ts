@@ -16,6 +16,8 @@ import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
   LIVE_INPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_HEADER_BYTES,
   type LiveDaemonMessage,
   type LiveHostHello,
 } from './types.js';
@@ -60,9 +62,25 @@ class FakeSocket extends EventEmitter {
       .filter((value): value is string => typeof value === 'string')
       .map((value) => JSON.parse(value) as LiveDaemonMessage);
   }
+
+  outputFrames(): Array<{ epoch: number; outputId: number; audio: Buffer }> {
+    return this.sent
+      .filter((value): value is Uint8Array => typeof value !== 'string')
+      .map((value) => {
+        const frame = Buffer.from(value);
+        return {
+          epoch: Number(frame.readBigUInt64BE(0)),
+          outputId: Number(
+            frame.readBigUInt64BE(LIVE_OUTPUT_AUDIO_EPOCH_BYTES),
+          ),
+          audio: frame.subarray(LIVE_OUTPUT_AUDIO_HEADER_BYTES),
+        };
+      });
+  }
 }
 
 const coordinators: LiveHostCoordinator[] = [];
+const TEST_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64');
 
 function readyHello(overrides: Partial<LiveHostHello> = {}): LiveHostHello {
   return {
@@ -73,6 +91,7 @@ function readyHello(overrides: Partial<LiveHostHello> = {}): LiveHostHello {
     instanceNonce: 'host_instance_nonce_0001',
     permissions: {
       microphone: 'granted',
+      camera: 'granted',
       accessibility: 'granted',
       screenRecording: 'granted',
     },
@@ -221,7 +240,7 @@ describe('LiveHostCoordinator', () => {
       expect(
         socket
           .messages()
-          .some((message) => message.type === 'host.capture_screen_context'),
+          .some((message) => message.type === 'host.capture_visual'),
       ).toBe(false);
     },
   );
@@ -297,24 +316,29 @@ describe('LiveHostCoordinator', () => {
       sessionId: 'coordinator-1',
     });
 
-    await expect(value.captureScreenContext('worker-1')).rejects.toThrow(
+    await expect(value.captureVisualContext('worker-1')).rejects.toThrow(
       'active Live session',
     );
-    const capture = value.captureScreenContext('coordinator-1');
+    const capture = value.captureVisualContext('coordinator-1');
     const request = socket
       .messages()
-      .find((message) => message.type === 'host.capture_screen_context');
+      .find((message) => message.type === 'host.capture_visual');
     expect(request).toMatchObject({
-      type: 'host.capture_screen_context',
+      type: 'host.capture_visual',
       epoch: call.epoch,
+      source: 'screen',
     });
-    if (!request || request.type !== 'host.capture_screen_context') {
+    if (!request || request.type !== 'host.capture_visual') {
       throw new Error('Missing Appshot request');
     }
     socket.receive({
-      type: 'host.screen_context_result',
+      type: 'host.visual_capture_result',
       requestId: request.requestId,
       success: true,
+      source: 'screen',
+      image: TEST_JPEG,
+      width: 1280,
+      height: 720,
       appName: 'Google Chrome',
       windowTitle: 'LIVE_APP_A',
       accessibilityText: 'AXWindow LIVE_APP_A',
@@ -375,17 +399,21 @@ describe('LiveHostCoordinator', () => {
       }),
     ).toBe(true);
 
-    const capture = value.captureScreenContext('coordinator-1');
+    const capture = value.captureVisualContext('coordinator-1');
     const request = socket
       .messages()
-      .find((message) => message.type === 'host.capture_screen_context');
-    if (!request || request.type !== 'host.capture_screen_context') {
+      .find((message) => message.type === 'host.capture_visual');
+    if (!request || request.type !== 'host.capture_visual') {
       throw new Error('Missing Appshot request');
     }
     socket.receive({
-      type: 'host.screen_context_result',
+      type: 'host.visual_capture_result',
       requestId: request.requestId,
       success: true,
+      source: 'screen',
+      image: TEST_JPEG,
+      width: 1280,
+      height: 720,
       appName: 'TextEdit',
       accessibilityText: 'APPSHOT-MARKER-AMBER-4827',
       screenshotPath: '/private/tmp/qwen-live-appshot/test.png',
@@ -410,7 +438,7 @@ describe('LiveHostCoordinator', () => {
       workspaceCwd: '/conversations/live-1',
       sessionId: 'coordinator-1',
     });
-    const capture = value.captureScreenContext('coordinator-1');
+    const capture = value.captureVisualContext('coordinator-1');
     const settled = capture.catch((error: unknown) => error);
 
     await vi.advanceTimersByTimeAsync(100);
@@ -521,6 +549,42 @@ describe('LiveHostCoordinator', () => {
     value.attachHost(socket as unknown as WebSocket, 'wrong_nonce_value_0000');
 
     expect(socket.closeCode).toBe(4003);
+    expect(value.getStatus()).toMatchObject({
+      available: false,
+      blocker: 'host_missing',
+    });
+  });
+
+  it('reports a pre-camera Host hello as an incompatible protocol', () => {
+    const value = coordinator();
+    const socket = new FakeSocket();
+    value.attachHost(socket as unknown as WebSocket, value.daemonInstanceNonce);
+    const legacyHello = readyHello({ protocolVersion: 7 }) as unknown as {
+      permissions: Record<string, unknown>;
+    };
+    delete legacyHello.permissions['camera'];
+
+    socket.receive(legacyHello);
+
+    expect(socket.closeCode).toBe(4006);
+    expect(value.getStatus()).toMatchObject({
+      available: false,
+      blocker: 'host_version',
+    });
+  });
+
+  it('rejects a v9 Host hello that omits camera readiness', () => {
+    const value = coordinator();
+    const socket = new FakeSocket();
+    value.attachHost(socket as unknown as WebSocket, value.daemonInstanceNonce);
+    const invalidHello = readyHello() as unknown as {
+      permissions: Record<string, unknown>;
+    };
+    delete invalidHello.permissions['camera'];
+
+    socket.receive(invalidHello);
+
+    expect(socket.closeCode).toBe(1002);
     expect(value.getStatus()).toMatchObject({
       available: false,
       blocker: 'host_missing',
@@ -839,8 +903,8 @@ describe('LiveHostCoordinator', () => {
     });
   });
 
-  it('rejects the removed permission and session actions', () => {
-    const removedActions = [
+  it('rejects removed Host messages', () => {
+    const removedMessages = [
       {
         type: 'host.action',
         action: 'request_permission',
@@ -851,13 +915,19 @@ describe('LiveHostCoordinator', () => {
         action: 'open_session',
         locator: { workspaceCwd: '/work/one', sessionId: 'session-1' },
       },
+      {
+        type: 'host.screen_context_result',
+        requestId: 'capture-1',
+        success: false,
+        error: 'removed',
+      },
     ];
 
-    for (const action of removedActions) {
+    for (const message of removedMessages) {
       const value = coordinator();
       const socket = connectReady(value);
 
-      socket.receive(action);
+      socket.receive(message);
 
       expect(socket.closeCode).toBe(1002);
       expect(socket.messages()).toContainEqual({
@@ -885,6 +955,27 @@ describe('LiveHostCoordinator', () => {
         state: 'error',
         message: 'Live Voice failed to start.',
       });
+    });
+  });
+
+  it('frames one output generation until playback is cleared', () => {
+    const value = coordinator();
+    const socket = connectReady(value);
+    const call = value.start('resume');
+
+    expect(value.sendOutputAudio(call.epoch, Buffer.from([1, 0]))).toBe(true);
+    expect(value.sendOutputAudio(call.epoch, Buffer.from([2, 0]))).toBe(true);
+    expect(socket.outputFrames()).toEqual([
+      { epoch: call.epoch, outputId: 1, audio: Buffer.from([1, 0]) },
+      { epoch: call.epoch, outputId: 1, audio: Buffer.from([2, 0]) },
+    ]);
+
+    value.clearOutput(call.epoch);
+    expect(value.sendOutputAudio(call.epoch, Buffer.from([3, 0]))).toBe(true);
+    expect(socket.outputFrames().at(-1)).toEqual({
+      epoch: call.epoch,
+      outputId: 2,
+      audio: Buffer.from([3, 0]),
     });
   });
 
@@ -977,8 +1068,7 @@ describe('LiveHostCoordinator', () => {
     expect(onInputAudio).not.toHaveBeenCalled();
 
     socket.receiveAudio(second.epoch, [2, 0]);
-    expect(onInputAudio).toHaveBeenCalledOnce();
-    expect(onInputAudio).toHaveBeenCalledWith({
+    expect(onInputAudio).toHaveBeenCalledExactlyOnceWith({
       epoch: second.epoch,
       callId: second.callId,
       pcm16: Buffer.from([2, 0]),
@@ -1118,8 +1208,7 @@ describe('LiveHostCoordinator', () => {
       requirements: { provider: 'checking', appshot: 'unavailable' },
     });
     expect(value.getStatus().callId).toBeUndefined();
-    expect(onStop).toHaveBeenCalledOnce();
-    expect(onStop).toHaveBeenCalledWith({
+    expect(onStop).toHaveBeenCalledExactlyOnceWith({
       epoch: call.epoch,
       callId: call.callId,
     });
@@ -1148,8 +1237,7 @@ describe('LiveHostCoordinator', () => {
       requirements: { provider: 'checking', screenRecording: 'denied' },
     });
     expect(value.getStatus().callId).toBeUndefined();
-    expect(onStop).toHaveBeenCalledOnce();
-    expect(onStop).toHaveBeenCalledWith({
+    expect(onStop).toHaveBeenCalledExactlyOnceWith({
       epoch: call.epoch,
       callId: call.callId,
     });

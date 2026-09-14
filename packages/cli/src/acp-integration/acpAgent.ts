@@ -53,6 +53,7 @@ import {
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   parseInvocationContext,
   findExistingProviderModels,
+  resolveOwnsModel,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -147,6 +148,7 @@ import {
   extractAndStripMeta,
   listWorkflowSnapshots,
   type TurnResultRecordPayload,
+  qualifySkillName,
   sessionIdContext,
   registerSession,
   SessionSourceService,
@@ -209,6 +211,7 @@ import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { Stats } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -425,6 +428,8 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
@@ -440,6 +445,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -1695,7 +1701,17 @@ function readExistingProviderConfig(
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
-    ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
+    ...(existing
+      ? {
+          modelIds: existing.models
+            .filter(
+              (model) =>
+                model.baseUrl === firstModel?.baseUrl &&
+                model.envKey === firstModel?.envKey,
+            )
+            .map((model) => model.id),
+        }
+      : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
@@ -1708,9 +1724,34 @@ function resolveExistingProviderApiKey(
   settings: LoadedSettings,
   protocol: ProviderConfig['protocol'],
   baseUrl: string,
+  modelIds: string[],
 ): string | undefined {
-  const envKey = resolveProviderEnvKey(config, protocol, baseUrl);
-  return readSettingsEnv(settings, envKey);
+  const owns = resolveOwnsModel(config);
+  const models = (settings.merged.modelProviders?.[protocol] ?? []).filter(
+    (model) =>
+      owns?.(model) && model.baseUrl === baseUrl && modelIds.includes(model.id),
+  );
+  const conversation = models.filter(
+    (model) => !model.imageOnly && !model.voiceOnly,
+  );
+  if (
+    !conversation.length &&
+    modelIds.some((id) => !models.some((model) => model.id === id))
+  ) {
+    return readSettingsEnv(
+      settings,
+      resolveProviderEnvKey(config, protocol, baseUrl),
+    );
+  }
+  const keys = new Set(
+    (conversation.length ? conversation : models).map((model) => model.envKey),
+  );
+  if (keys.size === 1) return readSettingsEnv(settings, [...keys][0]);
+  if (keys.size > 1) return undefined;
+  return readSettingsEnv(
+    settings,
+    resolveProviderEnvKey(config, protocol, baseUrl),
+  );
 }
 
 function serializeProviderConfig(
@@ -1751,6 +1792,7 @@ function readProviderSetupInputs(
   resolveExistingApiKey?: (
     protocol: ProviderConfig['protocol'],
     baseUrl: string,
+    modelIds: string[],
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
@@ -1781,19 +1823,6 @@ function readProviderSetupInputs(
     );
   }
 
-  // `apiKey` is optional on update: when the client omits it (e.g. it only
-  // received `hasApiKey` from the list response), fall back to the stored key.
-  const apiKey =
-    readOptionalString(params['apiKey'], 'apiKey') ??
-    resolveExistingApiKey?.(protocol ?? config.protocol, baseUrl);
-  if (!apiKey) {
-    throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
-  }
-  const apiKeyError = config.validateApiKey?.(apiKey, baseUrl);
-  if (apiKeyError) {
-    throw RequestError.invalidParams(undefined, apiKeyError);
-  }
-
   const defaultModelIds = getDefaultModelIds(config);
   const modelIds = readStringArray(params['modelIds'], 'modelIds');
   const resolvedModelIds = modelIds.length > 0 ? modelIds : defaultModelIds;
@@ -1802,6 +1831,23 @@ function readProviderSetupInputs(
       undefined,
       `Invalid or missing modelIds for provider "${config.id}"`,
     );
+  }
+
+  // `apiKey` is optional on update: when the client omits it (e.g. it only
+  // received `hasApiKey` from the list response), fall back to the stored key.
+  const apiKey =
+    readOptionalString(params['apiKey'], 'apiKey') ??
+    resolveExistingApiKey?.(
+      protocol ?? config.protocol,
+      baseUrl,
+      resolvedModelIds,
+    );
+  if (!apiKey) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
+  }
+  const apiKeyError = config.validateApiKey?.(apiKey, baseUrl);
+  if (apiKeyError) {
+    throw RequestError.invalidParams(undefined, apiKeyError);
   }
 
   const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
@@ -2908,17 +2954,26 @@ export async function runAcpAgent(
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
   // closure keeps the timeout + log labels consistent.
+  let drainPoolPromise: Promise<void> | undefined;
   const drainPoolBeforeExit = async (
     label: string,
     strict = false,
   ): Promise<void> => {
     if (!agentInstance) return;
     try {
-      await agentInstance.shutdownMcpPool(8_000);
+      drainPoolPromise ??= agentInstance.shutdownMcpPool(8_000);
+      await drainPoolPromise;
     } catch (err) {
       debugLogger.error(`[ACP] MCP pool drain (${label}) error:`, err);
       if (strict) throw err;
     }
+  };
+
+  let disposeSessionsPromise: Promise<void> | undefined;
+  const disposeSessionsOnce = (): Promise<void> => {
+    if (!agentInstance) return Promise.resolve();
+    disposeSessionsPromise ??= agentInstance.disposeSessions();
+    return disposeSessionsPromise;
   };
 
   // Handle SIGTERM/SIGINT for graceful shutdown.
@@ -2927,53 +2982,88 @@ export async function runAcpAgent(
   // causing the ACP process to ignore termination signals.
   let shuttingDown = false;
   let managedShutdownPromise: Promise<void> | undefined;
-  let sessionEndFired = false;
+  let sessionEndPromise: Promise<void> | undefined;
 
   // Helper to fire SessionEnd hook once, preventing double-fire from both
   // shutdown handler path and connection.closed path.
-  const fireSessionEndOnce = async (
+  const fireSessionEndOnce = (
     reason: SessionEndReason,
     managedConfigs?: Config[],
-  ) => {
-    if (sessionEndFired) return;
-    sessionEndFired = true;
+  ): Promise<void> => {
+    if (sessionEndPromise) return sessionEndPromise;
 
-    const configs = new Set<Config>(managedConfigs ?? [config]);
-    if (!managedConfigs) {
-      const sessions = agentInstance?.getActiveSessions();
-      if (sessions) {
-        for (const session of sessions) {
-          const sessionConfig = session.getConfig?.();
-          if (sessionConfig) {
-            configs.add(sessionConfig);
+    sessionEndPromise = (async () => {
+      const configs = new Set<Config>(managedConfigs ?? [config]);
+      if (!managedConfigs) {
+        const sessions = agentInstance?.getActiveSessions();
+        if (sessions) {
+          for (const session of sessions) {
+            const sessionConfig = session.getConfig?.();
+            if (sessionConfig) {
+              configs.add(sessionConfig);
+            }
           }
         }
       }
-    }
 
-    const failures: unknown[] = [];
-    for (const cfg of configs) {
-      const hookSystem = cfg.getHookSystem?.();
-      const hooksEnabled = !cfg.getDisableAllHooks?.();
-      if (
-        !hooksEnabled ||
-        !hookSystem ||
-        !cfg.hasHooksForEvent?.('SessionEnd')
-      ) {
-        continue;
-      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+      timeout.unref();
       try {
-        await hookSystem.fireSessionEndEvent(reason);
-      } catch (err) {
-        if (managedConfigs) failures.push(err);
-        debugLogger.warn(
-          `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
+        const results = await Promise.allSettled(
+          [...configs].flatMap((cfg) => {
+            const hookSystem = cfg.getHookSystem?.();
+            if (
+              cfg.getDisableAllHooks?.() ||
+              !hookSystem ||
+              typeof hookSystem.fireSessionEndEvent !== 'function' ||
+              !cfg.hasHooksForEvent?.('SessionEnd')
+            ) {
+              return [];
+            }
+            return [
+              Promise.resolve().then(() =>
+                hookSystem.fireSessionEndEvent(reason, controller.signal),
+              ),
+            ];
+          }),
         );
+        const failures = results
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          )
+          .map((result) => result.reason);
+        // A SessionEnd hook that outlives the 30s budget is cancelled rather
+        // than rejected: `fireSessionEndEvent` resolves to `undefined` for a
+        // cancelled hook (the `{ success: false, outcome: 'cancelled' }`
+        // result never rejects), so `Promise.allSettled` cannot observe it and
+        // `failures` above stays empty. Detect the abort directly so the
+        // cancellation is recorded at all, instead of the CLI exiting 0 as
+        // though every hook had run. What recording it buys depends on the
+        // caller: the throw below is gated on `managedConfigs`, so a managed
+        // shutdown turns it into a non-zero exit while an unmanaged one gets
+        // the warning line only.
+        if (controller.signal.aborted) {
+          failures.push(
+            new Error(
+              'SessionEnd hook did not complete within 30s (cancelled)',
+            ),
+          );
+        }
+        for (const failure of failures) {
+          debugLogger.warn(
+            `SessionEnd hook failed: ${failure instanceof Error ? failure.message : String(failure)}`,
+          );
+        }
+        if (managedConfigs && failures.length > 0) {
+          throw new AggregateError(failures, 'SessionEnd hook shutdown failed');
+        }
+      } finally {
+        clearTimeout(timeout);
       }
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(failures, 'SessionEnd hook shutdown failed');
-    }
+    })();
+    return sessionEndPromise;
   };
 
   const shutdownManagedAgent = (
@@ -3076,7 +3166,7 @@ export async function runAcpAgent(
     try {
       // Fire SessionEnd hook for all active sessions (aligned with core path)
       await fireSessionEndOnce(SessionEndReason.Other);
-      await agentInstance?.disposeSessions();
+      await disposeSessionsOnce();
 
       try {
         process.stdin.destroy();
@@ -3128,7 +3218,7 @@ export async function runAcpAgent(
       // Mirror the SIGTERM handler's pool drain on the IDE-initiated
       // normal close path to avoid leaking shared MCP entries.
       await drainPoolBeforeExit('ide_close');
-      await agentInstance?.disposeSessions();
+      await disposeSessionsOnce();
     }
   } finally {
     process.off('SIGTERM', shutdownHandler);
@@ -5514,7 +5604,8 @@ class QwenAgent implements Agent {
           sessionSource,
           sessionId,
           true,
-          {},
+          // Restore token counts only after the model route is authenticated.
+          { skipLlmInitialization: true },
           undefined,
           restoreOptions,
         ),
@@ -5907,7 +5998,8 @@ class QwenAgent implements Agent {
           sessionSource,
           sessionId,
           true,
-          {},
+          // Restore token counts only after the model route is authenticated.
+          { skipLlmInitialization: true },
           undefined,
           RESUME_RESTORE_OPTIONS,
         ),
@@ -6118,7 +6210,9 @@ class QwenAgent implements Agent {
       );
     }
     return await this.runInSessionContext(session, () =>
-      session.setModel({ ...params, sessionId }),
+      params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
+        ? session.setModel({ ...params, sessionId }, { persistDefault: false })
+        : session.setModel({ ...params, sessionId }),
     );
   }
 
@@ -6303,13 +6397,30 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const submittedPrompt =
+      this.privateParentState === 'trusted'
+        ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
+        : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[SUBMITTED_PROMPT_META_KEY];
+    delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
+      meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
+    }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta['qwen.goalProposalApproval'];
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedGoalProposalApproval === true
+    ) {
+      meta['qwen.goalProposalApproval'] = true;
+    }
     delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
@@ -6437,8 +6548,134 @@ class QwenAgent implements Agent {
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
-    this.settings = loadSettings(cwd);
-    return this.settings;
+    return this.adoptRequestSettings(this.loadRequestSettings(cwd), cwd);
+  }
+
+  /**
+   * Publish a freshly loaded `LoadedSettings` into the process-wide
+   * `this.settings` cache only when it was loaded for the daemon's own
+   * workspace. `this.settings` is the "latest loaded" cache read by the
+   * daemon-global control handlers (`workspaceReload`,
+   * `workspaceModelProvidersReload`, `qwen/settings/getPath`, workspace
+   * status): a session-scoped load for a foreign workspace (worktree) must
+   * stay request-local, or that workspace's settings, approval mode, MCP
+   * servers, hooks and permission rules would bleed into every other live
+   * session. The load still returns the caller's instance either way.
+   */
+  private adoptRequestSettings(
+    settings: LoadedSettings,
+    settingsCwd: string,
+  ): LoadedSettings {
+    if (
+      this.canonicalWorkspacePath(settingsCwd) ===
+      this.canonicalWorkspacePath(this.config.getTargetDir())
+    ) {
+      this.settings = settings;
+    }
+    return settings;
+  }
+
+  /**
+   * Canonical spelling for workspace-coordinate comparisons. A session's
+   * admission root and a request's settings cwd can name the same directory
+   * through a symlink (`/tmp` vs `/private/tmp` on macOS) or a different case
+   * on a case-insensitive volume; a plain string compare then turns a
+   * workspace grant's *revocation* into a no-op on the live session while the
+   * caller is told it saved (fail-open). `realpathSync.native()` resolves
+   * both through the filesystem — including the on-disk casing on macOS and
+   * Windows — and deliberately does NOT fold case itself: on a case-sensitive
+   * volume `proj` and `PROJ` are genuinely different workspaces, and folding
+   * would silently authorise one under a rule written for the other.
+   */
+  private canonicalWorkspacePath(workspacePath: string): string {
+    const resolved = path.resolve(workspacePath);
+    try {
+      return realpathSync.native(resolved);
+    } catch {
+      // The path does not exist (yet); compare the resolved spelling.
+      return resolved;
+    }
+  }
+
+  /**
+   * Load settings for a single `qwen/settings/*` / `qwen/permissions/*`
+   * request. `skipLoadEnvironment` is set because a per-request read — and, for
+   * session-scoped calls, a foreign-workspace read — must not inject that
+   * workspace's `.env` into the daemon's process-wide `process.env`; env
+   * application stays with the daemon-global reload handlers that call
+   * `reloadEnvironment` deliberately. `consumeCorruptionEnvVars` is stated
+   * explicitly because passing an options object replaces `loadSettings`'s
+   * `= true` default.
+   */
+  private loadRequestSettings(settingsCwd: string): LoadedSettings {
+    return loadSettings(settingsCwd, {
+      consumeCorruptionEnvVars: true,
+      skipLoadEnvironment: true,
+    });
+  }
+
+  /**
+   * Resolve the workspace root for the session-aware `qwen/settings/*` +
+   * `qwen/permissions/*` handlers — the ones whose write and read-back share
+   * the resolved coordinate. The handlers whose status/apply routes are
+   * workspace-global (`setMcpServer`, `removeMcpServer`, `setHook`,
+   * `removeHook`, `setExtensionSetting`) deliberately do NOT resolve
+   * `sessionId`: their write would land in the session's worktree while the
+   * status and reload routes keep reading the bootstrap workspace, so the
+   * handler would answer "saved" for a server no route ever lists or applies.
+   * Those five resolve `requestedCwd || this.config.getTargetDir()` instead
+   * (`||`, not `??`: a present-but-empty `cwd` is not a workspace and falls to
+   * the bootstrap dir like an absent one).
+   *
+   * `sessionId` names the requesting session, whose own Config is
+   * relocated to its worktree; without one the daemon's bootstrap
+   * `this.config` is used — nothing relocates the agent-level Config, so that
+   * is the boot workspace and swapping `process.cwd()` for
+   * `this.config.getTargetDir()` is a no-op there. An unresolvable `sessionId`
+   * is rejected rather than silently retargeting the read/write to the
+   * bootstrap workspace, whose trust decision and settings the caller never
+   * selected.
+   */
+  private settingsCwdFor(
+    requestedCwd: string | undefined,
+    params: Record<string, unknown>,
+  ): string {
+    // An explicit `cwd` from the request wins outright: the `sessionId` lookup
+    // below only exists to resolve the session's own workspace root when the
+    // caller did not name one, so a well-targeted request must not be rejected
+    // over a field the resolver will not use.
+    if (requestedCwd) {
+      return requestedCwd;
+    }
+    const sessionId = params['sessionId'];
+    if (sessionId !== undefined && sessionId !== null) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        // A present-but-malformed `sessionId` (a number, an object, an empty
+        // string) is a caller error, not "absent": falling through would
+        // silently read/write the bootstrap workspace the caller never
+        // selected.
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid sessionId: expected a non-empty string',
+        );
+      }
+      const session = this.sessions.get(sessionId);
+      if (!session) {
+        throw new RequestError(-32004, `Session not found: ${sessionId}`, {
+          errorKind: 'session_not_found',
+          sessionId,
+        });
+      }
+      // Resolve the session's stable workspace root, not its live cwd:
+      // `session/cd` relocates `config.targetDir` into a subdirectory that
+      // carries no `.qwen/settings.json`, while `storage` stays bound to the
+      // admission workspace (`relocateWorkingDirectory` runs with
+      // `skipArtifactMigration: true`, so it never replaces `storage`). The
+      // live cwd would make all twelve handlers read/write a stray
+      // `<subdir>/.qwen/settings.json` after a single cd.
+      return this.sessionWorkspaceRoot(session.getConfig());
+    }
+    return this.config.getTargetDir();
   }
 
   private async buildCoreSettings(
@@ -6593,6 +6830,8 @@ class QwenAgent implements Agent {
   private syncLivePermissionManagers(
     before: PermissionRuleSet,
     after: PermissionRuleSet,
+    settingScope: SettingScope,
+    settingsCwd: string,
   ): void {
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
@@ -6603,6 +6842,22 @@ class QwenAgent implements Agent {
       if (removed.length === 0 && added.length === 0) continue;
 
       for (const session of this.sessions.values()) {
+        if (settingScope === SettingScope.Workspace) {
+          // A workspace-scoped write only applies to sessions bound to the
+          // workspace it landed in. `settingsCwd` is the requesting session's
+          // stable workspace root; skip sessions in other workspaces so a
+          // worktree's grant/deny doesn't fan out to every live session with
+          // no record in their own settings files.
+          const sessionWorkspace = this.sessionWorkspaceRoot(
+            session.getConfig(),
+          );
+          if (
+            this.canonicalWorkspacePath(sessionWorkspace) !==
+            this.canonicalWorkspacePath(settingsCwd)
+          ) {
+            continue;
+          }
+        }
         const pm = session.getConfig().getPermissionManager?.();
         if (!pm) continue;
         // Isolate per-session failures: a stale/broken permission manager for
@@ -6628,6 +6883,21 @@ class QwenAgent implements Agent {
 
   private workspaceCwd(config: Config): string {
     return config.getTargetDir();
+  }
+
+  /**
+   * The stable workspace root a session was admitted under. Unlike
+   * `workspaceCwd` (the live `getTargetDir()`) and `Config.getProjectRoot()`
+   * (also live `targetDir`), this reads the admission-bound `storage`, which
+   * `relocateWorkingDirectory` leaves untouched when `session/cd` moves a
+   * session into a subdirectory (`skipArtifactMigration: true`). Keying the
+   * twelve `qwen/settings/*` / `qwen/permissions/*` handlers and the
+   * workspace-scoped permission fan-out on this root — rather than the live
+   * cwd — is what keeps a post-`cd` request from reading/writing a stray
+   * `<subdir>/.qwen/settings.json`.
+   */
+  private sessionWorkspaceRoot(config: Config): string {
+    return config.storage.getProjectRoot();
   }
 
   private safeWorkspaceCwd(config: Config): string {
@@ -7466,13 +7736,26 @@ class QwenAgent implements Agent {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
           const extensionName = extension.name;
-          const key = `extension:${extensionName}:${skill.name}`;
+          // The registry rows above key on the qualified name; the manifest
+          // still holds the authored spelling. Qualify it here or the two keys
+          // never meet, and a stale registry row plus its manifest entry emit
+          // the same skill twice under two names.
+          const key = `extension:${extensionName}:${qualifySkillName(
+            extensionName,
+            skill.name,
+          )}`;
           if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(
               {
                 ...skill,
+                // Carry the qualified name like the registry rows do: a
+                // surface that persists this row's name verbatim (the web
+                // shell's Enable toggle) would otherwise write a bare entry
+                // that can never grant once the extension activates.
+                name: qualifySkillName(extensionName, skill.name),
+                authoredName: skill.name,
                 level: 'extension',
                 extensionName,
                 extensionDisplayName: extension.displayName,
@@ -8086,6 +8369,7 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      recovery: session.getRecoveryStatus(),
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
@@ -8865,16 +9149,23 @@ class QwenAgent implements Agent {
         const inputs = readProviderSetupInputs(
           providerConfig,
           params,
-          (protocol, baseUrl) =>
+          (protocol, baseUrl, modelIds) =>
             resolveExistingProviderApiKey(
               providerConfig,
               this.settings,
               protocol,
               baseUrl,
+              modelIds,
             ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          this.settings.merged.modelProviders?.[
+            inputs.protocol ?? providerConfig.protocol
+          ],
+        );
         const adapter = createLoadedSettingsAdapter(
           this.settings,
           persistScope,
@@ -8919,8 +9210,9 @@ class QwenAgent implements Agent {
         return setManagedSkillEnabled(this.config, params, requestedCwd);
       }
       case 'qwen/settings/getMemory': {
-        const settings = loadSettings(cwd);
-        this.settings = settings;
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadRequestSettings(settingsCwd);
+        this.adoptRequestSettings(settings, settingsCwd);
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
@@ -8930,7 +9222,8 @@ class QwenAgent implements Agent {
         // Mutate a freshly loaded settings object and adopt it, mirroring the
         // other settings mutation handlers, instead of writing through the
         // possibly-stale cached `this.settings` and reading it back.
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadRequestSettings(settingsCwd);
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -8941,7 +9234,7 @@ class QwenAgent implements Agent {
           }
           settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
-        this.settings = settings;
+        this.adoptRequestSettings(settings, settingsCwd);
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
@@ -8950,12 +9243,16 @@ class QwenAgent implements Agent {
         return { path: this.settings.user.path };
       }
       case 'qwen/settings/getMemoryPaths': {
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const projectRoot =
           typeof params['projectRoot'] === 'string'
             ? params['projectRoot']
-            : cwd;
+            : settingsCwd;
         return {
-          paths: await resolveQwenMemoryPaths({ cwd, projectRoot }),
+          paths: await resolveQwenMemoryPaths({
+            cwd: settingsCwd,
+            projectRoot,
+          }),
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
@@ -13324,9 +13621,10 @@ class QwenAgent implements Agent {
         return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
-        const settings = loadSettings(cwd);
-        this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadRequestSettings(settingsCwd);
+        this.adoptRequestSettings(settings, settingsCwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setCoreValue': {
         const key = params['key'];
@@ -13339,7 +13637,8 @@ class QwenAgent implements Agent {
             'Unsupported Qwen setting key',
           );
         }
-        const settings = loadSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingKey = key as QwenCoreSettingKey;
         const normalizedValue = normalizeCoreSettingValue(
           settingKey,
@@ -13368,8 +13667,8 @@ class QwenAgent implements Agent {
         }
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        this.adoptRequestSettings(settings, settingsCwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setMcpServer': {
         const name = params['name'];
@@ -13379,7 +13678,13 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settings = loadSettings(cwd);
+        // Workspace-global write: the MCP status/apply routes
+        // (`buildManagedWorkspaceMcpStatus`, `reloadWorkspaceMcpDiscovery`)
+        // resolve only the bootstrap workspace, so a session-scoped write
+        // here would be listed nowhere and applied never. Session-aware
+        // resolution returns only once those routes share the coordinate.
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13397,8 +13702,8 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'mcpServers', mcpServers);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        this.adoptRequestSettings(settings, settingsCwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeMcpServer': {
         const name = params['name'];
@@ -13408,7 +13713,9 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settings = loadSettings(cwd);
+        // Workspace-global write, same contract as setMcpServer above.
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13418,15 +13725,19 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'mcpServers', mcpServers);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        this.adoptRequestSettings(settings, settingsCwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setHook': {
         const event = params['event'];
         if (!isHookEvent(event)) {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
-        const settings = loadSettings(cwd);
+        // Workspace-global write: the workspaceHooks status route reports the
+        // bootstrap Config's live hook registry, so a session-scoped write
+        // would diverge from what is reported and applied.
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13465,8 +13776,8 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'hooks', hooksRoot);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        this.adoptRequestSettings(settings, settingsCwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeHook': {
         const event = params['event'];
@@ -13481,7 +13792,9 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
-        const settings = loadSettings(cwd);
+        // Workspace-global write, same contract as setHook above.
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
+        const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -13501,8 +13814,8 @@ class QwenAgent implements Agent {
         settings.setValue(settingScope, 'hooks', hooksRoot);
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
-        this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        this.adoptRequestSettings(settings, settingsCwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setExtensionSetting': {
         const extensionId = params['extensionId'];
@@ -13520,9 +13833,12 @@ class QwenAgent implements Agent {
         if (typeof value !== 'string') {
           throw RequestError.invalidParams(undefined, 'value must be a string');
         }
-        const settings = loadSettings(cwd);
+        // Workspace-global write: the workspaceExtensions status route
+        // reports the bootstrap workspace, same contract as setMcpServer.
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
+        const settings = this.loadRequestSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
-          workspaceDir: cwd,
+          workspaceDir: settingsCwd,
           isWorkspaceTrusted:
             isWorkspaceTrusted(settings.merged).isTrusted ?? true,
           locale: getCurrentLanguage(),
@@ -13549,11 +13865,12 @@ class QwenAgent implements Agent {
         // `updateSetting` (extension settings store), not `settings.setValue`,
         // so `settings` here is just the snapshot loaded above and is reused to
         // build the response.
-        this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        this.adoptRequestSettings(settings, settingsCwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/permissions/getSettings': {
-        const settings = this.loadPermissionSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadPermissionSettings(settingsCwd);
         return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
@@ -13575,7 +13892,8 @@ class QwenAgent implements Agent {
           );
         }
 
-        const settings = this.loadPermissionSettings(cwd);
+        const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const settings = this.loadPermissionSettings(settingsCwd);
         const before = readPermissionRuleSet(settings.merged);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
@@ -13602,7 +13920,12 @@ class QwenAgent implements Agent {
         // (avoids redundant I/O and a concurrency window where another handler
         // could mutate settings between the two loads).
         const after = readPermissionRuleSet(settings.merged);
-        this.syncLivePermissionManagers(before, after);
+        this.syncLivePermissionManagers(
+          before,
+          after,
+          settingScope,
+          settingsCwd,
+        );
         return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
@@ -13618,19 +13941,21 @@ class QwenAgent implements Agent {
           debugLogger.warn('Model-provider settings reload failed');
           return { configsRefreshed: 0, configsFailed: 1 };
         }
-        this.modelProviderReloadRevision += 1;
+        const reloadRevision = ++this.modelProviderReloadRevision;
         const merged = this.settings.merged;
         reloadEnvironment(merged, cwd);
         const providerProtocol = merged.providerProtocol ?? {};
         let configsRefreshed = 0;
         let configsFailed = 0;
 
-        const reloadConfig = (config: Config, id: string) => {
+        const reloadConfig = async (config: Config, id: string) => {
+          if (reloadRevision !== this.modelProviderReloadRevision) return;
           try {
             config.reloadModelProvidersConfig(
               merged.modelProviders,
               providerProtocol,
             );
+            await config.setImageModel(merged.imageModel);
             configsRefreshed += 1;
           } catch {
             configsFailed += 1;
@@ -13638,15 +13963,15 @@ class QwenAgent implements Agent {
           }
         };
 
-        reloadConfig(this.config, 'bootstrap');
+        await reloadConfig(this.config, 'bootstrap');
         for (const config of this.initializingConfigs) {
           if (config !== this.config) {
-            reloadConfig(config, `initializing:${config.getSessionId()}`);
+            await reloadConfig(config, `initializing:${config.getSessionId()}`);
           }
         }
         for (const [id, session] of this.sessions) {
           try {
-            session.reloadModelProvidersFromDisk();
+            await session.reloadModelProvidersFromDisk();
             configsRefreshed += 1;
           } catch {
             configsFailed += 1;
@@ -13731,11 +14056,17 @@ class QwenAgent implements Agent {
             const config = session.getConfig();
             const authType = config.getAuthType();
 
+            const sessionProvidersChanged =
+              JSON.stringify(config.getModelProvidersConfig()) !==
+                JSON.stringify(newMerged.modelProviders) ||
+              JSON.stringify(config.getProviderProtocolConfig()) !==
+                JSON.stringify(newMerged.providerProtocol ?? {});
+
             // Long-lived ACP sessions never restart, so honor providerProtocol
             // changes here too (its requiresRestart only gates the TUI path) and
             // always pass the current map so a modelProviders-only reload doesn't
             // re-register against a stale protocol mapping.
-            if (providersChanged) {
+            if (sessionProvidersChanged) {
               try {
                 config.reloadModelProvidersConfig(
                   newMerged.modelProviders,
@@ -13746,6 +14077,14 @@ class QwenAgent implements Agent {
                   `reload: reloadModelProvidersConfig failed for session ${id}: ${err}`,
                 );
               }
+            }
+
+            try {
+              await config.setImageModel(newMerged.imageModel);
+            } catch (err) {
+              debugLogger.warn(
+                `reload: setImageModel failed for session ${id}: ${err}`,
+              );
             }
 
             const newModelName = newMerged.model?.name;
@@ -13763,7 +14102,7 @@ class QwenAgent implements Agent {
                   `reload: switchModel failed for session ${id}: ${err}`,
                 );
               }
-            } else if ((providersChanged || envChanged) && authType) {
+            } else if ((sessionProvidersChanged || envChanged) && authType) {
               try {
                 await this.refreshAuthWithPersistedReasoning(
                   config,
@@ -14317,6 +14656,10 @@ class QwenAgent implements Agent {
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }
+    config.setArtifactSnapshotsEnabled(this.isTrustedManagedParent());
+    if (this.clientCapabilities?._meta?.['qwen.goalProposals'] === true) {
+      config.setGoalProposalHostSupported(true);
+    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }
@@ -14859,6 +15202,7 @@ class QwenAgent implements Agent {
           settings.merged.modelProviders,
           settings.merged.providerProtocol ?? {},
         );
+        await config.setImageModel(settings.merged.imageModel);
         if (options.deferWorkspaceActivation !== true) {
           const envReload = reloadEnvironment(
             settings.merged,

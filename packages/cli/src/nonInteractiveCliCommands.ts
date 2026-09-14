@@ -19,6 +19,7 @@ import {
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
+import { commandRestrictionNames } from './services/commandUtils.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
@@ -436,9 +437,14 @@ export const handleSlashCommand = async (
     const trimmed = name.trim();
     if (trimmed) disabledNameSet.add(trimmed.toLowerCase());
   }
-  const isDisabled = (cmd: { name: string; altNames?: readonly string[] }) =>
-    disabledNameSet.has(cmd.name.toLowerCase()) ||
-    (cmd.altNames ?? []).some((a) => disabledNameSet.has(a.toLowerCase()));
+  // The same matcher the gate below uses (`CommandService.create` filters with
+  // it), so this surface can neither report a command as blocked when it isn't
+  // nor stay silent when it is: a skill command's registry name carries the
+  // extension prefix while an existing `slashCommands.disabled` entry may hold
+  // the bare authored name.
+  const isDisabled = (
+    cmd: Pick<SlashCommand, 'name' | 'altNames' | 'skillDetail'>,
+  ) => commandRestrictionNames(cmd).some((name) => disabledNameSet.has(name));
 
   // Load the full command set (unfiltered by the denylist) so that the
   // fallback existence check below can distinguish a disabled command from a

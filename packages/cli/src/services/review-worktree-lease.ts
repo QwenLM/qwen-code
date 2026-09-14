@@ -2,19 +2,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   LEASE_PREFIX,
   REVIEW_TMP_DIR,
+  REVIEW_LEASE_DIR,
+  inertPath,
   reviewBranch,
 } from '../commands/review/lib/paths.js';
 
@@ -34,7 +48,7 @@ function validTarget(target: string): boolean {
 }
 
 /**
- * Whether a filename under `REVIEW_TMP_DIR` is a review-worktree lease.
+ * Whether a filename under `REVIEW_LEASE_DIR` is a review-worktree lease.
  * Derived from `validTarget` so the writer, `cleanup`'s sweep guard, and the
  * `cleanupReviewWorktreeLeases` scan share one definition of the lease shape
  * (see the `LEASE_PREFIX` comment in `lib/paths.ts`).
@@ -60,7 +74,37 @@ export interface ReviewWorktreeLease {
 }
 
 function leaseDirectory(repositoryRoot: string): string {
-  return join(repositoryRoot, REVIEW_TMP_DIR);
+  const resolved = resolve(repositoryRoot);
+  // Nested geometry (R27-6): a review launched from inside another review's
+  // worktree has a repositoryRoot INSIDE the outer review's read-write
+  // mount, and a plain `join(root, REVIEW_LEASE_DIR)` would put this
+  // session's host-trusted state — the records the finalizer force-removes
+  // worktrees and branches on the say-so of — back inside the writable
+  // surface the move out of `.qwen/tmp` exists to escape. Re-root to the
+  // OUTERMOST enclosing repository's lease directory instead. The scan is
+  // lexical, never git's: a planted pointer would choose where the lock is
+  // written. The re-root is also the correct lock SCOPE — every nested
+  // layer shares the outermost repository's common git dir, so the branch
+  // the lease guards (`qwen-review/pr-<n>`) is one resource across all of
+  // them, and two layers reviewing the same PR genuinely collide on it.
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = (resolved + sep).indexOf(marker);
+  if (at < 0) return join(resolved, REVIEW_LEASE_DIR);
+  const outermostTmp = resolved.slice(0, at + marker.length - 1);
+  // `<host>/.qwen/tmp` → `<host>`: the lease directory beside the outermost
+  // review temp dir is outside every review temp dir on the path.
+  return join(resolve(outermostTmp, '..', '..'), REVIEW_LEASE_DIR);
+}
+
+/**
+ * Where leases lived before they moved out of the mounted directory. Still
+ * WRITTEN (the acquisition mirror, for pre-move builds that read only this
+ * path) and DELETED (the clear path, the finalizer's twin sweep) — but never
+ * BELIEVED: a file here is mount-resident content and carries no gate
+ * authority, so nothing in this module blocks on it.
+ */
+function legacyLeasePath(repositoryRoot: string, target: string): string {
+  return join(repositoryRoot, REVIEW_TMP_DIR, `${LEASE_PREFIX}${target}.json`);
 }
 
 function leasePath(repositoryRoot: string, target: string): string {
@@ -80,7 +124,38 @@ export function clearReviewWorktreeLease(
   target: string,
 ): void {
   if (!validTarget(target)) return;
-  rmSync(leasePath(resolve(repositoryRoot), target), { force: true });
+  const root = resolve(repositoryRoot);
+  rmSync(leasePath(root, target), { force: true });
+  // The pre-move path too, for the same one-release window the read fallback
+  // covers: a stale legacy lease would otherwise wedge this target for old
+  // builds forever — nothing else removes it, and a recovery instruction
+  // naming only the new path deletes a file that does not exist. `recursive`
+  // because a DIRECTORY at the lease's name would throw EISDIR (the
+  // acquisition-side wedge shape); `force` because absence is the common
+  // case. Deletion only — the mirror in `createReviewWorktreeLease` is the
+  // sole legacy write path.
+  //
+  // Fenced, because this is the only removal in the clear path that touches
+  // the directory reviewed code can still write, and it runs AFTER the
+  // trusted lease above is already gone. `force` swallows ENOENT and nothing
+  // else: a mode-500 directory planted at the legacy name (the wedge two of
+  // this file's own tests stage) makes the unlink throw EACCES, and an open
+  // handle on Windows does the same non-adversarially. Thrown, it leaves
+  // `clearReviewWorktreeLease` — and `runCleanup`, whose tests pin it as
+  // never throwing — reporting failure over a cleanup that succeeded, with
+  // every retry re-throwing on a file no message names. Loud instead, the
+  // same contract the mirror write carries.
+  const legacy = legacyLeasePath(root, target);
+  try {
+    rmSync(legacy, { force: true, recursive: true });
+  } catch (error) {
+    writeStderrLineSafe(
+      `warning: could not remove the pre-move review lease at ${legacy} ` +
+        `(${(error as NodeJS.ErrnoException).code ?? error}); the trusted ` +
+        `lease for ${target} is released, but a build from before the lease ` +
+        `move will keep seeing this one until it is deleted by hand.`,
+    );
+  }
 }
 
 /**
@@ -130,6 +205,19 @@ export function createReviewWorktreeLease(params: {
   const data = `${JSON.stringify(lease, null, 2)}\n`;
   const path = leasePath(repositoryRoot, params.target);
   mkdirSync(leaseDirectory(repositoryRoot), { recursive: true });
+  // The pre-move path is deliberately NOT read for authority here. While the
+  // move rolled out, an mtime-bounded read honored a legacy lease that
+  // predated the move's landing date — but a pinned-to-the-past cutoff
+  // freezes the honored population at release day: an old build acquiring
+  // AFTER it writes a fresh-mtime lease no new build honors, so the arm
+  // protected no acquisition the rollout could still produce. What remained
+  // was the cost (R30-7): the legacy path lives in the one directory
+  // reviewed code can write, `utimes` backdating is a syscall away, and an
+  // honored plant naming a foreign session wedged this target for every
+  // later run until a human deleted it. A legacy-path file is residue, not
+  // a lock: the mirror below replaces it — loudly, when it parses as
+  // another session's lease — and only the new path answers the gate.
+  const legacy = legacyLeasePath(repositoryRoot, params.target);
   try {
     // `flag: 'wx'` fails EEXIST instead of overwriting: two concurrent
     // fetch-prs can both pass the gate's read, and a plain write would let
@@ -143,8 +231,8 @@ export function createReviewWorktreeLease(params: {
     if (existing && existing.sessionId !== params.sessionId) {
       throw new Error(
         `review worktree lease for ${params.target} is held by another ` +
-          `session (session ${existing.sessionId}); it was acquired ` +
-          `between the gate read and the lease write — retry`,
+          `session (session ${existing.sessionId}) at ${path}; it was ` +
+          `acquired between the gate read and the lease write — retry`,
       );
     }
     // Same-session re-fetch refreshes the lease (ownership is per session,
@@ -152,9 +240,143 @@ export function createReviewWorktreeLease(params: {
     // every reader, so rewriting it heals a torn write instead of wedging.
     writeFileSync(path, data, 'utf8');
   }
+  mirrorLeaseAtLegacyPath(legacy, data, params.sessionId, params.target);
+}
+
+/**
+ * Mirror the just-acquired lease at the pre-move path, for the one release
+ * the rollout assumes old builds exist in: a pre-move build reads ONLY that
+ * path, so without the mirror its fetch-pr passes its own gate over this
+ * live lease and its cleanStale force-removes this session's worktree and
+ * deletes its branch mid-run — #9205 in the mirrored direction, and
+ * unannounced, because this session's rollback clears only the new path.
+ *
+ * The mirror is advisory, never an arbiter: it is written only after the
+ * new-path `wx` write has won, and it is never FATAL (R29-5). The legacy
+ * path lives in the one directory reviewed code can still write, so any
+ * obstruction there — a directory at the lease's name, an unwritable
+ * parent, a planted link — is mount weather, not a verdict; a failed mirror
+ * skips with a warning, because a silent skip is how a missing mirror
+ * re-opens #9205 for pre-move builds with nobody told.
+ *
+ * The replacement write never FOLLOWS what stands at the path (R27-7,
+ * R30-8, R30-39): it writes a unique sibling and `renameSync`s it over the
+ * name — rename replaces a symlink itself rather than writing through it,
+ * so a planted link cannot aim this host-side write at a file outside the
+ * mount, and a readerless FIFO at the name is never opened at all. A plain
+ * `writeFileSync(legacy, …)` here was the one host-side write into the
+ * mounted directory that followed whatever was at the path — `O_TRUNC`
+ * through a swapped-in symlink is an arbitrary-file-write primitive from
+ * the mount against the host filesystem.
+ */
+function mirrorLeaseAtLegacyPath(
+  legacy: string,
+  data: string,
+  sessionId: string,
+  target: string,
+): void {
+  try {
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, data, { encoding: 'utf8', flag: 'wx' });
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      warnMirrorSkipped(legacy, error);
+      return;
+    }
+  }
+  // EEXIST — something already stands at the legacy name. `readLease`'s
+  // lstat guard removes a non-regular wedge (a DIRECTORY at the lease name,
+  // which nothing else removes and a rename cannot replace; a planted
+  // symlink — unlinked, never followed; a FIFO) before answering, so what
+  // remains for the rename below is at most a regular file: this session's
+  // own earlier mirror, or a lease-shaped file written inside the mount.
+  // The replacement is quiet for the first and loud for a file that parses
+  // as ANOTHER session's lease — the one honest way to produce that is a
+  // pre-move build still holding the target, and displacing its lock
+  // without a word is exactly the unannounced #9205 the mirror exists to
+  // prevent.
+  const displaced = readLease(legacy);
+  const tmp = `${legacy}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, data, { encoding: 'utf8', flag: 'wx' });
+    renameSync(tmp, legacy);
+  } catch (error) {
+    // A rename failure (a directory at the name, EACCES) leaves the tmp
+    // file behind: it matches no sweep's glob, so take it with us — and
+    // THAT removal must not throw either: the mirror is never fatal, and
+    // an rm error escaping here would roll back the acquisition that
+    // already won.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // A tmp file left behind is litter, not a verdict.
+    }
+    warnMirrorSkipped(legacy, error);
+    return;
+  }
+  if (displaced && displaced.sessionId !== sessionId) {
+    writeStderrLineSafe(
+      `warning: replaced the pre-move review lease for ${target} at ` +
+        `${legacy} (recorded session ${inertSessionId(displaced.sessionId)}) — if a ` +
+        `pre-move build is still reviewing ${target} on this machine, its ` +
+        `worktree is no longer protected; otherwise this was residue or a ` +
+        `plant, and it is gone.`,
+    );
+  }
+}
+
+/**
+ * The displaced session id, made inert for a terminal.
+ *
+ * It is parsed out of a file in the one directory reviewed code can write, so
+ * it reaches stderr the way every other workspace-controlled value in this
+ * repo does: through `inertPath`, which flattens control characters (a raw
+ * ESC is an SGR sequence; a newline forges a second line — a `::error::`
+ * workflow command of its own, in CI), the invisible formatting characters
+ * that survive it, and the line separators. Bounded too: the warning names
+ * the id so an operator can recognise the displaced run, and an id longer
+ * than that is not a name, it is a payload.
+ */
+function inertSessionId(id: string): string {
+  const inert = inertPath(id);
+  return inert.length > 120 ? `${inert.slice(0, 120)}…` : inert;
+}
+
+/** A skipped mirror is mount weather: loud, never fatal (R29-5). */
+function warnMirrorSkipped(legacy: string, error: unknown): void {
+  writeStderrLineSafe(
+    `warning: could not mirror the review worktree lease to the pre-move ` +
+      `path ${legacy} (${(error as NodeJS.ErrnoException).code ?? error}); ` +
+      `the acquisition stands on the new-path lease, but builds from before ` +
+      `the lease move will not see this lock.`,
+  );
 }
 
 function readLease(path: string): ReviewWorktreeLease | null {
+  try {
+    // lstat BEFORE any open: either lease path can carry a planted FIFO —
+    // the legacy one sits in the one directory reviewed code can still
+    // write — and `readFileSync` blocks in open(2) on a FIFO with no
+    // timeout, so no catch below could ever run and every gate read of the
+    // target would hang forever. A non-regular file (FIFO, directory,
+    // socket) cannot be a lease: treat it as none and remove it, because
+    // nothing else will — a DIRECTORY at the lease's name otherwise keeps
+    // throwing EISDIR at every non-recursive removal (the wedge shape the
+    // recursive removes elsewhere in this file exist to escape).
+    if (!lstatSync(path).isFile()) {
+      rmSync(path, { force: true, recursive: true });
+      return null;
+    }
+  } catch (error) {
+    // ENOENT is the ordinary "no lease" answer; anything else (a removal
+    // racing the lstat) is also read as no lease, the same torn-write
+    // healing the parse catch below performs.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.debug(`Failed to inspect review lease ${path}:`, error);
+    }
+    return null;
+  }
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as ReviewWorktreeLease;
     if (
@@ -179,8 +401,29 @@ export function readReviewWorktreeLease(
   repositoryRoot: string,
   target: string,
 ): ReviewWorktreeLease | null {
+  return readReviewWorktreeLeaseAt(repositoryRoot, target)?.lease ?? null;
+}
+
+/**
+ * The lease currently registered for a review target AND the path it was
+ * found at, so a recovery instruction names the file that actually holds
+ * the lock.
+ *
+ * Only the new path answers. The pre-move path under `.qwen/tmp` carried an
+ * mtime-bounded read for one rollout window, and the window closed without
+ * the bound ever protecting a post-cutoff acquisition — what it still did
+ * was hand a `utimes`-backdated plant permanent gate authority (R30-7).
+ * Mount-resident content is never this build's idea of a lock.
+ */
+export function readReviewWorktreeLeaseAt(
+  repositoryRoot: string,
+  target: string,
+): { lease: ReviewWorktreeLease; path: string } | null {
   if (!validTarget(target)) return null;
-  return readLease(reviewLeasePath(repositoryRoot, target));
+  const root = resolve(repositoryRoot);
+  const current = leasePath(root, target);
+  const lease = readLease(current);
+  return lease ? { lease, path: current } : null;
 }
 
 /**
@@ -202,6 +445,26 @@ export function reviewLeaseHeldByAnotherSession(
   if (!lease) return false;
   const sessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
   return !sessionId || lease.sessionId !== sessionId;
+}
+
+/**
+ * Parsed-content equality: two lease files record the same lease regardless
+ * of formatting. The finalizer's mirror check keys on this rather than raw
+ * bytes so a genuinely identical mirror always passes.
+ */
+function sameLease(
+  a: ReviewWorktreeLease,
+  b: ReviewWorktreeLease | null,
+): boolean {
+  return (
+    b !== null &&
+    a.sessionId === b.sessionId &&
+    a.promptId === b.promptId &&
+    a.target === b.target &&
+    a.repositoryRoot === b.repositoryRoot &&
+    a.worktreePath === b.worktreePath &&
+    a.branch === b.branch
+  );
 }
 
 function removeLeaseWorktree(
@@ -306,12 +569,34 @@ export function cleanupReviewWorktreeLeases(params: {
 }): void {
   try {
     const repositoryRoot = resolve(params.repositoryRoot);
-    const directory = leaseDirectory(repositoryRoot);
-    if (!existsSync(directory)) return;
+    const newLeaseDirectory = leaseDirectory(repositoryRoot);
+    // Driven ONLY by the trusted directory (R28-5, R30-36): one target, one
+    // destructive pass, one verdict. Scanning the legacy directory as an
+    // independent actor ran `removeLeaseWorktree` TWICE per target — and the
+    // second pass operated on state the first had already destroyed, so a
+    // first pass that removed the tree and then failed a follow-up (a prune
+    // losing a race, a 1s exit-time timeout kill) left the legs to disagree:
+    // the later pass succeeded against the emptied world and deleted the
+    // trusted lease while the mirror survived — twinless, and uncollectable
+    // forever by the only automated sweep that knew it.
+    if (!existsSync(newLeaseDirectory)) return;
+    // The trusted directory lives outside the mount, so its listing can
+    // still only fail on host weather (a stale handle, a permission the
+    // pipeline never sets) — say so and stop rather than half-sweep.
+    let entries: string[];
+    try {
+      entries = readdirSync(newLeaseDirectory);
+    } catch (error) {
+      debugLogger.debug(
+        `Failed to list ${newLeaseDirectory} for lease cleanup:`,
+        error,
+      );
+      return;
+    }
 
-    for (const entry of readdirSync(directory)) {
+    for (const entry of entries) {
       if (!isReviewLeaseFile(entry)) continue;
-      const path = join(directory, basename(entry));
+      const path = join(newLeaseDirectory, basename(entry));
       const lease = readLease(path);
       if (
         !lease ||
@@ -321,8 +606,34 @@ export function cleanupReviewWorktreeLeases(params: {
       ) {
         continue;
       }
-      if (removeLeaseWorktree(lease, params.gitTimeout ?? GIT_TIMEOUT_MS)) {
-        rmSync(path, { force: true });
+      if (!removeLeaseWorktree(lease, params.gitTimeout ?? GIT_TIMEOUT_MS)) {
+        // A failed finalize keeps BOTH files: the trusted lease for the next
+        // sweep's retry, and the mirror, whose twin check below is the only
+        // thing that ever deletes it — deleting it here would leave the
+        // trusted lease standing with no mirror while pre-move builds still
+        // read the legacy path.
+        continue;
+      }
+      rmSync(path, { force: true });
+      // The legacy twin goes with it — but only when it IS the twin. The
+      // mirror is READABLE from inside the mount, so reviewed code can copy
+      // its sessionId/promptId into a planted lease naming a victim
+      // worktreePath; only content-equality with the trusted lease proves
+      // acquisition wrote the legacy file. A doctored twin stays in place
+      // (never wielded — the sweep reads the trusted side only — and never
+      // deleted on a trusted twin's say-so alone). A legacy file with no
+      // trusted twin is never visited at all: it proves nothing, and the
+      // workflow's per-job sweep reaps it.
+      const twin = join(repositoryRoot, REVIEW_TMP_DIR, basename(entry));
+      try {
+        if (sameLease(lease, readLease(twin))) {
+          rmSync(twin, { force: true });
+        }
+      } catch (error) {
+        // The mounted directory is reviewed code's weather; the trusted
+        // lease is already gone and the next acquisition's mirror heals the
+        // name.
+        debugLogger.debug(`Failed to remove legacy lease twin ${twin}:`, error);
       }
     }
   } catch (error) {

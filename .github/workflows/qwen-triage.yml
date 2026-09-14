@@ -729,6 +729,9 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort in `settings`
+          # below (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
+          # renders "", which the CLI ignores — the provider default.
           # Pin the action's unconditional global reinstall to the version
           # this job already runs. Left at `latest`, the action installs with
           # --prefer-offline and resolves the dist-tag from the runner's
@@ -788,6 +791,9 @@ jobs:
           # are also checked against the write_file path rules.
           settings: |-
             {
+              "model": {
+                "reasoningEffort": "${{ vars.QWEN_TRIAGE_EFFORT }}"
+              },
               "tools": {
                 "core": [
                   "run_shell_command",
@@ -2590,7 +2596,11 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
-          apt-get install -y --no-install-recommends util-linux
+          # zip pairs with the base image's unzip so the install-script archive
+          # suite runs instead of throwing at collection: its CI-host guard
+          # hard-fails when CI=true and either binary is missing, and
+          # node:22-bookworm ships unzip but not zip.
+          apt-get install -y --no-install-recommends util-linux zip
 
           # Run the global install from RUNNER_TEMP: the persistent workspace
           # still holds the PREVIOUS run's checked-out tree at this point, and
@@ -3947,17 +3957,22 @@ jobs:
         run: |-
           set -uo pipefail
           # Download the browser binary for the Playwright package the
-          # capture harness actually imports. This lockfile has TWO
-          # Playwright trees: terminal-capture.ts imports `playwright`, but
-          # node_modules/.bin/playwright is @playwright/test's CLI, which
-          # pins a different chromium revision — so `npx playwright install`
-          # would download a browser the harness cannot launch. Resolve the
-          # CLI from the harness's own directory: require.resolve runs the
-          # same algorithm as its `from 'playwright'` import, so the binary
-          # matches the lockfile even if npm's hoist layout changes (nothing
-          # pins playwright to the root node_modules). cli.js is not in the
-          # package's exports map, so resolve the exported package.json and
-          # join. Runs as node so the tree is agent-readable without chmod.
+          # capture harness actually imports. Root `playwright` and Web
+          # Shell's `@playwright/test` carry the same exact pin, and
+          # `npm run check:lockfile` fails if the two manifests or their
+          # resolved trees drift apart, so both of those CLIs install the
+          # same chromium revision. The parity stops there: a transitive
+          # dependency of packages/mobile-mcp hoists an older
+          # `playwright-core` to the root, and its own bin pins an older
+          # revision. Resolve the CLI from the harness's own directory
+          # rather than assuming a hoist location anyway: require.resolve
+          # runs the same algorithm as the harness's `from 'playwright'`
+          # import, so the binary keeps matching the imported package if
+          # npm's hoist layout changes, if a workspace later nests its own
+          # copy, or if that parity check is ever bypassed. cli.js is not in
+          # the package's exports map, so resolve the exported package.json
+          # and join. Runs as node so the tree is agent-readable without
+          # chmod.
           # Best-effort: failure degrades to a text-only report.
           PW_PATH="${RUNNER_TEMP:?}/pw-browsers"
           mkdir -p "$PW_PATH"

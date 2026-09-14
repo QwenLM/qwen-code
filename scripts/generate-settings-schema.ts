@@ -40,6 +40,7 @@ interface JsonSchemaProperty {
   default?: unknown;
   minimum?: number;
   maximum?: number;
+  not?: JsonSchemaProperty;
   additionalProperties?: boolean | JsonSchemaProperty;
   required?: string[];
   oneOf?: JsonSchemaProperty[];
@@ -200,6 +201,9 @@ function convertSettingToJsonSchema(
     setting.maximum !== undefined
   ) {
     schema.maximum = setting.maximum;
+  }
+  if (setting.excludedValues && setting.excludedValues.length > 0) {
+    schema.not = { enum: [...setting.excludedValues] };
   }
 
   // If the field accepts a legacy primitive shape (e.g. a boolean that was

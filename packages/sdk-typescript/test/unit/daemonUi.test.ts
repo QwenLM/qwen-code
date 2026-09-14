@@ -8520,6 +8520,76 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
 });
 
 describe('cross-client event recognition (prompt_cancelled / replay_complete)', () => {
+  it('merges authoritative cancellation timing without changing the previous snapshot', () => {
+    const [provisional] = normalizeDaemonEvent({
+      v: 1,
+      type: 'prompt_cancelled',
+      promptId: 'p1',
+      data: {},
+    });
+    expect(provisional).toMatchObject({
+      type: 'prompt.cancelled',
+      promptId: 'p1',
+    });
+    const before = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      provisional,
+    ]);
+    const timing = normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_complete',
+      promptId: 'p1',
+      data: {
+        stopReason: 'cancelled',
+        promptCancelled: { elapsedMs: 10999, cancelledAt: 12000 },
+      },
+    });
+    let after = reduceDaemonTranscriptEvents(before, timing);
+    after = reduceDaemonTranscriptEvents(after, [provisional, ...timing]);
+    expect(before.blocks).toHaveLength(1);
+    expect(before.blocks[0]).not.toHaveProperty('elapsedMs');
+    expect(after.blocks).toEqual([
+      expect.objectContaining({
+        id: before.blocks[0].id,
+        kind: 'prompt_cancelled',
+        promptId: 'p1',
+        elapsedMs: 10999,
+        serverTimestamp: 12000,
+      }),
+    ]);
+    const enriched = reduceDaemonTranscriptEvents(after, [
+      { type: 'prompt.cancelled', promptId: 'p1', elapsedMs: 11000 },
+    ]);
+    expect(enriched.blocks[0]).toMatchObject({
+      serverTimestamp: 12000,
+      elapsedMs: 11000,
+    });
+    expect(after.blocks[0]).toMatchObject({ elapsedMs: 10999 });
+    after = reduceDaemonTranscriptEvents(after, [
+      { ...timing[0], promptId: 'p2' },
+    ]);
+    expect(after.blocks).toHaveLength(2);
+  });
+
+  it.each([
+    { elapsedMs: -1, cancelledAt: 12000 },
+    { elapsedMs: NaN, cancelledAt: 12000 },
+    { elapsedMs: 1000, cancelledAt: Infinity },
+    { elapsedMs: '1000', cancelledAt: 12000 },
+    undefined,
+  ])(
+    'ignores malformed or legacy cancellation timing %j',
+    (promptCancelled) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'p1',
+          data: { stopReason: 'cancelled', promptCancelled },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes prompt_cancelled to prompt.cancelled (not debug)', () => {
     const events = normalizeDaemonEvent({
       id: 1,
@@ -8536,6 +8606,34 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
     ]);
     // No reason for a plain user cancel.
     expect(events[0]).not.toHaveProperty('reason');
+  });
+
+  it('uses the persisted cancellation identity when replayed during another prompt', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      promptId: 'current-prompt',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            promptCancelled: {
+              promptId: 'cancelled-prompt',
+              cancelledAt: 1000,
+              elapsedMs: 0,
+            },
+          },
+        },
+      },
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'prompt.cancelled',
+        promptId: 'cancelled-prompt',
+        elapsedMs: 0,
+      }),
+    ]);
   });
 
   it('forwards the prompt_cancelled reason (C3 forward_failed)', () => {

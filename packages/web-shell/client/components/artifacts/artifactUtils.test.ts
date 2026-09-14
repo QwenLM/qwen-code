@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   artifactKindLabel,
+  artifactPreviewDocument,
   downloadWorkspaceFile,
   getArtifactFreshnessKey,
   getArtifactImageMimeType,
@@ -322,6 +323,22 @@ describe('artifactUtils', () => {
       }),
     ).rejects.toThrow('changed while loading');
     expect(statFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps user HTML inside an opaque child with a restrictive parent policy', () => {
+    const title = 'Page "quoted" <title>';
+    const output = artifactPreviewDocument(
+      '<p>Hello</p><script>let n=0</script>',
+      title,
+    );
+    const parent = new DOMParser().parseFromString(output, 'text/html');
+    const child = parent.querySelector('iframe')!;
+    expect(parent.querySelector('script')).toBeNull();
+    expect(parent.querySelector('meta')?.content).toContain("frame-src 'none'");
+    expect(child.title).toBe(title);
+    expect(child.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(child.srcdoc).toContain('<p>Hello</p><script>let n=0</script>');
+    expect(child.srcdoc).toContain("default-src 'none'");
   });
 
   it('injects preview CSP and strips unsafe metadata', () => {
