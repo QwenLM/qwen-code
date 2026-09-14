@@ -710,6 +710,41 @@ describe('splitCompoundCommand', () => {
     ]);
   });
 
+  // Same guard for the whitespace side. bash's word separators are the three
+  // default `IFS` characters — space, tab, newline — and not JavaScript's `\s`,
+  // which also matches `\r`, `\v`, `\f` and `\u00a0`. After any of those four the
+  // `#` is mid-word and literal, so the `;` stays a real boundary and bash runs
+  // both commands: `bash -xc "$(printf 'echo a\r#c ; echo DANGER')"` traces
+  // `+ echo $'a\r#c'` and then `+ echo DANGER`. Reading the `#` as a comment
+  // folded the line into one segment, so the second command lost its rule check.
+  it.each([
+    [
+      'a carriage return',
+      'echo a\r#c ; echo DANGER',
+      ['echo a\r#c', 'echo DANGER'],
+    ],
+    [
+      'a vertical tab',
+      'echo a\v#c ; rm -rf /tmp/x',
+      ['echo a\v#c', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a form feed',
+      'echo a\f#c ; rm -rf /tmp/x',
+      ['echo a\f#c', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a no-break space',
+      'echo a\u00a0#c ; rm -rf /tmp/x',
+      ['echo a\u00a0#c', 'rm -rf /tmp/x'],
+    ],
+  ])(
+    'still splits after %s, which does not end a bash word',
+    async (_separator, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
   // An escaped boundary does not end a word: `bash -xc 'echo a\ #b ; echo B'`
   // traces `+ echo a #b` then `+ echo B` — the `#` is mid-word and literal.
   // Reading it as a comment would swallow the `;` boundary and drop the second

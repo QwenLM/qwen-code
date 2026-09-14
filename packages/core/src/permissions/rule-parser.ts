@@ -838,16 +838,25 @@ function isAsyncOperator(command: string, index: number): boolean {
 }
 
 /**
- * Operators after which a `#` still starts a word, and so a comment.
+ * Characters that end a bash word, so a `#` after one of them starts a word and
+ * so a comment: the three default `IFS` whitespace characters plus the operators
+ * that separate commands. The start of the input is handled by
+ * {@link isCommentStart} itself.
  *
- * Whitespace and the start of the input are handled by {@link isCommentStart}
- * itself. Confirmed against bash: `echo a;#c` and `echo a&#c` each run one
- * command, and `echo a|#c` is a syntax error because the `#` comments out the
- * right-hand side of the pipe. Redirection operators and `(` are deliberately
- * absent: bash starts a word there too, but leaving them literal only
- * over-splits, which stays fail-closed, and no reported shape needs them.
+ * The whitespace half is an explicit list rather than `\s`. JavaScript's `\s`
+ * also matches `\r`, `\v`, `\f` and `\u00a0`, and bash treats none of those as
+ * word separators: `bash -xc "$(printf 'echo a\r#c ; echo DANGER')"` traces two
+ * commands, because the `#` is mid-word and literal while the `;` after it is a
+ * real boundary. Reading that `#` as a comment folded the line into one segment,
+ * so the command bash ran second never got its own rule check.
+ *
+ * Confirmed against bash for the operators: `echo a;#c` and `echo a&#c` each run
+ * one command, and `echo a|#c` is a syntax error because the `#` comments out
+ * the right-hand side of the pipe. Redirection operators and `(` are
+ * deliberately absent: bash starts a word there too, but leaving them literal
+ * only over-splits, which stays fail-closed, and no reported shape needs them.
  */
-const COMMENT_WORD_BOUNDARIES = [';', '&', '|'];
+const COMMENT_WORD_BOUNDARIES = [' ', '\t', '\n', ';', '&', '|'];
 
 /**
  * Whether the `#` at `index` opens a comment rather than being a literal.
@@ -867,9 +876,10 @@ function isCommentStart(command: string, index: number): boolean {
     return true;
   }
   const previous = command[index - 1]!;
-  const isBoundary =
-    /\s/.test(previous) || COMMENT_WORD_BOUNDARIES.includes(previous);
-  return isBoundary && precedingBackslashCount(command, index - 1) % 2 === 0;
+  return (
+    COMMENT_WORD_BOUNDARIES.includes(previous) &&
+    precedingBackslashCount(command, index - 1) % 2 === 0
+  );
 }
 
 /**
