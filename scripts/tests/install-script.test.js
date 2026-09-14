@@ -851,6 +851,23 @@ describe('standalone release packaging', () => {
     ]);
   });
 
+  it('stages the locked node-pty packages declared in the root manifest', async () => {
+    const { readNodePtyPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+
+    // The list tracks the root package.json optionalDependencies, so a newly
+    // pinned platform package (e.g. linux-arm64) is staged automatically.
+    expect(readNodePtyPackageSpecs()).toEqual([
+      '@lydell/node-pty@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-x64@1.2.0-beta.10',
+      '@lydell/node-pty-linux-x64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-x64@1.2.0-beta.10',
+    ]);
+  });
+
   it('maps every release target to its clipboard native package', async () => {
     const { TARGET_CLIPBOARD_PACKAGE } = await import(
       standalonePackageScriptUrl

@@ -233,7 +233,16 @@ describe('WebTerminalRegistry', () => {
     getPty.mockResolvedValueOnce(null);
     await expect(
       registry.create({ workspaceCwd: '/workspace' }),
-    ).resolves.toEqual({ error: 'PTY not available' });
+    ).resolves.toEqual({
+      error: `PTY not available: no PTY backend module (@lydell/node-pty or node-pty) found for linux/${process.arch}`,
+    });
+
+    getPty.mockRejectedValueOnce(new Error('native load failed'));
+    await expect(
+      registry.create({ workspaceCwd: '/workspace' }),
+    ).resolves.toEqual({
+      error: `PTY not available: PTY support failed to load on linux/${process.arch}: native load failed`,
+    });
 
     spawn.mockImplementationOnce(() => {
       throw new Error('spawn failed');

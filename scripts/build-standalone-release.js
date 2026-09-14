@@ -141,7 +141,7 @@ async function main() {
         fs.readFileSync(checksumsPath, 'utf8'),
       );
     }
-    const nativeModulesDir = stageClipboardPackages(runtimeDir);
+    const nativeModulesDir = stageNativeModules(runtimeDir);
     // Only the bun runtime consumes the staged OpenTUI packages; the classic
     // Node packaging must not install them (nor fail on a missing lockfile
     // entry) at all.
@@ -265,10 +265,38 @@ function readClipboardPackageSpecs() {
   });
 }
 
-function stageClipboardPackages(runtimeDir) {
+// node-pty pins live in the root package.json optionalDependencies (mirrored
+// in packages/core). The wrapper plus every pinned platform package must be
+// staged because release packaging cross-builds all targets from a single
+// host — the host's own node_modules only ever carries one platform's
+// prebuild, and getPty() resolves the platform package from node_modules at
+// runtime (#11872). Deriving the list from the root manifest keeps it in sync
+// when a platform pin is added (e.g. linux-arm64).
+function readNodePtyPackageSpecs() {
+  const packageLock = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
+  );
+  const rootPackage = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
+  );
+  const packageNames = Object.keys(
+    rootPackage.optionalDependencies ?? {},
+  ).filter((packageName) => packageName.startsWith('@lydell/node-pty'));
+
+  return packageNames.map((packageName) => {
+    const version =
+      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    if (!version) {
+      fail(`node-pty package version is not locked for ${packageName}`);
+    }
+    return `${packageName}@${version}`;
+  });
+}
+
+function stageNativeModules(runtimeDir) {
   const installDir = path.join(runtimeDir, 'clipboard-modules');
   fs.mkdirSync(installDir, { recursive: true });
-  console.log('Staging standalone clipboard native packages');
+  console.log('Staging standalone native packages (clipboard, node-pty)');
   const npmExecPath = process.env.npm_execpath;
   if (!npmExecPath) {
     fail('npm_execpath is unavailable; run package:standalone:release via npm');
@@ -287,6 +315,7 @@ function stageClipboardPackages(runtimeDir) {
       '--no-audit',
       '--no-fund',
       ...readClipboardPackageSpecs(),
+      ...readNodePtyPackageSpecs(),
     ],
     {
       cwd: rootDir,
@@ -527,5 +556,6 @@ export {
   assertStandaloneOutput,
   parseChecksums,
   readClipboardPackageSpecs,
+  readNodePtyPackageSpecs,
   RELEASE_TARGETS,
 };

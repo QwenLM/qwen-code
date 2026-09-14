@@ -179,6 +179,11 @@ async function main() {
     copyRuntimeAssets(packageRoot, outDir, args.runtime);
     copyNativeAddon(packageRoot, target);
     copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
+    // getPty() returns null under Bun without touching node-pty, so only the
+    // node runtime needs the PTY packages.
+    if (args.runtime === 'node') {
+      copyNodePtyAddon(packageRoot, target, args.nativeModulesDir);
+    }
     if (args.runtime === 'bun') {
       copyOpenTuiAddon(packageRoot, target, args.opentuiModulesDir);
     }
@@ -520,6 +525,69 @@ function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
   assertNoSymlinks(
     modulesDest,
     'Bundled clipboard addon still contains symlinks.',
+  );
+}
+
+// Bundle @lydell/node-pty (the wrapper plus only this target's platform
+// prebuild package) into lib/node_modules so the web terminal can spawn a PTY
+// in standalone installs. getPty() resolves the wrapper via a runtime
+// import('@lydell/node-pty') — esbuild.config.js keeps every node-pty
+// specifier external — and the wrapper in turn requires
+// `@lydell/node-pty-<platform>-<arch>` from node_modules. Without this step
+// the archive declares the packages in optionalDependencies but ships none of
+// them, so every web terminal creation fails with "PTY not available"
+// (#11872). Missing packages warn-and-degrade locally (like the audio-capture
+// step) rather than failing the build: unlike clipboard this set has a known
+// gap (no pinned linux-arm64 package), so --native-modules-dir cannot be the
+// fatal gate. Release packaging sets
+// QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 to make a missing package fatal.
+function copyNodePtyAddon(packageRoot, target, nativeModulesDir) {
+  const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
+  const nativePackage = `@lydell/node-pty-${prebuildDirName}`;
+  const packageNames = ['@lydell/node-pty', nativePackage];
+  const modulesSrc = path.resolve(
+    nativeModulesDir || path.join(rootDir, 'node_modules'),
+  );
+  const packageSources = packageNames.map((packageName) =>
+    path.join(modulesSrc, packageName),
+  );
+  const hasRequiredFiles =
+    packageSources.every((packageSrc) =>
+      fs.existsSync(path.join(packageSrc, 'package.json')),
+    ) &&
+    hasNativePrebuild(
+      path.join(packageSources[1], 'prebuilds', prebuildDirName),
+    );
+
+  if (!hasRequiredFiles) {
+    const message = `node-pty packages for ${target} are missing from ${modulesSrc}`;
+    if (process.env.QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD === '1') {
+      fail(`Required ${message}`);
+    }
+    console.warn(
+      `[standalone] ${message}; bundling without PTY support ` +
+        '(web terminal will report "PTY not available").',
+    );
+    return;
+  }
+
+  const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+  for (let index = 0; index < packageNames.length; index += 1) {
+    fs.cpSync(
+      packageSources[index],
+      path.join(modulesDest, packageNames[index]),
+      copyOpts,
+    );
+  }
+
+  assertNoSymlinks(
+    modulesDest,
+    'Bundled node-pty addon still contains symlinks.',
   );
 }
 
