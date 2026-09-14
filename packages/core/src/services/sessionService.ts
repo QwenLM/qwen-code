@@ -301,10 +301,11 @@ export class InvalidSessionListCursorError extends Error {
 }
 
 /**
- * Decodes a wire-format session-list cursor. Returns `undefined` for an
- * empty/blank cursor (first page), a number for a legacy numeric cursor, and
- * a {@link SessionListCursor} for the composite form. Throws
- * {@link InvalidSessionListCursorError} on malformed input.
+ * Decodes a wire-format session-list cursor. Returns `undefined` only for
+ * the literal empty string (first page); a blank-but-nonempty string is
+ * malformed like any other invalid input. Returns a number for a legacy
+ * numeric cursor and a {@link SessionListCursor} for the composite form.
+ * Throws {@link InvalidSessionListCursorError} on malformed input.
  */
 export function decodeSessionListCursor(
   raw: string,
@@ -328,9 +329,11 @@ export function decodeSessionListCursor(
     }
     return parsed;
   }
-  const mtime = Number(trimmed.slice(0, sep));
+  const mtimeText = trimmed.slice(0, sep);
   const sessionId = trimmed.slice(sep + 1);
+  const mtime = Number(mtimeText);
   if (
+    mtimeText === '' ||
     !Number.isFinite(mtime) ||
     mtime < 0 ||
     mtime > Number.MAX_SAFE_INTEGER ||

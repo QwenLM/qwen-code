@@ -1425,11 +1425,10 @@ describe('backfillWorkspaceSessionPrs', () => {
   }, 30000);
 
   it('scans sessions whose mtime ties across the old page boundary', async () => {
-    // listSessions pages with a strict `mtime < cursor` filter and returns
-    // the page's last mtime as the cursor — sessions tied with that entry
-    // are filtered out on every run, the hazard findSessionsByTitle
-    // documents for not paging listSessions. Two files tied across the
-    // 1000-entry boundary must both be scanned and bound.
+    // listSessions once paged with a strict `mtime < cursor` filter that
+    // dropped sessions tied with the page's last entry (fixed: composite
+    // cursor). Two files tied across the 1000-entry boundary must both be
+    // scanned and bound by the exhaustive sweep.
     const chatsDir = path.join(
       new Storage(workspaceCwd).getProjectDir(),
       'chats',
@@ -3675,8 +3674,8 @@ describe('backfillWorkspaceSessionPrs', () => {
 
   it('scans sessions whose mtime ties a pagination boundary', async () => {
     // 1007 sessions, four of them sharing the mtime of the 1000th file:
-    // listSessions' strict-`<` cursor boundary drops those boundary twins
-    // on every paging run, so a pager can never reach them. Backfill must.
+    // a legacy numeric cursor cannot reach past the boundary twins
+    // (strict `mtime <` drops them). Backfill must sweep them regardless.
     const total = 1007;
     const chatsDir = path.join(
       new Storage(workspaceCwd).getProjectDir(),

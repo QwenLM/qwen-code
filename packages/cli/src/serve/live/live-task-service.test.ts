@@ -1378,6 +1378,62 @@ describe('LiveTaskService', () => {
     expect(harness.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('bounds the persisted scan for an unlocatable thread to the page cap', async () => {
+    // The thread is persisted under /project but unknown to the bridge, so
+    // locateTask falls into the scan loop. Every page reports no match with
+    // a fresh composite cursor: without the cap this never terminates.
+    const harness = makeHarness();
+    persistedSessions.set('missing-thread', persisted('missing-thread'));
+    persistedSessionOwners.set('missing-thread', '/project');
+    let pageNo = 0;
+    listWorkspaceSessionsForResponse.mockImplementation(async () => {
+      pageNo += 1;
+      return {
+        sessions: [],
+        nextCursor: `1779019140000:550e8400-e29b-41d4-a716-44665544${String(pageNo).padStart(4, '0')}`,
+      };
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'missing-thread' },
+      }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    expect(listWorkspaceSessionsForResponse).toHaveBeenCalledTimes(100);
+  });
+
+  it('stops the persisted scan as soon as the thread is found', async () => {
+    const harness = makeHarness();
+    persistedSessions.set('late-thread', persisted('late-thread'));
+    persistedSessionOwners.set('late-thread', '/project');
+    const summary: BridgeSessionSummary = {
+      sessionId: 'late-thread',
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:02.000Z',
+      displayName: 'Late task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    listWorkspaceSessionsForResponse
+      .mockResolvedValueOnce({
+        sessions: [],
+        nextCursor: '1779019140000:550e8400-e29b-41d4-a716-446655440000',
+      })
+      .mockResolvedValueOnce({ sessions: [summary] });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'late-thread' },
+      }),
+    ).resolves.toMatchObject({ thread: { id: 'late-thread' } });
+    expect(listWorkspaceSessionsForResponse).toHaveBeenCalledTimes(2);
+  });
+
   it('routes an explicit standalone follow-up through service admission', async () => {
     const harness = makeHarness();
     const summary: BridgeSessionSummary = {

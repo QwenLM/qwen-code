@@ -56,6 +56,13 @@ const COORDINATOR_TURN_TIMEOUT_MS = 10 * 60_000;
 const BACKEND_CONTEXT_FLUSH_MS = 200;
 const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 30_000;
 const SESSION_SCAN_SIZE = 100;
+// Page cap for the resume-time compatibility scan. With the composite
+// session-list cursor, an mtime tie group no longer self-terminates the walk
+// after two pages, so an unbounded loop would re-scan and re-stat the whole
+// chats directory once per page before Live Voice connects. The cap matches
+// the file budget one listSessions pass already guarantees
+// (MAX_FILES_TO_PROCESS 10000 / SESSION_SCAN_SIZE 100).
+const MAX_SESSION_SCAN_PAGES = 100;
 const MAX_LIVE_CAPTION_CHARS = 8_192;
 
 function writeLiveDiagnostic(
@@ -555,7 +562,10 @@ export class LiveSessionCoordinator {
         ? (await this.options.listRecentSessions(runtime)).find(
             isCompatibleLiveSession,
           )
-        : await this.findRecentCompatibleSession(runtime);
+        : await this.findRecentCompatibleSession(
+            runtime,
+            context.callAbort.signal,
+          );
     }
     if (!this.isActive(context)) {
       throw new DOMException('Live call ended.', 'AbortError');
@@ -606,15 +616,18 @@ export class LiveSessionCoordinator {
 
   private async findRecentCompatibleSession(
     runtime: WorkspaceRuntime,
+    signal?: AbortSignal,
   ): Promise<SessionListItem | undefined> {
     const service = new SessionService(runtime.workspaceCwd);
     let cursor: SessionListCursor | undefined;
     const seenCursors = new Set<string>();
-    while (true) {
+    for (let pageNo = 0; pageNo < MAX_SESSION_SCAN_PAGES; pageNo++) {
+      signal?.throwIfAborted();
       const page = await service.listSessions({
         size: SESSION_SCAN_SIZE,
         archiveState: 'active',
         ...(cursor !== undefined ? { cursor } : {}),
+        ...(signal !== undefined ? { signal } : {}),
       });
       const match = page.items.find(isCompatibleLiveSession);
       if (match) return match;
@@ -626,6 +639,7 @@ export class LiveSessionCoordinator {
       seenCursors.add(cursorKey);
       cursor = page.nextCursor;
     }
+    return undefined;
   }
 
   private callbacksFor(

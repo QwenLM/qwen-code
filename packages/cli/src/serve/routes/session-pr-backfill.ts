@@ -290,9 +290,10 @@ export async function backfillWorkspaceSessionPrs(
   );
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
-    // Tie-safe exhaustive enumeration (see listAllProjectSessionIds): the
-    // paged listSessions mtime cursor silently skips sessions tied with a
-    // page's last entry, which an all-sessions sweep must never do.
+    // Exhaustive enumeration via listAllProjectSessionIds: backfill must
+    // sweep every session in one pass rather than paginate, so a run never
+    // waits on page turns for thousands of bindings. (listSessions paginates
+    // losslessly across mtime ties since the composite-cursor fix.)
     const sessionIds =
       await sessionService.listAllProjectSessionIds(archiveState);
     for (const sessionId of sessionIds) {

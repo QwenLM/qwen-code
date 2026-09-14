@@ -35,7 +35,8 @@ beforeAll(() => {
 
 afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
-});
+  // The tie-break cap test leaves 10k files behind; Windows deletion is slow.
+}, 120_000);
 
 beforeEach(() => {
   runtimeBaseDir = fs.mkdtempSync(path.join(tmpRoot, 'runtime-'));
@@ -167,6 +168,49 @@ describe('listSessions pagination with equal mtimes', () => {
     expect(second.hasMore).toBe(false);
     expect(second.nextCursor).toBeUndefined();
   });
+
+  it('advances the cursor past skipped files, so a scan behind a skipped block stays lossless', async () => {
+    // Layout (one shared mtime, file-name order): own A, then
+    // MAX_FILES_TO_PROCESS content-empty files (skipped after processing),
+    // then own B. Page 1 returns A. Page 2 hits the files-processed cap
+    // inside the skipped block: its cursor must name the last *processed*
+    // (skipped) file, not the last pushed item (A), or page 3 would
+    // re-filter the same block, emit the same cursor, and never reach B.
+    const shared = new Date('2026-08-17T00:00:00.000Z').getTime();
+    const ownA = sessionIdAt(0);
+    const ownB = sessionIdAt(10_001);
+    writeSession(ownA, shared);
+    writeSession(ownB, shared);
+    const skippedCount = 10_000; // MAX_FILES_TO_PROCESS
+    for (let i = 1; i <= skippedCount; i++) {
+      const filePath = sessionFilePath(sessionIdAt(i));
+      fs.writeFileSync(filePath, '', 'utf8');
+      const mtime = new Date(shared);
+      fs.utimesSync(filePath, mtime, mtime);
+    }
+
+    const page1 = await service.listSessions({ size: 1 });
+    expect(page1.items.map((item) => item.sessionId)).toEqual([ownA]);
+
+    const page2 = await service.listSessions({
+      size: 1,
+      cursor: page1.nextCursor,
+    });
+    expect(page2.items).toEqual([]);
+    expect(page2.hasMore).toBe(true);
+    // The cursor sits on the last processed file, which is a skipped one.
+    expect(page2.nextCursor).toEqual({
+      mtime: shared,
+      sessionId: sessionIdAt(skippedCount),
+    });
+
+    const page3 = await service.listSessions({
+      size: 1,
+      cursor: page2.nextCursor,
+    });
+    expect(page3.items.map((item) => item.sessionId)).toEqual([ownB]);
+    expect(page3.hasMore).toBe(false);
+  }, 60_000);
 });
 
 describe('session-list cursor codec', () => {
@@ -194,6 +238,7 @@ describe('session-list cursor codec', () => {
     'not-a-cursor',
     '1755000000000:not-a-session-id',
     '1755000000000:',
+    ':550e8400-e29b-41d4-a716-446655440000',
     '-5',
     '99999999999999999999',
   ])('rejects malformed cursor %j', (raw) => {

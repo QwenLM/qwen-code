@@ -24,7 +24,7 @@ metadata, and merge bridge-owned live state.
 
 The current paths have different cost and cache behavior:
 
-- The default numeric-cursor path reads a fresh storage page for every request,
+- The default persisted-cursor path reads a fresh storage page for every request,
   enriches its worktree sidecars, and does not use
   `PersistedSessionListCache`. The server caps its requested page size at 100.
 - Metadata-filtered and organized paths gather the persisted workspace before
@@ -289,7 +289,7 @@ the protocol explicitly permits this.
 
 The persisted session-list cache is process-global and keyed by runtime base
 directory, workspace, and archive state. Only organized and metadata-filtered
-catalog reads use it; the numeric-cursor path always performs a fresh storage
+catalog reads use it; the persisted-cursor path always performs a fresh storage
 read. Invalidated in-flight cached loads may still resolve to their existing
 waiter, but their generation check prevents them from installing a stale cache
 value. Cache invalidation therefore protects cached catalog shapes, while the

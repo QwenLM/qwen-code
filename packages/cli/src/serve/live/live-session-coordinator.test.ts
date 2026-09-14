@@ -32,14 +32,28 @@ const buildRealtimeStartupContext = vi.hoisted(() =>
   vi.fn(async () => '<startup_context>test context</startup_context>'),
 );
 
+// Default: one empty page. Tests targeting findRecentCompatibleSession
+// override this stub with a multi-page program.
+const listSessionsStub = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _options?: unknown,
+    ): Promise<{
+      items: SessionListItem[];
+      hasMore: boolean;
+      nextCursor?: { mtime: number; sessionId: string };
+    }> => ({ items: [], hasMore: false }),
+  ),
+);
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
     SessionService: class {
-      async listSessions() {
-        return { items: [], hasMore: false };
+      async listSessions(options?: unknown) {
+        return listSessionsStub(options);
       }
 
       async removeSession() {
@@ -87,6 +101,7 @@ function waitFor(assertion: () => void): Promise<void> {
 function makeHarness(
   options: {
     recent?: SessionListItem[];
+    useCoordinatorScan?: boolean;
     enqueueAccepted?: boolean;
     providerError?: QwenRealtimeError;
     transcriptTail?: RealtimeTranscriptEntry[];
@@ -283,7 +298,11 @@ function makeHarness(
       async (sessionId: string) => '/conversations/conversation-' + sessionId,
     ),
     discardEmptyConversationDirectory: vi.fn(async () => true),
-    listRecentSessions: vi.fn(async () => options.recent ?? []),
+    // Production leaves listRecentSessions unset; only then does resume mode
+    // reach findRecentCompatibleSession (the paginated SessionService scan).
+    ...(options.useCoordinatorScan
+      ? {}
+      : { listRecentSessions: vi.fn(async () => options.recent ?? []) }),
     gracefulStopDrainMs: options.gracefulStopDrainMs,
   });
 
@@ -374,6 +393,11 @@ function makeHarness(
 afterEach(() => {
   vi.useRealTimers();
   readPersistedParentSessionId.mockReset();
+  listSessionsStub.mockReset();
+  listSessionsStub.mockImplementation(async () => ({
+    items: [],
+    hasMore: false,
+  }));
 });
 
 describe('LiveSessionCoordinator', () => {
@@ -1030,6 +1054,100 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.bridge.resumeSession).not.toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: persistedSessionId }),
     );
+  });
+
+  it('resume scan follows composite cursors past page one to find a compatible candidate', async () => {
+    const incompatible = (n: number) =>
+      ({
+        sessionId: `550e8400-e29b-41d4-a716-4466554410${String(n).padStart(2, '0')}`,
+        cwd: '/conversations',
+        startTime: '2026-09-01T00:00:00.000Z',
+        mtime: 1_000 - n,
+        prompt: 'delegated sub-session',
+        parentSessionId: 'parent-x',
+      }) as SessionListItem;
+    const compatibleSourceId = LIVE_SESSION_SOURCE_PREFIX + 'scan-hit';
+    const compatible = {
+      sessionId: '550e8400-e29b-41d4-a716-4466554400aa',
+      cwd: '/conversations',
+      startTime: '2026-09-01T00:03:00.000Z',
+      mtime: 997,
+      prompt: 'top-level live session',
+      sourceType: 'default',
+      sourceId: compatibleSourceId,
+    } as SessionListItem;
+    listSessionsStub
+      .mockResolvedValueOnce({
+        items: [incompatible(1)],
+        hasMore: true,
+        nextCursor: { mtime: 999, sessionId: incompatible(1).sessionId },
+      })
+      .mockResolvedValueOnce({
+        items: [incompatible(2)],
+        hasMore: true,
+        nextCursor: { mtime: 998, sessionId: incompatible(2).sessionId },
+      })
+      .mockResolvedValueOnce({ items: [compatible], hasMore: false });
+
+    const harness = makeHarness({ useCoordinatorScan: true });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'resume',
+    });
+
+    // The match sits on page 3: reachable only when the page-2 cursor does
+    // not collapse to '[object Object]' and trip the repeat guard.
+    await waitFor(() =>
+      expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+        sessionId: compatible.sessionId,
+        workspaceCwd: '/conversations',
+        sourceType: 'default',
+        sourceId: compatibleSourceId,
+      }),
+    );
+    expect(listSessionsStub).toHaveBeenCalledTimes(3);
+    expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
+  });
+
+  it('bounds the resume scan when every page reports a fresh cursor', async () => {
+    let pageNo = 0;
+    listSessionsStub.mockImplementation(async () => {
+      pageNo += 1;
+      return {
+        items: [
+          {
+            sessionId: `550e8400-e29b-41d4-a716-4466554411${String(pageNo % 100).padStart(2, '0')}`,
+            cwd: '/conversations',
+            startTime: '2026-09-01T00:00:00.000Z',
+            mtime: 1_000,
+            prompt: 'delegated sub-session',
+            parentSessionId: 'parent-x',
+          } as SessionListItem,
+        ],
+        hasMore: true,
+        nextCursor: {
+          mtime: 1_000,
+          sessionId: `550e8400-e29b-41d4-a716-4466554402${String(pageNo).padStart(2, '0')}`,
+        },
+      };
+    });
+
+    const harness = makeHarness({ useCoordinatorScan: true });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'resume',
+    });
+
+    // No compatible candidate anywhere: the scan must stop at the page cap
+    // (MAX_FILES_TO_PROCESS budget / SESSION_SCAN_SIZE) and fall through to a
+    // fresh session instead of walking forever.
+    await waitFor(() =>
+      expect(harness.bridge.spawnOrAttach).toHaveBeenCalled(),
+    );
+    expect(listSessionsStub).toHaveBeenCalledTimes(100);
+    expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
   });
 
   it('tracks a task session only from a completed built-in create_sub_session result', async () => {

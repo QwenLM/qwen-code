@@ -96,7 +96,7 @@ describe('QwenAgentManager.getSessionListPaged', () => {
     expect(page.hasMore).toBe(true);
   });
 
-  it('still accepts a legacy numeric cursor from the daemon', async () => {
+  it('passes a legacy bare-mtime cursor string through verbatim', async () => {
     const manager = new QwenAgentManager();
     const listSessions = vi.fn().mockResolvedValue({
       sessions: [],
@@ -110,6 +110,45 @@ describe('QwenAgentManager.getSessionListPaged', () => {
 
     expect(page.nextCursor).toBe('1755000000000');
     expect(page.hasMore).toBe(true);
+  });
+
+  it('coerces a numeric JSON nextCursor from the daemon to its string form', async () => {
+    // Some ACP agents emit nextCursor as a JSON number; the wire form this
+    // client forwards must stay a string (acpConnection stringifies on send).
+    const manager = new QwenAgentManager();
+    const listSessions = vi.fn().mockResolvedValue({
+      sessions: [],
+      nextCursor: 1755000000000,
+    });
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions,
+    };
+
+    const page = await manager.getSessionListPaged({ size: 5 });
+
+    expect(page.nextCursor).toBe('1755000000000');
+    expect(page.hasMore).toBe(true);
+  });
+
+  it('treats an empty-string nextCursor as the end of pagination', async () => {
+    const manager = new QwenAgentManager();
+    const listSessions = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          title: 'Stored session',
+        },
+      ],
+      nextCursor: '',
+    });
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions,
+    };
+
+    const page = await manager.getSessionListPaged({ size: 5 });
+
+    expect(page.nextCursor).toBeUndefined();
+    expect(page.hasMore).toBe(false);
   });
 
   it('fails closed when a composite cursor reaches the filesystem fallback', async () => {
