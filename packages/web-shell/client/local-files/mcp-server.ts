@@ -208,7 +208,8 @@ function formatHits(result: LocalSearchResult): string {
     result.filesSkipped > 0
       ? `, skipped ${result.filesSkipped} (binary or over the read limit)`
       : '';
-  const budget = `scanned ${result.filesScanned} file(s), ${result.bytesScanned} bytes${skipped}`;
+  const dirs = result.dirsScanned > 0 ? `, ${result.dirsScanned} dir(s)` : '';
+  const budget = `scanned ${result.filesScanned} file(s), ${result.bytesScanned} bytes${dirs}${skipped}`;
   const note = result.truncated
     ? `\n(stopped early: hit the ${result.truncatedBy} budget after ${budget})`
     : '';

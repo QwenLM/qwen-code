@@ -24,7 +24,7 @@
 9389 comment-attachment-guard.yml
 1634 desktop-packaging-check.yml
 1936 desktop-release-sync.yml
-31677 desktop-release.yml
+35602 desktop-release.yml
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
 23879 e2e.yml

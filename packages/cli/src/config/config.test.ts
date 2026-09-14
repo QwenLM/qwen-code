@@ -23,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
+  buildSkillSettingsListsProvider,
   isValidSessionId,
   loadCliConfig,
   parseArguments,
@@ -1260,6 +1261,40 @@ describe('loadCliConfig', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv);
     expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
+  it('wires the skill settings lists provider outside bare and safe mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({ skills: { enabled: ['pdf'] } }, argv);
+
+    expect(config.hasSkillSettingsListsProvider()).toBe(true);
+  });
+
+  it.each(['--bare', '--safe-mode'])(
+    'omits the skill settings lists provider in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { skills: { enabled: ['pdf'] } },
+        argv,
+      );
+
+      expect(config.hasSkillSettingsListsProvider()).toBe(false);
+    },
+  );
+
+  it('maps the settings lists into normalized provider sets', () => {
+    const lists = buildSkillSettingsListsProvider({
+      skills: { enabled: [' A '], defaultDisabled: ['B'], disabled: ['C'] },
+    })();
+
+    expect([...lists.enabled]).toEqual(['a']);
+    expect([...lists.defaultDisabled]).toEqual(['b']);
+    expect([...lists.hardDisabled]).toEqual(['c']);
   });
 
   it('preserves explicit opt-out when --debug is used', async () => {
@@ -3036,6 +3071,33 @@ describe('loadCliConfig', () => {
       expect(config.getWebSearchSettings()?.apiKeyEnv).toBe(
         'DASHSCOPE_API_KEY',
       );
+    });
+
+    it('lets WEB_SEARCH_TIMEOUT_MS override tools.webSearch.timeoutMs', async () => {
+      vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', '90000');
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 30000 } },
+      });
+      expect(config.getWebSearchSettings()?.timeoutMs).toBe(90000);
+    });
+
+    it('ignores an empty, non-numeric or non-positive WEB_SEARCH_TIMEOUT_MS', async () => {
+      for (const raw of ['', 'abc', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { timeoutMs: 30000 } },
+        });
+        expect(config.getWebSearchSettings()?.timeoutMs).toBe(30000);
+      }
+    });
+
+    it('passes a budget-only setting through without other web search keys', async () => {
+      // Core still treats this as the automatic path: only model or an
+      // env-declared backend make the configuration explicit.
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 45000 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ timeoutMs: 45000 });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings

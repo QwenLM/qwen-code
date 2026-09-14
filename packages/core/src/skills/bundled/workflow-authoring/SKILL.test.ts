@@ -176,6 +176,29 @@ describe('bundled workflow-authoring skill', () => {
     // The phase option is ambient, not per call.
     ['every dispatch issued after it'],
     ['It is not scoped to the one call'],
+    // effort: the rule it shares with /effort, where it does not reach, and
+    // what changes the key.
+    ['model?, effort?, agentType?'],
+    ["limited to the tiers `/effort` offers for the agent's model"],
+    ["the tiers its provider's built-in table accepts"],
+    ['becomes the next stronger tier it does offer'],
+    ['leaves the agent with the effort it would have had without the option'],
+    ["The session's own effort is never changed"],
+    ['replaces any thinking budget the agent would otherwise inherit'],
+    ['still takes precedence over the tier'],
+    [
+      "a `model` override that switches provider starts from that model's own reasoning settings",
+    ],
+    ['A different effort is a different resume cache key'],
+    // disallowedTools only narrows, names what it accepts, and a schema agent
+    // cannot deny its answer.
+    ['stallMs?, disallowedTools? })'],
+    ['never re-enable one'],
+    ['`mcp__<server>__*`'],
+    ["such as `'Bash'`, resolves the call to null"],
+    ['include `structured_output` resolves to null'],
+    ['not on their order or duplicates'],
+    ['named by its tool name or its display name'],
     // What the disallowed-tool floor means for a script. The tools themselves
     // are checked against the orchestrator's own list below.
     ['cannot fan out further'],
