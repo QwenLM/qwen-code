@@ -1956,23 +1956,26 @@ describe('Session', () => {
     );
   });
 
-  it('serializes permissions across sessions sharing one ACP connection', async () => {
-    let resolveFirst:
+  it('does not serialize permissions across sessions sharing one ACP connection', async () => {
+    let settleFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    let settleSecond:
       | ((response: RequestPermissionResponse) => void)
       | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
           new Promise<RequestPermissionResponse>((resolve) => {
-            resolveFirst = resolve;
+            settleFirst = resolve;
           }),
       )
-      .mockResolvedValueOnce({
-        outcome: {
-          outcome: 'selected',
-          optionId: core.ToolConfirmationOutcome.ProceedOnce,
-        },
-      });
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            settleSecond = resolve;
+          }),
+      );
     const secondWorkflowRunRegistry = {
       ...mockWorkflowRunRegistry,
       setApprovalRequestCallback: vi.fn(),
@@ -1994,10 +1997,10 @@ describe('Session', () => {
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
     const secondCallback = secondWorkflowRunRegistry.setApprovalRequestCallback
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (): core.WorkflowApproval => ({
-      approvalId: 'wfap_1',
-      subagentId: 'agent-1',
-      callId: 'call-1',
+    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
+      approvalId,
+      subagentId: `agent-${approvalId}`,
+      callId: `call-${approvalId}`,
       name: 'run_shell_command',
       description: 'Run command',
       confirmationDetails: {
@@ -2012,37 +2015,35 @@ describe('Session', () => {
 
     const first = firstCallback(
       { runId: 'wf_first' } as core.WorkflowTask,
-      makeApproval(),
+      makeApproval('wfap_first'),
       { command: 'echo first' },
       new AbortController().signal,
     );
     const second = secondCallback(
       { runId: 'wf_second' } as core.WorkflowTask,
-      makeApproval(),
+      makeApproval('wfap_second'),
       { command: 'echo second' },
       new AbortController().signal,
     );
 
+    // Neither request is answered and neither signal aborts, which is the
+    // shape of an idle session nobody is watching: a sibling session sharing
+    // the connection must still reach the client.
     await vi.waitFor(() => {
-      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
     });
-    resolveFirst?.({
-      outcome: {
-        outcome: 'selected',
-        optionId: core.ToolConfirmationOutcome.ProceedOnce,
-      },
-    });
-    await Promise.all([first, second]);
-
-    expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
     expect(
       vi
         .mocked(mockClient.requestPermission)
         .mock.calls.map(([request]) => request.toolCall.toolCallId),
     ).toEqual([
-      'workflow:test-session-id:wf_first:wfap_1',
-      'workflow:second-session-id:wf_second:wfap_1',
+      'workflow:test-session-id:wf_first:wfap_first',
+      'workflow:second-session-id:wf_second:wfap_second',
     ]);
+
+    settleFirst?.({ outcome: { outcome: 'cancelled' } });
+    settleSecond?.({ outcome: { outcome: 'cancelled' } });
+    await Promise.allSettled([first, second]);
     secondSession.dispose();
   });
 
