@@ -109,7 +109,9 @@ describe('review runner schedule', () => {
       /RUNNER_ADMIN_TOKEN: '\$\{\{ secrets\.RUNNER_ADMIN_PAT \}\}'/,
     );
     const review = read('../workflows/qwen-code-pr-review.yml');
-    const runsOn = review.match(/^  review-pr:[\s\S]*?^    runs-on: (.*)$/m)[1];
+    const runsOn = review.match(
+      /^ {2}review-pr:[\s\S]*?^ {4}runs-on: (.*)$/m,
+    )[1];
     assert.match(runsOn, /"ecs-review"/);
   });
 });

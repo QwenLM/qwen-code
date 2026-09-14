@@ -50,6 +50,7 @@ export function hourIn(date, timeZone = TIME_ZONE) {
 
 // [start, end) on a 24-hour clock; 17..5 covers 17:00 through 04:59.
 export function isNight(hour, start, end) {
+  // Equal start and end means daytime mode all day.
   if (start === end) return false;
   return start < end
     ? hour >= start && hour < end
