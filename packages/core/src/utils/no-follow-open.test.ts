@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import type { Stats } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -46,10 +46,10 @@ const itNoSymlink = process.platform === 'win32' ? it.skip : it;
 
 // Copy a Stats object with identity fields patched, keeping the prototype
 // so isSymbolicLink()/isFile() keep working on the perturbed result.
-function perturbedStats(
-  stats: Stats,
-  patch: Partial<Pick<Stats, 'dev' | 'ino'>>,
-): Stats {
+function perturbedStats<T extends BigIntStats | Stats>(
+  stats: T,
+  patch: Partial<Pick<T, 'dev' | 'ino'>>,
+): T {
   return Object.assign(
     Object.create(Object.getPrototypeOf(stats)),
     stats,
@@ -57,8 +57,10 @@ function perturbedStats(
   );
 }
 
-function differentIdentity(value: number): number {
-  return value === 1 ? 2 : 1;
+function differentIdentity<T extends bigint | number>(value: T): T {
+  return (
+    typeof value === 'bigint' ? (value === 1n ? 2n : 1n) : value === 1 ? 2 : 1
+  ) as T;
 }
 
 // Install a node:fs mock with O_NOFOLLOW removed so the module under test
@@ -297,20 +299,22 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
   function mockNoFollowFsWithPerturbedSnapshot(): void {
     let lstatCalls = 0;
     mockNoFollowFs((actual) => {
-      const snapshotStats = (stats: Stats): Stats => {
+      const snapshotStats = <T extends BigIntStats | Stats>(stats: T): T => {
         lstatCalls += 1;
         return lstatCalls === 1
           ? stats
           : perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       };
       return {
-        lstatSync: ((p: string) =>
-          snapshotStats(actual.lstatSync(p))) as typeof actual.lstatSync,
+        lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+          const stats = actual.lstatSync(...args);
+          return stats ? snapshotStats(stats) : stats;
+        }) as typeof actual.lstatSync,
         promises: {
           ...actual.promises,
-          lstat: (async (p: string) =>
+          lstat: (async (...args: Parameters<typeof actual.promises.lstat>) =>
             snapshotStats(
-              await actual.promises.lstat(p),
+              await actual.promises.lstat(...args),
             )) as typeof actual.promises.lstat,
         },
       };
