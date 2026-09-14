@@ -199,6 +199,20 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 describe('staged model-provider refresh admission', () => {
+  it('discards a staged image selection after an immediate provider reload', () => {
+    const reloadModelProvidersConfig = vi.fn();
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      modelsConfig: { reloadModelProvidersConfig },
+    });
+    config.stageImageModelReload('openai:image-a');
+
+    config.reloadModelProvidersConfig();
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(config['pendingImageModelReload']).toBeUndefined();
+  });
+
   it('applies the staged image model after the provider registry changes', async () => {
     const applyImageModel = vi.fn().mockResolvedValue(undefined);
     const apply = vi.fn(

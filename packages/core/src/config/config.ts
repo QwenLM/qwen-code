@@ -4810,6 +4810,7 @@ export class Config {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.pendingImageModelReload = undefined;
     this.baseLlmClient?.clearPerModelGeneratorCache();
   }
 
