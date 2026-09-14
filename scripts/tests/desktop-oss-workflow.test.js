@@ -46,10 +46,13 @@ describe('Desktop OSS mirror workflow', () => {
 
     const syncOss = getWorkflowJob(releaseWorkflow, 'sync-oss');
     expect(syncOss).toContain(
-      "if: \"${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'release') && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}\"",
+      "if: \"${{ (github.event_name == 'workflow_dispatch' || inputs.follows_release) && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}\"",
     );
     expect(syncOss).toContain("- 'publish'");
     expect(syncOss).toContain("source: 'artifact'");
+    expect(syncOss).toContain(
+      "follows_release: '${{ inputs.follows_release }}'",
+    );
     expect(syncOss).not.toContain('secrets: inherit');
   });
 
@@ -161,9 +164,51 @@ describe('Desktop OSS mirror workflow', () => {
 
   it('admits the release path in the reusable sync job gate', () => {
     const sync = getWorkflowJob(syncWorkflow, 'sync');
+    // This workflow is itself a reusable callee, so github.event_name here is
+    // always workflow_call and can never see the release that started the
+    // chain. The gate has to read the input the caller hands down instead.
     expect(sync).toContain(
-      "if: \"${{ github.repository == 'QwenLM/qwen-code' && (github.ref == 'refs/heads/main' || github.event_name == 'release') }}\"",
+      "if: \"${{ github.repository == 'QwenLM/qwen-code' && (github.ref == 'refs/heads/main' || inputs.follows_release) }}\"",
     );
+    expect(syncWorkflow).toContain(
+      "      follows_release:\n        default: false\n        type: 'boolean'",
+    );
+    expect(syncWorkflow).not.toContain(
+      '      follows_release:\n        required: true',
+    );
+  });
+
+  it('hands the release signal down instead of reading the caller event', () => {
+    // Inside a reusable workflow invoked with `uses:`, github.event_name and
+    // $GITHUB_EVENT_NAME are always workflow_call — never the caller's trigger.
+    // Every `event_name == 'release'` test in these two callees was therefore
+    // dead: the prepare guard aborted the run before it built anything, and the
+    // sync-oss job was silently skipped. The signal has to be threaded through
+    // an explicit input. Pin both ends, and pin that the dead class is gone.
+    expect(releaseWorkflow).toContain(
+      "      follows_release:\n        default: false\n        type: 'boolean'",
+    );
+    expect(releaseWorkflow).not.toContain(
+      '      follows_release:\n        required: true',
+    );
+    const source = getWorkflowStep(
+      getWorkflowJob(releaseWorkflow, 'prepare'),
+      'Resolve Qwen Code source',
+    );
+    expect(source).toContain(
+      "FOLLOWS_RELEASE: '${{ inputs.follows_release }}'",
+    );
+    for (const [name, text] of [
+      ['desktop-release.yml', releaseWorkflow],
+      ['sync-desktop-to-oss.yml', syncWorkflow],
+    ]) {
+      expect(text, `${name} still tests the caller's event`).not.toContain(
+        "github.event_name == 'release'",
+      );
+      expect(text, `${name} still tests the caller's event`).not.toContain(
+        '$GITHUB_EVENT_NAME',
+      );
+    }
   });
 
   it('resolves the release tag parent before the main ancestry check', () => {
@@ -172,13 +217,13 @@ describe('Desktop OSS mirror workflow', () => {
       'Resolve Qwen Code source',
     );
     expect(source).toContain(
-      'if [ "$GITHUB_REF_NAME" != \'main\' ] && [ "$GITHUB_EVENT_NAME" != \'release\' ]; then',
+      'if [ "$GITHUB_REF_NAME" != \'main\' ] && [ "$FOLLOWS_RELEASE" != \'true\' ]; then',
     );
     expect(source).toContain(
       '::error::Published desktop releases must run from main or follow a published release.',
     );
     expect(source).toContain('ancestor="$sha"');
-    expect(source).toContain('if [ "$GITHUB_EVENT_NAME" = \'release\' ]; then');
+    expect(source).toContain('if [ "$FOLLOWS_RELEASE" = \'true\' ]; then');
     expect(source).toContain('ancestor="$(git rev-parse "${sha}^")"');
     expect(source).toContain(
       'git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main',
@@ -241,6 +286,8 @@ describe('Desktop release sync caller', () => {
       'draft: false',
       'prerelease: false',
       'clobber: false',
+      // The callee cannot observe this trigger, so the caller must say so.
+      'follows_release: true',
     ]) {
       expect(publish).toContain(withValue);
     }

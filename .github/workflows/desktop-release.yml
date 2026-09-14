@@ -65,6 +65,15 @@ on:
       clobber:
         required: true
         type: 'boolean'
+      # Deliberately not required, unlike every input above. A callee cannot
+      # see the caller's trigger: inside a reusable workflow the event name is
+      # always workflow_call, so the caller has to state that it is following a
+      # published release. Omitting the input therefore means "not following a
+      # release", which is the safe default, and the dry-run caller
+      # desktop-packaging-check.yml needs no edit.
+      follows_release:
+        default: false
+        type: 'boolean'
 
 permissions:
   contents: 'read'
@@ -131,6 +140,7 @@ jobs:
         id: 'source'
         shell: 'bash'
         env:
+          FOLLOWS_RELEASE: '${{ inputs.follows_release }}'
           INPUT_REF: '${{ inputs.qwen_code_ref }}'
           IS_DRY_RUN: '${{ inputs.dry_run }}'
         run: |
@@ -138,7 +148,7 @@ jobs:
           git fetch origin "$INPUT_REF"
           sha="$(git rev-parse FETCH_HEAD)"
           if [ "$IS_DRY_RUN" = 'false' ]; then
-            if [ "$GITHUB_REF_NAME" != 'main' ] && [ "$GITHUB_EVENT_NAME" != 'release' ]; then
+            if [ "$GITHUB_REF_NAME" != 'main' ] && [ "$FOLLOWS_RELEASE" != 'true' ]; then
               echo '::error::Published desktop releases must run from main or follow a published release.'
               exit 1
             fi
@@ -166,12 +176,12 @@ jobs:
             # parent instead would bundle the previous CLI version. Tightening
             # who may tag is the lever that would change this.
             ancestor="$sha"
-            if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
+            if [ "$FOLLOWS_RELEASE" = 'true' ]; then
               ancestor="$(git rev-parse "${sha}^")"
             fi
             git fetch origin main:refs/remotes/origin/main
             if ! git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main; then
-              if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
+              if [ "$FOLLOWS_RELEASE" = 'true' ]; then
                 echo "::error::Release $INPUT_REF: the tag commit's first parent $ancestor is not reachable from main, so this step cannot confirm the release was cut from main. That shape is a non-main source ref, or commits added to the release branch after the version bump; the dispatch arm refuses it too."
               else
                 echo '::error::Published desktop releases may only bundle commits reachable from main.'
@@ -769,7 +779,7 @@ jobs:
 
   sync-oss:
     name: 'Mirror stable Desktop release to Aliyun OSS'
-    if: "${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'release') && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ (github.event_name == 'workflow_dispatch' || inputs.follows_release) && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
     needs:
       - 'prepare'
       - 'build'
@@ -781,6 +791,7 @@ jobs:
     with:
       version: '${{ needs.prepare.outputs.version }}'
       source: 'artifact'
+      follows_release: '${{ inputs.follows_release }}'
     secrets:
       ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
       ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'

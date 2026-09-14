@@ -54,4 +54,7 @@ jobs:
       draft: false
       prerelease: false
       clobber: false
+      # The callee runs under workflow_call and cannot see this trigger, so
+      # the release signal has to be handed down explicitly.
+      follows_release: true
     secrets: 'inherit'
