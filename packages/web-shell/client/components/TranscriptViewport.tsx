@@ -50,27 +50,26 @@ export function followRangeFromRows(
 ): TurnFollowRange | undefined {
   const firstMapped = rows.find((row) => row.ordinal !== undefined)?.ordinal;
   if (firstMapped === undefined) return undefined;
-  const center = viewportTop + (viewportBottom - viewportTop) / 2;
+  // The reading position is anchored a third of the way down the viewport so
+  // the highlight reaches the first and last turns at the scroll extremes
+  // instead of stalling on whichever turn sits in the middle.
+  const line = viewportTop + (viewportBottom - viewportTop) / 3;
   let lastMapped: number | undefined;
   let start: number | undefined;
   let end: number | undefined;
+  let firstVisible: number | undefined;
   let current: number | undefined;
-  let closest = Number.POSITIVE_INFINITY;
   for (const row of rows) {
     if (row.ordinal !== undefined) lastMapped = row.ordinal;
     const effective = row.ordinal ?? lastMapped ?? Math.max(0, firstMapped - 1);
     if (row.bottom < viewportTop || row.top > viewportBottom) continue;
     start = start === undefined ? effective : Math.min(start, effective);
     end = end === undefined ? effective : Math.max(end, effective);
-    const distance = Math.abs((row.top + row.bottom) / 2 - center);
-    if (distance < closest) {
-      closest = distance;
-      current = effective;
-    }
+    firstVisible ??= effective;
+    if (row.top <= line) current = effective;
   }
-  if (start === undefined || end === undefined || current === undefined)
-    return undefined;
-  return { start, end, current };
+  if (start === undefined || end === undefined) return undefined;
+  return { start, end, current: current ?? firstVisible! };
 }
 
 export const TranscriptViewport = forwardRef<

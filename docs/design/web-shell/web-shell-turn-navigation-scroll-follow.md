@@ -32,7 +32,9 @@ the rail highlight — a regression in daily reading flow, not a code defect.
 ## Goals
 
 - While the transcript scrolls (live or historical view), the rail highlights
-  the turn owning the row nearest the viewport center and marks the turns
+  the turn owning the row above the reading line a third of the way down the
+  viewport — so the marker reaches the first and last turns at the scroll
+  extremes — and marks the turns
   spanning the visible rows as in-range, matching the in-list timeline.
 - When the highlighted turn changes, the rail scrolls itself to center the
   current tick, matching the in-list timeline.

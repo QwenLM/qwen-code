@@ -9,7 +9,7 @@ describe('followRangeFromRows', () => {
     ).toBeUndefined();
   });
 
-  it('highlights the turn owning the row nearest the viewport center', () => {
+  it('highlights the turn owning the row above the reading line', () => {
     const rows = [
       { top: 0, bottom: 100, ordinal: 3 },
       { top: 100, bottom: 200, ordinal: 4 },
@@ -20,6 +20,29 @@ describe('followRangeFromRows', () => {
       end: 5,
       current: 4,
     });
+  });
+
+  it('reaches the first and last turns at the scroll extremes', () => {
+    expect(
+      followRangeFromRows(
+        [
+          { top: 0, bottom: 120, ordinal: 0 },
+          { top: 120, bottom: 240, ordinal: 1 },
+        ],
+        0,
+        300,
+      )?.current,
+    ).toBe(0);
+    expect(
+      followRangeFromRows(
+        [
+          { top: 0, bottom: 200, ordinal: 8 },
+          { top: 200, bottom: 400, ordinal: 9 },
+        ],
+        200,
+        400,
+      )?.current,
+    ).toBe(9);
   });
 
   it('propagates a turn across its unmapped rows', () => {

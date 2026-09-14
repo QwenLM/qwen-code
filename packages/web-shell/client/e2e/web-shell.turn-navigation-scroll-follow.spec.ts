@@ -132,6 +132,10 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   await expect.poll(() => ariaOrdinal(page)).toBeLessThan(atBottom - 3);
   const inMiddle = (await ariaOrdinal(page))!;
 
+  // The highlight reaches the first turn at the scroll top.
+  await scrollTranscriptTo(page, 0);
+  await expect.poll(() => ariaOrdinal(page)).toBe(0);
+
   // Scrolling back down moves it to newer turns again.
   await scrollTranscriptTo(page, 0.9);
   await expect.poll(() => ariaOrdinal(page)).toBeGreaterThan(inMiddle + 3);
