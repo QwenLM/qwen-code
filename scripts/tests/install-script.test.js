@@ -2691,6 +2691,14 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('hosted entrypoint');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
+    // The archives ship the node-pty wrapper plus the target prebuild, and the
+    // guide has to say so instead of sending PTY users to an npm install; the
+    // linux-arm64 gap it does not cover must stay named.
+    expect(guide).toContain('@lydell/node-pty');
+    expect(guide).toContain('linux-arm64');
+    expect(guide).not.toContain(
+      'do not currently install every npm optional native module',
+    );
   });
 
   it('provides standalone uninstall scripts that clean install-owned files only', () => {

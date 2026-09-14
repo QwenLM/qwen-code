@@ -323,8 +323,12 @@ Options:
                           renderer (needs bun:ffi) works standalone.
   --node-archive PATH     Downloaded Node.js runtime archive.
   --native-modules-dir DIR
-                          Staged native node_modules directory. Missing
-                          clipboard packages are fatal when this is supplied.
+                          Staged native node_modules directory holding
+                          @teddyzhu/clipboard* packages and, for --runtime
+                          node, @lydell/node-pty* packages. Missing clipboard
+                          packages are fatal when this is supplied; missing
+                          node-pty packages warn unless
+                          QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1.
   --opentui-modules-dir DIR
                           Staged node_modules directory holding @opentui
                           platform packages. Used with --runtime bun; missing
@@ -539,8 +543,10 @@ function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
 // (#11872). Missing packages warn-and-degrade locally (like the audio-capture
 // step) rather than failing the build: unlike clipboard this set has a known
 // gap (no pinned linux-arm64 package), so --native-modules-dir cannot be the
-// fatal gate. Release packaging sets
-// QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 to make a missing package fatal.
+// fatal gate. QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 opts in to the fatal
+// gate; nothing sets it today — release.yml exports only
+// QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD for the archive build — and
+// it cannot be wired unconditionally while linux-arm64 has no pinned package.
 function copyNodePtyAddon(packageRoot, target, nativeModulesDir) {
   const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
   const nativePackage = `@lydell/node-pty-${prebuildDirName}`;
