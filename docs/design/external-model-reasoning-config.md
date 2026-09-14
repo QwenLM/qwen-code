@@ -84,6 +84,10 @@ tools and retries. The latest valid reload is applied before the next user
 prompt, after the previous prompt has ended. New sessions use the latest
 configuration. A failed update preserves the previous runtime and reports an
 error. Reuse existing workspace ownership and prompt admission paths.
+Image-tool refresh runs after the provider update commits; its failure retains
+the image selection for retry at the next user prompt without rolling back an
+already refreshed provider. A newer image selection arriving during apply is
+kept for the following user prompt, even without another provider update.
 
 ACP keeps `reasoning_effort`; existing metadata carries defaults and thinking
 availability. CLI and WebShell render the same effective state. Tiered profiles

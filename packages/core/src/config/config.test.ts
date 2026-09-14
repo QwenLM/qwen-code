@@ -235,6 +235,55 @@ describe('staged model-provider refresh admission', () => {
     expect(config['pendingImageModelReload']).toBeUndefined();
   });
 
+  it('applies an image update arriving during refresh on the next prompt without another provider update', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    const applyImageModel = vi.fn().mockResolvedValue(undefined);
+    const apply = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        config.stageImageModelReload('openai:new-image');
+        return true;
+      })
+      .mockResolvedValue(false);
+    Object.assign(config, {
+      modelsConfig: { applyPendingModelProvidersReload: apply },
+      applyImageModel,
+      debugLogger: { error: vi.fn() },
+    });
+    config.stageImageModelReload('openai:first-image');
+    await config.applyPendingModelProvidersReload();
+    expect(applyImageModel).toHaveBeenLastCalledWith('openai:first-image');
+    await config.applyPendingModelProvidersReload();
+    expect(applyImageModel).toHaveBeenLastCalledWith('openai:new-image');
+    expect(config['pendingImageModelReload']).toBeUndefined();
+  });
+
+  it('does not roll back a committed provider refresh when image tool refresh fails', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    const apply = vi.fn(async (refresh: () => Promise<void>) => {
+      await refresh();
+      return true;
+    });
+    const applyImageModel = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('image tools unavailable'))
+      .mockResolvedValue(undefined);
+    Object.assign(config, {
+      modelsConfig: { applyPendingModelProvidersReload: apply },
+      getAuthType: () => undefined,
+      applyImageModel,
+      debugLogger: { error: vi.fn() },
+    });
+    config.stageImageModelReload('openai:image');
+    await expect(config.applyPendingModelProvidersReload()).resolves.toBe(true);
+    expect(config['pendingImageModelReload']).toEqual({
+      value: 'openai:image',
+    });
+    apply.mockResolvedValue(false);
+    await config.applyPendingModelProvidersReload();
+    expect(config['pendingImageModelReload']).toBeUndefined();
+  });
+
   it('keeps the latest image selection with a staged provider registry', async () => {
     const config = Object.create(Config.prototype) as Config;
     Object.assign(config, {

@@ -10462,6 +10462,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('keeps live provider rows when one reasoning preview fails', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue('openai'),
+      getModel: vi.fn().mockReturnValue('healthy-model'),
+      getResolvedModelConfig: vi.fn((_authType: string, modelId: string) =>
+        modelId === 'qwen3.8-max'
+          ? {
+              baseUrl: 'https://api.openai.com/v1',
+              generationConfig: {
+                reasoningConfig: { defaultEffort: 'medium' },
+              },
+            }
+          : undefined,
+      ),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        { id: 'healthy-model', label: 'Healthy', authType: 'openai' },
+        { id: 'qwen3.8-max', label: 'Qwen', authType: 'openai' },
+      ]),
+    } as unknown as Config;
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    try {
+      const status = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        {},
+      );
+      expect(status).toMatchObject({
+        providers: [
+          {
+            models: [
+              { baseModelId: 'healthy-model' },
+              { baseModelId: 'qwen3.8-max' },
+            ],
+          },
+        ],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('projects reasoning preview only for stable non-runtime qwen3.8-max', async () => {
     mockConfig = {
       ...mockConfig,

@@ -4860,14 +4860,21 @@ export class Config {
             // stall ACP or headless callers that cannot answer the prompt.
             await this.refreshAuth(authType, true);
           }
-          if (pendingImageModelReload) {
-            await this.applyImageModel(pendingImageModelReload.value);
-          }
           this.baseLlmClient?.clearPerModelGeneratorCache();
         },
       );
-      if (applied && this.pendingImageModelReload === pendingImageModelReload) {
-        this.pendingImageModelReload = undefined;
+      if (pendingImageModelReload) {
+        try {
+          await this.applyImageModel(pendingImageModelReload.value);
+          if (this.pendingImageModelReload === pendingImageModelReload) {
+            this.pendingImageModelReload = undefined;
+          }
+        } catch (error) {
+          this.debugLogger.error(
+            'Failed to apply staged image model; keeping the previous image selection',
+            error,
+          );
+        }
       }
       return applied;
     } catch (error) {

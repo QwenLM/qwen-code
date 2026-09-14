@@ -682,7 +682,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
       effectiveEffort,
       sampling.max_tokens,
     );
-    if (thinking?.type === 'enabled') sampling.temperature = 1;
+    if (thinking?.type === 'enabled' && !this.modelRejectsTemperature())
+      sampling.temperature = 1;
     const outputConfig = this.buildOutputConfig(request, effectiveEffort);
 
     // Compute per-request: `Config.setModel()` mutates contentGeneratorConfig

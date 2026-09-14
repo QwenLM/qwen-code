@@ -94,7 +94,7 @@ function inferProfile(
   const dashscope = isDashScopeProvider(route);
   if (legacy?.disableField === 'enable_thinking') return 'dashscope-thinking';
   if (qwen && dashscope)
-    return /^qwen3\.8-max/i.test(route.model) ||
+    return /^qwen3\.8-max/i.test(normalize(route.model)) ||
       legacy?.disableField === 'reasoning_effort'
       ? 'dashscope-effort'
       : 'dashscope-thinking';

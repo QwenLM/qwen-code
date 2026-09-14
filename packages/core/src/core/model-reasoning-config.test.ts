@@ -230,6 +230,17 @@ describe('external model reasoning configuration', () => {
     ).toThrow('inferred profile "dashscope-thinking"');
   });
 
+  it('infers tiered reasoning for provider-prefixed Qwen 3.8 Max', () => {
+    expect(
+      resolveModelReasoningConfig({
+        model: 'provider:qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoningConfig: { defaultEffort: 'medium' },
+      }),
+    ).toMatchObject({ profile: 'dashscope-effort', defaultEffort: 'medium' });
+  });
+
   it('recognizes provider-prefixed qwen model ids during profile inference', () => {
     expect(() =>
       resolveModelReasoningConfig({

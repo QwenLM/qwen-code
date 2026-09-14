@@ -7867,40 +7867,48 @@ class QwenAgent implements Agent {
               model.registryBaseUrl ?? model.baseUrl,
             )
           : undefined;
-        const reasoning = resolved
-          ? (resolveModelReasoningConfig(
-              {
-                ...resolved.generationConfig,
-                model: model.id,
-                authType: model.authType,
-                baseUrl: resolved.baseUrl,
-              },
-              model.capabilities?.reasoning,
-            ) ?? model.capabilities?.reasoning)
-          : model.capabilities?.reasoning;
-        const configOptions =
-          model.isRuntimeModel ||
-          (modelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
-            resolved?.generationConfig.reasoningConfig === undefined)
-            ? undefined
-            : buildModelReasoningConfigPreview(
-                model.id,
-                resolvePersistedReasoningConfigState(
+        let configOptions: ReturnType<typeof buildModelReasoningConfigPreview>;
+        try {
+          const reasoning = resolved
+            ? (resolveModelReasoningConfig(
+                {
+                  ...resolved.generationConfig,
+                  model: model.id,
+                  authType: model.authType,
+                  baseUrl: resolved.baseUrl,
+                },
+                model.capabilities?.reasoning,
+              ) ?? model.capabilities?.reasoning)
+            : model.capabilities?.reasoning;
+          configOptions =
+            model.isRuntimeModel ||
+            (modelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+              resolved?.generationConfig.reasoningConfig === undefined)
+              ? undefined
+              : buildModelReasoningConfigPreview(
                   model.id,
-                  settings.merged.model?.reasoningEffort,
-                  resolved?.generationConfig.thinkingMandatory === true,
+                  resolvePersistedReasoningConfigState(
+                    model.id,
+                    settings.merged.model?.reasoningEffort,
+                    resolved?.generationConfig.thinkingMandatory === true,
+                    reasoning,
+                  ),
                   reasoning,
-                ),
-                reasoning,
-                resolved
-                  ? {
-                      ...resolved.generationConfig,
-                      model: model.id,
-                      authType: model.authType,
-                      baseUrl: resolved.baseUrl,
-                    }
-                  : undefined,
-              );
+                  resolved
+                    ? {
+                        ...resolved.generationConfig,
+                        model: model.id,
+                        authType: model.authType,
+                        baseUrl: resolved.baseUrl,
+                      }
+                    : undefined,
+                );
+        } catch (error) {
+          debugLogger.warn(
+            `Unable to preview reasoning for model ${model.id}:`,
+            error,
+          );
+        }
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),

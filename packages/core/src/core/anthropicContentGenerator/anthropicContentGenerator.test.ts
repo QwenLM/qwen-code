@@ -2486,39 +2486,47 @@ describe('AnthropicContentGenerator', () => {
         ).toEqual({ type: 'adaptive', display: 'summarized' });
       });
 
-      it('uses adaptive thinking when an external adaptive profile owns the wire shape', async () => {
-        const { AnthropicContentGenerator } = await importGenerator();
-        anthropicState.createImpl.mockResolvedValue({
-          id: 'anthropic-1',
-          model: 'claude-opus-4-8',
-          content: [{ type: 'text', text: 'hi' }],
-        });
-        const generator = new AnthropicContentGenerator(
-          {
+      it.each(['anthropic-adaptive', 'anthropic-manual'] as const)(
+        'keeps temperature omitted on Claude 4.8 with %s',
+        async (profile) => {
+          const { AnthropicContentGenerator } = await importGenerator();
+          anthropicState.createImpl.mockResolvedValue({
+            id: 'anthropic-1',
             model: 'claude-opus-4-8',
-            apiKey: 'test-key',
-            baseUrl: 'https://api.anthropic.com',
-            timeout: 10_000,
-            maxRetries: 2,
-            samplingParams: { max_tokens: 4096 },
-            schemaCompliance: 'auto',
-            reasoningConfig: { profile: 'anthropic-adaptive' },
-            reasoning: { effort: 'medium', budget_tokens: 2048 },
-          },
-          mockConfig,
-        );
+            content: [{ type: 'text', text: 'hi' }],
+          });
+          const generator = new AnthropicContentGenerator(
+            {
+              model: 'claude-opus-4-8',
+              apiKey: 'test-key',
+              baseUrl: 'https://api.anthropic.com',
+              timeout: 10_000,
+              maxRetries: 2,
+              samplingParams: { max_tokens: 4096 },
+              schemaCompliance: 'auto',
+              reasoningConfig: { profile },
+              reasoning: { effort: 'medium', budget_tokens: 2048 },
+            },
+            mockConfig,
+          );
 
-        await generator.generateContent({
-          model: 'models/ignored',
-          contents: 'Hello',
-        } as unknown as GenerateContentParameters);
+          await generator.generateContent({
+            model: 'models/ignored',
+            contents: 'Hello',
+          } as unknown as GenerateContentParameters);
 
-        const [request] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
-        expect(request).toMatchObject({
-          thinking: { type: 'adaptive', display: 'summarized' },
-          output_config: { effort: 'medium' },
-        });
-      });
+          const [request] =
+            anthropicState.lastCreateArgs as AnthropicCreateArgs;
+          expect(request).not.toHaveProperty('temperature');
+          expect(request).toMatchObject({
+            thinking:
+              profile === 'anthropic-adaptive'
+                ? { type: 'adaptive', display: 'summarized' }
+                : { type: 'enabled', budget_tokens: 2048 },
+            output_config: { effort: 'medium' },
+          });
+        },
+      );
 
       it('omits an external manual budget when max_tokens cannot fit it', async () => {
         const { AnthropicContentGenerator } = await importGenerator();

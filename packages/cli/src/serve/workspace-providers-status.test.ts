@@ -124,6 +124,36 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     }
   });
 
+  it('keeps other models visible when a deferred reasoning preview is invalid', async () => {
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'healthy-model' },
+      modelProviders: {
+        openai: [
+          { id: 'healthy-model' },
+          {
+            id: 'qwen3.8-max',
+            generationConfig: {
+              reasoningConfig: { defaultEffort: 'medium' },
+            },
+          },
+        ],
+      },
+    });
+    const status = await createWorkspaceProvidersStatusProvider({ env: {} })(
+      workspace,
+      false,
+    );
+    expect(status.initialized).toBe(true);
+    const models = status.providers.flatMap((provider) => provider.models);
+    expect(models.some((model) => model.baseModelId === 'healthy-model')).toBe(
+      true,
+    );
+    const invalid = models.find((model) => model.baseModelId === 'qwen3.8-max');
+    expect(invalid).toBeDefined();
+    expect(invalid?.configOptions).toBeUndefined();
+  });
+
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
