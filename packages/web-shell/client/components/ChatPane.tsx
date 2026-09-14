@@ -73,6 +73,10 @@ import {
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
+import {
+  useContextUsageControls,
+  type RegisterContextUsageControls,
+} from '../hooks/useContextUsageControls';
 import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -223,6 +227,12 @@ export interface ChatPaneProps {
     sessionId: string,
     sessionActions: DaemonSessionActions,
   ) => void;
+  registerContextUsageControls?: RegisterContextUsageControls;
+  onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -266,6 +276,9 @@ export function ChatPane({
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
+  registerContextUsageControls,
+  onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
   onFirstPromptAdmitted,
@@ -1420,6 +1433,31 @@ export function ChatPane({
   // workspace provider (the pane's own session connection may not carry it).
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
+  const prepareContextCompression = useCallback(() => {
+    clearFollowup();
+    if (connection.sessionId) onBeforeContextCompress?.(connection.sessionId);
+  }, [clearFollowup, connection.sessionId, onBeforeContextCompress]);
+  const handleOpenContextUsage = useCallback(() => {
+    if (connection.sessionId)
+      onOpenContextUsage?.(connection.sessionId, actions);
+  }, [actions, connection.sessionId, onOpenContextUsage]);
+  const contextUsageControls = useContextUsageControls({
+    connection,
+    actions,
+    ownerGuard: sessionOwnerGuard,
+    onBeforeCompress: prepareContextCompression,
+    busy: streamingState !== 'idle' || sessionHasActivePrompt,
+    writeBlocked:
+      Boolean(connection.loadingTranscript) ||
+      admissionPayloadLocked ||
+      approvalActive ||
+      modeControlsBusy,
+  });
+  useEffect(() => {
+    if (contextUsageControls)
+      return registerContextUsageControls?.(contextUsageControls);
+  }, [contextUsageControls, registerContextUsageControls]);
+
   // Memoized so the array identity is stable across renders — `ChatEditor` is
   // `React.memo`, and a fresh `[...]` each render would defeat it.
   const paneToolbarActions = useMemo(
@@ -1766,6 +1804,14 @@ export function ChatPane({
             }
             onShowContextUsage={
               contextUsageAvailable ? handleShowContextUsage : undefined
+            }
+            contextUsageControls={
+              onOpenContextUsage ? contextUsageControls : undefined
+            }
+            onOpenContextUsage={
+              contextUsageAvailable && onOpenContextUsage
+                ? handleOpenContextUsage
+                : undefined
             }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
