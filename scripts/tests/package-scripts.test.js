@@ -1623,7 +1623,7 @@ describe('package scripts', () => {
     expect(installSteps.length).toBe(3);
     for (const installStep of installSteps) {
       expect(installStep).toContain(
-        'npm ci --ignore-scripts --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
       );
       expect(installStep).toContain('npm run postinstall');
       expect(installStep).toContain('npm run generate');

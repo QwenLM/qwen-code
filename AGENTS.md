@@ -92,9 +92,10 @@ dependencies with `node scripts/setup-worktree.js`, which runs the pinned
 pnpm with `--frozen-lockfile` (warm store ≈ 99 MiB on copy-on-write
 filesystems such as APFS, btrfs, and XFS with reflink; without reflink, as on
 ext4, it is ≈ 1.2 GiB, close to a plain npm install). The bootstrap skips the
-`prepare` build, so run `npm run build` before package tests. npm remains the
-authoritative path for build, CI, packaging, and release; the pnpm layout is
-install-only for now. When dependencies change, update `package-lock.json`
+`prepare` build, so run `npm run build` before package tests. CI and release
+install dependencies the same way — the pinned pnpm with `--frozen-lockfile`
+— so `corepack pnpm install --frozen-lockfile` reproduces the tree CI tests;
+scripts still run through `npm run`. When dependencies change, update `package-lock.json`
 with npm first, then regenerate the pnpm lockfile from it with
 `corepack pnpm import` and commit both lockfiles together;
 `npm run check:lockfile` fails when pnpm resolves a version npm has not

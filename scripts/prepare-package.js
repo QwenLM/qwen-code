@@ -276,28 +276,34 @@ function writeDistPackageJson(rootDir, distDir) {
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
-  let lockfile;
-  try {
-    lockfile = JSON.parse(
-      fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
-    );
-  } catch (error) {
-    throw new Error(`Cannot read package-lock.json: ${error.message}`);
-  }
   const coreManifest = JSON.parse(
     fs.readFileSync(
       path.join(rootDir, 'packages', 'core', 'package.json'),
       'utf-8',
     ),
   );
-  const sharpVersion =
-    lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
-    lockfile.packages?.['node_modules/sharp']?.version;
+  // Resolve sharp the way core does at runtime — the nearest
+  // node_modules/sharp above packages/core — so the published manifest pins
+  // the version this release was built against, whichever package manager
+  // installed the tree.
+  let sharpVersion;
+  for (
+    let dir = path.join(rootDir, 'packages', 'core');
+    ;
+    dir = path.dirname(dir)
+  ) {
+    const manifest = path.join(dir, 'node_modules', 'sharp', 'package.json');
+    if (fs.existsSync(manifest)) {
+      sharpVersion = JSON.parse(fs.readFileSync(manifest, 'utf-8')).version;
+      break;
+    }
+    if (dir === rootDir || path.dirname(dir) === dir) break;
+  }
   const declared = coreManifest.dependencies?.sharp;
   if (!sharpVersion || !declared || !semver.satisfies(sharpVersion, declared)) {
     throw new Error(
-      `sharp version is not locked in package-lock.json ` +
-        `(resolved ${sharpVersion ?? 'none'}, ` +
+      `sharp is not installed at a version packages/core accepts ` +
+        `(installed ${sharpVersion ?? 'none'}, ` +
         `packages/core declares ${declared ?? 'none'})`,
     );
   }

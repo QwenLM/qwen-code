@@ -2177,7 +2177,9 @@ describe('release workflow', () => {
       expect(setupNode?.if, id).toBe(
         "${{ runner.environment != 'self-hosted' }}",
       );
-      expect(setupNode?.with.cache, id).toBe('npm');
+      // Dependencies install with pnpm, so an npm download cache would be
+      // restored and never read.
+      expect(setupNode?.with.cache, id).toBeUndefined();
       expect(setupNode?.with['package-manager-cache'], id).toBe(false);
       const machineNode = steps.find((step) =>
         String(step.uses ?? '').includes('.github/actions/self-hosted-node'),
@@ -2190,9 +2192,7 @@ describe('release workflow', () => {
     const publishSetupNode = releaseYaml.jobs.publish.steps.find((step) =>
       String(step.uses ?? '').includes('actions/setup-node'),
     );
-    expect(publishSetupNode?.with.cache).toBe(
-      "${{ runner.environment != 'self-hosted' && 'npm' || '' }}",
-    );
+    expect(publishSetupNode?.with.cache).toBeUndefined();
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
   });
 
