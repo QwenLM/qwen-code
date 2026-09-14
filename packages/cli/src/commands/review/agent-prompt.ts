@@ -987,12 +987,17 @@ function diffWindow(
  * (R40-3). Spelled as pages, the compliant path is the credited one.
  *
  * Pages are sized off the planner's own measurement: `chars` over the
- * planner's safe chunk size gives the page count, spread evenly over the
- * window's lines. Lines are uneven, so a page can still come back truncated;
- * the launch keeps the paging rule, and a further page inside a page is still
- * a sub-window. A chunk whose single LINE exceeds the cap keeps one read —
- * no page reaches the tail of that line, and its brief asks for a
- * declaration, not a read. A plan without `chars` keeps one read too.
+ * planner's safe chunk size gives the page count FLOOR, and the window's
+ * worst line bounds how many lines a page may hold. Sizing off the mean
+ * (`chars` spread evenly over `lines`) spelled a page of up to
+ * `perPage × maxLineChars` chars that `read_file` truncates — and `rangeOf`
+ * records the REQUESTED range, so coverage's `pagedAcross` credited the
+ * chunk off reads whose tails never arrived (R41-1). `+ 1` is the newline
+ * each line carries into the returned content: `maxLineChars` does not
+ * count it and the read's char cap does. A chunk whose single LINE exceeds
+ * the cap keeps one read — no page reaches the tail of that line, and its
+ * brief asks for a declaration, not a read. A plan without `chars` keeps
+ * one read too.
  */
 function diffPages(c: {
   startLine: number;
@@ -1010,7 +1015,27 @@ function diffPages(c: {
   ) {
     return [diffWindow(c.startLine, c.endLine)];
   }
-  const pages = Math.min(lines, Math.ceil(c.chars / MAX_CHUNK_CHARS));
+  // Absent or hand-zeroed, the worst line is unmeasurable, so no multi-line
+  // page can be proven to fit — page per line, the tightest split there is.
+  const maxLine =
+    typeof c.maxLineChars === 'number' && c.maxLineChars > 0
+      ? c.maxLineChars
+      : READ_FILE_CHAR_CAP;
+  const safePerPage = Math.max(
+    1,
+    Math.floor(READ_FILE_CHAR_CAP / (maxLine + 1)),
+  );
+  // `ceil(chars / MAX_CHUNK_CHARS)` stays the floor, not the replacement:
+  // the page count feeds every budgeted agent's mandatory-read floor
+  // (`diffReadPages`), so the worst-line bound must not over-page a
+  // uniformly-lined window either.
+  const pages = Math.min(
+    lines,
+    Math.max(
+      Math.ceil(c.chars / MAX_CHUNK_CHARS),
+      Math.ceil(lines / safePerPage),
+    ),
+  );
   const perPage = Math.ceil(lines / pages);
   const out: Array<{ offset: number; limit: number }> = [];
   for (let start = c.startLine; start <= c.endLine; start += perPage) {

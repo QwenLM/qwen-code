@@ -2412,10 +2412,7 @@ export function coverageFromTranscripts(
               told.every(([s, e]) => s >= dc.startLine && e <= dc.endLine)
             );
           }));
-    if (told.length > 0 && rec.diffToolCalls === 0 && !declaringOwnChunk) {
-      if (!rewrittenThisRecord && !superseded(rec, chunk)) {
-        unopenedAgents.push(name);
-      }
+    if (told.length > 0 && rec.diffToolCalls === 0) {
       // BOTH causes, like the idle arm two blocks up — `classify()` does the
       // ranking, and it already ranks the rebuild above the relaunch, so the
       // operator is still handed one repair. Recording only the winner
@@ -2426,15 +2423,32 @@ export function coverageFromTranscripts(
       // `causes` field exists precisely so the repair precedence and the
       // fact can stop competing for one slot.
       //
-      // Gated like the push above: a superseding relaunch already reopened
+      // Gated like the push below: a superseding relaunch already reopened
       // the diff or rebuilt the prompt.
+      //
+      // The note fires on the declarer bypass too — through
+      // `noteChunkCause`'s naming seal, not the credit one. Skipping it with
+      // the arm left a zero-diff-call declarer whose declaration the arm
+      // below then REFUSED (a marker-less delivery fails the plan-identity
+      // seal) with `causes: []` / `classification: 'unknown'`:
+      // `chunkReadNothing` answered false, and the stderr line announced a
+      // refused read over a chunk nobody had opened the diff for (R41-2).
+      // Safe for the declarer the arm ADMITS: `classify()` ranks
+      // `declared-uncoverable` above `unopened`, and `chunkReadNothing` is
+      // `some(READ_NOTHING) && !some(READ_SOMETHING)`, so an admitted
+      // declaration still reads as a reported read.
       if (!superseded(rec, chunk)) {
         noteChunkCause(rec, chunk, 'unopened');
         if (rewrittenThisRecord) {
           noteChunkCause(rec, chunk, 'rewritten-prompt');
         }
       }
-      continue;
+      if (!declaringOwnChunk) {
+        if (!rewrittenThisRecord && !superseded(rec, chunk)) {
+          unopenedAgents.push(name);
+        }
+        continue;
+      }
     }
 
     // This record has passed every credit guard ABOVE it: it was given the
@@ -3430,9 +3444,23 @@ export function coverageFromTranscripts(
       // the chunk missing (R39-13). A prior reader that PAGED the window was
       // credited, so `stillCredited` keeps it counted.
       !(
-        c !== null &&
-        (chunkTruncatableByPlan(c) || windowExceedsOneRead(c)) &&
-        !stillCredited
+        (c !== null
+          ? chunkTruncatableByPlan(c) || windowExceedsOneRead(c)
+          : // The key-shaped half of the same guard. A prior WHOLE-DIFF
+            // record (a verifier, a reverse-auditor) is assigned no chunk,
+            // so the plan's two measurements cannot name its refusal — but
+            // the credit loop adjudicates its RANGED reads exactly the
+            // same, and a record whose every spanning read that loop
+            // refused was being counted as recovered work: the continuity
+            // note announced "counted as reviewed" beside a ledger listing
+            // the chunk missing (R41-3 — R39-13's shape on the other
+            // branch of the guard). Keyed on `diffReads`, not
+            // `diffToolCalls`: an unranged whole-file read never enters
+            // the credit loop, so it carries no refusal this guard owes —
+            // and keying on the call count excluded the pinned key-shaped
+            // shape (a prior `reverse-audit` record with unranged calls
+            // and no ranged reads), which must keep counting.
+            r.diffReads.length > 0) && !stillCredited
       ) &&
       certifies(r) &&
       // Not if a CURRENT record already satisfied the same obligation: the

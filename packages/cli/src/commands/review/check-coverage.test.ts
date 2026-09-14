@@ -3592,6 +3592,107 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     ).toContain('Nobody read those lines');
   });
 
+  it('records the UNOPENED fact on the declarer bypass the declaration arm refuses', () => {
+    // The `declaringOwnChunk` bypass skipped the whole `unopened` arm —
+    // including its fact note — so a zero-diff-call declarer whose
+    // declaration the declaration arm then REFUSED (a marker-less delivery
+    // fails the plan-identity seal) left the chunk `causes: []` /
+    // `classification: 'unknown'`: `chunkReadNothing` answered false and the
+    // stderr announced a refused read over a chunk nobody had opened the
+    // diff for (R41-2). The bypass still skips the repair axis (no
+    // `unopenedAgents` push, no `continue` short of the declaration arm) —
+    // pinned by 'scopes the assigned declarer bypass to the chunk it
+    // declared' above; what it may not skip is the FACT.
+    const diffPath = join(dir, 'd-identity.txt');
+    const text = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+new\n';
+    writeFileSync(diffPath, text);
+    const chunks = [
+      { id: 1, startLine: 1, endLine: 100, maxLineChars: 42 },
+      // Truncatable: the one chunk shape whose brief hands the agent the
+      // declaration template and drops the review block — the shape the
+      // bypass exists for.
+      {
+        id: 2,
+        startLine: 101,
+        endLine: 200,
+        maxLineChars: READ_FILE_CHAR_CAP + 1,
+      },
+    ];
+    const sel = buildSelectionIdentity(
+      text,
+      chunks as unknown as DiffChunk[],
+      3,
+    );
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 5000,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks,
+        selection: sel,
+      }),
+    );
+    satisfyRoster(p);
+    const token = planIdentityToken(sel) as string;
+    const mk = (c: number, tok: boolean) =>
+      `You are review agent \`chunk ${c} of 2\` — the territory agent.\n` +
+      (tok ? `Plan identity: ${token}\n` : '') +
+      `read_file(file_path="${briefPath(p, `chunk-${c}`)}")\n` +
+      `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
+    for (const c of [1, 2]) {
+      built(p, c, mk(c, true));
+      writeFileSync(briefPath(p, `chunk-${c}`), 'b');
+    }
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    transcript('a1', mk(1, true), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    // The marker-less delivery that RETURNS the declaration: identity line
+    // and spelled read intact, `Plan identity:` dropped, the brief opened,
+    // zero diff calls.
+    transcript('a2', mk(2, false), {
+      calls: 0,
+      opens: [briefPath(p, 'chunk-2')],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    const entry = entryFor(r, 2);
+    // The declaration is refused — the record cannot be sealed to this plan —
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([2]);
+    // ...but the FACT is the one the unopened arm exists to record.
+    expect(entry.causes).toContain('unopened');
+    expect(chunkReadNothing(entry)).toBe(true);
+    expect(
+      driveHandler(p).find((l) => l.includes('chunk(s) were not reviewed')),
+    ).toContain('Nobody read those lines');
+
+    // The control the bypass is for, one arm over: the VERBATIM delivery,
+    // same zero calls, whose declaration is admitted. It keeps the unopened
+    // fact too — it did not open the diff — but the admitted declaration is
+    // a reported read, so the chunk does NOT read as read-nothing.
+    rmSync(join(dir, 'subagents', 'S1', 'agent-a2.jsonl'));
+    transcript('a2', mk(2, true), {
+      calls: 0,
+      opens: [briefPath(p, 'chunk-2')],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    const c = coverageFromTranscripts(p, ENV);
+    expect(c.uncoverableChunks).toEqual([2]);
+    const admitted = entryFor(c, 2);
+    expect(admitted.classification).toBe('declared-uncoverable');
+    expect(chunkReadNothing(admitted)).toBe(false);
+  });
+
   it('reads the FACT axis, not the collapsed repair class', () => {
     // `classify()` ranks causes by which repair subsumes which, so an idle
     // chunk whose prompt was also rewritten reports `rewritten-prompt`.
@@ -8746,6 +8847,72 @@ describe('coverage — an oversized window is paged, or it is refused and said s
     expect(r.rewrittenPrompts).toEqual([]);
   });
 
+  it('credits the compliant agent of a FRONT-LOADED window’s built launch', () => {
+    // The paging witness above uses a uniform window (maxLineChars 120 over
+    // 900 lines), where the mean and the worst case agree. A front-loaded
+    // window — 12 lines of 12 000 chars — is where they part: sized off the
+    // mean, the launch spelled three 4-line pages that no read returns
+    // whole, and `pagedAcross` credited the chunk off the REQUESTED ranges
+    // (R41-1). The built block now spells six 2-line pages; a transcript
+    // holding exactly those reads is the compliant path, and it must be the
+    // credited one.
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 12,
+        files: [
+          {
+            path: 'lock.json',
+            kind: 'generated',
+            removedLines: 0,
+            heavy: true,
+          },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 12,
+            maxLineChars: 12_000,
+            chars: 60_000,
+            oversized: true,
+          },
+        ],
+      }),
+    );
+    const launch = buildChunkLaunchPrompt(
+      {
+        diffPathAbsolute: DIFF,
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 12,
+            lines: 12,
+            chars: 60_000,
+            maxLineChars: 12_000,
+            oversized: true,
+            files: [],
+          },
+        ],
+      } as unknown as Parameters<typeof buildChunkLaunchPrompt>[0],
+      1,
+      briefPath(p, 'chunk-1'),
+    );
+    const spelled = [...launch.matchAll(/offset=(\d+), limit=(\d+)/g)].map(
+      (m) => [Number(m[1]), Number(m[2])] as [number, number],
+    );
+    expect(spelled).toHaveLength(6);
+    built(p, 1, launch);
+    transcript('a1', launch, { ranges: spelled });
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.rewrittenPrompts).toEqual([]);
+  });
+
   it('does not both refuse a truncated read and let it refute a declaration', () => {
     // A whole-diff record's single read of chunk 2's oversized window was
     // refused as truncated by the credit loop and, in the same pass, used by
@@ -9235,6 +9402,92 @@ describe('coverage — round 40: absence is not mismatch, and every refusal is a
 
     const r = coverageFromTranscripts(p, ENV);
     expect(r.missingChunks).toEqual([2]);
+    expect(r.recoveredAgents).toBe(0);
+  });
+
+  it('does not count a prior KEY-shaped reader of an oversized window as recovered work', () => {
+    // The key-shaped twin of the chunk-assigned case above: the
+    // `stillCredited` exclusion fired only for records `assignedChunk`
+    // resolves (`c !== null`), so a prior whole-diff record — a
+    // reverse-auditor — whose one spanning read the credit loop refused on
+    // the same measurement was still counted as work the resumed run
+    // reused: the continuity note announced "counted as reviewed" beside a
+    // ledger listing the chunk missing (R41-3). The key-shaped arm keys on
+    // `diffReads` (the ranged reads the credit loop adjudicates), not
+    // `diffToolCalls` — the pinned key-shaped fixture above ('counts
+    // recovered KEY-shaped work') makes two UNRANGED calls that never enter
+    // the credit loop, and it must keep counting.
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 900,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 900,
+            maxLineChars: 120,
+            chars: 45_000,
+            oversized: true,
+          },
+        ],
+      }),
+    );
+    built(
+      p,
+      1,
+      `You are review agent \`chunk 1 of 1\` — the territory agent.\n` +
+        `read_file(file_path="${briefPath(p, 'chunk-1')}")\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=900)`,
+    );
+    writeFileSync(briefPath(p, 'chunk-1'), 'b');
+    // The interrupted attempt's reverse-auditor: a verbatim delivery of the
+    // built block, its brief opened, and the window read in ONE call.
+    const key = 'reverse-audit';
+    const brief = briefPath(p, key);
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const ra =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=900)`;
+    writeFileSync(
+      join(promptRecordDir(p), `${encodeURIComponent(key)}.txt`),
+      ra,
+    );
+    satisfyRoster(p);
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const now = Date.now();
+    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+    recordResume(p, ENV, now + 1500);
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+    transcript('ra0', ra, {
+      ranges: [[0, 900]],
+      opens: [brief],
+    });
+    const live = join(dir, 'subagents', 'S1', 'agent-ra0.jsonl');
+    writeFileSync(
+      join(dir, 'subagents', 'S0', 'agent-ra0.jsonl'),
+      readFileSync(live, 'utf8').replaceAll(
+        '"sessionId":"S1"',
+        '"sessionId":"S0"',
+      ),
+    );
+    rmSync(live);
+
+    const r = coverageFromTranscripts(p, ENV);
+    // The read was refused — the ledger says so...
+    expect(r.coveredChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([1]);
+    expect(r.oversizedWindows.join(' ')).toContain('chunk 1');
+    // ...so the continuity count may not claim it back.
     expect(r.recoveredAgents).toBe(0);
   });
 });

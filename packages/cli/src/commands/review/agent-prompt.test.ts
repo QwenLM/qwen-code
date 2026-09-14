@@ -8364,6 +8364,44 @@ describe('diff pages — an oversized window is spelled as reads the gate credit
         [Number(m[1]) + 1, Number(m[1]) + Number(m[2])] as [number, number],
     );
 
+  it('bounds a page by the window’s WORST line, not its mean', () => {
+    // The page count used to be the window's total `chars` spread evenly
+    // over its lines, so a page's real size was bounded only by
+    // `perPage × maxLineChars` — a front-loaded window (a generated file, a
+    // lockfile, a minified hunk) spelled a page no one read returns whole.
+    // `rangeOf` records the REQUESTED range, so coverage's `pagedAcross`
+    // credited the chunk off reads whose tails never arrived (R41-1).
+    // Twelve lines of 12 000 chars: `ceil(60000 / 20000)` = 3 pages of 4
+    // lines reach 48 000 chars; the worst-line bound is
+    // `floor(25000 / 12001)` = 2 lines a page, so the window is six pages.
+    const plan = {
+      ...PLAN,
+      chunks: [
+        {
+          id: 22,
+          startLine: 1,
+          endLine: 12,
+          lines: 12,
+          chars: 60_000,
+          maxLineChars: 12_000,
+          oversized: true,
+          files: [{ path: 'lock.json', newStart: 1, newEnd: 12 }],
+        },
+      ],
+    };
+    const pages = pagesOf(
+      buildChunkLaunchPrompt(plan as never, 22, '/tmp/x.brief.md'),
+    );
+    expect(pages).toEqual([
+      [1, 2],
+      [3, 4],
+      [5, 6],
+      [7, 8],
+      [9, 10],
+      [11, 12],
+    ]);
+  });
+
   it('tiles an oversized chunk exactly, in pages none of which spans it', () => {
     // Coverage credits an oversized window only off several reads, none
     // spanning it, that cover it between them. The launch spelled ONE
@@ -8392,11 +8430,14 @@ describe('diff pages — an oversized window is spelled as reads the gate credit
 
   it('budgets every page the launch spells, not the older truncation estimate', () => {
     // Two quantities that must be one: the pages the launch MANDATES and the
-    // reads the budget block counts for them. Pages are sized at
-    // `MAX_CHUNK_CHARS`, the budget estimate was `ceil(chars /
-    // READ_FILE_CHAR_CAP)` — a 45 000-character window was spelled as three
-    // reads and budgeted for two (audit of R40-3's fix). The fixture's 40k
-    // chunk happens to agree under both, which is why this needs its own.
+    // reads the budget block counts for them. Pages are floored at
+    // `ceil(chars / MAX_CHUNK_CHARS)`, the budget estimate was
+    // `ceil(chars / READ_FILE_CHAR_CAP)` — a 45 000-character window was
+    // budgeted for two reads (audit of R40-3's fix). And the page split is
+    // bounded by the WORST line, not the mean: three 300-line pages of
+    // 120-char lines reach 36 300 chars, which `read_file` truncates
+    // (R41-1) — `floor(25000 / 121)` = 206 lines a page, so this window is
+    // spelled as five.
     const plan = {
       ...PLAN,
       budget: {
@@ -8422,7 +8463,7 @@ describe('diff pages — an oversized window is spelled as reads the gate credit
     const spelled = pagesOf(
       buildChunkLaunchPrompt(plan as never, 21, '/tmp/x.brief.md'),
     );
-    expect(spelled).toHaveLength(3);
+    expect(spelled).toHaveLength(5);
     // The brief's reading list: the brief itself plus every spelled page.
     expect(buildChunkAgentPrompt(plan as never, 21)).toContain(
       `~${1 + spelled.length} reads your launch is assigned`,
