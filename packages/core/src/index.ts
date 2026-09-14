@@ -510,6 +510,12 @@ export { isUnusableScriptEntry } from './services/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
+// Offline License
+// ============================================================================
+
+export * from './license/offline-license.js';
+
+// ============================================================================
 // Managed Auto-Memory
 // ============================================================================
 
