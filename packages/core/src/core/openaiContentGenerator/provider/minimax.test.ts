@@ -171,7 +171,10 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       ).toBe(false);
       expect(
         MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-          createRoutedConfig('llama-3.1-8b-instruct', 'http://127.0.0.1:8080/v1'),
+          createRoutedConfig(
+            'llama-3.1-8b-instruct',
+            'http://127.0.0.1:8080/v1',
+          ),
         ),
       ).toBe(false);
     });
