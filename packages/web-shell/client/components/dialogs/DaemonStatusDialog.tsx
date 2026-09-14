@@ -881,11 +881,13 @@ function DaemonStatusDialogInner({
                       onChangeTarget(daemonOrigin, token);
                     })
                     .catch(() => {
-                      // An inconclusive probe (daemon restarting, tunnel
-                      // flapping) keeps the previous write-then-navigate
-                      // behavior.
-                      setConnectionError('');
-                      onChangeTarget(daemonOrigin, token);
+                      // A rejection means no answer arrived — including this
+                      // handler's own 10 s abort, so "the daemon did not
+                      // answer" is conclusive rather than inconclusive. Report
+                      // it and leave the stored credential alone: navigating
+                      // here would overwrite a working token with one nothing
+                      // accepted and read as a successful switch.
+                      setConnectionError(t('daemon.connection.notReady'));
                     })
                     .finally(() => {
                       window.clearTimeout(timeout);

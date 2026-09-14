@@ -429,6 +429,67 @@ describe('DaemonStatusDialog', () => {
     },
   );
 
+  // A rejection means no answer arrived — including the abort this handler
+  // arms for itself — so it is conclusive, not an inconclusive probe that may
+  // fall back to write-then-navigate.
+  it('keeps the stored credential when a same-target probe gets no answer', async () => {
+    const onChangeTarget = vi.fn();
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      persistDaemonToken('working-token', 'http://localhost:4170');
+      mount('en', onChangeTarget);
+      const token = typeToken('typed-unvalidated');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'did not accept',
+      );
+    } finally {
+      persistDaemonToken('', 'http://localhost:4170');
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports its own 10s probe timeout instead of switching anyway', async () => {
+    vi.useFakeTimers();
+    const onChangeTarget = vi.fn();
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new Error('The user aborted a request.')),
+          );
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      persistDaemonToken('working-token', 'http://localhost:4170');
+      mount('en', onChangeTarget);
+      const token = typeToken('typed-unvalidated');
+      await act(async () => {
+        token
+          .closest('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'did not accept',
+      );
+    } finally {
+      persistDaemonToken('', 'http://localhost:4170');
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('switches the current target once the typed token probes green', async () => {
     const onChangeTarget = vi.fn();
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
