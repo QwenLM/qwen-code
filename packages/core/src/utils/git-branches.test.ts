@@ -50,6 +50,7 @@ function makeRepo(): string {
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
   git(dir, 'config', 'tag.gpgsign', 'false');
+  git(dir, 'config', 'core.autocrlf', 'false');
   git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
@@ -90,6 +91,7 @@ function makeUpstream(): { dir: string; clone: string } {
   git(clone, 'config', 'user.email', 'other@example.com');
   git(clone, 'config', 'user.name', 'Other');
   git(clone, 'config', 'commit.gpgsign', 'false');
+  git(clone, 'config', 'core.autocrlf', 'false');
   return { dir, clone };
 }
 

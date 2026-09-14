@@ -270,7 +270,7 @@ describe('runScratchTree', () => {
     const pwned = join(repo, 'PWNED-included-smudge');
     writeFileSync(
       join(repo, 'innocuous.cfg'),
-      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${pwned.replaceAll('\\', '/')}\n`,
     );
     git(worktree, 'config', 'include.path', join(repo, 'innocuous.cfg'));
     writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
@@ -1510,15 +1510,17 @@ describe('runScratchTree --standalone', () => {
     const linked = runScratchTree({ worktree, label });
     expect(linked.available).toBe(true);
     expect(statSync(join(linked.path!, '.git')).isFile()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(
-      linked.path!,
-    );
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).toContain(linked.path!.replaceAll('\\', '/'));
 
     const r = run(label);
     expect(r.available).toBe(true);
     expect(r.path).toBe(linked.path);
     expect(statSync(join(r.path!, '.git')).isDirectory()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain(r.path!);
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).not.toContain(r.path!.replaceAll('\\', '/'));
     expect(existsSync(join(repo, '.git', 'worktrees', basename(r.path!)))).toBe(
       false,
     );
@@ -1537,9 +1539,9 @@ describe('runScratchTree --standalone', () => {
     expect(linked.reused).toBe(false);
     expect(linked.standalone).toBe(false);
     expect(statSync(join(linked.path!, '.git')).isFile()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(
-      linked.path!,
-    );
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).toContain(linked.path!.replaceAll('\\', '/'));
   });
 
   it('rebuilds over a symlink at the path without following it', () => {

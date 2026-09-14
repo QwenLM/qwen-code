@@ -342,7 +342,16 @@ describe('runCleanup', () => {
     // so a deletion AFTER the capture still threw uv_cwd out of the sweep.
     // Both now anchor at the captured root. The call-count is the pin: any
     // downstream cwd read returns this to red.
-    const cwdSpy = vi.spyOn(process, 'cwd');
+    //
+    // The cwd is pinned to the fixture root instead of skipping this on
+    // Windows. This file mocks `node:path` to posix, and a real Windows cwd
+    // (`C:\…`) is not posix-absolute, so every downstream `resolve()` re-read
+    // `process.cwd()` and the count came back 16 against an expected 1. That
+    // is an artifact of the module-level posix mock, not of production, which
+    // uses win32 semantics on Windows and has exactly one live `process.cwd()`
+    // (`cleanup.ts:754`) with no platform branch. A posix-absolute cwd makes
+    // the count platform-independent, so the witness runs on every lane.
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/repo');
     try {
       runCleanup('pr-123');
       expect(cwdSpy).toHaveBeenCalledTimes(1);
