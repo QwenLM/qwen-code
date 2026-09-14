@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, StrictMode, useRef, useState, type ReactNode } from 'react';
+import {
+  act,
+  StrictMode,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   Box,
   render,
@@ -78,6 +85,22 @@ function createTestStdout(
   };
 }
 
+// Pins the clock so that a budget refilling on elapsed wall-clock time refills
+// on every measurement, however fast the machine is. Restored unconditionally:
+// the patched hook reads no clock, but ink's render loop does, and a spy left
+// in place would push a 16ms-jumping clock into the cases after this one.
+async function withPinnedClock(body: () => Promise<void>): Promise<void> {
+  let clock = 0;
+  const now = vi
+    .spyOn(performance, 'now')
+    .mockImplementation(() => (clock += 16));
+  try {
+    await body();
+  } finally {
+    now.mockRestore();
+  }
+}
+
 async function mount(
   node: ReactNode,
   stdout: NodeJS.WriteStream,
@@ -117,13 +140,32 @@ function MeasuredBox({
 // Flips its own width on every measurement, so each commit produces a layout
 // that disagrees with the previous one and the measure -> setState -> commit
 // cycle never settles without the guard. `onRender` lets a test count the
-// commits the guard let through before it stopped the cascade.
+// commits the guard let through before it stopped the cascade; it reports from
+// an effect rather than from the render body, because StrictMode invokes a body
+// twice per commit and an invocation count is not a commit count.
 function OscillatingBox({ onRender }: { onRender?: () => void } = {}) {
-  onRender?.();
   const ref = useRef<DOMElement>(null);
   const { width, hasMeasured } = useBoxMetrics(ref);
+  useEffect(() => {
+    onRender?.();
+  });
   return (
     <Box ref={ref} width={hasMeasured && width >= 11 ? 10 : 11}>
+      <Text>x</Text>
+    </Box>
+  );
+}
+
+// Gates the measured element's own mounting on `hasMeasured`, and the attached
+// box computes to all zeros, so `metrics` never changes value: the only setter
+// scheduling commits is `setHasMeasured`.
+function HasMeasuredGatedBox() {
+  const ref = useRef<DOMElement>(null);
+  const { hasMeasured } = useBoxMetrics(ref);
+  return hasMeasured ? (
+    <Text>fallback</Text>
+  ) : (
+    <Box ref={ref} width={0} height={0}>
       <Text>x</Text>
     </Box>
   );
@@ -160,24 +202,21 @@ describe('ink useBoxMetrics loop guard', () => {
     // spent by the first invocation and refilled by the second, so it never
     // drains and React's #185 fires instead. The budget therefore has to be
     // settled once per commit rather than once per render invocation.
-    const { stdout, lastFrame } = createTestStdout();
-    let renderError: unknown;
-    try {
+    //
+    // The clock is pinned for the reason the case below pins it: this whole
+    // mount fits inside one 16ms window on an idle machine, so a budget
+    // refilling on elapsed time could not fail it here.
+    await withPinnedClock(async () => {
+      const { stdout, lastFrame } = createTestStdout();
       await mount(
         <StrictMode>
           <OscillatingBox />
         </StrictMode>,
         stdout,
       );
-    } catch (error) {
-      // Captured instead of thrown so the failure stays one case: a mount that
-      // throws out of the commit phase also leaves this suite's act scope
-      // unusable for the cases after it.
-      renderError = error;
-    }
 
-    expect(renderError).toBeUndefined();
-    expect(lastFrame()).toContain('x');
+      expect(lastFrame()).toContain('x');
+    });
   });
 
   it('still measures on a later resize once an oscillation tripped the guard', async () => {
@@ -200,13 +239,16 @@ describe('ink useBoxMetrics loop guard', () => {
     expect(lastFrame()).toContain('probe:60');
   });
 
-  it('unfreezes a tripped instance on resize, the only path that reaches it', async () => {
-    // A tripped instance stops scheduling renders of its own, and ink recomputes
-    // a resize in its own handler without a React render, so the refill in
-    // `onResize` is the only thing that reaches it again. Drop that reset and
-    // this case goes red: `updateMetrics` returns before `setMetrics`, so
-    // nothing follows the resize and the box renders against a stale width for
-    // the rest of the session.
+  it('unfreezes a tripped instance on resize, which needs no React commit', async () => {
+    // A tripped instance stops scheduling renders of its own, so it can only
+    // measure again on an event from outside the cascade. Any later commit in
+    // the ink root reaches it too - `onLayout` runs for every commit, not only
+    // for commits that re-render this subtree - but a resize is recomputed by
+    // ink's own handler with no React commit at all, so `onResize` is the path
+    // that reaches a tripped instance while nothing else in the tree renders.
+    // Drop that reset and this case goes red: `updateMetrics` returns before
+    // `setMetrics`, so nothing follows the resize and the box renders against a
+    // stale width for the rest of the session.
     let renders = 0;
     const { stdout, setColumns } = createTestStdout(80);
     const app = await mount(
@@ -258,40 +300,52 @@ describe('ink useBoxMetrics loop guard', () => {
     // Advancing the clock 16ms on every read keeps that refill firing on every
     // measurement however fast the machine is, so this case separates a
     // commit-counted budget from a timed one without racing the clock.
-    let clock = 0;
-    const now = vi
-      .spyOn(performance, 'now')
-      .mockImplementation(() => (clock += 16));
-    try {
+    await withPinnedClock(async () => {
       const { stdout, lastFrame } = createTestStdout();
       await mount(<OscillatingBox />, stdout);
 
       expect(lastFrame()).toContain('x');
-    } finally {
-      now.mockRestore();
-    }
+    });
   });
 
-  it('stops an oscillation in far fewer commits than React tolerates', async () => {
-    // React throws #185 once 50 nested updates stack up, so the guard has to
-    // stop the cascade well inside that. A guard that never trips does not just
-    // fail this assertion - it takes the whole mount down with #185.
-    let renders = 0;
-    const { stdout } = createTestStdout();
-    await mount(
-      <OscillatingBox
-        onRender={() => {
-          renders += 1;
-        }}
-      />,
-      stdout,
-    );
+  // `onRender` reports once per commit, so the same bound has to hold in both
+  // modes. Running it under StrictMode is what pins the counter against a
+  // render-body invocation count, which would report roughly double here.
+  describe.each([false, true])('strictMode=%s', (strictMode) => {
+    it('stops an oscillation in far fewer commits than React tolerates', async () => {
+      // React throws #185 once 50 nested updates stack up, so the guard has to
+      // stop the cascade well inside that. A guard that never trips does not just
+      // fail this assertion - it takes the whole mount down with #185.
+      let renders = 0;
+      const { stdout } = createTestStdout();
+      const box = (
+        <OscillatingBox
+          onRender={() => {
+            renders += 1;
+          }}
+        />
+      );
+      await mount(strictMode ? <StrictMode>{box}</StrictMode> : box, stdout);
 
-    // Bounded on both sides: a cap loose enough to only just beat React's own
-    // 50-nested-update limit, and one tight enough to stale a consumer that
-    // needs a second measurement pass, both fail here.
-    expect(renders).toBeGreaterThan(2);
-    expect(renders).toBeLessThanOrEqual(24);
+      // Bounded on both sides: a cap loose enough to only just beat React's own
+      // 50-nested-update limit, and one tight enough to stale a consumer that
+      // needs a second measurement pass, both fail here. The bound is a count of
+      // commits, which StrictMode does not double.
+      expect(renders).toBeGreaterThan(2);
+      expect(renders).toBeLessThanOrEqual(24);
+    });
+  });
+
+  it('settles a cascade driven only by a hasMeasured transition', async () => {
+    // `setHasMeasured` schedules a commit of its own, with no changed
+    // measurement behind it, so the budget only bounds this cascade if a
+    // `hasMeasured` transition arms the guard too. Without that arming every
+    // commit takes the refill branch and the mount runs to React's own cap, so
+    // the frame asserted below becomes the #185 error instead of the box.
+    const { stdout, lastFrame } = createTestStdout();
+    await mount(<HasMeasuredGatedBox />, stdout);
+
+    expect(lastFrame()).toContain('fallback');
   });
 
   it('keeps measuring across far more external re-renders than one budget', async () => {

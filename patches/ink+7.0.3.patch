@@ -204,7 +204,7 @@ index 0000000..745a4ba
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
 diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
-index c4386e4..e1b2567 100644
+index c4386e4..a6d1a4d 100644
 --- a/node_modules/ink/build/hooks/use-box-metrics.js
 +++ b/node_modules/ink/build/hooks/use-box-metrics.js
 @@ -1,4 +1,4 @@
@@ -225,7 +225,7 @@ index c4386e4..e1b2567 100644
  // eslint-disable-next-line @typescript-eslint/no-restricted-types
  const findRootNode = (node) => {
      if (!node) {
-@@ -50,18 +55,70 @@ const useBoxMetrics = (
+@@ -50,18 +55,83 @@ const useBoxMetrics = (
  ref) => {
      const [metrics, setMetrics] = useState(emptyMetrics);
      const [hasMeasured, setHasMeasured] = useState(false);
@@ -235,10 +235,12 @@ index c4386e4..e1b2567 100644
 +    // #185 and the process dies.
 +    //
 +    // Only a measurement that changes the metrics schedules another render of
-+    // this component, so only those spend budget. The budget refills on a commit
-+    // the hook did not cause (new props, a parent update, a re-measure after an
-+    // external layout change) and on a terminal resize, which keeps mount,
-+    // streaming content and resize measuring indefinitely.
++    // this component, and only a `hasMeasured` transition schedules one without
++    // a changed measurement, so those two spend budget. The budget refills on
++    // every commit the hook did not cause - `onLayout` runs for any commit in
++    // the ink root, not only for commits that re-render this subtree - and on a
++    // terminal resize, which keeps mount, streaming content and resize measuring
++    // indefinitely.
 +    //
 +    // Every refill is an event in React's own update chain, so a cascade trips
 +    // after the same number of commits on any machine. Refilling on elapsed
@@ -252,6 +254,7 @@ index c4386e4..e1b2567 100644
 +        count: 0,
 +        armed: false,
 +        last: null,
++        hasMeasured: false,
 +    });
      const { stdout } = useStdout();
      const updateMetrics = useCallback(() => {
@@ -267,6 +270,7 @@ index c4386e4..e1b2567 100644
 -                previousMetrics.top !== layout.top;
 -            return hasChanged ? layout : previousMetrics;
 -        });
+-        setHasMeasured(Boolean(ref.current));
 +        const last = guard.last;
 +        const hasChanged = last === null ||
 +            last.width !== layout.width ||
@@ -280,7 +284,17 @@ index c4386e4..e1b2567 100644
 +            guard.armed = true;
 +            setMetrics(layout);
 +        }
-         setHasMeasured(Boolean(ref.current));
++        const nextHasMeasured = Boolean(ref.current);
++        if (nextHasMeasured !== guard.hasMeasured) {
++            // `setHasMeasured` schedules a commit of its own when it flips, and
++            // that commit is this hook's as much as the metrics one, so it arms
++            // the guard too. Only the transition may: the call below is
++            // unconditional, and arming on it would charge the external commits
++            // that keep a streaming box measuring.
++            guard.hasMeasured = nextHasMeasured;
++            guard.armed = true;
++        }
++        setHasMeasured(nextHasMeasured);
      }, [ref]);
 +    // Settles the budget for the commit this is called from, once per commit and
 +    // never during render. Accounting kept in render would be invoked twice under
@@ -303,7 +317,7 @@ index c4386e4..e1b2567 100644
      // Runs after every render of this component.
      // This keeps metrics fresh when local state/props in this subtree change.
      useEffect(updateMetrics);
-@@ -72,16 +129,22 @@ ref) => {
+@@ -72,16 +142,22 @@ ref) => {
          if (!rootNode) {
              return;
          }
