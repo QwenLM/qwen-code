@@ -174,6 +174,7 @@ describe('no-AK integration CI wiring', () => {
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
         './skill-hooks-invocation-parity.test.ts',
+        './skill-hooks-resume.test.ts',
         './qwen-live-m4-acp-call.test.ts',
         './qwen-live-m4-acp-permission.test.ts',
         './qwen-live-m4-acp-steering.test.ts',
