@@ -834,6 +834,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     subagentTranscriptMode = 'full',
     suppressOwnUserEcho = true,
     includeRawEvent = false,
+    prefetchGitBranch = true,
+    prefetchSkills = true,
     autoConnect = true,
     autoReconnect = true,
     restartEventStreamOnPrompt = false,
@@ -1909,15 +1911,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const [providerResult, skillsResult, acpStatusResult, gitResult] =
                 await Promise.allSettled([
                   client.workspaceProviders(),
-                  skillsRuntimeClient
-                    ? skillsRuntimeClient.workspaceConfigSkills()
-                    : client.workspaceSkills(),
-                  !canUseSkillsConfigRuntime && canReadPrimaryAcpStatus
+                  prefetchSkills
+                    ? skillsRuntimeClient
+                      ? skillsRuntimeClient.workspaceConfigSkills()
+                      : client.workspaceSkills()
+                    : Promise.resolve(undefined),
+                  prefetchSkills &&
+                  !canUseSkillsConfigRuntime &&
+                  canReadPrimaryAcpStatus
                     ? client.workspaceAcpStatus()
                     : Promise.resolve(undefined),
-                  effectWorkspaceCwd
-                    ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
-                    : client.workspaceGit(),
+                  prefetchGitBranch
+                    ? effectWorkspaceCwd
+                      ? client.workspaceByCwd(effectWorkspaceCwd).workspaceGit()
+                      : client.workspaceGit()
+                    : Promise.resolve(undefined),
                 ]);
               if (providerResult.status === 'rejected') {
                 console.warn(
@@ -1954,9 +1962,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   : undefined,
               );
               const preserveClearedSessionCommands =
-                skillsResult.status === 'rejected' ||
-                (manualSessionClearRef.current &&
-                  deferredSkillCommands.length === 0);
+                connectionRef.current.workspaceCwd === effectWorkspaceCwd &&
+                (skillsResult.status === 'rejected' ||
+                  (manualSessionClearRef.current &&
+                    deferredSkillCommands.length === 0));
               setConnection((current) => ({
                 ...current,
                 status: 'connected',
@@ -1964,9 +1973,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 workspaceCwd: effectWorkspaceCwd,
                 standaloneSession: undefined,
                 gitBranch:
-                  gitResult.status === 'fulfilled'
-                    ? (gitResult.value.branch ?? undefined)
-                    : undefined,
+                  !prefetchGitBranch &&
+                  current.workspaceCwd === effectWorkspaceCwd
+                    ? current.gitBranch
+                    : gitResult.status === 'fulfilled'
+                      ? (gitResult.value?.branch ?? undefined)
+                      : undefined,
                 models: providerModelStatus.models,
                 currentModel: providerModelStatus.currentModel,
                 currentMode: providerModelStatus.currentMode,
@@ -1975,12 +1987,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 capabilities: caps,
                 commands: preserveClearedSessionCommands
                   ? current.commands
-                  : deferredSkillCommands,
+                  : !prefetchSkills || skillsResult.status === 'rejected'
+                    ? undefined
+                    : deferredSkillCommands,
                 skills: preserveClearedSessionCommands
                   ? current.skills
-                  : deferredSkills,
+                  : !prefetchSkills || skillsResult.status === 'rejected'
+                    ? undefined
+                    : deferredSkills,
               }));
-              if (skillsRuntimeClient) {
+              if (prefetchSkills && skillsRuntimeClient) {
                 void (async () => {
                   try {
                     const runtime = await skillsRuntimeClient.ensureRuntime();
@@ -2008,6 +2024,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   }
                 })();
               } else if (
+                prefetchSkills &&
                 canPreheatPrimaryWorkspace &&
                 !(
                   acpStatusResult.status === 'fulfilled' &&
@@ -2943,6 +2960,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             workspaceCwd: activeWorkspaceScoped
               ? activeProductSessionContext.cwd
               : undefined,
+            gitBranch:
+              activeWorkspaceScoped &&
+              current.workspaceCwd === activeProductSessionContext.cwd
+                ? current.gitBranch
+                : undefined,
             standaloneSession:
               activeProductSessionContext.kind === 'standalone'
                 ? getStandaloneConnectionState(activeSession.session)
@@ -3004,7 +3026,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               : undefined;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
-            : activeWorkspaceScoped
+            : activeWorkspaceScoped && prefetchGitBranch
               ? activeSession.workspaceCwd
                 ? client
                     .workspaceByCwd(activeSession.workspaceCwd)
@@ -3254,7 +3276,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   )
                 : (current.goalState ?? goalStateFallback),
               gitBranch:
-                activeWorkspaceScoped && gitResult.status === 'fulfilled'
+                activeWorkspaceScoped &&
+                prefetchGitBranch &&
+                gitResult.status === 'fulfilled'
                   ? gitBranch
                   : activeWorkspaceScoped
                     ? current.gitBranch
@@ -4389,6 +4413,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     autoConnect,
     autoReconnect,
+    prefetchGitBranch,
+    prefetchSkills,
     turnNotifications,
     resolvedBaseUrl,
     resolvedToken,

@@ -94,6 +94,7 @@ import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { applySkillSideEffects } from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -3523,6 +3524,38 @@ describe('Server Config (config.ts)', () => {
       config.startNewSession('replacement-session');
 
       expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    });
+
+    it("drops a skill's session allow rules at the session boundary", async () => {
+      // `PermissionManager` outlives the swap, so without the purge a skill's
+      // grant would keep auto-approving in a session that never loaded it.
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipLlmInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const permissionManager = config.getPermissionManager()!;
+      const gitPush = {
+        toolName: ToolNames.SHELL,
+        command: 'git push origin main',
+      };
+
+      await applySkillSideEffects(config, {
+        name: 'gated-skill',
+        description: 'Gated',
+        level: 'user',
+        filePath: '/skills/gated-skill/SKILL.md',
+        body: 'Body.',
+        allowedTools: ['Bash(git *)'],
+      } as unknown as SkillConfig);
+      expect(await permissionManager.evaluate(gitPush)).toBe('allow');
+
+      config.startNewSession('replacement-session');
+
+      expect(await permissionManager.evaluate(gitPush)).toBe('ask');
     });
 
     it('records no lifecycle transition when resuming the current session id', async () => {
@@ -13742,6 +13775,61 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
+  });
+
+  it('carries enableRequestMetadata across a qwen-oauth hot model switch', async () => {
+    // The DashScope provider reads enableRequestMetadata off its own
+    // contentGeneratorConfig, which on the main route is this same object. A
+    // hot switch rebuilds it field by field, so a per-model override that is
+    // not copied would leave the gate reading the previous model's value.
+    const config = new Config(baseParams);
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        ['model']: 'qwen3-coder-plus',
+        ['authType']: AuthType.QWEN_OAUTH,
+        ['apiKey']: 'test-key',
+        ['enableRequestMetadata']: false,
+      },
+      sources: {
+        model: { kind: 'settings' },
+        enableRequestMetadata: { kind: 'settings' },
+      },
+    });
+
+    await config.refreshAuth(AuthType.QWEN_OAUTH);
+    expect(config.getContentGeneratorConfig()['enableRequestMetadata']).toBe(
+      false,
+    );
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        ['model']: 'qwen-max',
+        ['authType']: AuthType.QWEN_OAUTH,
+        ['apiKey']: 'test-key',
+        ['enableRequestMetadata']: true,
+      },
+      sources: {
+        model: { kind: 'programmatic', detail: 'user' },
+        enableRequestMetadata: { kind: 'settings', detail: 'model' },
+      },
+    });
+
+    await (
+      config as unknown as {
+        handleModelChange: (
+          authType: AuthType,
+          requiresRefresh: boolean,
+        ) => Promise<void>;
+      }
+    ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
+    expect(config.getContentGeneratorConfig()['enableRequestMetadata']).toBe(
+      true,
+    );
+    const sources = config.getContentGeneratorConfigSources();
+    expect(sources['enableRequestMetadata']?.kind).toBe('settings');
+    expect(sources['enableRequestMetadata']?.detail).toBe('model');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
