@@ -289,10 +289,13 @@ import {
 } from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   createManagedHarnessHandle,
+  parseManagedRuntimeOutcomePart,
   type ManagedAwaitRuntimeRequest,
   type ManagedDurableWaitDecision,
   type ManagedDurableWaitRequest,
   type ManagedHarnessHandle,
+  type ManagedRuntimeOutcome,
+  type ManagedRuntimeOutcomeRead,
 } from '../managed-runtime/managed-harness-factory.js';
 import { managedRuntimeDispatchGate } from '../managed-runtime/managed-runtime-dispatch-gate.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
@@ -5117,6 +5120,7 @@ export class Config {
     executionCallId: string;
     outcome: 'completed' | 'failed' | 'cancelled';
     body?: unknown;
+    functionResponse?: ManagedRuntimeOutcome['part']['functionResponse'];
   }): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
@@ -5129,6 +5133,9 @@ export class Config {
           executionCallId: request.executionCallId,
           outcome: request.outcome,
           body: request.body ?? null,
+          ...(request.functionResponse === undefined
+            ? {}
+            : { functionResponse: request.functionResponse }),
         }),
         'utf8',
       ),
@@ -5148,6 +5155,61 @@ export class Config {
     return managedRuntimeDispatchGate(
       session.authority.sessionHeader.sessionKey,
     ).isHandedOff(executionCallId);
+  }
+
+  /**
+   * Reads unconsumed settled Runtime receipts for the next model request.
+   * Missing or unreadable outcome bodies are not synthesized.
+   */
+  async readManagedRuntimeOutcomes(): Promise<ManagedRuntimeOutcomeRead> {
+    const empty: ManagedRuntimeOutcomeRead = {
+      outcomes: [],
+      preserveCallIds: [],
+    };
+    const session = this.managedSession;
+    if (session === undefined) return empty;
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (
+      authorization.status !== 'runnable' ||
+      authorization.checkpoint.continuation.phase !== 'results_ready' ||
+      authorization.checkpoint.tools === null
+    ) {
+      return empty;
+    }
+    const preserveCallIds: string[] = [];
+    const outcomes: ManagedRuntimeOutcome[] = [];
+    for (const item of authorization.checkpoint.tools.items) {
+      if (item.state !== 'settled' || item.consumed) continue;
+      preserveCallIds.push(item.functionCallId);
+      if (item.outcomeRef === null) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(
+          (await session.resources.read(item.outcomeRef)).toString('utf8'),
+        ) as unknown;
+      } catch {
+        continue;
+      }
+      const part = parseManagedRuntimeOutcomePart(item.functionCallId, parsed);
+      if (part === null) continue;
+      outcomes.push({
+        functionCallId: item.functionCallId,
+        executionCallId: item.executionCallId,
+        part,
+      });
+    }
+    return { outcomes, preserveCallIds };
+  }
+
+  /**
+   * Marks unconsumed Runtime receipts consumed after they are present on
+   * the outgoing model request. Legacy sessions no-op.
+   */
+  async consumeManagedRuntimeResults(): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    await this.managedHarness.consumeRuntimeResults();
   }
 
   /**

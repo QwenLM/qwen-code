@@ -12188,6 +12188,7 @@ export class Session implements SessionContext {
     let managedPostHookConsumed = false;
     let managedFailureHookConsumed = false;
     let managedRuntimeWaitCommitted = false;
+    let managedModelFunctionResponse: Part['functionResponse'];
     const drainManagedInvocation = async () => {
       if (managedInvocation) {
         if (
@@ -12328,6 +12329,9 @@ export class Session implements SessionContext {
         opts.status,
         opts.errorType,
       );
+      managedModelFunctionResponse = errorParts.find(
+        (part) => part.functionResponse,
+      )?.functionResponse;
       if (opts.additionalContext)
         errorParts.push({ text: opts.additionalContext });
       if (toolName !== ToolNames.TODO_WRITE) {
@@ -14498,6 +14502,9 @@ export class Session implements SessionContext {
             if (status === 'error' && toolResult.error) {
               spanError = toolResult.error.message;
             }
+            managedModelFunctionResponse = responseParts.find(
+              (part) => part.functionResponse,
+            )?.functionResponse;
             return {
               parts: responseParts,
               stopAfterPermissionCancel: nestedPermissionCancelled,
@@ -14653,11 +14660,23 @@ export class Session implements SessionContext {
               : terminalStatus === 'success'
                 ? 'completed'
                 : 'failed';
+          const persistableFunctionResponse =
+            typeof managedModelFunctionResponse?.id === 'string' &&
+            typeof managedModelFunctionResponse.name === 'string'
+              ? {
+                  id: managedModelFunctionResponse.id,
+                  name: managedModelFunctionResponse.name,
+                  ...(managedModelFunctionResponse.response === undefined
+                    ? {}
+                    : { response: managedModelFunctionResponse.response }),
+                }
+              : undefined;
           await this.config.resolveManagedAwaitRuntime?.({
             functionCallId: callId,
             executionCallId: managedInvocation.toolUseId,
             outcome,
             body: managedInvocation.result ?? null,
+            functionResponse: persistableFunctionResponse,
           });
         }
       }

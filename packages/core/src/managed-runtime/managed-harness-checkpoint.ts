@@ -1466,6 +1466,58 @@ export function createResultsReadyHarnessCheckpoint(input: {
 }
 
 /**
+ * After the original Runtime receipts are present on the next model
+ * request, mark those settled items consumed. Phase stays
+ * `results_ready` so the same turn may still start the model.
+ */
+export function createConsumedRuntimeResultsHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+}): HarnessCheckpointV1 {
+  if (input.previous.continuation.phase !== 'results_ready') {
+    throw new ManagedSessionRecordError(
+      'consumed Runtime results require a results_ready checkpoint.',
+    );
+  }
+  if (input.previous.tools === null) {
+    throw new ManagedSessionRecordError(
+      'consumed Runtime results require the settled tools.',
+    );
+  }
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'results_ready',
+      pendingEventIds: [],
+    },
+    attempt: input.previous.attempt,
+    tools: {
+      batchId: input.previous.tools.batchId,
+      items: input.previous.tools.items.map((item) =>
+        item.state === 'settled' && item.consumed === false
+          ? { ...item, consumed: true }
+          : item,
+      ),
+    },
+    runtime: input.previous.runtime,
+    approval: null,
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
  * After a durable wait is resolved, the turn continues without a new model
  * start reservation. Phase is `model_output_committed` so the next model
  * request is allowed; the requested approval is cleared.

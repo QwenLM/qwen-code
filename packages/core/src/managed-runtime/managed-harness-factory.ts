@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import {
   createAwaitActionHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
+  createConsumedRuntimeResultsHarnessCheckpoint,
   createInitialHarnessCheckpoint,
   createModelOutputCommittedHarnessCheckpoint,
   createResultsReadyHarnessCheckpoint,
@@ -115,6 +116,25 @@ export interface ManagedAwaitRuntimeRequest {
   readonly modelMessageId?: string;
 }
 
+export interface ManagedRuntimeFunctionResponse {
+  readonly id: string;
+  readonly name: string;
+  readonly response?: Record<string, unknown>;
+}
+
+export interface ManagedRuntimeOutcome {
+  readonly functionCallId: string;
+  readonly executionCallId: string;
+  readonly part: {
+    readonly functionResponse: ManagedRuntimeFunctionResponse;
+  };
+}
+
+export interface ManagedRuntimeOutcomeRead {
+  readonly outcomes: readonly ManagedRuntimeOutcome[];
+  readonly preserveCallIds: readonly string[];
+}
+
 export interface ManagedHarnessHandle {
   /** The activation this handle is allowed to present. */
   readonly activation: {
@@ -172,6 +192,12 @@ export interface ManagedHarnessHandle {
   resolveAwaitRuntime(
     outcomeRef: ManagedSessionDurableRef,
   ): Promise<HarnessCheckpointV1 | null>;
+  /**
+   * Marks unconsumed settled Runtime receipts as consumed after they are
+   * present on the next model request. No-op when the handle is not at
+   * `results_ready`.
+   */
+  consumeRuntimeResults(): Promise<HarnessCheckpointV1 | null>;
 }
 
 /**
@@ -548,6 +574,33 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     return checkpoint;
   }
 
+  async consumeRuntimeResults(): Promise<HarnessCheckpointV1 | null> {
+    this.assertNotDetached();
+    this.assertCurrentActivation();
+    const previous = (await this.requireRunnableAuthorization()).checkpoint;
+    if (previous.continuation.phase !== 'results_ready') {
+      return null;
+    }
+    const items = previous.tools?.items ?? [];
+    if (
+      items.length === 0 ||
+      items.every((item) => item.state !== 'settled' || item.consumed)
+    ) {
+      return previous;
+    }
+    const identity = this.nextCheckpointIdentity();
+    const checkpoint = createConsumedRuntimeResultsHarnessCheckpoint({
+      previous,
+      ...identity,
+    });
+    await this.commitHarnessCheckpoint(
+      `harness:results_consumed:${this.activation.activationId}:${identity.coveredSequence}`,
+      checkpoint,
+      null,
+    );
+    return checkpoint;
+  }
+
   private assertNotDetached(): void {
     if (this.detached) {
       throw new ManagedSessionConflictError(
@@ -673,4 +726,49 @@ function isHarnessSafetyBoundary(
     boundary === HARNESS_TURN_COMPLETE_BOUNDARY ||
     boundary === HARNESS_DURABLE_WAIT_BOUNDARY
   );
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asFunctionResponse(
+  value: unknown,
+): ManagedRuntimeFunctionResponse | null {
+  if (!isObjectRecord(value)) return null;
+  const id = value['id'];
+  const name = value['name'];
+  if (typeof id !== 'string' || typeof name !== 'string') {
+    return null;
+  }
+  const response = value['response'];
+  return {
+    id,
+    name,
+    ...(isObjectRecord(response) ? { response } : {}),
+  };
+}
+
+/**
+ * Reads the model-facing functionResponse from a published Runtime
+ * outcome. Missing or malformed receipts are not synthesized.
+ */
+export function parseManagedRuntimeOutcomePart(
+  functionCallId: string,
+  parsed: unknown,
+): ManagedRuntimeOutcome['part'] | null {
+  if (!isObjectRecord(parsed)) return null;
+  const nested = isObjectRecord(parsed['body']) ? parsed['body'] : undefined;
+  const candidate =
+    asFunctionResponse(parsed['functionResponse']) ??
+    (nested === undefined
+      ? null
+      : asFunctionResponse(nested['functionResponse']));
+  if (candidate === null) return null;
+  return {
+    functionResponse: {
+      ...candidate,
+      id: functionCallId,
+    },
+  };
 }

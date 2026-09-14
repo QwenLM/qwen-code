@@ -9,9 +9,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from './config.js';
-import { LlmChat } from '../core/llm-chat.js';
+import { LlmChat, ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
 import type { ContentGenerator } from '../core/contentGenerator.js';
-import type { GenerateContentResponse } from '@google/genai';
+import type { Content, GenerateContentResponse } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
 import { Storage } from './storage.js';
@@ -125,10 +125,10 @@ function checkpointPayloads(
     );
 }
 
-async function readCheckpointPhase(
+async function readCheckpoint(
   fixture: Fixture,
   payload: Record<string, unknown>,
-): Promise<string> {
+) {
   const stateRef = payload['stateRef'] as {
     kind: string;
     resourceId: string;
@@ -140,7 +140,14 @@ async function readCheckpointPhase(
       stateRef.resourceId,
     ),
   );
-  return parseHarnessCheckpointV1(bytes).continuation.phase;
+  return parseHarnessCheckpointV1(bytes);
+}
+
+async function readCheckpointPhase(
+  fixture: Fixture,
+  payload: Record<string, unknown>,
+): Promise<string> {
+  return (await readCheckpoint(fixture, payload)).continuation.phase;
 }
 
 function stubStoppedModelStream(
@@ -697,6 +704,231 @@ describe('managed session log activation', () => {
               (event['payload'] as Record<string, unknown>)['phase'] as string,
           ),
       ).toEqual(['active']);
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
+  it('sends the original Runtime receipt on the next model request instead of a synthesized failure', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run a remote tool');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+      await fixture.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-rt-1',
+        executionCallId: 'ex-rt-1',
+        invocationBindingId: 'bind-rt-1',
+        modelMessageId: 'msg-rt-1',
+      });
+      await fixture.config.resolveManagedAwaitRuntime({
+        functionCallId: 'fc-rt-1',
+        executionCallId: 'ex-rt-1',
+        outcome: 'completed',
+        body: { output: 'ok' },
+        functionResponse: {
+          id: 'fc-rt-1',
+          name: 'remote_tool',
+          response: { output: 'original runtime receipt' },
+        },
+      });
+
+      let captured: Content[] | undefined;
+      const generateContentStream = vi.fn(
+        async (request: { contents: Content[] }) => {
+          captured = request.contents;
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'used original' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        },
+      );
+      vi.spyOn(fixture.config, 'getContentGenerator').mockReturnValue({
+        generateContent: vi.fn(),
+        generateContentStream,
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+      vi.spyOn(fixture.config, 'getContentGeneratorConfig').mockReturnValue({
+        model: 'qwen3-coder-plus',
+        authType: 'openai',
+      } as ReturnType<Config['getContentGeneratorConfig']>);
+
+      const chat = new LlmChat(fixture.config, {}, [
+        {
+          role: 'user',
+          parts: [{ text: 'run a remote tool' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'fc-rt-1',
+                name: 'remote_tool',
+                args: {},
+              },
+            },
+          ],
+        },
+      ]);
+      const stream = await chat.sendMessageStream(
+        'qwen3-coder-plus',
+        { message: 'continue' },
+        'prompt-h04',
+      );
+      for await (const _ of stream) {
+        /* consume the Agent stream */
+      }
+
+      expect(generateContentStream).toHaveBeenCalledOnce();
+      const serialized = JSON.stringify(captured);
+      expect(serialized).toContain('original runtime receipt');
+      expect(serialized).not.toContain(ORPHAN_TOOL_USE_REPAIR_REASON);
+      expect(
+        captured
+          ?.flatMap((content) => content.parts ?? [])
+          .find((part) => part.functionResponse?.id === 'fc-rt-1')
+          ?.functionResponse?.response,
+      ).toEqual({ output: 'original runtime receipt' });
+
+      const payloads = checkpointPayloads(
+        await transcriptRecords(fixture.transcriptPath),
+      );
+      const latest = await readCheckpoint(
+        fixture,
+        payloads[payloads.length - 1]!,
+      );
+      expect(latest.continuation.phase).toBe('results_ready');
+      expect(latest.tools?.items[0]?.consumed).toBe(true);
+      expect(() =>
+        managedRuntimeDispatchGate(
+          localManagedSessionKey(fixture.config.getProjectRoot(), sessionId),
+        ).claim('ex-rt-1'),
+      ).toThrow(/already dispatched/);
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
+  it('marks an already-present Runtime receipt consumed without replacing it', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('run a remote tool');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+      await fixture.config.commitManagedAwaitRuntime({
+        functionCallId: 'fc-rt-1',
+        executionCallId: 'ex-rt-1',
+        invocationBindingId: 'bind-rt-1',
+        modelMessageId: 'msg-rt-1',
+      });
+      await fixture.config.resolveManagedAwaitRuntime({
+        functionCallId: 'fc-rt-1',
+        executionCallId: 'ex-rt-1',
+        outcome: 'completed',
+        functionResponse: {
+          id: 'fc-rt-1',
+          name: 'remote_tool',
+          response: { output: 'original runtime receipt' },
+        },
+      });
+
+      let captured: Content[] | undefined;
+      const generateContentStream = vi.fn(
+        async (request: { contents: Content[] }) => {
+          captured = request.contents;
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'used original' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        },
+      );
+      vi.spyOn(fixture.config, 'getContentGenerator').mockReturnValue({
+        generateContent: vi.fn(),
+        generateContentStream,
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+      vi.spyOn(fixture.config, 'getContentGeneratorConfig').mockReturnValue({
+        model: 'qwen3-coder-plus',
+        authType: 'openai',
+      } as ReturnType<Config['getContentGeneratorConfig']>);
+
+      const chat = new LlmChat(fixture.config, {}, [
+        {
+          role: 'user',
+          parts: [{ text: 'run a remote tool' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'fc-rt-1',
+                name: 'remote_tool',
+                args: {},
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'fc-rt-1',
+                name: 'remote_tool',
+                response: { output: 'original runtime receipt' },
+              },
+            },
+          ],
+        },
+      ]);
+      const stream = await chat.sendMessageStream(
+        'qwen3-coder-plus',
+        { message: 'continue' },
+        'prompt-h04-live',
+      );
+      for await (const _ of stream) {
+        /* consume the Agent stream */
+      }
+
+      expect(generateContentStream).toHaveBeenCalledOnce();
+      expect(JSON.stringify(captured)).not.toContain(
+        ORPHAN_TOOL_USE_REPAIR_REASON,
+      );
+      expect(
+        captured
+          ?.flatMap((content) => content.parts ?? [])
+          .filter((part) => part.functionResponse?.id === 'fc-rt-1'),
+      ).toHaveLength(1);
+
+      const payloads = checkpointPayloads(
+        await transcriptRecords(fixture.transcriptPath),
+      );
+      expect(
+        (await readCheckpoint(fixture, payloads[payloads.length - 1]!)).tools
+          ?.items[0]?.consumed,
+      ).toBe(true);
 
       await fixture.config.closeSessionWriter();
     });

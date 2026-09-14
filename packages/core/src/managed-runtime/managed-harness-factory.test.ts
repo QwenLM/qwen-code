@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Storage } from '../config/storage.js';
 import {
   createManagedHarnessHandle,
+  parseManagedRuntimeOutcomePart,
   ManagedHarnessBlockedError,
   type ManagedAwaitRuntimeCommit,
   type ManagedDurableWaitCommit,
@@ -589,6 +590,57 @@ describe('managed harness factory', () => {
     await expect(next.commitAwaitRuntime(commit)).rejects.toThrow(
       /already dispatched/,
     );
+    await session.close();
+  });
+
+  it('marks settled Runtime receipts consumed without a second dispatch', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const commit = await runtimeCommit(session);
+    await handle.commitAwaitRuntime(commit);
+    const outcomeRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from(
+        JSON.stringify({
+          functionCallId: 'fc-1',
+          executionCallId: 'ex-1',
+          outcome: 'completed',
+          functionResponse: {
+            id: 'fc-1',
+            name: 'remote_tool',
+            response: { output: 'original runtime receipt' },
+          },
+        }),
+        'utf8',
+      ),
+    );
+    const ready = await handle.resolveAwaitRuntime(outcomeRef);
+    expect(ready?.tools?.items[0]?.consumed).toBe(false);
+    const consumed = await handle.consumeRuntimeResults();
+    expect(consumed?.continuation.phase).toBe('results_ready');
+    expect(consumed?.tools?.items[0]?.consumed).toBe(true);
+    const again = await handle.consumeRuntimeResults();
+    expect(again?.identity.checkpointId).toBe(consumed?.identity.checkpointId);
+    expect(() => managedRuntimeDispatchGate(sessionKey).claim('ex-1')).toThrow(
+      /already dispatched/,
+    );
+    expect(
+      parseManagedRuntimeOutcomePart('fc-1', {
+        functionResponse: {
+          id: 'other',
+          name: 'remote_tool',
+          response: { output: 'original runtime receipt' },
+        },
+      }),
+    ).toEqual({
+      functionResponse: {
+        id: 'fc-1',
+        name: 'remote_tool',
+        response: { output: 'original runtime receipt' },
+      },
+    });
     await session.close();
   });
 

@@ -34952,6 +34952,11 @@ describe('Session', () => {
           executionCallId: 'runtime-tool-use-id',
           outcome: 'completed',
           body: { executionStatus: 'success' },
+          functionResponse: expect.objectContaining({
+            id: 'managed-call',
+            name: 'remote_tool',
+            response: { output: 'remote output' },
+          }),
         });
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
           expect.objectContaining({
