@@ -7260,3 +7260,37 @@ describe('review supersede salvage (#10110)', () => {
     },
   );
 });
+
+describe('qwen pr review unchanged-diff anchor', () => {
+  it('stamps reviewed heads from its own job, never from review-pr', () => {
+    const doc = parse(workflow);
+    const reviewPr = doc.jobs['review-pr'];
+    // review-pr's checkout persists its GITHUB_TOKEN where the agent can
+    // read it, so it must not hold statuses: write.
+    expect(reviewPr.permissions.statuses).toBeUndefined();
+    expect(reviewPr.outputs.review_completed).toBe(
+      '${{ steps.review.outputs.review_completed }}',
+    );
+    expect(reviewPr.outputs.unchanged_diff).toBe(
+      '${{ steps.review.outputs.unchanged_diff }}',
+    );
+    const job = doc.jobs['record-reviewed'];
+    expect(job.needs).toEqual(['review-pr']);
+    expect(job.permissions).toEqual({ statuses: 'write' });
+    expect(job['runs-on']).toBe('ubuntu-latest');
+    expect(job.if).toContain("github.event_name == 'pull_request_target'");
+    expect(job.if).toContain("needs.review-pr.result == 'success'");
+    const [step] = job.steps;
+    // The event's head, never an output the agent's step could write.
+    expect(step.env.HEAD_SHA).toBe('${{ github.event.pull_request.head.sha }}');
+    expect(step.run).toContain("-f context='qwen-review/reviewed'");
+  });
+
+  it('checks for an unchanged diff on automatic synchronize runs only', () => {
+    const run = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    expect(run).toContain('bash .github/scripts/review-unchanged-diff.sh');
+    expect(run).toContain('[ "${EVENT_ACTION:-}" = "synchronize" ]');
+  });
+});
