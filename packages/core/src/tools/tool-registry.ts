@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import {
+  isEnabled,
   removeMCPServerStatus,
   populateMcpServerCommand,
 } from './mcp-client.js';
@@ -42,7 +43,6 @@ import {
   ToolMode,
   type CodeModeBindingPlan,
 } from './code-mode.js';
-import { coerceMcpFilterEntries } from './mcp-session-config.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -263,6 +263,15 @@ export class ToolRegistry {
   // restore on EVERY legacy reconnect of a tracked server (R3-7 round
   // 5) and disarmed the R2-1 dedup for its duration.
   private serverTeardownGeneration = new Map<string, number>();
+
+  // Monotonic epoch bumped by every DELIBERATE reveal reset
+  // (`clearRevealedDeferredTools` — `/clear` and session resets). A
+  // discovery pass captures it before awaiting the manager; the restore
+  // leg replays pre-pass reveal state only when the epoch still matches
+  // (R5-48 round 6). Pinned reveals are exempt on the replay side via
+  // `pinnedDeferredReveals`, matching `clearRevealedDeferredTools`'s own
+  // re-pin loop.
+  private revealResetEpoch = 0;
 
   // Server names whose current `DiscoveredMCPTool` entries were copied
   // in from ANOTHER registry by `copyDiscoveredToolsFrom` (per-agent
@@ -754,9 +763,14 @@ export class ToolRegistry {
     // restore is suppressed if a teardown path bumped it mid-pass (R3-7).
     const discoveryGeneration =
       this.serverTeardownGeneration.get(serverName) ?? 0;
+    // Capture the reveal-reset epoch too: a mid-pass `/clear` deliberately
+    // drops reveal state, and the restore must not replay its pre-pass
+    // snapshot over that decision (R5-48 round 6).
+    const revealEpoch = this.revealResetEpoch;
     const run = this.discoverToolsForServerInner(
       serverName,
       discoveryGeneration,
+      revealEpoch,
     ).finally(() => {
       this.serverDiscoveryInFlight.delete(serverName);
     });
@@ -767,6 +781,7 @@ export class ToolRegistry {
   private async discoverToolsForServerInner(
     serverName: string,
     discoveryGeneration: number,
+    revealEpoch: number,
   ): Promise<void> {
     // Snapshot the server's current registrations so a FAILED rediscovery
     // can put them back. The purge below runs before the await, so without
@@ -837,6 +852,7 @@ export class ToolRegistry {
           restoreCandidates.prompts,
           restoreCandidates.resources,
           previousRevealed,
+          revealEpoch,
         );
       }
     } catch (error) {
@@ -865,6 +881,7 @@ export class ToolRegistry {
           restoreCandidates.prompts,
           restoreCandidates.resources,
           previousRevealed,
+          revealEpoch,
         );
       }
       throw error;
@@ -972,15 +989,12 @@ export class ToolRegistry {
 
   /**
    * The snapshot tools the operator's CURRENT includeTools/excludeTools
-   * still admit, filtered per tool with the SAME predicate discovery
-   * uses (`McpClient`'s `isEnabled`): exact-match exclude, exact-or-
-   * parenthesized-suffix include, `undefined` include = allow all and
-   * `[]` = allow none. Re-implementing that predicate with the server-
-   * name glob matcher diverged on all three axes (R1-3 round 5); a
-   * divergent restore filter would re-exclude tools discovery keeps or
-   * re-admit tools discovery excludes. Coercion keeps malformed filter
-   * shapes (settings files carry them uncoerced) from throwing into
-   * the restore leg.
+   * still admit, filtered with the SAME predicate discovery uses —
+   * `isEnabled` from `mcp-client.js`, so the restore can never drift
+   * from discovery on any axis (R1-3 round 6): a JSON `null` allow-list
+   * is absent (allow all), `[]` is allow-none, a string excludeTools is
+   * substring-excluded. The round-5 re-derivation diverged from
+   * `isEnabled` on exactly those shapes.
    */
   private snapshotFilterPassingTools(
     serverName: string,
@@ -996,25 +1010,9 @@ export class ToolRegistry {
     if (!serverConfig) {
       return [];
     }
-    const exclude = coerceMcpFilterEntries(serverConfig.excludeTools);
-    const include = coerceMcpFilterEntries(serverConfig.includeTools);
-    // `undefined` include = allow all, `[]` = allow none — the two must
-    // stay distinct (the same distinction `isEnabled` and
-    // `mcpSessionMetadataKey` document).
-    const includeIsAbsent = serverConfig.includeTools === undefined;
-    if (exclude.length === 0 && includeIsAbsent) {
-      return tools;
-    }
-    return tools.filter((tool) => {
-      const raw = tool.serverToolName;
-      if (exclude.includes(raw)) {
-        return false;
-      }
-      return (
-        includeIsAbsent ||
-        include.some((entry) => entry === raw || entry.startsWith(`${raw}(`))
-      );
-    });
+    return tools.filter((tool) =>
+      isEnabled({ name: tool.serverToolName }, serverName, serverConfig),
+    );
   }
 
   private restoreServerRegistrations(
@@ -1023,13 +1021,23 @@ export class ToolRegistry {
     previousPrompts: ReturnType<PromptRegistry['getPromptsByServer']>,
     previousResources: ReturnType<ResourceRegistry['getResourcesByServer']>,
     previousRevealed: Array<[string, boolean]>,
+    revealEpoch: number,
   ): void {
     try {
       for (const tool of previousTools) {
         this.registerTool(tool);
       }
+      // Replay reveal state only when no deliberate reveal reset (e.g.
+      // `/clear`) landed mid-pass — otherwise the snapshot would re-reveal
+      // tools in the fresh session the operator just cleared (R5-48
+      // round 6). Pinned reveals are exempt: they are session-setup
+      // state `clearRevealedDeferredTools` itself re-establishes.
+      const revealResetLanded = revealEpoch !== this.revealResetEpoch;
       for (const [name, revealed] of previousRevealed) {
-        if (revealed) {
+        if (
+          revealed &&
+          (!revealResetLanded || this.pinnedDeferredReveals.has(name))
+        ) {
           this.revealedDeferred.add(name);
         }
       }
@@ -1359,6 +1367,9 @@ export class ToolRegistry {
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
+    // A discovery pass pending across this reset must not replay its
+    // pre-pass reveal snapshot over the fresh session (R5-48 round 6).
+    this.revealResetEpoch += 1;
     for (const name of this.pinnedDeferredReveals) {
       const tool = this.tools.get(name);
       if (tool && this.isEffectivelyDeferred(tool) && !tool.alwaysLoad) {

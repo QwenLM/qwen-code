@@ -2416,6 +2416,56 @@ describe('ToolRegistry', () => {
       expect(await toolRegistry.ensureTool(fetchTool.name)).toBeUndefined();
     });
 
+    it('restores a server whose includeTools is JSON null (R1-3 round 6)', async () => {
+      // Settings JSON carries `"includeTools": null` uncoerced. Every
+      // runtime filter treats a null allow-list as ABSENT (allow all):
+      // discovery's `isEnabled` (`!includeTools`), the pool's
+      // `compileNameFilter` (`includeTools != null`). The round-5
+      // re-derivation tested absence with `=== undefined`, read `null`
+      // as an empty allow-list, and restored NOTHING for a tools-only
+      // server — the cancelled/failed rediscovery this PR exists to
+      // fix left it with zero registrations for the session. Asking
+      // `isEnabled` directly cannot drift on any axis.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig(
+          'node',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          null as unknown as string[],
+        ),
+      });
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockResolvedValue(undefined);
+
+      await toolRegistry.discoverToolsForServer('flaky-server');
+
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
     it('restores nothing when includeTools is an empty list (R1-3 round 5)', async () => {
       // `includeTools: []` is allow-NONE (mcp-session-config.ts: an
       // absent list means allow all, an empty one allow none). The
@@ -2584,6 +2634,105 @@ describe('ToolRegistry', () => {
 
       await toolRegistry.discoverToolsForServer('mcp');
 
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('reject-leg restore does not replay reveal state across a mid-pass /clear (R5-48 round 6)', async () => {
+      // A deferred tool registered AND revealed (ToolSearch surfaced
+      // it). A pass parks on the manager; while parked the session
+      // runs `/clear` (clearRevealedDeferredTools). The manager then
+      // rejects and the restore replays the pre-pass reveal snapshot
+      // — re-adding `revealedDeferred` for the tool and undoing the
+      // reset. `getFunctionDeclarations` would emit the schema in the
+      // session the user just cleared.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      toolRegistry.revealDeferredTool(mcpTool.name);
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(true);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      let rejectPass: (error: Error) => void = () => {};
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPass = reject;
+          }),
+      );
+
+      const pendingPass = toolRegistry.discoverToolsForServer('flaky-server');
+      await vi.waitFor(() => expect(rejectPass).toBeDefined());
+      // `/clear` lands mid-pass...
+      toolRegistry.clearRevealedDeferredTools();
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(false);
+      // ...then the manager rejects.
+      rejectPass(new Error('reconnect failed'));
+      await expect(pendingPass).rejects.toThrow('reconnect failed');
+
+      // The restore must NOT re-reveal the cleared tool, while the
+      // tool itself still comes back (its registrations are the best
+      // available state for the next connection).
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(false);
+      expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
+    });
+
+    it('reject-leg restore keeps reveal state that was NOT reset mid-pass (R5-48 round 6)', async () => {
+      // The epoch gate must be scoped: reveal state that survived the
+      // pass (no `/clear` landed) replays as before — a revealed tool
+      // stays revealed across a failed rediscovery so the model keeps
+      // calling it.
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'search',
+        'description',
+        {},
+      );
+      toolRegistry.registerTool(mcpTool);
+      toolRegistry.revealDeferredTool(mcpTool.name);
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(
+        new PromptRegistry(),
+      );
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(
+        new ResourceRegistry(),
+      );
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+
+      let rejectPass: (error: Error) => void = () => {};
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPass = reject;
+          }),
+      );
+
+      const pendingPass = toolRegistry.discoverToolsForServer('flaky-server');
+      await vi.waitFor(() => expect(rejectPass).toBeDefined());
+      rejectPass(new Error('reconnect failed'));
+      await expect(pendingPass).rejects.toThrow('reconnect failed');
+
+      expect(toolRegistry.isDeferredToolRevealed(mcpTool.name)).toBe(true);
       expect(await toolRegistry.ensureTool(mcpTool.name)).toBe(mcpTool);
     });
 

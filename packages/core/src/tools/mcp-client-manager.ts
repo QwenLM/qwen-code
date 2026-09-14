@@ -515,6 +515,21 @@ export class McpClientManager {
    */
   private operatorTornDownServers = new Set<string>();
   /**
+   * Monotonic per-name teardown epoch. Every operator-teardown entry
+   * point bumps it; the trailing cleanup in those same calls deletes
+   * the plain tombstone above, so the Set alone cannot refuse a
+   * rediscovery that was already parked upstream when the teardown
+   * completed — it would sail through the cleared gate and resurrect
+   * the server the operator just removed (R6-1 round 6). A discovery
+   * pass captures the epoch before its first await and the gate treats
+   * a mismatch as "torn down while this pass was in flight", which
+   * outlives the teardown call itself. Never deleted by the teardown
+   * calls themselves — only a successful connect (`discover` or the
+   * runtime add) or `stop()` clears it, so an in-flight pre-teardown
+   * pass stays refused even after the teardown returns.
+   */
+  private operatorTeardownEpochs = new Map<string, number>();
+  /**
    * optional callback set at construction time OR via
    * `setOnBudgetEvent` after construction. When non-`null` and
    * `budgetMode !== 'off'`, the manager fires it on every threshold
@@ -1342,6 +1357,13 @@ export class McpClientManager {
     serverName: string,
     cliConfig: Config,
   ): Promise<void> {
+    // Capture the teardown epoch before the first await: the gates below
+    // compare against it, so a teardown that begins AND COMPLETES while
+    // this pass is parked still refuses the pass — the plain tombstone
+    // the gates also read is cleared by the teardown's own trailing
+    // cleanup and cannot cover that interleaving (R6-1 round 6).
+    const teardownEpochAtEntry =
+      this.operatorTeardownEpochs.get(serverName) ?? 0;
     const servers = this.getEffectiveMcpServers();
     const serverConfig = servers[serverName];
     if (!serverConfig) {
@@ -1488,7 +1510,10 @@ export class McpClientManager {
       } catch {
         // best-effort transport cleanup; nothing is registered to lose
       }
-      this.releaseSlotName(serverName);
+      if (weReservedSlot) {
+        this.releaseSlotName(serverName);
+      }
+      this.freshReservations.delete(serverName);
       return;
     }
 
@@ -1502,13 +1527,30 @@ export class McpClientManager {
     // name; this leg covers the window where the operator's call has
     // already passed its finally checks. Deliberately checked BEFORE
     // `this.clients.set` so the map never advertises the doomed client.
-    if (this.operatorTornDownServers.has(serverName)) {
+    // The epoch comparison extends the refusal past the teardown's own
+    // return: a pass parked upstream when the teardown ran finds the
+    // plain tombstone already cleared, but the bumped epoch still names
+    // it as pre-teardown and rejects the resurrection (R6-1 round 6).
+    if (
+      this.operatorTornDownServers.has(serverName) ||
+      (this.operatorTeardownEpochs.get(serverName) ?? 0) !==
+        teardownEpochAtEntry
+    ) {
       try {
         await client.disconnect();
       } catch {
         // best-effort transport cleanup; nothing is registered to lose
       }
-      this.releaseSlotName(serverName);
+      // `weReservedSlot` ownership-gates the release (R5-17 round 6):
+      // a pass whose reservation came back `'already_held'` shares a
+      // slot a surviving connection holds — releasing it here would
+      // unreserve that connection. The marker delete keeps the timeout
+      // handler's fresh-release read accurate on gated exits (R6-2
+      // round 6).
+      if (weReservedSlot) {
+        this.releaseSlotName(serverName);
+      }
+      this.freshReservations.delete(serverName);
       return;
     }
 
@@ -1522,6 +1564,7 @@ export class McpClientManager {
       // deliberate re-add path (e.g. addRuntimeMcpServer after a
       // removal) clears the tombstone when its own connection lands.
       this.operatorTornDownServers.delete(serverName);
+      this.operatorTeardownEpochs.delete(serverName);
       // Record the connected-config key of the config this client is now
       // connected with, so the incremental reconcile can detect a later
       // in-place config change and reconnect (mirrors the pool path's
@@ -2024,6 +2067,7 @@ export class McpClientManager {
     this.warnArmed = true;
     // Full shutdown satisfies every pending operator teardown.
     this.operatorTornDownServers.clear();
+    this.operatorTeardownEpochs.clear();
   }
 
   /**
@@ -2045,7 +2089,7 @@ export class McpClientManager {
     // sides cooperate — the discovery path checks the tombstone before
     // `clients.set`, and the finally below disconnects a replacement
     // that slipped in anyway.
-    this.operatorTornDownServers.add(serverName);
+    this.markOperatorTeardown(serverName);
 
     // release this server's pool reference if
     // we acquired one. Pool starts drain timer at refs=0; entry will
@@ -2131,6 +2175,13 @@ export class McpClientManager {
       this.releaseSlotName(serverName);
       this.dropRefusalEntry(serverName);
       this.operatorTornDownServers.delete(serverName);
+      // The epoch entry deliberately survives the plain tombstone's
+      // clear: a pass parked upstream of the gates when this call ran
+      // is still pre-teardown, and must stay refused after this call
+      // returns (R6-1 round 6). It is never deleted here — a deliberate
+      // reconnect passes the gate as-is because its entry-time capture
+      // equals the surviving value only when no teardown intervened,
+      // and `stop()` clears the map wholesale.
     }
   }
 
@@ -2788,6 +2839,10 @@ export class McpClientManager {
    */
   private markOperatorTeardown(serverName: string): void {
     this.operatorTornDownServers.add(serverName);
+    this.operatorTeardownEpochs.set(
+      serverName,
+      (this.operatorTeardownEpochs.get(serverName) ?? 0) + 1,
+    );
     this.toolRegistry.markMcpServerTornDown(serverName);
   }
 
@@ -3265,8 +3320,10 @@ export class McpClientManager {
       // Replacement is operator teardown intent for the outgoing
       // connection: a rediscovery racing this replace must not let a
       // fresh client for the old config survive (R1-15 round 5).
-      // Cleared below once the replacement itself connects.
-      this.operatorTornDownServers.add(name);
+      // Cleared below once the replacement itself connects. The epoch
+      // bump rides along so a pass parked upstream of the gate stays
+      // refused for the replace's duration (R6-1 round 6).
+      this.markOperatorTeardown(name);
     }
     if (existingConn) {
       try {
@@ -3342,8 +3399,19 @@ export class McpClientManager {
         // The new runtime connection is live: the replace-phase
         // tombstone (if any) no longer applies to it.
         this.operatorTornDownServers.delete(name);
+        this.operatorTeardownEpochs.delete(name);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
         toolCount = this.toolRegistry.getToolsByServer(name).length;
+        // A boot refusal of this name no longer describes reality: the
+        // name now HOLDS its slot with a live connection, and the
+        // refusal record would keep reporting it as policy-removed
+        // (`wasRefused`) — suppressing restores and tagging the
+        // snapshot `disabledReason: 'budget'` for a CONNECTED server
+        // (R4-1 round 6). addRuntimeMcpServer's standalone success
+        // path was the one connect path that never dropped the entry.
+        // The budget-side record is untouched: `budget.release`/its
+        // own pass resets own it.
+        this.dropRefusalEntry(name);
       }
     } catch (err) {
       // Spawn failed — roll back Config overlay + budget reservation
@@ -3420,8 +3488,11 @@ export class McpClientManager {
     const wasShadowingSettings = name in settingsServers;
 
     // Operator removal: a rediscovery racing this removal must not let
-    // a fresh client for the name survive (R1-15 round 5).
-    this.operatorTornDownServers.add(name);
+    // a fresh client for the name survive (R1-15 round 5). Bumps the
+    // teardown epoch too, so a pass parked upstream of the gate is
+    // refused even after this call's trailing cleanup clears the plain
+    // tombstone (R6-1 round 6).
+    this.markOperatorTeardown(name);
 
     // Release pool connection (identity-check prevents race with concurrent add)
     const poolConn = this.pooledConnections.get(name);
@@ -3458,6 +3529,11 @@ export class McpClientManager {
     this.connectedConfigKeys.delete(name);
     this.dropRefusalEntry(name);
     this.operatorTornDownServers.delete(name);
+    // Epoch entry intentionally retained (same rationale as
+    // `disconnectServer`'s trailing block): a pass parked upstream of
+    // the discovery gates when this removal ran stays refused after
+    // this call returns (R6-1 round 6). Only a later successful
+    // connect or `stop()` clears it.
 
     // Release budget slot
     const budget = this.pool?.getBudget();
