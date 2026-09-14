@@ -112,6 +112,14 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   await expect(
     page.locator('[data-web-shell-message-row]').first(),
   ).toBeVisible();
+  await expect
+    .poll(() =>
+      rail
+        .locator('div')
+        .first()
+        .evaluate((element) => getComputedStyle(element).scrollbarWidth),
+    )
+    .toBe('none');
 
   // The rail highlights the reading position without any click.
   await expect.poll(() => ariaOrdinal(page)).not.toBeNull();

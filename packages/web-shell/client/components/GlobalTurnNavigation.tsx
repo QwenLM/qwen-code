@@ -155,7 +155,7 @@ export function GlobalTurnNavigation({
         {/* Allow hover ticks to expand past the gutter without covering message hit targets. */}
         <div
           ref={viewport}
-          className="-mr-8 min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="-mr-8 min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden"
           style={{ height: Math.min(count * ROW_HEIGHT, 360) }}
           onScroll={(event) => setTop(event.currentTarget.scrollTop)}
         >
