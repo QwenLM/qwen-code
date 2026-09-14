@@ -1051,7 +1051,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             // logged body is the body actually sent — the MiniMax routing
             // keeps `parameters` on zero-argument tools (#11834).
             keepParameterlessParameters:
-              MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+              MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
                 this.generatorConfig,
               ),
           },

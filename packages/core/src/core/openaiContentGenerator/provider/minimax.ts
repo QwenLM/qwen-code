@@ -38,6 +38,19 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     }
   }
 
+  /**
+   * Also matches routings whose hostname gives no MiniMax hint: aggregating
+   * gateways proxy MiniMax backends under their own host and forward the
+   * `invalid params, function parameters is empty (2013)` rejection verbatim,
+   * leaving the model id as the only usable signal (#11834).
+   */
+  static isMiniMaxRouting(config: ContentGeneratorConfig): boolean {
+    return (
+      MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config) ||
+      /minimax/i.test(config.model ?? '')
+    );
+  }
+
   override getResponseParsingOptions(): OpenAIResponseParsingOptions {
     return { taggedThinkingTags: true };
   }

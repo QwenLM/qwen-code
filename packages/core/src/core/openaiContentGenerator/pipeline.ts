@@ -1039,9 +1039,10 @@ export class ContentGenerationPipeline {
           // MiniMax answers `400 invalid params, function parameters is empty
           // (2013)` when a zero-argument tool ships without `parameters`
           // (#11834), which the always-registered `list_agents` does by
-          // default.
+          // default. Gateways that proxy MiniMax under their own host are
+          // caught via the model id, since their hostname carries no hint.
           keepParameterlessParameters:
-            MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
+            MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
               this.contentGeneratorConfig,
             ),
         },
