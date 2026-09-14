@@ -10859,6 +10859,9 @@ export class Session implements SessionContext {
     result?: RequestPermissionResponse & { answers?: Record<string, string> },
     error?: unknown,
   ): Promise<void> {
+    if (this.#shouldRetainManagedPermissionTicket(params, result, error)) {
+      return;
+    }
     const requestId = params.toolCall.toolCallId;
     const selected =
       error === undefined && result?.outcome.outcome === 'selected'
@@ -10876,6 +10879,26 @@ export class Session implements SessionContext {
             },
           },
     );
+  }
+
+  // Restored AskUserQuestion re-hangs from transcript. Persisting cancelled
+  // here would make the next load see an already-final ticket.
+  #shouldRetainManagedPermissionTicket(
+    params: RequestPermissionRequest,
+    result:
+      | (RequestPermissionResponse & { answers?: Record<string, string> })
+      | undefined,
+    error: unknown,
+  ): boolean {
+    const callId = params.toolCall.toolCallId;
+    if (this.restoringAskUserQuestionCallIds?.has(callId) !== true) {
+      return false;
+    }
+    if (error !== undefined) return true;
+    const reason = (
+      result as { _meta?: Record<string, unknown> | null } | undefined
+    )?._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+    return isUnattendedRestorePermissionCancel(reason);
   }
 
   /**

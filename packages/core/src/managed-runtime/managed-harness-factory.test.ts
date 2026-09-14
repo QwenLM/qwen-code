@@ -444,6 +444,43 @@ describe('managed harness factory', () => {
     await reopened.close();
   });
 
+  it('keeps a requested approval after the waiter handle is gone', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    await handle.commitDurableWait(waitCommit(await waitRefs(session)));
+    await handle.detach();
+    expect(session.authority.action('fc-1')?.state).toBe('requested');
+    await session.close();
+
+    const reopened = await openManagedSession({
+      runtimeBaseDir: workspace.runtimeBaseDir,
+      sessionId,
+      transcriptPath: workspace.transcriptPath,
+      sessionKey,
+      cwd: workspace.projectRoot,
+      version: 'test',
+      workerId: 'worker-1',
+      activationLeaseDurationMs: 60_000,
+    });
+    expect(reopened.authority.action('fc-1')?.state).toBe('requested');
+    expect(reopened.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    const next = createManagedHarnessHandle(reopened);
+    await expect(next.ensureRunnable()).rejects.toMatchObject({
+      reason: 'invalid_state',
+    });
+    await expect(next.resolveDurableWait()).rejects.toThrow(
+      /before a final action decision/,
+    );
+    await decideAction(reopened);
+    const resumed = await next.resolveDurableWait();
+    expect(resumed?.continuation.phase).toBe('model_output_committed');
+    await reopened.close();
+  });
+
   it('is idempotent for the same approval wait and rejects a second request', async () => {
     const session = await open(await createWorkspace());
     const handle = createManagedHarnessHandle(session);
