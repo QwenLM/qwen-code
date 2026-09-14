@@ -12738,7 +12738,11 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCalls[0].status).toBe('error');
     // A hook block is not an approval problem, so it must not carry the
     // marker that makes the headless CLI suggest -y.
-    expect(completedCalls[0].response.approvalRequired).toBeUndefined();
+    const blockedCall = completedCalls[0];
+    if (blockedCall.status !== 'error') {
+      throw new Error('expected the hook-blocked call to settle as an error');
+    }
+    expect(blockedCall.response.approvalRequired).toBeUndefined();
     // This test exercises the actual PreToolUse hook deny path inside
     // _executeToolCallBody — which is the only site that should still emit
     // 'pre_hook_blocked' (#4321 review C-Critical).
