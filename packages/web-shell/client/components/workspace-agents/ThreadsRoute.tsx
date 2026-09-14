@@ -255,10 +255,14 @@ export function ThreadsRoute({
   const [openId, setOpenId] = useState<string | undefined>(initialThreadId);
   const [showDetails, setShowDetails] = useState(false);
   const [detail, setDetail] = useState<ThreadDetailView | undefined>();
+  const listed = threads.find((entry) => entry.id === openId);
+  const opened = detail && detail.id === openId ? detail : undefined;
+  const headerTitleId = opened?.id ?? listed?.id;
+  const headerTitle = opened?.title ?? listed?.title;
   useEffect(() => {
-    if (chat && !activityOnly && detail)
-      onTitleChange?.(detail.id, detail.title);
-  }, [chat, activityOnly, detail, onTitleChange]);
+    if (chat && !activityOnly && headerTitleId && headerTitle)
+      onTitleChange?.(headerTitleId, headerTitle);
+  }, [chat, activityOnly, headerTitleId, headerTitle, onTitleChange]);
   const [draft, setDraft] = useState('');
   const [preview, setPreview] = useState<RoutingPreviewTarget[] | undefined>();
   const [createPreview, setCreatePreview] = useState<

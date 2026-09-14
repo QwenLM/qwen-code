@@ -8564,7 +8564,7 @@ export function App({
   >(null);
   const activePanelRef = useRef(activePanel);
   const [collaborationThread, setCollaborationThread] = useState<
-    { id: string; cwd: string; server: string } | undefined
+    { id: string; cwd: string; server: string; title?: string } | undefined
   >(() => {
     try {
       const saved = JSON.parse(
@@ -9566,7 +9566,7 @@ export function App({
   const chatHeaderTitle = collaborationThreadId
     ? collaborationTitle?.id === collaborationThreadId
       ? collaborationTitle.title
-      : '协作对话'
+      : collaborationThread?.title || '协作对话'
     : sessionDisplayName;
   useEffect(() => {
     onSessionInfoChange?.({
@@ -17954,8 +17954,13 @@ export function App({
                 />
                 <WebShellSidebar
                   selectedCollaborationId={collaborationThreadId}
-                  onOpenCollaboration={(id, cwd) => {
-                    setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+                  onOpenCollaboration={(id, cwd, title) => {
+                    setCollaborationThread({
+                      id,
+                      cwd,
+                      server: workspace.baseUrl,
+                      title,
+                    });
                     setMainView('chat');
                     closePanel();
                   }}

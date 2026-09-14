@@ -404,7 +404,7 @@ export type { WorkspaceManagementTarget, WorkspaceOverviewItem };
 
 interface WebShellSidebarProps {
   selectedCollaborationId?: string;
-  onOpenCollaboration?: (id: string, cwd: string) => void;
+  onOpenCollaboration?: (id: string, cwd: string, title?: string) => void;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
@@ -4228,7 +4228,11 @@ export function WebShellSidebar({
             title={session.displayName}
             onClick={() => {
               if (session.sourceId)
-                onOpenCollaboration?.(session.sourceId, session.workspaceCwd);
+                onOpenCollaboration?.(
+                  session.sourceId,
+                  session.workspaceCwd,
+                  session.displayName,
+                );
             }}
           >
             <span className={styles.sessionStatusSlot}>
