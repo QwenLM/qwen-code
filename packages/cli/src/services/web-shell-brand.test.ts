@@ -1038,8 +1038,11 @@ describe('resolveWebShellBrand', () => {
         return;
       }
       // Drive the post-swap state: the pre-open lstat reports a regular file,
-      // so the guards pass and the open hits the FIFO.
-      const regular = fsActual.lstatSync(writeLogo(LOGO_SVG));
+      // so the guards pass and the open hits the FIFO. Production stats both
+      // sides as BigIntStats and compares with a bare `!==`, so a
+      // number-backed fake would trip `dev` first and the `!stat.isFile()`
+      // arm this test exists to drive would never be evaluated.
+      const regular = fsActual.lstatSync(writeLogo(LOGO_SVG), { bigint: true });
       vi.mocked(fs.lstatSync).mockImplementationOnce((() => regular) as never);
       const { brand, warnings } = resolveWebShellBrand(
         makeSettings({ user: brandSettings({ logoPath: fifoPath }) }),

@@ -254,6 +254,72 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     );
   });
 
+  it('refuses an identity that differs only above 2^53 (NTFS file index)', async () => {
+    // NTFS reports a 64-bit file index and Node rounds it at the JS number
+    // boundary, so these two ids are distinct as bigints yet collapse to the
+    // SAME double. A number-backed comparison therefore waves the swap
+    // through, and `{ bigint: true }` at the stat call sites is the only thing
+    // that keeps the re-check exact on such a volume — this is the case that
+    // makes that conversion observable; every other test here passes with it
+    // removed, because Linux and macOS inodes are small.
+    //
+    // The offsets sit above 2^60, where the double spacing is 256: both round
+    // to 2^60. Offsets of 1 and 2 above 2^53 would NOT collapse — the spacing
+    // there is already 2, so 2^53+2 is exactly representable.
+    //
+    // The mock mirrors what Node really returns for each form of the call: a
+    // BigIntStats carrying the exact id, or a Stats carrying the rounded one.
+    // Asserting ELOOP (not EUNVERIFIABLE) pins the identity-mismatch branch:
+    // core's hasVerifiableInode is `Number(ino) !== 0`, so an id this large is
+    // still verifiable and still reaches the comparison.
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'payload');
+
+    const PRE_OPEN_INO = 2n ** 60n + 1n;
+    const SWAPPED_INO = 2n ** 60n + 2n;
+    // Fixture guard: the whole case rests on these two collapsing to one
+    // double while staying distinct as bigints. Without this, editing the
+    // constants could silently degrade the test into a no-op.
+    expect(PRE_OPEN_INO).not.toBe(SWAPPED_INO);
+    expect(Number(PRE_OPEN_INO)).toBe(Number(SWAPPED_INO));
+
+    const wantsBigint = (opts: unknown): boolean =>
+      typeof opts === 'object' &&
+      opts !== null &&
+      (opts as { bigint?: boolean }).bigint === true;
+
+    mockNoFollowFs((actual) => ({
+      lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+        if (wantsBigint(args[1])) {
+          return perturbedStats(actual.lstatSync(args[0], { bigint: true }), {
+            ino: PRE_OPEN_INO,
+          });
+        }
+        return perturbedStats(actual.lstatSync(args[0]), {
+          ino: Number(PRE_OPEN_INO),
+        });
+      }) as typeof actual.lstatSync,
+      fstatSync: ((...args: Parameters<typeof actual.fstatSync>) => {
+        if (wantsBigint(args[1])) {
+          return perturbedStats(actual.fstatSync(args[0], { bigint: true }), {
+            ino: SWAPPED_INO,
+          });
+        }
+        return perturbedStats(actual.fstatSync(args[0]), {
+          ino: Number(SWAPPED_INO),
+        });
+      }) as typeof actual.fstatSync,
+    }));
+
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    expect(() => openSyncFallback(filePath)).toThrow(
+      expect.objectContaining({ code: 'ELOOP' }),
+    );
+  });
+
   it('refuses when the file identity changes between lstat and open (async)', async () => {
     // Async counterpart of the sync identity-change test. The real opened
     // FileHandle's stat() cannot be intercepted through fs mocks, so the

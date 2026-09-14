@@ -174,13 +174,18 @@ describe('Live conversation workspace root', () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const identity = await workspace.getRoot();
+
+    // Both revalidations return the SAME object and skip the inode whenever
+    // `inodeVerifiable` is false on both sides, so they hold on a host with
+    // unverifiable inodes — gate them away and a mutant returning a fresh
+    // object goes undetected there. Only the swap below needs a real inode.
+    expect(await workspace.revalidate()).toBe(identity);
+    expect(await revalidateConversationRoot(identity)).toBe(identity);
+
     if (!identity.inodeVerifiable) {
       ctx.skip();
       return;
     }
-
-    expect(await workspace.revalidate()).toBe(identity);
-    expect(await revalidateConversationRoot(identity)).toBe(identity);
 
     await rename(identity.configuredRoot, `${identity.configuredRoot}-old`);
     await mkdir(identity.configuredRoot, { mode: 0o700 });

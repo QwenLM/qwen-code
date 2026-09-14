@@ -2206,17 +2206,29 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterBlankEnv([])).toEqual({});
   });
 
-  it('localFilterCommands: a discovery that fails is a hit, and a newline in the path does not mis-pair the dirs', (ctx) => {
-    if (process.platform === 'win32') {
-      ctx.skip();
-      return;
-    }
+  it('localFilterCommands: a discovery that fails is a hit, not an empty screen', () => {
     // The old wrapper answered `[]` — "no filters" — when rev-parse failed,
-    // and split one newline-delimited answer for two flags, so a directory
-    // named with a newline paired the wrong dirs and screened nothing.
+    // so all four efficacy screens concluded there was nothing to blank and
+    // authorised worktree operations on an unscreened `.git/config`. This
+    // branch is platform-free by construction: a failed `git rev-parse`
+    // answers `[UNRESOLVED_REPO]` on any git, so it stays ungated and must
+    // run on the Windows lane too.
     expect(localFilterCommands(dir).join(' ')).toContain(
       'could not be resolved',
     );
+  });
+
+  it('localFilterCommands: a newline in the path does not mis-pair the dirs', (ctx) => {
+    if (process.platform === 'win32') {
+      // Win32 cannot create a directory whose name contains a newline, so
+      // there is no fixture to build. Only this half is Windows-impossible —
+      // the fail-closed branch above is not, and must not be gated with it.
+      ctx.skip();
+      return;
+    }
+    // The old wrapper split one newline-delimited answer for two flags, so a
+    // directory named with a newline paired the wrong dirs and screened
+    // nothing.
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-filter-nl-')));
     try {
       const repo = join(base, 'a\nb', 'repo');
