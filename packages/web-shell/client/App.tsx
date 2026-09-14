@@ -1763,7 +1763,8 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
-    >;
+    >
+  | Extract<ArtifactPanelTab, { kind: 'agent_activity' }>;
 
 function parsePersistedArtifactPanelTab(
   value: unknown,
@@ -1942,6 +1943,9 @@ function parsePersistedArtifactPanelTab(
         sessionId: tab['sessionId'],
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
+    case 'agent_activity':
+      if (typeof tab['threadId'] !== 'string' || typeof tab['workspaceCwd'] !== 'string') return;
+      return { ...common, kind: 'agent_activity', threadId: tab['threadId'], workspaceCwd: tab['workspaceCwd'] };
     case 'workflow':
       return {
         ...common,
@@ -2092,6 +2096,8 @@ function serializeArtifactPanelTabs(
               },
             ]
           : [];
+      case 'agent_activity':
+        return [{ id, kind: tab.kind, title, threadId: tab.threadId, workspaceCwd: tab.workspaceCwd }];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'pending': {
@@ -6232,6 +6238,8 @@ export function App({
                   const { taskId: _taskId, ...rest } = tab;
                   return { ...rest, task, sessionActions } as ArtifactPanelTab;
                 }
+                case 'agent_activity':
+                  return tab;
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
                 case 'terminal':
@@ -17493,6 +17501,7 @@ export function App({
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
+    onOpenCollaborationSession: (sessionId: string, workspaceCwd: string) => void loadSidebarSession(sessionId, workspaceCwd),
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
     activeTabId: activeArtifactPanelTabId,
@@ -19042,6 +19051,13 @@ export function App({
                 {collaborationThreadId && (
                   <ThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
                     workspaceCwd={collaborationThread?.cwd}
+                    onOpenActivity={(threadId, workspaceCwd) => {
+                      const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: '运行详情', threadId, workspaceCwd };
+                      setArtifactPanelTabs((tabs) => tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab]);
+                      setActiveArtifactPanelTabId(tab.id);
+                      setArtifactPanelWidth((width) => artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth());
+                      setArtifactPanelOpen(true);
+                    }}
                     onOpenThreadChat={(id, cwd) => setCollaborationThread({ id, cwd, server: workspace.baseUrl })}
                     onOpenAgentSession={(sessionId) => void loadSidebarSession(sessionId, collaborationThread?.cwd)} />
                 )}

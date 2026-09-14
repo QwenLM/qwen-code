@@ -184,6 +184,8 @@ export interface ThreadsRouteProps {
   initialThreadId?: string;
   workspaceCwd?: string;
   chat?: boolean;
+  activityOnly?: boolean;
+  onOpenActivity?: (threadId: string, workspaceCwd: string) => void;
   hideNavigation?: boolean;
   onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
   api?: ThreadsApi;
@@ -199,6 +201,8 @@ export function ThreadsRoute({
   initialThreadId,
   workspaceCwd: boundWorkspaceCwd,
   chat = false,
+  activityOnly = false,
+  onOpenActivity,
   hideNavigation = false,
   onOpenThreadChat,
   api,
@@ -418,6 +422,12 @@ export function ThreadsRoute({
           )}
           <ThreadChat
             key={detail.id}
+            activityOnly={activityOnly}
+            onOpenActivity={
+              onOpenActivity && workspaceCwd
+                ? () => onOpenActivity(detail.id, workspaceCwd)
+                : undefined
+            }
             thread={detail}
             agents={agents}
             preview={preview}

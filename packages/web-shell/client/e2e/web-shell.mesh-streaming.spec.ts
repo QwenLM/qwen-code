@@ -57,6 +57,10 @@ test('mesh shows growing replies before completion, survives reload, and replace
     runtime: { label: 'Demo-Host', status: 'offline' },
   };
   let sent = 0;
+  let releaseReply!: () => void;
+  const replyGate = new Promise<void>((resolve) => {
+    releaseReply = resolve;
+  });
   await page.route('**/workspaces/*/agent/**', async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname.endsWith('/agents'))
@@ -67,6 +71,7 @@ test('mesh shows growing replies before completion, survives reload, and replace
       const { text } = route.request().postDataJSON();
       expect(text).toBe('@stream-worker Please explain streaming.');
       sent++;
+      await replyGate;
       thread.posts = [
         {
           id: 'human-1',
@@ -118,9 +123,22 @@ test('mesh shows growing replies before completion, survives reload, and replace
   await openChat(page, thread.id, scenario.workspaceCwd);
   await send(page, '@stream-worker Please explain streaming.');
   await expect.poll(() => sent).toBe(1);
-  const activity = page.getByRole('complementary').filter({
-    has: page.getByRole('heading', { name: 'Agent activity', exact: true }),
+  await expect(
+    page.getByRole('status').filter({ hasText: '正在发送消息…' }),
+  ).toBeVisible();
+  releaseReply();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'stream-worker 执行主机离线' }),
+  ).toBeVisible();
+  const activity = page.getByRole('region', {
+    name: '智能体运行详情',
+    exact: true,
   });
+  await expect(activity).toHaveCount(0);
+  await page.getByRole('button', { name: '运行详情', exact: true }).click();
+  await expect(
+    page.getByRole('tab', { name: '运行详情', exact: true }),
+  ).toBeVisible();
   await expect(activity).toContainText('Demo-Host 离线');
   const run = thread.runs[0];
   agent.status = 'idle';
@@ -128,6 +146,11 @@ test('mesh shows growing replies before completion, survives reload, and replace
   run.status = 'running';
   const initialProgress = run.progress!;
   run.progress = undefined;
+  await expect(
+    page
+      .getByRole('status')
+      .filter({ hasText: 'stream-worker 等待执行端确认…' }),
+  ).toBeVisible();
   await expect(activity).toContainText('等待执行端确认');
   await expect(activity).not.toContainText('暂无过程上报');
   await expect(activity).not.toContainText('思考中');
@@ -140,15 +163,19 @@ test('mesh shows growing replies before completion, survives reload, and replace
     hasText: 'stream-worker 正在启动…',
   });
   await expect(starting).toBeVisible();
-  await page.getByRole('button', { name: '收起活动', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Close 运行详情', exact: true })
+    .click();
   await expect(activity).toBeHidden();
   await expect(starting).toBeVisible();
-  await page.getByRole('button', { name: '展开活动', exact: true }).click();
+  await page.getByRole('button', { name: '运行详情', exact: true }).click();
   await expect(activity).toBeVisible();
   run.progress = { ...run.progress, stage: 'resuming' };
   await expect(activity).toContainText('继续会话中');
   await expect(
-    page.getByRole('status').filter({ hasText: 'stream-worker 正在继续原会话…' }),
+    page
+      .getByRole('status')
+      .filter({ hasText: 'stream-worker 正在继续原会话…' }),
   ).toBeVisible();
   run.progress = { ...run.progress, stage: 'thinking' };
   await expect(activity).toContainText('思考中');
@@ -161,11 +188,14 @@ test('mesh shows growing replies before completion, survives reload, and replace
     await expect(activity).toContainText(thought);
   }
   await page.reload();
+  await page.getByRole('button', { name: '运行详情', exact: true }).click();
   await expect(activity).toContainText(
     'Checking the task. Choosing a collaborator.',
   );
   const transcript = page.locator('[data-web-shell-message-list]:visible');
-  await page.getByRole('button', { name: '收起活动', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Close 运行详情', exact: true })
+    .click();
   for (const text of ['First fragment.', 'First fragment. Second fragment.']) {
     run.progress = {
       ...run.progress,
@@ -180,9 +210,10 @@ test('mesh shows growing replies before completion, survives reload, and replace
     expect(thread.posts).toHaveLength(1);
   }
   await expect(activity).toBeHidden();
-  await page.getByRole('button', { name: '展开活动', exact: true }).click();
+  await page.getByRole('button', { name: '运行详情', exact: true }).click();
   await page.screenshot({ path: info.outputPath('01-growing.png') });
   await page.reload();
+  await page.getByRole('button', { name: '运行详情', exact: true }).click();
   await expect(transcript).toContainText('First fragment. Second fragment.');
   expect(sent).toBe(1);
   run.progress = { ...run.progress!, receivedAt: Date.now() - 25000 };
@@ -253,6 +284,7 @@ test('mesh real Host streams into the browser @mesh-live', async ({
   });
   try {
     await openChat(page, id, cwd!);
+    await page.getByRole('button', { name: '运行详情', exact: true }).click();
     await send(
       page,
       `@${name} Do not inspect or change files, run commands, or browse the web. Explain the water cycle in one plain-text paragraph of about 400 words. No Markdown, lists, numbering, headings or formatting. Stream your answer as text. If thread_review is available, you MUST then call thread_review with that answer as the summary to hand it back for review; this collaboration closing tool is explicitly allowed.`,
@@ -283,11 +315,9 @@ test('mesh real Host streams into the browser @mesh-live', async ({
             run.status === 'running' &&
             thought.length > (thoughtSamples.at(-1)?.chars ?? 0)
           ) {
-            const activity = page.getByRole('complementary').filter({
-              has: page.getByRole('heading', {
-                name: 'Agent activity',
-                exact: true,
-              }),
+            const activity = page.getByRole('region', {
+              name: '智能体运行详情',
+              exact: true,
             });
             await expect(activity).toContainText(thought.slice(-80));
             thoughtSamples.push({
