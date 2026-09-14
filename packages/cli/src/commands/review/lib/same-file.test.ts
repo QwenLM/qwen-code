@@ -87,9 +87,17 @@ describe('isSameFile', () => {
     writeFileSync(original, '{}');
     const linked = join(dir, 'linked.json');
     linkSync(original, linked);
-    // Hard-link identity rides dev/ino; on volumes that expose no inode
-    // numbers (ino 0) the comparison degrades to canonical spellings by
-    // design and cannot see through a hard link.
+    // Hard-link identity rides dev/ino, so the gate below covers two cases
+    // that must not be read as one:
+    //   ino === 0 (FAT/exFAT/SMB) — degrading to canonical spellings is BY
+    //     DESIGN, and 'decides by canonical spelling when inodes are
+    //     unverifiable' below is the test that pins it.
+    //   ino above the safe-integer range (NTFS 64-bit file index) — the
+    //     degradation is a DEFECT, not a design: the id is knowable exactly,
+    //     and is only lost because `tryStat` asks for a number-backed `Stats`.
+    //     The alias guards that consume this answer fail open there.
+    // The second is tracked in #11848; converting `tryStat` to `{ bigint: true }`
+    // narrows this gate to the ino-0 case alone.
     const inode = statSync(original).ino;
     if (!Number.isSafeInteger(inode) || inode <= 0) {
       ctx.skip();
