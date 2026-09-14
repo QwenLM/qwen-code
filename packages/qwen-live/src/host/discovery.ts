@@ -10,6 +10,7 @@ import * as fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
+import { privateDirectoryStat } from '../private-directory.js';
 import type { LockOptions } from 'proper-lockfile';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 
@@ -240,21 +241,11 @@ async function inspectDirectory(
   directory: string,
   requirePrivateMode = true,
 ): Promise<LiveDiscoveryDirectory> {
-  const stat = await fs.lstat(directory);
-  if (
-    !stat.isDirectory() ||
-    stat.isSymbolicLink() ||
-    // Windows stat modes are synthetic, so the POSIX privacy check applies
-    // only where the bits are real. Kept in step by hand with
-    // privateDirectory() in ../proactive/monitor-debug-store.ts, which
-    // carries the same carve-out at a looser setting (any owner-only mode).
-    (process.platform !== 'win32' &&
-      ((requirePrivateMode && (stat.mode & 0o777) !== 0o700) ||
-        (typeof process.getuid === 'function' &&
-          stat.uid !== process.getuid())))
-  ) {
-    throw new LiveDiscoveryStateError();
-  }
+  const stat = await privateDirectoryStat(
+    directory,
+    requirePrivateMode ? 'exact-0700' : 'none',
+  );
+  if (!stat) throw new LiveDiscoveryStateError();
   return { directory, dev: stat.dev, ino: stat.ino };
 }
 

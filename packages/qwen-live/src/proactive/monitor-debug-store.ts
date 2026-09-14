@@ -17,6 +17,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename, resolve } from 'node:path';
+import { privateDirectoryStat } from '../private-directory.js';
 
 export const MONITOR_DEBUG_ROOT = join(tmpdir(), 'qwen-live-monitor-debug');
 const FORMAT = 'qwen-live-monitor-debug-v1';
@@ -38,17 +39,7 @@ export interface MonitorDebugInfo {
 }
 
 async function privateDirectory(path: string): Promise<void> {
-  const stat = await lstat(path);
-  if (
-    !stat.isDirectory() ||
-    stat.isSymbolicLink() ||
-    // Windows stat modes are synthetic (directories report 0o777), so the
-    // POSIX privacy check applies only where the bits are real. Kept in step
-    // by hand with inspectDirectory() in ../host/discovery.ts, which carries
-    // the same carve-out at a stricter setting (exact 0o700).
-    (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
-    (process.getuid && stat.uid !== process.getuid())
-  )
+  if (!(await privateDirectoryStat(path, 'owner-only')))
     throw new Error('unsafe_directory');
 }
 

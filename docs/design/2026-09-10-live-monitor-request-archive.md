@@ -63,5 +63,6 @@ the paths; normal runs do not save media. Keep only the ten most recently create
 Monitor directories. Older active Monitors continue after eviction but do not
 recreate their records. Files are readable/writable only by the current user
 on POSIX (on Windows this relies on the per-user temporary directory's ACLs);
-safe cleanup covers only directories created by this feature. Archive failure
-must not affect calls.
+safe cleanup covers only directories created by this feature on POSIX, and on
+Windows any directory beneath the managed root carrying this feature's marker,
+because ownership is not exposed there. Archive failure must not affect calls.
