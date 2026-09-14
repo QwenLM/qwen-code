@@ -13966,6 +13966,7 @@ exit 1
       'packages/core/.gitattributes',
       'packages/desktop-shell/.npmrc',
       'eslint.legacy-filenames.mjs',
+      'eslint.legacy-core-barrel-imports.mjs',
       '.github/workflows/qwen-pr-safety-precheck.yml',
     ]);
     expect(classes).toContain('.github/actions/a/action.yml=ci-workflows');
@@ -13991,6 +13992,9 @@ exit 1
     );
     expect(classes).toContain('packages/desktop-shell/.npmrc=toolchain-config');
     expect(classes).toContain('eslint.legacy-filenames.mjs=lint-config');
+    expect(classes).toContain(
+      'eslint.legacy-core-barrel-imports.mjs=lint-config',
+    );
     expect(classes).toContain(
       '.github/workflows/qwen-pr-safety-precheck.yml=autofix-loop',
     );
