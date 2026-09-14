@@ -42,6 +42,12 @@ interface ExtensionActionsViewProps {
   onReload: () => void;
   /** Leave the detail and return to the list. */
   onExit: () => void;
+  /**
+   * Report the state an update settled on, so the parent's update-state map
+   * stops re-supplying the superseded "update available" value to a later
+   * mount of this view (leaving the detail and coming back remounts it).
+   */
+  onUpdateStateChange?: (name: string, state: ExtensionUpdateState) => void;
 }
 
 const SCOPE_LABEL: Record<ExtensionScope, string> = {
@@ -73,6 +79,7 @@ export const ExtensionActionsView = ({
   onStatus,
   onReload,
   onExit,
+  onUpdateStateChange,
 }: ExtensionActionsViewProps) => {
   const manager = config.getExtensionManager();
   const [sub, setSub] = useState<SubView>('detail');
@@ -92,6 +99,11 @@ export const ExtensionActionsView = ({
   // Uninstall removes files (and can take a moment); surfaced as a loading
   // line so the confirm prompt doesn't appear frozen after pressing Enter.
   const [uninstallBusy, setUninstallBusy] = useState(false);
+  // An update re-fetches the source, converts, stages, swaps the artifact and
+  // reloads tools; surfaced as a loading line so the action doesn't look
+  // ignored — the action list is also replaced while it runs, so a second
+  // Enter cannot start a concurrent update.
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   // Result of an in-view "check for updates" (Mark for Update), which takes
   // precedence over the background-checked state passed in via props so the
@@ -207,28 +219,44 @@ export const ExtensionActionsView = ({
             break;
           }
           case 'update': {
-            const result = await manager.updateExtension(
-              extension,
-              ExtensionUpdateState.UPDATE_AVAILABLE,
-              () => {},
-            );
-            if (result?.warnings?.length) {
-              onStatus({
-                type: 'warning',
-                text: t('Updated "{{name}}" with warnings: {{warnings}}.', {
-                  name,
-                  warnings: result.warnings
-                    .map((warning) => `${warning.code}: ${warning.error}`)
-                    .join('; '),
-                }),
-              });
-            } else {
-              onStatus({
-                type: 'success',
-                text: t('Updated "{{name}}".', { name }),
-              });
+            setUpdateBusy(true);
+            try {
+              // The manager's callback is a state transition, not a progress
+              // string: it emits UPDATING and then the state the update
+              // settled on. Adopting the last emission is what stops the menu
+              // offering "Update Now" for an extension that is current again.
+              let settledState: ExtensionUpdateState | undefined;
+              const result = await manager.updateExtension(
+                extension,
+                ExtensionUpdateState.UPDATE_AVAILABLE,
+                (_extensionName, state) => {
+                  settledState = state;
+                },
+              );
+              if (settledState) {
+                setCheckedUpdateState(settledState);
+                onUpdateStateChange?.(name, settledState);
+              }
+              if (result?.warnings?.length) {
+                onStatus({
+                  type: 'warning',
+                  text: t('Updated "{{name}}" with warnings: {{warnings}}.', {
+                    name,
+                    warnings: result.warnings
+                      .map((warning) => `${warning.code}: ${warning.error}`)
+                      .join('; '),
+                  }),
+                });
+              } else {
+                onStatus({
+                  type: 'success',
+                  text: t('Updated "{{name}}".', { name }),
+                });
+              }
+              onReload();
+            } finally {
+              setUpdateBusy(false);
             }
-            onReload();
             break;
           }
           case 'uninstall':
@@ -241,7 +269,15 @@ export const ExtensionActionsView = ({
         onStatus({ type: 'error', text: getErrorMessage(error) });
       }
     },
-    [manager, extension, enabled, scope, onStatus, onReload],
+    [
+      manager,
+      extension,
+      enabled,
+      scope,
+      onStatus,
+      onReload,
+      onUpdateStateChange,
+    ],
   );
 
   const handleScope = useCallback(
@@ -379,6 +415,14 @@ export const ExtensionActionsView = ({
         onConfirm={handleUninstall}
         onNavigateBack={() => setSub('detail')}
       />
+    );
+  }
+
+  if (updateBusy) {
+    return (
+      <Text color={theme.text.secondary}>
+        {t('Updating {{name}}...', { name: extension.name })}
+      </Text>
     );
   }
 
