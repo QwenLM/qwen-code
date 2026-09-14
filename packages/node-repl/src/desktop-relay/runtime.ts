@@ -12,7 +12,6 @@ import net from 'node:net';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { format } from 'node:util';
 import WebSocket, { type RawData } from 'ws';
 import {
   AcpRelay,
@@ -257,16 +256,9 @@ async function runRelay(
 
 /** Serves the connection launchd accepted and handed over as stdin/stdout. */
 export async function runAgent(home: string): Promise<void> {
-  // stdout is the accepted socket, so a stray console.log would be written
-  // into the HTTP reply; diagnostics go to the log file instead.
-  const toLog = (...args: unknown[]) => {
-    process.stderr.write(`${format(...args)}\n`);
-  };
-  console.log = toLog;
-  console.info = toLog;
-  console.debug = toLog;
-
-  const socket = new net.Socket({ fd: 0, readable: true, writable: true });
+  // stdout is the accepted socket,   // Under launchd the accepted connection is stdin and stdout; nothing on
+  // this path writes to stdout, so the socket carries only the reply.
+: 0, readable: true, writable: true });
   const store = createRecordStore(home);
   await serveConnection(socket, {
     http: {
