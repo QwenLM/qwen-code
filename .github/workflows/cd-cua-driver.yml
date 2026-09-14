@@ -697,7 +697,6 @@ jobs:
       - uses: 'actions/setup-node@v4'
         with:
           node-version: '22'
-          package-manager-cache: false
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
       - name: 'Install npm 11'

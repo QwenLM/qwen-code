@@ -33,7 +33,7 @@ const cacheProducerPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
   'workflows',
-  'npm-cache.yml',
+  'pnpm-store.yml',
 );
 const cacheProducerDoc = parse(readFileSync(cacheProducerPath, 'utf8'));
 const prWorkflowPath = join(
@@ -1139,16 +1139,19 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
   });
 });
 
-describe('qwen-triage: npm cache restore-only invariant', () => {
+describe('qwen-triage: pnpm store restore-only invariant', () => {
   for (const [jobName, jobDef] of [
     ['verify', verifyJob],
     ['tmux-testing', tmuxJob],
   ]) {
     it(`${jobName}: uses actions/cache/restore with no save path`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
-      assert.ok(cacheStep, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        cacheStep,
+        `'Restore pnpm store' step must exist in ${jobName}`,
+      );
       assert.match(
         cacheStep.uses,
         /^actions\/cache\/restore@/,
@@ -1165,9 +1168,9 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       }
     });
 
-    it(`${jobName}: npm ci --cache matches the restored directory`, () => {
+    it(`${jobName}: pnpm install --store-dir matches the restored directory`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       const prepareStep = jobDef.steps.find(
         (s) => s.name === 'Install and build PR app',
@@ -1182,25 +1185,25 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       );
       assert.ok(dir, 'cache path must resolve to a directory name');
       assert.ok(
-        prepareStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
-        `npm ci must use --cache "$RUNNER_TEMP/${dir}"`,
+        prepareStep.run.includes(`--store-dir "$RUNNER_TEMP/${dir}"`),
+        `pnpm install must use --store-dir "$RUNNER_TEMP/${dir}"`,
       );
     });
 
-    it(`${jobName}: clears stale npm cache before restore`, () => {
+    it(`${jobName}: clears stale pnpm store before restore`, () => {
       const clearIdx = jobDef.steps.findIndex(
-        (s) => s.name === 'Clear stale npm cache',
+        (s) => s.name === 'Clear stale pnpm store',
       );
       const restoreIdx = jobDef.steps.findIndex(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.ok(
         clearIdx !== -1,
-        `'Clear stale npm cache' step must exist in ${jobName}`,
+        `'Clear stale pnpm store' step must exist in ${jobName}`,
       );
       assert.ok(
         restoreIdx !== -1,
-        `'Restore npm cache' step must exist in ${jobName}`,
+        `'Restore pnpm store' step must exist in ${jobName}`,
       );
       assert.ok(
         clearIdx < restoreIdx,
@@ -1212,7 +1215,7 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
         'clear step must rm -rf the cache directory',
       );
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       const dir = cacheStep.with.path.replace(
         /^\$\{\{\s*runner\.temp\s*\}\}\//,
@@ -1226,34 +1229,34 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
 
     it(`${jobName}: reports the cache hit so a permanent miss is visible`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.equal(
         cacheStep.id,
-        'npm-cache',
+        'pnpm-store',
         'restore step needs an id so its cache-hit output is readable',
       );
       const reportStep = jobDef.steps.find(
-        (s) => s.name === 'Report npm cache hit',
+        (s) => s.name === 'Report pnpm store hit',
       );
-      assert.ok(reportStep, "'Report npm cache hit' step must exist");
+      assert.ok(reportStep, "'Report pnpm store hit' step must exist");
       assert.match(
         reportStep.run,
-        /steps\.npm-cache\.outputs\.cache-hit/,
+        /steps\.pnpm-store\.outputs\.cache-hit/,
         'report step must surface the cache-hit output',
       );
     });
   }
 });
 
-describe('qwen-triage: npm cache producer workflow', () => {
+describe('qwen-triage: pnpm store producer workflow', () => {
   const saveJob = cacheProducerDoc.jobs.save;
 
   it('triggers on push to main only', () => {
     const push = cacheProducerDoc.on.push ?? cacheProducerDoc[true]?.push;
     assert.ok(push, 'must have a push trigger');
     assert.deepEqual(push.branches, ['main']);
-    assert.deepEqual(push.paths, ['package-lock.json']);
+    assert.deepEqual(push.paths, ['pnpm-lock.yaml']);
   });
 
   it('saves with the same key and path the triage lanes restore', () => {
@@ -1266,7 +1269,7 @@ describe('qwen-triage: npm cache producer workflow', () => {
       ['tmux-testing', tmuxJob],
     ]) {
       const restoreStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.equal(
         saveStep.with.path,
@@ -1292,12 +1295,12 @@ describe('qwen-triage: npm cache producer workflow', () => {
     );
     assert.ok(dir, 'save path must resolve to a directory name');
     const populateStep = saveJob.steps.find(
-      (s) => s.name === 'Populate npm cache',
+      (s) => s.name === 'Populate pnpm store',
     );
-    assert.ok(populateStep, "'Populate npm cache' step must exist");
+    assert.ok(populateStep, "'Populate pnpm store' step must exist");
     assert.ok(
-      populateStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
-      `populate step must fill the saved cache directory (--cache "$RUNNER_TEMP/${dir}")`,
+      populateStep.run.includes(`--store-dir "$RUNNER_TEMP/${dir}"`),
+      `populate step must fill the saved store directory (--store-dir "$RUNNER_TEMP/${dir}")`,
     );
   });
 

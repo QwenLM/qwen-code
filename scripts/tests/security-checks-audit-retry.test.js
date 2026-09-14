@@ -20,9 +20,9 @@ import { parse } from 'yaml';
 
 // Executes the Security Checks audit step under the shell GitHub actually gives
 // it — security-checks.yml sets `defaults.run.shell: bash`, which on Linux is
-// `bash --noprofile --norc -e -o pipefail {0}` — with `npm`, `timeout` and
-// `sleep` stubbed. Three properties of this gate cannot be witnessed by the
-// shape assertions in security-workflows.test.js:
+// `bash --noprofile --norc -e -o pipefail {0}` — with `npm`, `corepack`,
+// `timeout` and `sleep` stubbed. Three properties of this gate cannot be
+// witnessed by the shape assertions in security-workflows.test.js:
 //
 //   1. a registry-side failure is retried instead of being reported as a CVE;
 //   2. a real high-severity finding is never retried away or swallowed;
@@ -42,9 +42,13 @@ describe('security-checks audit step endpoint-error retry', () => {
   const script = auditStep.run;
 
   const ENDPOINT_ERROR = 'npm error audit endpoint returned an error';
-  const NO_VERDICT = '::error::npm audit returned no verdict after 2 attempts';
+  // pnpm 11's wording for the same registry-side failure.
+  const PNPM_ENDPOINT_ERROR =
+    ' ERR_PNPM_AUDIT_BAD_RESPONSE  The audit endpoint (at https://registry.npmjs.org/-/npm/v1/security/audits/quick) responded with 400: Invalid package tree';
+  const NO_VERDICT =
+    '::error::dependency audit returned no verdict after 2 attempts';
 
-  // Three audit sites, matching the real tree: the root `npm audit` plus the
+  // Three audit sites, matching the real tree: the root `pnpm audit` plus the
   // two vendored lockfiles the per-package loop does not skip. The loop keeps
   // going after a root failure (`|| status=$?` accumulates rather than aborts),
   // so a persistent failure is audited and retried at all three.
@@ -74,23 +78,26 @@ describe('security-checks audit step endpoint-error retry', () => {
 
       const binDir = join(dir, 'bin');
       mkdirSync(binDir);
-      writeFileSync(
-        join(binDir, 'npm'),
+      // The root workspace is audited through `corepack pnpm audit` and the
+      // vendored lockfiles through `npm audit`. Both stubs share one counter
+      // and one mode; each prints its own tool's endpoint error, so the retry
+      // has to recognise both wordings to reach the counts below.
+      const auditStub = (auditCommand, endpointError) =>
         [
           '#!/usr/bin/env bash',
-          '# `npm ci` always succeeds; only the audit is under test.',
-          '[ "$1" = "audit" ] || exit 0',
+          '# Installs always succeed; only the audit is under test.',
+          `${auditCommand} || exit 0`,
           bump('AUDIT_CALLS_FILE'),
           'case "$AUDIT_MODE" in',
           '  clean) exit 0 ;;',
           '  endpoint-error-then-clean)',
           '    if [ "$n" -lt 2 ]; then',
-          `      printf '%s\\n' '${ENDPOINT_ERROR}'`,
+          `      printf '%s\\n' '${endpointError}'`,
           '      exit 1',
           '    fi',
           '    ;;',
           '  endpoint-error-always)',
-          `    printf '%s\\n' '${ENDPOINT_ERROR}'`,
+          `    printf '%s\\n' '${endpointError}'`,
           '    exit 1',
           '    ;;',
           '  cve-found)',
@@ -100,7 +107,14 @@ describe('security-checks audit step endpoint-error retry', () => {
           '    ;;',
           'esac',
           'exit 0',
-        ].join('\n'),
+        ].join('\n');
+      writeFileSync(
+        join(binDir, 'npm'),
+        auditStub('[ "$1" = "audit" ]', ENDPOINT_ERROR),
+      );
+      writeFileSync(
+        join(binDir, 'corepack'),
+        auditStub('[ "$1 $2" = "pnpm audit" ]', PNPM_ENDPOINT_ERROR),
       );
       // Stands in for coreutils `timeout`, absent on macOS: it either simulates
       // the 124 a killed attempt returns, or drops the duration and execs the
@@ -126,7 +140,7 @@ describe('security-checks audit step endpoint-error retry', () => {
         join(binDir, 'sleep'),
         ['#!/usr/bin/env bash', bump('SLEEPS_FILE'), 'exit 0'].join('\n'),
       );
-      for (const stub of ['npm', 'timeout', 'sleep']) {
+      for (const stub of ['npm', 'corepack', 'timeout', 'sleep']) {
         chmodSync(join(binDir, stub), 0o755);
       }
 
@@ -188,7 +202,7 @@ describe('security-checks audit step endpoint-error retry', () => {
     expect(auditCalls).toBe(4);
     expect(sleeps).toBe(1);
     expect(output).toContain(
-      '::warning::npm audit returned no verdict (attempt 1/2), retrying',
+      '::warning::dependency audit returned no verdict (attempt 1/2), retrying',
     );
   });
 

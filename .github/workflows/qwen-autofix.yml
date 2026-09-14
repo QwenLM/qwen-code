@@ -905,10 +905,6 @@ jobs:
           # store stays on disk; only the hosted fallback restores it.
           package-manager-cache: false
 
-      - name: 'Cache pnpm store (hosted)'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: './.github/actions/pnpm-store-cache'
-
       - name: 'Install tmux'
         run: |-
           if command -v tmux > /dev/null 2>&1; then
@@ -3649,10 +3645,6 @@ jobs:
           # No remote cache on the pool: see issue-autofix's setup step.
           package-manager-cache: false
 
-      - name: 'Cache pnpm store (hosted)'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: './.github/actions/pnpm-store-cache'
-
       # The npm-ci retry recipe and the 'Prepare Qwen Code CLI' shim below
       # are duplicated in issue-autofix and review-address; the workflow
       # contract tests pin every copy in lockstep — edit them together.
@@ -4035,10 +4027,6 @@ jobs:
           node-version: '22.x'
           # No remote cache on the pool: see issue-autofix's setup step.
           package-manager-cache: false
-
-      - name: 'Cache pnpm store (hosted)'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Install tmux'
         run: |-

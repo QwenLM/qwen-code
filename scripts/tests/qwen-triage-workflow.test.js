@@ -24,7 +24,7 @@ import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
-  '.github/workflows/npm-cache.yml',
+  '.github/workflows/pnpm-store.yml',
   'utf8',
 );
 const prSkill = readFileSync(
@@ -945,7 +945,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prepareStep).toContain('-u GITHUB_PATH');
     expect(prepareStep).toContain('-u GITHUB_STEP_SUMMARY');
     expect(prepareStep).toMatch(
-      new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+npm ci`),
+      new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+corepack pnpm install`),
     );
     expect(prepareStep).toMatch(
       new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+npm run build`),
@@ -4975,7 +4975,7 @@ describe('qwen-triage verify publish fidelity', () => {
         PREPARE_FAILURE_PHASE: 'install',
       });
       expect(real).toContain('treated as a PR failure');
-      expect(real).toContain('npm ci');
+      expect(real).toContain('pnpm install');
       // The install is retried, so this sentence is blaming the PR for two
       // consecutive failures and has to say which. Without the count a
       // reader cannot tell this verdict from the single-shot one that
@@ -4999,7 +4999,7 @@ describe('qwen-triage verify publish fidelity', () => {
         PREPARE_FAILURE_PHASE: 'build',
       });
       expect(buildPhase).toContain('npm run build');
-      expect(buildPhase).not.toContain('`npm ci` failed');
+      expect(buildPhase).not.toContain('`pnpm install` failed');
       // The build is single-shot, so the retry clause must not leak onto it.
       expect(buildPhase).not.toContain('twice in a row');
 
@@ -6099,8 +6099,10 @@ describe('qwen-triage verify round-3 hardening', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prepare-retry-'));
     try {
       const work = join(dir, 'work');
-      mkdirSync(work, { recursive: true });
-      const calls = join(dir, 'npm-ci-calls');
+      // Stands in for what a failed attempt leaves behind: the retry must
+      // clear it, since pnpm install (unlike npm ci) keeps node_modules.
+      mkdirSync(join(work, 'node_modules', 'stale'), { recursive: true });
+      const calls = join(dir, 'install-calls');
       writeFileSync(calls, '');
       writeFileSync(
         join(dir, 'runuser'),
@@ -6113,17 +6115,14 @@ describe('qwen-triage verify round-3 hardening', () => {
         { mode: 0o755 },
       );
       writeFileSync(
-        join(dir, 'npm'),
+        join(dir, 'corepack'),
         [
           '#!/usr/bin/env bash',
-          // Only `ci` is counted/failed: `run build` shares this stub and
-          // must stay a success, or an install-phase assertion could pass
-          // because the BUILD failed instead.
-          'if [ "$1" = ci ]; then',
-          '  printf "ci\\n" >> "$NPM_CI_CALLS"',
-          '  n=$(wc -l < "$NPM_CI_CALLS" | tr -d " ")',
-          '  if [ "$n" -le "$NPM_CI_FAILURES" ]; then',
-          '    echo "npm error ETXTBSY" >&2',
+          'if [ "$1 $2" = "pnpm install" ]; then',
+          '  printf "install\\n" >> "$INSTALL_CALLS"',
+          '  n=$(wc -l < "$INSTALL_CALLS" | tr -d " ")',
+          '  if [ "$n" -le "$INSTALL_FAILURES" ]; then',
+          '    echo "ERR_PNPM_LIFECYCLE ETXTBSY" >&2',
           '    exit 1',
           '  fi',
           'fi',
@@ -6131,6 +6130,11 @@ describe('qwen-triage verify round-3 hardening', () => {
         ].join('\n'),
         { mode: 0o755 },
       );
+      // `npm run build` must stay a success, or an install-phase assertion
+      // could pass because the BUILD failed instead.
+      writeFileSync(join(dir, 'npm'), '#!/usr/bin/env bash\nexit 0\n', {
+        mode: 0o755,
+      });
       for (const noop of ['chown', 'curl']) {
         writeFileSync(join(dir, noop), '#!/usr/bin/env bash\nexit 0\n', {
           mode: 0o755,
@@ -6144,8 +6148,8 @@ describe('qwen-triage verify round-3 hardening', () => {
         env: {
           ...process.env,
           PATH: `${dir}:${process.env.PATH}`,
-          NPM_CI_CALLS: calls,
-          NPM_CI_FAILURES: String(failures),
+          INSTALL_CALLS: calls,
+          INSTALL_FAILURES: String(failures),
           RUNNER_TEMP: dir,
           GITHUB_WORKSPACE: work,
           GITHUB_OUTPUT: out,
@@ -6160,6 +6164,7 @@ describe('qwen-triage verify round-3 hardening', () => {
           ? readFileSync(calls, 'utf8').trim().split('\n').length
           : 0,
         log: readFileSync(join(dir, resultsDir, 'prepare.log'), 'utf8'),
+        staleLeft: existsSync(join(work, 'node_modules', 'stale')),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -6170,7 +6175,7 @@ describe('qwen-triage verify round-3 hardening', () => {
     ['verify', 'verify-results'],
     ['tmux-testing', 'tmux-results'],
   ]) {
-    it(`retries a transient npm ci once in the ${jobName} lane`, () => {
+    it(`retries a transient pnpm install once in the ${jobName} lane`, () => {
       // One ETXTBSY-style failure then success: the run must continue to
       // the build with no verdict at all. This is the arm the bug lives in
       // — before the retry it emitted verdict=fail here.
@@ -6179,6 +6184,7 @@ describe('qwen-triage verify round-3 hardening', () => {
       expect(flaky.output).not.toContain('verdict=');
       expect(flaky.log).toContain('retrying once');
       expect(flaky.log).toContain('$ npm run build');
+      expect(flaky.staleLeft).toBe(false);
 
       // A tree that is genuinely broken still fails, and the retry is
       // bounded: exactly two attempts, not an unbounded loop.
@@ -6195,6 +6201,7 @@ describe('qwen-triage verify round-3 hardening', () => {
       expect(clean.attempts).toBe(1);
       expect(clean.output).not.toContain('verdict=');
       expect(clean.log).not.toContain('retrying once');
+      expect(clean.staleLeft).toBe(true);
     });
   }
 
@@ -6222,7 +6229,7 @@ describe('qwen-triage verify round-3 hardening', () => {
       ['publish-tmux', 'Post tmux result comment'],
     ]) {
       const publish = stepIn(jobName, stepName);
-      const install = publish.indexOf("PREPARE_COMMAND='npm ci'");
+      const install = publish.indexOf("PREPARE_COMMAND='pnpm install'");
       const build = publish.indexOf("PREPARE_COMMAND='npm run build'");
       expect(install).toBeGreaterThan(-1);
       expect(build).toBeGreaterThan(install);
@@ -6867,9 +6874,9 @@ describe('qwen-triage tmux lane parity', () => {
   // post-save hook, so PR lifecycle scripts cannot write to the shared
   // cache. Swapping to `actions/cache` would re-enable the save path and
   // let a PR poison subsequent runs.
-  it('pins the npm cache step to restore-only in both lanes', () => {
+  it('pins the pnpm store step to restore-only in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
-      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      const cacheStep = stepIn(jobName, 'Restore pnpm store');
       expect(cacheStep).toContain('actions/cache/restore@');
       expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
       // A separate save step would reopen the same hole the
@@ -6879,53 +6886,53 @@ describe('qwen-triage tmux lane parity', () => {
     }
   });
 
-  it('points npm ci at the restored cache directory in both lanes', () => {
+  it('points pnpm install at the restored store in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
       const prepare = stepIn(jobName, 'Install and build PR app');
-      expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain('--store-dir "$RUNNER_TEMP/pnpm-store"');
       expect(prepare).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"',
       );
-      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/npm-cache"');
-      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/npm-cache"');
-      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/pnpm-store"');
+      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/pnpm-store"');
+      const cacheStep = stepIn(jobName, 'Restore pnpm store');
       const cachePath = cacheStep.match(
         /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
       )?.[1];
       expect(cachePath).toBeTruthy();
-      const npmCaches = [
-        ...prepare.matchAll(/--cache "\$RUNNER_TEMP\/([^"]+)"/g),
+      const stores = [
+        ...prepare.matchAll(/--store-dir "\$RUNNER_TEMP\/([^"]+)"/g),
       ].map((m) => m[1]);
-      expect(npmCaches.length).toBeGreaterThanOrEqual(2);
-      for (const c of npmCaches) expect(c).toBe(cachePath);
+      expect(stores.length).toBeGreaterThanOrEqual(2);
+      for (const c of stores) expect(c).toBe(cachePath);
     }
   });
-  it('clears stale npm cache before restore in both lanes', () => {
+  it('clears stale pnpm store before restore in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
-      const clearStep = stepIn(jobName, 'Clear stale npm cache');
+      const clearStep = stepIn(jobName, 'Clear stale pnpm store');
       expect(clearStep, `${jobName} must have a clear step`).toContain(
         'rm -rf',
       );
-      const clearIdx = job(jobName).indexOf("'Clear stale npm cache'");
-      const restoreIdx = job(jobName).indexOf("'Restore npm cache'");
+      const clearIdx = job(jobName).indexOf("'Clear stale pnpm store'");
+      const restoreIdx = job(jobName).indexOf("'Restore pnpm store'");
       expect(clearIdx).toBeGreaterThan(-1);
       expect(restoreIdx).toBeGreaterThan(-1);
       expect(clearIdx).toBeLessThan(restoreIdx);
     }
   });
 
-  it('reports the npm cache hit so a permanent miss is visible in both lanes', () => {
+  it('reports the pnpm store hit so a permanent miss is visible in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
-      const cacheStep = stepIn(jobName, 'Restore npm cache');
-      expect(cacheStep).toContain("id: 'npm-cache'");
-      const reportStep = stepIn(jobName, 'Report npm cache hit');
-      expect(reportStep).toContain('steps.npm-cache.outputs.cache-hit');
+      const cacheStep = stepIn(jobName, 'Restore pnpm store');
+      expect(cacheStep).toContain("id: 'pnpm-store'");
+      const reportStep = stepIn(jobName, 'Report pnpm store hit');
+      expect(reportStep).toContain('steps.pnpm-store.outputs.cache-hit');
       expect(reportStep).toContain('GITHUB_STEP_SUMMARY');
     }
   });
 });
 
-describe('qwen-triage npm cache producer', () => {
+describe('qwen-triage pnpm store producer', () => {
   it('saves with the same key and path the triage lanes restore', () => {
     expect(cacheProducerWorkflow).toContain('actions/cache/save@');
     // Prettier may choose single or double quotes depending on inner
@@ -6942,7 +6949,7 @@ describe('qwen-triage npm cache producer', () => {
       cacheProducerWorkflow.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
     );
     for (const jobName of ['verify', 'tmux-testing']) {
-      const restoreStep = stepIn(jobName, 'Restore npm cache');
+      const restoreStep = stepIn(jobName, 'Restore pnpm store');
       const path = yamlScalar(
         restoreStep.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
       );

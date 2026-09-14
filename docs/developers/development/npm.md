@@ -253,6 +253,6 @@ This tells NPM that any folder inside the `packages` directory is a separate pac
 
 ### Benefits of Workspaces
 
-- **Simplified Dependency Management**: Running `npm install` from the root of the project will install all dependencies for all packages in the workspace and link them together. This means you don't need to run `npm install` in each package's directory.
-- **Automatic Linking**: Packages within the workspace can depend on each other. When you run `npm install`, NPM will automatically create symlinks between the packages. This means that when you make changes to one package, the changes are immediately available to other packages that depend on it.
+- **Simplified Dependency Management**: Running `corepack pnpm install --frozen-lockfile` from the root of the project installs the dependencies of every package in the workspace and links the packages together, so you don't need to install in each package's directory.
+- **Automatic Linking**: Packages within the workspace can depend on each other. When you install from the root, pnpm creates symlinks between the packages. This means that when you make changes to one package, the changes are immediately available to other packages that depend on it.
 - **Simplified Script Execution**: You can run scripts in any package from the root of the project using the `--workspace` flag. For example, to run the `build` script in the `cli` package, you can run `npm run build --workspace @qwen-code/qwen-code`.

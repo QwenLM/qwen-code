@@ -43,7 +43,6 @@ describe('security workflows', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
     const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
-    const installStep = getWorkflowStep(dependencyJob, 'Install dependencies');
     const auditStep = getWorkflowStep(
       dependencyJob,
       'Audit production dependencies',
@@ -78,9 +77,8 @@ describe('security workflows', () => {
       'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
     );
     expect(dependencyCheckoutStep).toContain('persist-credentials: false');
-    expect(installStep).toContain(
-      "run: 'npm ci --ignore-scripts --no-audit --progress=false'",
-    );
+    // pnpm audit reads pnpm-lock.yaml, so the root tree is never installed.
+    expect(dependencyJob).not.toContain("- name: 'Install dependencies'");
     expect(auditStep).not.toContain('continue-on-error');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
@@ -99,8 +97,9 @@ describe('security workflows', () => {
     // finding, and must not pass the gate either. Witnessed by bash in
     // security-checks-audit-retry.test.js.
     expect(auditStep).toContain('audit endpoint returned an error');
+    expect(auditStep).toContain('ERR_PNPM_AUDIT_BAD_RESPONSE');
     expect(auditStep).toContain(
-      'audit npm audit --omit=dev --audit-level=high || status=$?',
+      'audit corepack pnpm audit --prod --audit-level high || status=$?',
     );
     expect(auditStep).toContain(
       'audit npm audit --omit=dev --audit-level=high --workspaces=false',

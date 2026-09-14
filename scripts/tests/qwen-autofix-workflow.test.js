@@ -276,80 +276,6 @@ const hasSha256sum =
     stdio: 'ignore',
   }).status === 0;
 
-// GitHub Actions expressions return operand VALUES from &&/||, not
-// booleans: && yields the first falsy operand (else the last operand), ||
-// the first truthy (else the last), '' is falsy, and && binds tighter
-// than ||. A ternary can therefore read right and evaluate wrong, which
-// text pins cannot see — so the cache choice is also pinned semantically
-// with this minimal evaluator.
-function evalGhaExpression(expression, facts) {
-  let pos = 0;
-  const truthy = (value) =>
-    value !== false && value !== null && value !== 0 && value !== '';
-  const skipSpace = () => {
-    while (/\s/.test(expression[pos] ?? '')) {
-      pos += 1;
-    }
-  };
-  const parsePrimary = () => {
-    skipSpace();
-    if (expression[pos] === "'") {
-      const end = expression.indexOf("'", pos + 1);
-      const value = expression.slice(pos + 1, end);
-      pos = end + 1;
-      return value;
-    }
-    const name = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(expression.slice(pos))[0];
-    pos += name.length;
-    if (name === 'true') {
-      return true;
-    }
-    if (name === 'false') {
-      return false;
-    }
-    if (name === 'null') {
-      return null;
-    }
-    return facts[name];
-  };
-  const parseComparison = () => {
-    const left = parsePrimary();
-    skipSpace();
-    const op = expression.slice(pos, pos + 2);
-    if (op !== '==' && op !== '!=') {
-      return left;
-    }
-    pos += 2;
-    const right = parsePrimary();
-    return op === '==' ? left === right : left !== right;
-  };
-  const parseAnd = () => {
-    let left = parseComparison();
-    for (;;) {
-      skipSpace();
-      if (expression.slice(pos, pos + 2) !== '&&') {
-        return left;
-      }
-      pos += 2;
-      const right = parseComparison();
-      left = truthy(left) ? right : left;
-    }
-  };
-  const parseOr = () => {
-    let left = parseAnd();
-    for (;;) {
-      skipSpace();
-      if (expression.slice(pos, pos + 2) !== '||') {
-        return left;
-      }
-      pos += 2;
-      const right = parseAnd();
-      left = truthy(left) ? left : right;
-    }
-  };
-  return parseOr();
-}
-
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
@@ -10895,7 +10821,7 @@ exit 1
       );
       expect(step).toContain("node-version: '22.x'");
       // No setup-node step restores a cache: dependencies install with pnpm,
-      // and the pnpm store has its own hosted-only restore step, pinned by
+      // and nothing restores the pnpm store either, as pinned by
       // 'does not restore a remote cache on the persistent pool'.
       expect(step).not.toMatch(/^\s*cache(-dependency-path)?:/m);
       expect(step).toContain('package-manager-cache: false');
@@ -12821,36 +12747,16 @@ exit 1
     // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
     // an `npm ci` that took 29s in the very next step. Every leg pays it,
     // up to ten per scan, plus build-cli and issue-autofix. Dependencies now
-    // install with pnpm, whose store stays on the pool's disk, so the only
-    // remote restore left is the hosted fallback's store cache.
+    // install with pnpm, whose store stays on the pool's disk. Nothing
+    // restores it remotely: the hosted fallback installs cold, because the
+    // shared pnpm-store-cache action is a local `uses: './...'` step, which
+    // 'pins the persistent-pool hygiene steps into every heavy job' forbids.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
       expect(step).not.toMatch(/^\s*cache:/m);
     }
-    const storeCacheSteps =
-      workflow.match(
-        /- name: 'Cache pnpm store \(hosted\)'\n\s+if: "[^"]*"\n\s+uses: '[^']*'/g,
-      ) ?? [];
-    // All three consumers, so a fourth job that restores the store without
-    // the pool guard fails here rather than quietly paying for it per run.
-    expect(storeCacheSteps).toHaveLength(3);
-    for (const step of storeCacheSteps) {
-      expect(step).toContain("uses: './.github/actions/pnpm-store-cache'");
-    }
-    // Text pins cannot tell a condition that works from one GHA's expression
-    // semantics defeat; evaluate it the way Actions does.
-    const condition =
-      storeCacheSteps[0].match(/if: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
-    for (const [environment, expected] of [
-      ['self-hosted', false],
-      ['github-hosted', true],
-    ]) {
-      expect(
-        evalGhaExpression(condition, {
-          'runner.environment': environment,
-        }),
-      ).toBe(expected);
-    }
+    expect(workflow).not.toContain('actions/cache');
+    expect(workflow).not.toContain('pnpm-store-cache');
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
