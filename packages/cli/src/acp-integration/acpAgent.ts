@@ -211,6 +211,7 @@ import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { Stats } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -6564,11 +6565,34 @@ class QwenAgent implements Agent {
     settingsCwd: string,
   ): LoadedSettings {
     if (
-      path.resolve(settingsCwd) === path.resolve(this.config.getTargetDir())
+      this.canonicalWorkspacePath(settingsCwd) ===
+      this.canonicalWorkspacePath(this.config.getTargetDir())
     ) {
       this.settings = settings;
     }
     return settings;
+  }
+
+  /**
+   * Canonical spelling for workspace-coordinate comparisons. A session's
+   * admission root and a request's settings cwd can name the same directory
+   * through a symlink (`/tmp` vs `/private/tmp` on macOS) or a different case
+   * on a case-insensitive volume; a plain string compare then turns a
+   * workspace grant's *revocation* into a no-op on the live session while the
+   * caller is told it saved (fail-open). Resolve symlinks when the path
+   * exists and fold case where the volume does.
+   */
+  private canonicalWorkspacePath(workspacePath: string): string {
+    let resolved = path.resolve(workspacePath);
+    try {
+      resolved = realpathSync.native(resolved);
+    } catch {
+      // The path does not exist (yet); compare the resolved spelling.
+    }
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      resolved = resolved.toLowerCase();
+    }
+    return resolved;
   }
 
   /**
@@ -6597,7 +6621,9 @@ class QwenAgent implements Agent {
    * `sessionId`: their write would land in the session's worktree while the
    * status and reload routes keep reading the bootstrap workspace, so the
    * handler would answer "saved" for a server no route ever lists or applies.
-   * Those five resolve `requestedCwd ?? this.config.getTargetDir()` instead.
+   * Those five resolve `requestedCwd || this.config.getTargetDir()` instead
+ * (`||`, not `??`: a present-but-empty `cwd` is not a workspace and falls to
+ * the bootstrap dir like an absent one).
    *
    * `sessionId` names the requesting session, whose own Config is
    * relocated to its worktree; without one the daemon's bootstrap
@@ -6823,7 +6849,10 @@ class QwenAgent implements Agent {
           const sessionWorkspace = this.sessionWorkspaceRoot(
             session.getConfig(),
           );
-          if (path.resolve(sessionWorkspace) !== path.resolve(settingsCwd)) {
+          if (
+            this.canonicalWorkspacePath(sessionWorkspace) !==
+            this.canonicalWorkspacePath(settingsCwd)
+          ) {
             continue;
           }
         }
@@ -13652,7 +13681,7 @@ class QwenAgent implements Agent {
         // resolve only the bootstrap workspace, so a session-scoped write
         // here would be listed nowhere and applied never. Session-aware
         // resolution returns only once those routes share the coordinate.
-        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13683,7 +13712,7 @@ class QwenAgent implements Agent {
           );
         }
         // Workspace-global write, same contract as setMcpServer above.
-        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13705,7 +13734,7 @@ class QwenAgent implements Agent {
         // Workspace-global write: the workspaceHooks status route reports the
         // bootstrap Config's live hook registry, so a session-scoped write
         // would diverge from what is reported and applied.
-        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13762,7 +13791,7 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
         // Workspace-global write, same contract as setHook above.
-        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
@@ -13804,7 +13833,7 @@ class QwenAgent implements Agent {
         }
         // Workspace-global write: the workspaceExtensions status route
         // reports the bootstrap workspace, same contract as setMcpServer.
-        const settingsCwd = requestedCwd ?? this.config.getTargetDir();
+        const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
           workspaceDir: settingsCwd,

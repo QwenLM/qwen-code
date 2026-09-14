@@ -14,7 +14,7 @@ import {
   afterAll,
   type MockInstance,
 } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, symlinkSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import * as ts from 'typescript';
 import * as fs from 'node:fs/promises';
@@ -18064,6 +18064,81 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     expect(otherPm.addPersistentRule).not.toHaveBeenCalled();
     expect(otherPm.removePersistentRule).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('fans out a workspace-scoped grant across a different path spelling of the same directory', async () => {
+    // The admission root and the request's cwd can name one directory through
+    // a symlink (macOS /tmp vs /private/tmp) or case; a string compare would
+    // turn a revocation written with the other spelling into a silent no-op
+    // on the live session while the caller is told it saved.
+    const realRoot = mkdtempSync(path.join(os.tmpdir(), 'qwen-acp-canon-'));
+    const linkRoot = path.join(os.tmpdir(), `qwen-acp-canon-link-${process.pid}`);
+    symlinkSync(realRoot, linkRoot, 'dir');
+
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const livePm = {
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    };
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'linked-session',
+      {
+        getId: () => 'linked-session',
+        getConfig: () => ({
+          ...mockConfig,
+          getTargetDir: vi.fn().mockReturnValue(linkRoot),
+          storage: { getProjectRoot: () => linkRoot },
+          getPermissionManager: () => livePm,
+        }),
+      },
+    );
+
+    // The write names the workspace by its realpath; the session was admitted
+    // under the symlinked spelling.
+    await agent.extMethod('qwen/permissions/setRules', {
+      cwd: realRoot,
+      scope: 'workspace',
+      ruleType: 'allow',
+      rules: ['Bash(git push:*)'],
+    });
+
+    expect(livePm.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(git push:*)',
+      'allow',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('treats an empty-string cwd as absent for the workspace-global handlers', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/boot-workspace');
+
+    await agent.extMethod('qwen/settings/setMcpServer', {
+      cwd: '',
+      scope: 'workspace',
+      name: 'local',
+      server: {
+        transport: 'stdio',
+        command: 'node',
+        versionNegotiation: 'auto',
+      },
+    });
+
+    expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+      '/boot-workspace',
+      expect.objectContaining({
+        consumeCorruptionEnvVars: true,
+        skipLoadEnvironment: true,
+      }),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
