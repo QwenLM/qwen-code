@@ -877,32 +877,35 @@ describe('convertResponsesEventToGemini', () => {
     ).toThrow(/Responses API error: boom/);
   });
 
-  it('stamps .status/.code on a response.failed with a known error code so retry/fallback gates classify it', () => {
-    // A mid-stream failure arrives after 200 OK; without .status it classifies
-    // as `unknown` and misses every retry / rate-limit / fallback gate.
-    const state = new ResponsesStreamState();
-    let thrown: unknown;
-    try {
-      convertResponsesEventToGemini(
-        {
-          event: 'response.failed',
-          data: {
-            response: {
-              error: { code: 'rate_limit_exceeded', message: 'slow down' },
+  it.each(['rate_limit_exceeded', 'rate_limit_reached'])(
+    'stamps HTTP 429 on response.failed with %s so retry/fallback gates classify it',
+    (code) => {
+      // A mid-stream failure arrives after 200 OK; without .status it classifies
+      // as `unknown` and misses every retry / rate-limit / fallback gate.
+      const state = new ResponsesStreamState();
+      let thrown: unknown;
+      try {
+        convertResponsesEventToGemini(
+          {
+            event: 'response.failed',
+            data: {
+              response: {
+                error: { code, message: 'slow down' },
+              },
             },
           },
-        },
-        'gpt-5',
-        state,
-      );
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeInstanceOf(Error);
-    expect((thrown as { status?: number }).status).toBe(429);
-    expect((thrown as { code?: string }).code).toBe('rate_limit_exceeded');
-    expect((thrown as Error).message).toContain('rate_limit_exceeded');
-  });
+          'gpt-5',
+          state,
+        );
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as { status?: number }).status).toBe(429);
+      expect((thrown as { code?: string }).code).toBe(code);
+      expect((thrown as Error).message).toContain(code);
+    },
+  );
 
   it('maps a mid-stream error event server_error code to HTTP 500 status', () => {
     const state = new ResponsesStreamState();
@@ -921,6 +924,33 @@ describe('convertResponsesEventToGemini', () => {
   });
 
   it.each([
+    {
+      data: {
+        type: 'error',
+        error: {
+          message: 'Requests have exceeded the throughput limit.',
+          code: 'rate_limit_reached',
+          type: 'too_many_requests',
+        },
+      },
+      message:
+        'rate_limit_reached: Requests have exceeded the throughput limit.',
+      code: 'rate_limit_reached',
+      type: 'too_many_requests',
+      status: 429,
+    },
+    {
+      data: {
+        type: 'error',
+        message: 'Requests have exceeded the throughput limit.',
+        code: 'rate_limit_reached',
+      },
+      message:
+        'rate_limit_reached: Requests have exceeded the throughput limit.',
+      code: 'rate_limit_reached',
+      type: 'rate_limit_reached',
+      status: 429,
+    },
     {
       data: {
         type: 'error',
