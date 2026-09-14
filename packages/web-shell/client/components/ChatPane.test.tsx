@@ -553,7 +553,10 @@ describe('ChatPane', () => {
         return cleanup;
       },
     );
-    render({ registerContextUsageControls });
+    render({ registerContextUsageControls, onOpenContextUsage: vi.fn() });
+    expect(latestChatEditorProps.contextUsageControls).toBe(
+      registerContextUsageControls.mock.calls.at(-1)![0],
+    );
     expect(registerContextUsageControls).toHaveBeenLastCalledWith(
       expect.objectContaining({
         sessionId: connectionState.sessionId,
@@ -3040,6 +3043,35 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.tokenCount).toBe(0);
     expect(latestChatEditorProps.contextWindow).toBe(0);
     expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('opens composer details with the pane session and actions without adding a snapshot', () => {
+    const onOpenContextUsage = vi.fn();
+    render({ onOpenContextUsage });
+    act(() => latestChatEditorProps.onOpenContextUsage());
+    expect(onOpenContextUsage).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+      daemonActions,
+    );
+    expect(appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    const opener = latestChatEditorProps.onOpenContextUsage;
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBe(opener);
+    connectionState.status = 'error';
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls.canCompress).toBe(false);
+  });
+
+  it('keeps embedded side-task context read-only without a detail recovery path', () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    render({ embedded: true });
+    expect(latestChatEditorProps.onShowContextUsage).toBeTypeOf('function');
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
   });
 
   it('shows context usage for this pane session', async () => {

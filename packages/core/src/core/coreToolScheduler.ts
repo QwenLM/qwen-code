@@ -3604,16 +3604,15 @@ export class CoreToolScheduler {
                 rejectPlanShell(errorMessage);
                 continue;
               }
-              this.setStatusInternal(
-                reqInfo.callId,
-                'error',
-                createErrorResponse(
+              this.setStatusInternal(reqInfo.callId, 'error', {
+                ...createErrorResponse(
                   reqInfo,
                   new Error(errorMessage),
                   ToolErrorType.EXECUTION_DENIED,
                   'not_started',
                 ),
-              );
+                approvalRequired: true,
+              });
               setToolSpanFailure(
                 toolSpan,
                 TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,

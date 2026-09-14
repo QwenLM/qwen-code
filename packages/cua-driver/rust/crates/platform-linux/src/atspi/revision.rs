@@ -18,6 +18,7 @@ struct RevisionKey {
     xid: u64,
     max_elements: usize,
     max_depth: usize,
+    bounded: bool,
     serializer_version: String,
     projection_version: String,
 }
@@ -98,15 +99,21 @@ impl LinuxObservationRevisions {
             xid,
             max_elements,
             max_depth,
+            bounded: tree.truncated,
             serializer_version: request.serializer_version.clone(),
             projection_version: request.projection_version.clone(),
         };
+        let mut store = self.store.lock().unwrap();
+        store.remove(&RevisionKey {
+            bounded: !key.bounded,
+            ..key.clone()
+        });
         if tree.backend == AtspiBackend::X11 {
-            self.store.lock().unwrap().remove(&key);
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::UnsupportedBackend);
         }
-        if !tree.complete {
-            self.store.lock().unwrap().remove(&key);
+        if !tree.read_complete() {
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::CaptureIncomplete);
         }
         let identities = tree
@@ -115,11 +122,11 @@ impl LinuxObservationRevisions {
             .map(|node| node.identity.clone())
             .collect::<Option<Vec<_>>>();
         let Some(identities) = identities else {
-            self.store.lock().unwrap().remove(&key);
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
         };
         if identities.iter().collect::<HashSet<_>>().len() != identities.len() {
-            self.store.lock().unwrap().remove(&key);
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
         }
         let owners = identities
@@ -127,7 +134,6 @@ impl LinuxObservationRevisions {
             .map(|identity| identity.unique_owner.clone())
             .collect::<HashSet<_>>();
 
-        let mut store = self.store.lock().unwrap();
         if store
             .lineages
             .get(&key)
@@ -156,10 +162,20 @@ impl LinuxObservationRevisions {
         let forced_reason =
             cua_driver_core::observation_revision::requested_format_resync_reason(request)
                 .or_else(|| request.force_full.then_some(FullResyncReason::Requested));
-        let result = lineage
-            .revision
-            .observe_with_reason(captured, request.base_revision_id.as_deref(), forced_reason)
-            .map_err(|error: ObservationRevisionError| error.to_string())?;
+        let result = if tree.truncated {
+            lineage.revision.observe_bounded(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        } else {
+            lineage.revision.observe_with_reason(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        }
+        .map_err(|error: ObservationRevisionError| error.to_string())?;
         lineage.owners = owners;
         Ok(result)
     }
@@ -284,8 +300,80 @@ mod tests {
     }
 
     #[test]
+    fn budget_captures_retain_lineage_but_failures_and_coverage_changes_invalidate_it() {
+        for reason in ["max_elements_reached", "max_depth_reached"] {
+            let revisions = LinuxObservationRevisions::new();
+            let mut bounded = tree(vec![node("/button", "Before")]);
+            bounded.complete = false;
+            bounded.truncated = true;
+            bounded.incomplete_notes = vec![reason.into()];
+            let observe = |tree: &AtspiTreeResult, base| {
+                revisions
+                    .observe(session(), 10, 20, 1, 3, tree, &request(base))
+                    .unwrap()
+            };
+            let first = observe(&bounded, None);
+            assert!(bounded.read_complete());
+            assert!(first.stable_element_ids);
+            let unchanged = observe(&bounded, Some(first.revision_id.clone()));
+            assert_eq!(unchanged.mode, ObservationMode::NoChange);
+            assert_eq!(unchanged.lineage_id, first.lineage_id);
+            bounded.nodes[0].name = Some("After".into());
+            let changed = observe(&bounded, Some(unchanged.revision_id));
+            assert_eq!(changed.mode, ObservationMode::Full);
+            assert!(changed.stable_element_ids);
+            assert_eq!(changed.lineage_id, first.lineage_id);
+            assert_eq!(changed.nodes[0].element_id, first.nodes[0].element_id);
+            for failure in [
+                "provider_unresponsive",
+                "walk_deadline_reached",
+                "read_failed",
+            ] {
+                bounded.incomplete_notes.push(failure.into());
+                assert!(!bounded.read_complete());
+                let failed = observe(&bounded, Some(changed.revision_id.clone()));
+                assert!(!failed.stable_element_ids);
+                assert_eq!(
+                    failed.full_resync_reason,
+                    Some(FullResyncReason::CaptureIncomplete)
+                );
+                bounded.incomplete_notes.pop();
+            }
+            bounded.window_scoped = false;
+            assert!(!bounded.read_complete());
+            assert!(!observe(&bounded, None).stable_element_ids);
+            bounded.window_scoped = true;
+            let recovered = observe(&bounded, Some(changed.revision_id));
+            assert_ne!(recovered.lineage_id, first.lineage_id);
+            let full = observe(
+                &tree(vec![node("/button", "After")]),
+                Some(recovered.revision_id),
+            );
+            assert_eq!(full.mode, ObservationMode::Full);
+            assert_ne!(full.lineage_id, recovered.lineage_id);
+            let bounded_again = observe(&bounded, Some(full.revision_id));
+            assert_eq!(bounded_again.mode, ObservationMode::Full);
+            assert_ne!(bounded_again.lineage_id, recovered.lineage_id);
+        }
+    }
+
+    #[test]
     fn stable_owner_and_path_retain_no_change_and_diff_lineage() {
         let revisions = LinuxObservationRevisions::new();
+        let capture = |name| {
+            tree(
+                (0..8)
+                    .map(|index| {
+                        let mut captured = node(
+                            &format!("/button/{index}"),
+                            if index == 0 { name } else { "Unchanged" },
+                        );
+                        captured.element_index = Some(index);
+                        captured
+                    })
+                    .collect(),
+            )
+        };
         let initial = revisions
             .observe(
                 session(),
@@ -293,7 +381,7 @@ mod tests {
                 20,
                 5000,
                 usize::MAX,
-                &tree(vec![node("/button", "Before")]),
+                &capture("Before"),
                 &request(None),
             )
             .unwrap();
@@ -307,7 +395,7 @@ mod tests {
                 20,
                 5000,
                 usize::MAX,
-                &tree(vec![node("/button", "Before")]),
+                &capture("Before"),
                 &request(Some(initial.revision_id.clone())),
             )
             .unwrap();
@@ -320,7 +408,7 @@ mod tests {
                 20,
                 5000,
                 usize::MAX,
-                &tree(vec![node("/button", "After")]),
+                &capture("After"),
                 &request(Some(unchanged.revision_id)),
             )
             .unwrap();
