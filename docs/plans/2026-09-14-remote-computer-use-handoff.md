@@ -1,17 +1,17 @@
-# 交接：远程 Qwen Code 操作本地 Mac（PR #11799）
+# 交接：远程 Qwen Code 操作本地桌面机（PR #11799）
 
-> 写给接手的 session 或 agent。按顺序阅读：本文 → 方案 `docs/plans/2026-09-14-remote-computer-use-mac-companion.md` → 真机验证说明 `docs/verification/remote-computer-use/README.md`。
+> 写给接手的 session 或 agent。按顺序阅读：本文 → 方案 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md` → 真机验证说明 `docs/verification/remote-computer-use/README.md`。
 > 状态（2026-09-14，第三次修订）：只有文档，没有代码。方案已从 v1（中继驱动）改为 v2（中继 node_repl），原因见方案 §1；Mac 侧的中继进程定为 `qwen` 子命令，不做独立 app（用户决定，见方案 §3.1）。
 
 ## 1. 现在在哪
 
 - PR：https://github.com/QwenLM/qwen-code/pull/11799（草稿；base `main`；head `yiliang114:docs/remote-computer-use-plan`）。
 - 分支上的文件（只有这三个，都是文档）：
-  - `docs/plans/2026-09-14-remote-computer-use-mac-companion.md`：方案 v2；
+  - `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`：方案 v2；
   - `docs/plans/2026-09-14-remote-computer-use-handoff.md`：本文；
   - `docs/verification/remote-computer-use/README.md`：片1 原型的验证说明（替换了 v1 的片0）。
 - 调研基线：v1 读的是 `origin/main` @ `f9534f4395`，v2 复查读的是 `c666ec1a0a`。所有结论读自代码，没有构建、没有运行。
-- 用户原始诉求：远程 Linux 开发机（无图形界面）上的 Qwen Code，能通过 computer use 操作用户本地的 Mac。
+- 用户原始诉求：远程 Linux 开发机（无图形界面）上的 Qwen Code，能通过 computer use 操作用户面前那台有图形界面的机器。用户自己用的是 Mac，但方案不是 macOS 专属（方案 §2 平台范围）。
 
 ## 2. 用户的工作约定（必须遵守）
 
@@ -28,7 +28,7 @@
 
 - **远程化的对象是 `node_repl`，不是驱动守护进程。** skill 的常规路径是 `ComputerUse.create()` → 驱动以原生库内嵌在 `node_repl` 进程里运行；守护进程和它的 HTTP MCP 是给外部 agent 用的另一条产品线。TCC 授权落在拉起 `node_repl` 的进程身份上。
 - **v1 的方案 B 不成立**：`connect({ socketPath })` 发 `trusted_session_begin`，standalone 守护进程只接受"嵌入宿主连接"（父进程 pid 校验），任何 SDK 客户端都会被拒，与隧道无关。v1 的方案 A 和 C 中继的是原始工具面，会绕过 skill 层。
-- **v2 方案**：Mac 上的 `qwen mac-bridge` 子命令拉起本地 `node_repl`，主动连远端 `/acp`，按会话 `mcp_register { server: 'node-repl' }`，中继帧。远端 skill 只需把读参考文档的方式改成 `read_file`（它现在让 `node_repl` 读远端路径，Mac 上不存在）。
+- **v2 方案**：桌面机上的 `qwen bridge` 子命令拉起本地 `node_repl`，主动连远端 `/acp`，按会话 `mcp_register { server: 'node-repl' }`，中继帧。远端 skill 只需把读参考文档的方式改成 `read_file`（它现在让 `node_repl` 读远端路径，Mac 上不存在）。
 - **不做独立 app**：子命令从终端启动，TCC 授权记在终端名下，与本地 computer use 一致；本地刹车就是 Ctrl-C。签名 app、菜单栏界面列为可选片3，默认不做。
 - **零件都在 main 上**：`@qwen-code/node-repl-mcp`、`@qwen-code/cua-sdk`、反向工具通道（会话级注册、`alwaysLoadTools`、同名遮蔽设置项）、本地文件桥的客户端实现。
 - **#11548 的位置**：它让 Web Shell 连到远程 daemon，是配对入口最自然的落点，但它没有按会话的配对凭据；它刻意不给跨来源 daemon 挂本地文件桥，computer use 的配对要对齐这条边界。
@@ -36,7 +36,7 @@
 
 ## 4. 待用户决定（不要自行决定）
 
-已决定（不要再问）：中继进程是 `qwen` 的子命令，放在 `packages/cli`，不做独立 app。
+已决定（不要再问）：中继进程是一个新的顶级子命令 `qwen bridge`，放在 `packages/cli/src/commands/bridge.ts`，不做独立 app；它不是 macOS 专属，是给所有有图形会话的机器用的。
 
 1. **配对凭据的形态**：deep link 还是配对码；是否复用 daemon LAN listener 的配对凭据机制；凭据是否只对单个会话有效。
 2. **这个方案 PR 何时从草稿转为 ready**；代码 PR 是另开，还是追加到这个 PR（按"不要太碎"的原则判断，建议方案先合、代码另开）。
@@ -44,7 +44,7 @@
 ## 5. 下一步（按顺序）
 
 1. **真机验证方案 §1 的两条事实**（不写代码，十分钟）：让有 Mac 的人按 `docs/verification/remote-computer-use/README.md` 的 A 部分执行，确认 standalone 守护进程拒绝 `connect()`，并测一张全屏截图的 base64 体积。结果写成同目录的 `results.md`，推到本 PR 分支。
-2. **片1：`qwen mac-bridge` 子命令**。起点：
+2. **片1：`qwen bridge` 子命令**。起点：
    - 连接、初始化、注册和重试逻辑：`packages/web-shell/client/local-files/bridge-client.ts`。它跑在浏览器里，Node 版需要换掉 WebSocket 实现和 `navigator.locks`；
    - 帧协议：`packages/cli/src/serve/acp-http/client-mcp-ws.ts`；
    - 会话级注册：`packages/cli/src/serve/acp-http/client-mcp-sender-registry.ts`；
@@ -52,7 +52,7 @@
    - 本地子进程：`npx -y @qwen-code/node-repl-mcp@0.1.4`（stdio），版本跟 `SKILL.md:19` 保持一致；
    - skill 改动：`packages/core/src/skills/bundled/computer-use/SKILL.md` 里读 `references/*.md` 的那段改用 `read_file`；
    - 验收和测量：验证说明的 B 部分；
-   - 放在哪里：`packages/cli` 的子命令（已决定）。
+   - 放在哪里：`packages/cli/src/commands/bridge.ts`（已决定）。
 3. **片2（配对入口）**：见方案 §7。片3 是可选项，默认不做。
 
 ## 6. 操作配方
