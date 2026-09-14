@@ -10,9 +10,11 @@ import { AuthType } from '../core/contentGenerator.js';
 import { ToolErrorType } from './tool-error.js';
 import {
   CITATION_RULES,
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
   WebSearchTool,
   evaluateWebSearchGate,
+  resolveWebSearchMaxPerSession,
   resolveWebSearchTimeoutMs,
 } from './web-search.js';
 import { generateCustomEnvKey } from '../providers/presets/custom-provider.js';
@@ -55,7 +57,10 @@ interface ConfigOverrides {
     baseUrl?: string;
     apiKeyEnv?: string;
     timeoutMs?: number;
+    maxPerSession?: number;
   };
+  /** Session web_search counter; one shared object per config, as on Config. */
+  sessionUsage?: { calls: number };
   models?: Array<{
     id: string;
     authType: string;
@@ -83,6 +88,7 @@ interface ConfigOverrides {
 }
 
 function makeConfig(overrides: ConfigOverrides = {}): Config {
+  const sessionUsage = overrides.sessionUsage ?? { calls: 0 };
   const models = overrides.models ?? [
     {
       id: 'qwen3.6-plus',
@@ -121,6 +127,7 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
         : undefined;
     },
     getSessionId: () => 'session-1',
+    getWebSearchSessionUsage: () => sessionUsage,
     getOutboundAllowDynamicHeaderValues: () =>
       overrides.allowDynamicHeaderValues ?? false,
     getCliVersion: () => '0.0.0-test',
@@ -2149,6 +2156,28 @@ describe('WebSearchTool budget', () => {
     expect((mockCtorOpts.current as { timeout: number }).timeout).toBe(200);
   });
 
+  it('reports a sub-second budget to the millisecond instead of rounding it to zero', async () => {
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 40 },
+      }),
+    );
+    expect(result.error?.message).toBe('Web search timed out after 0.04s.');
+  });
+
   it('salvages the partial result when the budget expires after a search ran', async () => {
     // terminalFailure tries partial salvage before the timeout arm: a search
     // that spent its budget after collecting evidence must return it.
@@ -2242,7 +2271,9 @@ describe('WebSearchTool extractor fallback', () => {
       streamDyingAfterPageRead('a'.repeat(5_958) + '\u{1F600}'),
     );
     const content = (await runSearch(makeConfig())).llmContent as string;
-    expect(content).toContain('Truncated to 6000 characters.]');
+    // The cut backs off one unit to keep the pair whole, and the label
+    // reports the 5999 units actually delivered, not the 6000 bound.
+    expect(content).toContain('Truncated to 5999 characters.]');
     // No high surrogate without its low surrogate anywhere in the payload.
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(content)).toBe(false);
   });
@@ -2314,5 +2345,111 @@ describe('WebSearchTool citation invariants', () => {
     expect(content).toContain(
       `\n\nCitation policy: ${CITATION_RULES.map((rule) => `${rule}.`).join(' ')}\n\n[Safety:`,
     );
+  });
+});
+
+describe('WebSearchTool session budget', () => {
+  const answeredStream = () =>
+    makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM]));
+  const cappedConfig = (
+    maxPerSession: number,
+    sessionUsage?: { calls: number },
+  ) =>
+    makeConfig({
+      settings: { enabled: true, model: 'qwen3.6-plus', maxPerSession },
+      sessionUsage,
+    });
+
+  it('resolves the configured cap and falls back to the default otherwise', () => {
+    expect(resolveWebSearchMaxPerSession(undefined)).toBe(
+      DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+    );
+    expect(resolveWebSearchMaxPerSession(5)).toBe(5);
+    for (const value of [0, -1, 1.5, Number.NaN, 10_001]) {
+      expect(resolveWebSearchMaxPerSession(value)).toBe(
+        DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+      );
+    }
+  });
+
+  it('skips a call past the cap with a non-error result and sends nothing', async () => {
+    mockCreate.mockImplementation(() => Promise.resolve(answeredStream()));
+    const config = cappedConfig(2);
+
+    const first = await runSearch(config);
+    const second = await runSearch(config);
+    const third = await runSearch(config);
+
+    expect(first.error).toBeUndefined();
+    expect(second.error).toBeUndefined();
+    expect(third.error).toBeUndefined();
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(third.returnDisplay).toBe(
+      'Skipped: session web search budget used (2/2)',
+    );
+    const content = third.llmContent as string;
+    expect(content.startsWith('Web search was not performed:')).toBe(true);
+    expect(content).toContain('(2 of 2 web_search calls)');
+    expect(content).toContain('tools.webSearch.maxPerSession');
+    expect(content).toContain('WEB_SEARCH_MAX_PER_SESSION');
+    // Nothing external reached the model, so no untrusted-content footer.
+    expect(content).not.toContain('[Safety:');
+  });
+
+  it('counts a search that fails, because the request was sent', async () => {
+    mockCreate
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Internal error'), { status: 500 }),
+      )
+      .mockImplementation(() => Promise.resolve(answeredStream()));
+    const config = cappedConfig(2);
+
+    const failed = await runSearch(config);
+    const succeeded = await runSearch(config);
+    const skipped = await runSearch(config);
+
+    expect(failed.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(succeeded.error).toBeUndefined();
+    expect(skipped.returnDisplay).toBe(
+      'Skipped: session web search budget used (2/2)',
+    );
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not count a call the gate turns away before any request', async () => {
+    const usage = { calls: 0 };
+    delete process.env[TEST_ENV_KEY];
+
+    const blocked = await runSearch(cappedConfig(1, usage));
+
+    expect(blocked.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(usage.calls).toBe(0);
+
+    process.env[TEST_ENV_KEY] = 'sk-test';
+    mockCreate.mockImplementation(() => Promise.resolve(answeredStream()));
+    const allowed = await runSearch(cappedConfig(1, usage));
+
+    expect(allowed.error).toBeUndefined();
+    expect(usage.calls).toBe(1);
+  });
+
+  it('lets calls batched in one turn through only up to the cap', async () => {
+    // The check and the increment sit after the last await before the
+    // request; a check before an await would let all three pass.
+    mockCreate.mockImplementation(() => Promise.resolve(answeredStream()));
+    const config = cappedConfig(2);
+
+    const results = await Promise.all([
+      runSearch(config),
+      runSearch(config),
+      runSearch(config),
+    ]);
+
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(
+      results.filter((result) =>
+        String(result.returnDisplay).startsWith('Skipped:'),
+      ),
+    ).toHaveLength(1);
   });
 });

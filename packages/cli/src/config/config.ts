@@ -1030,7 +1030,7 @@ function resolveModelFallbacks(
  * precedence over `tools.webSearch` (mirroring the QWEN_SANDBOX_IMAGE
  * pattern): ENABLE_WEB_SEARCH for the flag, WEB_SEARCH_MODEL for the model
  * selector, WEB_SEARCH_EXTRACTOR for page reading, WEB_SEARCH_TIMEOUT_MS for
- * the per-search budget.
+ * the per-search budget, WEB_SEARCH_MAX_PER_SESSION for the per-session cap.
  *
  * Env-only backend: WEB_SEARCH_BASE_URL mirrors a modelProviders entry's
  * baseUrl for environments that cannot write settings.json; the API key
@@ -1060,6 +1060,12 @@ function resolveWebSearchSettings(
     0,
   );
   const timeoutMs = envTimeoutMs > 0 ? envTimeoutMs : webSearch?.timeoutMs;
+  const envMaxPerSession = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_MAX_PER_SESSION'],
+    0,
+  );
+  const maxPerSession =
+    envMaxPerSession > 0 ? envMaxPerSession : webSearch?.maxPerSession;
   const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
     ? process.env['WEB_SEARCH_API_KEY']?.trim()
@@ -1071,11 +1077,20 @@ function resolveWebSearchSettings(
     model === undefined &&
     webExtractor === undefined &&
     baseUrl === undefined &&
-    timeoutMs === undefined
+    timeoutMs === undefined &&
+    maxPerSession === undefined
   ) {
     return undefined;
   }
-  return { enabled, model, webExtractor, baseUrl, apiKeyEnv, timeoutMs };
+  return {
+    enabled,
+    model,
+    webExtractor,
+    baseUrl,
+    apiKeyEnv,
+    timeoutMs,
+    maxPerSession,
+  };
 }
 
 /**
