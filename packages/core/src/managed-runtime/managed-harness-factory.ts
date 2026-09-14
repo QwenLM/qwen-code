@@ -9,6 +9,7 @@ import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   HARNESS_MODEL_START_PHASES,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
   type HarnessCheckpointV1,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
@@ -37,6 +38,14 @@ export class ManagedHarnessBlockedError extends Error {
   }
 }
 
+export interface HarnessTurnCompleteBoundary {
+  readonly kind: 'turn_complete';
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly activationId: string;
+  readonly epoch: number;
+}
+
 export interface ManagedHarnessHandle {
   /** The activation this handle is allowed to present. */
   readonly activation: {
@@ -55,6 +64,16 @@ export interface ManagedHarnessHandle {
    * separate runner.
    */
   run<T>(agent: () => Promise<T>): Promise<T>;
+  /**
+   * Observes an already-committed turn-complete checkpoint. Does not wait for
+   * an in-flight turn, and does not invent a boundary.
+   */
+  requestBoundary(): Promise<HarnessTurnCompleteBoundary>;
+  /**
+   * Drains this handle after a turn-complete checkpoint. Does not release the
+   * Session writer, Runtime, or activation; a later handle continues.
+   */
+  detach(): Promise<void>;
 }
 
 /**
@@ -70,6 +89,7 @@ export function createManagedHarnessHandle(
 
 class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   private ran = false;
+  private detached = false;
 
   constructor(
     private readonly authority: LocalManagedSessionAuthority,
@@ -80,6 +100,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   ) {}
 
   async ensureRunnable(): Promise<HarnessCheckpointV1> {
+    this.assertNotDetached();
     this.assertCurrentActivation();
     let authorization = await this.authority.harnessRunAuthorization();
     if (authorization.status === 'initial') {
@@ -116,6 +137,56 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     }
     this.ran = true;
     return agent();
+  }
+
+  async requestBoundary(): Promise<HarnessTurnCompleteBoundary> {
+    this.assertNotDetached();
+    this.assertCurrentActivation();
+    const latest = this.authority.latestCheckpoint;
+    if (latest?.boundary !== HARNESS_TURN_COMPLETE_BOUNDARY) {
+      throw new ManagedSessionConflictError(
+        'harness is not at a turn-complete safety point.',
+      );
+    }
+    const authorization = await this.authority.harnessRunAuthorization();
+    if (authorization.status === 'blocked') {
+      throw new ManagedHarnessBlockedError(authorization);
+    }
+    if (authorization.status !== 'runnable') {
+      throw new ManagedHarnessBlockedError({
+        status: 'blocked',
+        reason: 'missing_checkpoint',
+      });
+    }
+    return {
+      kind: 'turn_complete',
+      checkpointId: latest.checkpointId,
+      coveredSequence: latest.coveredSequence,
+      activationId: this.activation.activationId,
+      epoch: this.activation.epoch,
+    };
+  }
+
+  async detach(): Promise<void> {
+    if (this.detached) return;
+    this.assertCurrentActivation();
+    if (
+      this.authority.latestCheckpoint?.boundary !==
+      HARNESS_TURN_COMPLETE_BOUNDARY
+    ) {
+      throw new ManagedSessionConflictError(
+        'harness cannot detach before a turn-complete checkpoint.',
+      );
+    }
+    this.detached = true;
+  }
+
+  private assertNotDetached(): void {
+    if (this.detached) {
+      throw new ManagedSessionConflictError(
+        'harness handle has been detached.',
+      );
+    }
   }
 
   private assertCurrentActivation(): void {

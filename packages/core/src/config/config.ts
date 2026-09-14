@@ -282,6 +282,7 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '../managed-runtime/managed-session-assembly.js';
+import { HARNESS_TURN_COMPLETE_BOUNDARY } from '../managed-runtime/managed-harness-checkpoint.js';
 import {
   createManagedHarnessHandle,
   type ManagedHarnessHandle,
@@ -4958,11 +4959,28 @@ export class Config {
   /**
    * A Managed session may not start a model request until a runnable Harness
    * checkpoint exists. Legal initial starts submit `before_model` first;
-   * opaque or missing continuation is blocked. Legacy sessions are a no-op.
+   * opaque or missing continuation is blocked. After a turn-complete safety
+   * point the drained handle is replaced so the next turn uses a new
+   * activation; the existing checkpoint is not rewritten.
    */
   async ensureManagedHarnessRunnable(): Promise<void> {
     const session = this.managedSession;
     if (session === undefined) return;
+    const handle = this.managedHarness;
+    if (handle !== undefined) {
+      const latest = session.authority.latestCheckpoint;
+      const authorization = await session.authority.harnessRunAuthorization();
+      if (
+        latest?.boundary === HARNESS_TURN_COMPLETE_BOUNDARY &&
+        authorization.status === 'runnable' &&
+        handle.activation.activationId ===
+          authorization.checkpoint.identity.activationId
+      ) {
+        await handle.detach();
+        await session.replaceActivation();
+        this.managedHarness = undefined;
+      }
+    }
     this.managedHarness ??= createManagedHarnessHandle(session);
     await this.managedHarness.ensureRunnable();
   }

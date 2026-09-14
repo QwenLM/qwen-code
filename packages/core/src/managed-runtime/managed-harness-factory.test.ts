@@ -13,7 +13,12 @@ import {
   createManagedHarnessHandle,
   ManagedHarnessBlockedError,
 } from './managed-harness-factory.js';
-import { parseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
+import {
+  createNextTurnReadyHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
+  parseHarnessCheckpointV1,
+} from './managed-harness-checkpoint.js';
 import {
   openManagedSession,
   type ManagedSession,
@@ -93,6 +98,41 @@ function command(operation: string, commandId: string): ManagedSessionCommand {
     sessionKey,
     contentDigest: DIGEST,
   };
+}
+
+async function settleTurnComplete(
+  session: ManagedSession,
+  turnId = 'turn-1',
+): Promise<void> {
+  const resultRef = await session.resources.publish(
+    'managed-turn-result',
+    Buffer.from('{"state":"completed"}', 'utf8'),
+  );
+  await session.authority.commitTurnComplete(
+    command('settleTurn', `settle-${turnId}`),
+    {
+      turn: {
+        turnId,
+        outcome: 'completed',
+        stopReason: 'end_turn',
+        resultRef,
+        occurredAt: 1,
+        eventId: `turn:${turnId}`,
+      },
+      boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+      state: (identity, previous) =>
+        encodeHarnessCheckpointV1(
+          createNextTurnReadyHarnessCheckpoint({
+            previous,
+            ...identity,
+            activationId: session.activation.activationId,
+            turnId,
+            promptId: turnId,
+          }),
+        ),
+    },
+    { class: 'harness', activation: session.activation },
+  );
 }
 
 describe('managed harness factory', () => {
@@ -227,6 +267,61 @@ describe('managed harness factory', () => {
     });
     await expect(handle.ensureRunnable()).rejects.toThrow(
       /not the committed activation/,
+    );
+    await session.close();
+  });
+
+  it('does not treat opening as a turn-complete boundary', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    await expect(handle.requestBoundary()).rejects.toThrow(
+      /not at a turn-complete safety point/,
+    );
+    await expect(handle.detach()).rejects.toThrow(
+      /cannot detach before a turn-complete checkpoint/,
+    );
+    await session.close();
+  });
+
+  it('replaces a drained handle after turn-complete without rewriting the checkpoint', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const firstId = session.authority.latestCheckpoint?.checkpointId;
+    await settleTurnComplete(session);
+    const completeId = session.authority.latestCheckpoint?.checkpointId;
+    expect(completeId).not.toBe(firstId);
+
+    const boundary = await handle.requestBoundary();
+    expect(boundary).toMatchObject({
+      kind: 'turn_complete',
+      checkpointId: completeId,
+      activationId: handle.activation.activationId,
+      epoch: handle.activation.epoch,
+    });
+    await handle.detach();
+    await expect(handle.ensureRunnable()).rejects.toThrow(/detached/);
+
+    const previousActivation = session.activation;
+    const nextActivation = await session.replaceActivation();
+    expect(nextActivation.activationId).not.toBe(
+      previousActivation.activationId,
+    );
+    const stale = createManagedHarnessHandle({
+      authority: session.authority,
+      activation: previousActivation,
+    });
+    await expect(stale.ensureRunnable()).rejects.toThrow(
+      /not the committed activation/,
+    );
+
+    const next = createManagedHarnessHandle(session);
+    const checkpoint = await next.ensureRunnable();
+    expect(checkpoint.identity.checkpointId).toBe(completeId);
+    expect(session.authority.latestCheckpoint?.checkpointId).toBe(completeId);
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_TURN_COMPLETE_BOUNDARY,
     );
     await session.close();
   });

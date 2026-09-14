@@ -53,7 +53,7 @@ export interface ManagedSession {
   readonly authority: LocalManagedSessionAuthority;
   readonly resources: LocalManagedSessionResourceStore;
   readonly sink: ManagedSessionRecordSink;
-  /** The activation this session installed, which its records name. */
+  /** The activation currently advancing this session. */
   readonly activation: {
     readonly activationId: string;
     readonly epoch: number;
@@ -66,6 +66,14 @@ export interface ManagedSession {
    * refused by the fence.
    */
   releaseActivation(): Promise<void>;
+  /**
+   * Releases the current activation and installs a successor. The next Harness
+   * handle must present the returned identity; the sink names it automatically.
+   */
+  replaceActivation(): Promise<{
+    readonly activationId: string;
+    readonly epoch: number;
+  }>;
   /** Seals the writer, leaving the at-rest barrier in place. */
   close(): Promise<void>;
 }
@@ -115,14 +123,15 @@ export async function openManagedSession(
     throw cause;
   }
 
-  const activation = await authority.installActivation({
+  let activation = await authority.installActivation({
     activationId: randomUUID(),
     workerId: options.workerId,
     leaseDurationMs: options.activationLeaseDurationMs,
   });
 
   // Installed before the sink exists, so there is no window in which a record
-  // has no activation to name.
+  // has no activation to name. The callback reads the live binding so a
+  // replacement handle's records name the successor, not the drained one.
   const sink = new ManagedSessionRecordSink(authority, resources, () => ({
     class: 'harness',
     activation,
@@ -132,8 +141,19 @@ export async function openManagedSession(
     authority,
     resources,
     sink,
-    activation,
+    get activation() {
+      return activation;
+    },
     releaseActivation: () => authority.releaseActivation(),
+    async replaceActivation() {
+      await authority.releaseActivation();
+      activation = await authority.installActivation({
+        activationId: randomUUID(),
+        workerId: options.workerId,
+        leaseDurationMs: options.activationLeaseDurationMs,
+      });
+      return activation;
+    },
     // Sealing is the at-rest barrier, but only the lease's owner may end it.
     // A call that owns the whole lifecycle also records the boundary, or the
     // activation would read as abandoned.

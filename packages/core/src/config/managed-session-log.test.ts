@@ -232,6 +232,67 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('replaces the Harness activation after a turn-complete checkpoint', async () => {
+    await withWorkspace(async (activate) => {
+      const fixture = await activate({ managedSessionLog: true });
+      const recorder = fixture.config.getChatRecordingService()!;
+      recorder.recordUserMessage('first turn');
+      await recorder.flush();
+      await fixture.config.ensureManagedHarnessRunnable();
+      recorder.recordTurnResult({
+        promptId: 'turn-1',
+        state: 'completed',
+        endedAt: Date.now(),
+        stopReason: 'end_turn',
+      });
+      await recorder.flush();
+
+      await fixture.config.ensureManagedHarnessRunnable();
+      await fixture.config.ensureManagedHarnessRunnable();
+      recorder.recordUserMessage('second turn');
+      await recorder.flush();
+
+      const after = await transcriptRecords(fixture.transcriptPath);
+      const events = after
+        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
+        .map((entry) => entry['managedSession'] as Record<string, unknown>);
+      const checkpoints = events.filter(
+        (event) => event['kind'] === 'checkpoint.committed',
+      );
+      expect(checkpoints).toHaveLength(2);
+      expect(
+        (checkpoints[1]['payload'] as Record<string, unknown>)['boundary'],
+      ).toBe('turn_complete');
+
+      const activations = events.filter(
+        (event) => event['kind'] === 'activation.changed',
+      );
+      expect(
+        activations.map(
+          (event) =>
+            (event['payload'] as Record<string, unknown>)['phase'] as string,
+        ),
+      ).toEqual(['active', 'released', 'active']);
+      const firstActive = activations[0]['payload'] as Record<string, unknown>;
+      const secondActive = activations[2]['payload'] as Record<string, unknown>;
+      expect(secondActive['activationId']).not.toBe(
+        firstActive['activationId'],
+      );
+      expect(secondActive['epoch']).toBe(2);
+
+      const messages = events.filter(
+        (event) => event['kind'] === 'message.committed',
+      );
+      expect(
+        (messages[messages.length - 1]?.['subject'] as Record<string, unknown>)[
+          'activationId'
+        ],
+      ).toBe(secondActive['activationId']);
+
+      await fixture.config.closeSessionWriter();
+    });
+  });
+
   it('attributes records to the activation it installed and releases it', async () => {
     await withWorkspace(async (activate) => {
       const fixture = await activate({ managedSessionLog: true });

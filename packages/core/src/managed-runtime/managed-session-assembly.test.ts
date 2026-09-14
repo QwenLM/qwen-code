@@ -252,4 +252,30 @@ describe('managed session assembly', () => {
     await session.close();
     await lease.sealForHandoff();
   });
+
+  it('names a replacement activation on later records', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const first = session.activation.activationId;
+    await session.sink.write(record({ uuid: 'rec-user-1' }));
+
+    const replaced = await session.replaceActivation();
+    expect(replaced.activationId).not.toBe(first);
+    expect(session.activation.activationId).toBe(replaced.activationId);
+
+    await session.sink.write(record({ uuid: 'rec-user-2' }));
+    const messages = session.authority
+      .readEvents()
+      .filter((event) => event.kind === 'message.committed');
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.subject).toMatchObject({
+      type: 'activation',
+      activationId: first,
+    });
+    expect(messages[1]?.subject).toMatchObject({
+      type: 'activation',
+      activationId: replaced.activationId,
+    });
+    await session.close();
+  });
 });
