@@ -281,14 +281,33 @@ describe('navigateToDaemon', () => {
     ).toBeNull();
   });
 
-  it('keeps the split set when reconnecting to the page-origin daemon', async () => {
-    const saved = JSON.stringify(['local-session']);
-    window.sessionStorage.setItem('qwen-webshell-split-sessions', saved);
+  it('forgets the split set when switching back to the page-origin daemon', async () => {
+    window.sessionStorage.setItem(
+      'qwen-webshell-split-sessions',
+      JSON.stringify(['remote-session']),
+    );
     const assign = setupPage(
       'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example',
     );
     const mod = await import('./daemon');
     mod.navigateToDaemon('http://localhost:5173');
+    expect(assign).toHaveBeenCalledTimes(1);
+    // A switch back leaves a daemon too: keeping the set would restore these
+    // ids into the page-origin daemon, which 404s on them and then re-saves
+    // the survivors, so the leak would outlive further refreshes.
+    expect(
+      window.sessionStorage.getItem('qwen-webshell-split-sessions'),
+    ).toBeNull();
+  });
+
+  it('keeps the split set when reconnecting to the daemon already in use', async () => {
+    const saved = JSON.stringify(['remote-session']);
+    window.sessionStorage.setItem('qwen-webshell-split-sessions', saved);
+    const assign = setupPage(
+      'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example',
+    );
+    const mod = await import('./daemon');
+    mod.navigateToDaemon('https://remote.example');
     expect(assign).toHaveBeenCalledTimes(1);
     expect(window.sessionStorage.getItem('qwen-webshell-split-sessions')).toBe(
       saved,

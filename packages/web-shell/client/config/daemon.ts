@@ -322,14 +322,18 @@ export function navigateToDaemon(raw: string, token?: string): void {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
   const nextUrl = buildDaemonConnectionUrl(raw, window.location.href);
   if (!daemonOrigin || !nextUrl) return;
+  // Read before the assign: getDaemonBaseUrl() follows the live URL.
+  const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
   confirmDaemonTarget(daemonOrigin);
   // The per-tab split set (App.tsx's refresh restore) is session-scoped state
-  // for the daemon being left: this navigation stays in the same tab on the
-  // page origin, so the entry would survive and boot the new daemon into a
-  // split of sessions it has never had. Keep it for a same-origin reconnect —
-  // that is the case a plain refresh relies on.
-  if (daemonOrigin !== window.location.origin) {
+  // for the daemon being left, and a switch back to the page origin leaves one
+  // just the same: this navigation stays in the same tab, so the entry would
+  // survive and boot the next daemon into a split of sessions it has never
+  // had. Key it on the target changing, not on the next target being remote.
+  // Reconnecting to the target already in use keeps the set — that is the case
+  // a plain refresh relies on.
+  if (daemonOrigin !== previousDaemonOrigin) {
     clearSplitSessions();
   }
   window.location.assign(nextUrl);
