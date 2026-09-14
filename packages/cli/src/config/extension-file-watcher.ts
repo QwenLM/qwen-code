@@ -26,7 +26,12 @@ const EXTENSION_FILES = new Set([
 // Keep these sets in sync with extension directory conventions. New runtime
 // directories must be classified here as either content-auto-refreshable or
 // package-stale.
-const AUTO_REFRESH_DIRS = new Set(['commands', 'skills', 'agents']);
+const AUTO_REFRESH_DIRS = new Set([
+  'commands',
+  'skills',
+  'agents',
+  'workflows',
+]);
 const STALE_DIRS = new Set(['hooks']);
 
 type WatchEvent = 'add' | 'addDir' | 'change' | 'unlink' | 'unlinkDir';

@@ -17,6 +17,7 @@ vi.mock('../../config/extension-runtime-reload.js', () => ({
     commandCount: 2,
     skillCount: 3,
     agentCount: 4,
+    workflowCount: 8,
     hookCount: 5,
     mcpServerCount: 6,
     lspServerCount: 7,
@@ -77,7 +78,7 @@ describe('reloadPluginsCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Reloaded extensions: 1 extension · 2 commands · 3 skills · 4 agents · 5 hooks · 6 extension MCP servers · 7 extension LSP servers',
+        'Reloaded extensions: 1 extension · 2 commands · 3 skills · 4 agents · 8 workflows · 5 hooks · 6 extension MCP servers · 7 extension LSP servers',
     });
   });
 

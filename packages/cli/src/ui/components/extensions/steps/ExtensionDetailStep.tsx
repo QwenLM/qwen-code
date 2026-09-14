@@ -125,6 +125,15 @@ export const ExtensionDetailStep = ({
           </Box>
         )}
 
+        {ext.workflows && ext.workflows.length > 0 && (
+          <Box>
+            <Box width={LABEL_WIDTH} flexShrink={0}>
+              <Text color={theme.text.primary}>{t('Workflows:')}</Text>
+            </Box>
+            <Text>{ext.workflows.map((w) => w.name).join(', ')}</Text>
+          </Box>
+        )}
+
         {ext.resolvedSettings && ext.resolvedSettings.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             <Box width={LABEL_WIDTH} flexShrink={0}>

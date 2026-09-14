@@ -907,6 +907,8 @@ export default {
     'This extension will install the following skills:',
   'This extension will install the following subagents:':
     'This extension will install the following subagents:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'This extension will install the following workflows (JavaScript scripts that can start subagents):',
   'Installation cancelled for "{{name}}".':
     'Installation cancelled for "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -986,6 +988,7 @@ export default {
   'Context files:': 'Context files:',
   'Skills:': 'Skills:',
   'Agents:': 'Agents:',
+  'Workflows:': 'Workflows:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.': 'Link extension failed to install.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -2763,6 +2766,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

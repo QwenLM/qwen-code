@@ -327,6 +327,24 @@ describe('CommandService', () => {
     expect(syncExtension?.extensionName).toBe('git-helper');
   });
 
+  it('keeps both an extension skill and a same-named extension workflow', async () => {
+    const skill = skillCommand('gcp:audit');
+    const workflow: SlashCommand = {
+      ...createMockCommand('gcp:audit', CommandKind.FILE),
+      source: 'workflow-command',
+      extensionName: 'gcp',
+    };
+    const service = await CommandService.create(
+      [new MockCommandLoader([skill]), new MockCommandLoader([workflow])],
+      new AbortController().signal,
+    );
+
+    expect(commandNamed(service, 'gcp:audit')?.kind).toBe(CommandKind.SKILL);
+    expect(commandNamed(service, 'gcp.gcp:audit')?.source).toBe(
+      'workflow-command',
+    );
+  });
+
   it('should handle user/project command override correctly', async () => {
     const builtinCommand = createMockCommand('help', CommandKind.BUILT_IN);
     const userCommand = createMockCommand('help', CommandKind.FILE);

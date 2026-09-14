@@ -77,6 +77,60 @@ describe('SavedWorkflowLoader', () => {
     expect(c.supportedModes).toEqual(['interactive']);
   });
 
+  it('builds an extension workflow command tagged with its extension', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
+        source: 'extension',
+        extensionName: 'gcp',
+        extensionDisplayName: 'Google Cloud',
+        description: 'Audits the project',
+      }),
+      entry({ name: 'deep-research', source: 'project' }),
+    ]);
+    const [extensionCmd, projectCmd] = await new SavedWorkflowLoader(
+      makeConfig(),
+    ).loadCommands(signal);
+
+    expect(extensionCmd).toMatchObject({
+      name: 'gcp:audit',
+      description: '[Google Cloud] Audits the project',
+      kind: CommandKind.FILE,
+      source: 'workflow-command',
+      sourceLabel: 'Workflow',
+      sourceDetail: 'extension',
+      extensionName: 'gcp',
+      supportedModes: ['interactive'],
+    });
+    expect(extensionCmd.modelInvocable).toBeUndefined();
+    expect(await extensionCmd.action!(ctx, '')).toEqual({
+      type: 'tool',
+      toolName: 'workflow',
+      toolArgs: { scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js' },
+    });
+    // Project and user workflows keep their existing shape.
+    expect(projectCmd.description).toBe(
+      'Run the "deep-research" saved workflow (project)',
+    );
+    expect('extensionName' in projectCmd).toBe(false);
+  });
+
+  it('tags an extension workflow with its manifest name when it has no display name', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        source: 'extension',
+        extensionName: 'gcp',
+        description: 'Audits the project',
+      }),
+    ]);
+    const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
+      signal,
+    );
+    expect(cmd.description).toBe('[gcp] Audits the project');
+  });
+
   it('action dispatches the workflow tool with the scriptPath', async () => {
     listMock.mockResolvedValue([entry()]);
     const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(

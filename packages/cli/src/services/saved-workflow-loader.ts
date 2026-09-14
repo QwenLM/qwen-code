@@ -61,15 +61,29 @@ export class SavedWorkflowLoader implements ICommandLoader {
   }
 
   private toCommand(entry: SavedWorkflowEntry): SlashCommand {
+    const extensionOwner =
+      entry.source === 'extension'
+        ? entry.extensionDisplayName || entry.extensionName
+        : undefined;
     return {
       name: entry.name,
-      description: `Run the "${entry.name}" saved workflow (${entry.source})`,
+      // An extension workflow reads like an extension command: its own
+      // description, tagged with the extension that ships it.
+      description:
+        extensionOwner && entry.description
+          ? `[${extensionOwner}] ${entry.description}`
+          : `Run the "${entry.name}" saved workflow (${entry.source})`,
       // File-derived command (all execution modes via commandUtils fallback);
       // `source` carries the distinct workflow identity for display/telemetry.
       kind: CommandKind.FILE,
       source: 'workflow-command',
       sourceLabel: 'Workflow',
-      sourceDetail: entry.source, // 'project' | 'user'
+      sourceDetail: entry.source, // 'project' | 'user' | 'extension'
+      // Lets `CommandService` rename this command instead of silently
+      // replacing a same-named extension command or skill.
+      ...(entry.source === 'extension' && entry.extensionName
+        ? { extensionName: entry.extensionName }
+        : {}),
       // Interactive only: the action returns a `{type:'tool'}` dispatch, which
       // the non-interactive command adapter converts to `unsupported`. Listing
       // these in headless / ACP modes would advertise a command that then fails
