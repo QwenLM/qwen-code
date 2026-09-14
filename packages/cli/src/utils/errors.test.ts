@@ -646,6 +646,7 @@ describe('errors', () => {
         const reason = written
           .slice('Warning: Tool "tool" was not run: '.length)
           .replace(/\n\n$/, '');
+        // eslint-disable-next-line no-control-regex
         expect(reason).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
         expect(reason).not.toMatch(/\p{Cf}/u);
         expect(reason.startsWith('blocked by hook x')).toBe(true);
