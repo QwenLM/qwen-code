@@ -57,6 +57,13 @@ export type PromptCacheSharingParameters = GenerateContentParameters & {
    */
   promptCacheSharing?: boolean;
   /**
+   * Route this one request through the provider's Batch API (half price,
+   * up to 24h) instead of the realtime endpoint. Only the main turn of a
+   * headless `--batch` run sets it; side calls never carry it, so they stay
+   * realtime. Local control signal, never sent on the wire.
+   */
+  executionMode?: 'batch';
+  /**
    * Local control signal, never sent on the wire: true when a streaming send
    * is a transport-continuation attempt resuming an answer whose prefix was
    * already delivered (LlmChat's transportContinuationPrefix). The OpenAI

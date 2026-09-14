@@ -68,6 +68,13 @@ P_OUT=4 CACHE_RATIO=0.2 node docs/verification/batch-api/02-cache.mjs
 `00` 的管线验证也可以直接用它做：把 `out/00-plumbing.jsonl` 喂给 `qwen batch submit`，再 `status` / `fetch`。
 记得 body 里显式写 `enable_thinking: false`，否则新模型默认开 thinking。
 
+## `--batch`（置换 v1）的验收
+
+`qwen -p "..." --batch` 已实现：主循环每一跳走 Batch API，side-call / 压缩 / 子 agent 仍是实时。
+它的验收就是 01：如果 01 通，跑一次带工具调用的 `qwen -p "列出当前目录文件并总结" --batch`，
+应看到 stderr 打出 `[batch] submitted batch_xxx`，等待后正常完成一轮工具调用。
+TUI 下 `--batch` 会被 `.check()` 拒绝；QWEN_OAUTH 下会在第一次请求时报错。
+
 ## 判定
 
 | 01 | 02 | 结论 |

@@ -270,7 +270,8 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 | 本评估 | `docs/plans/2026-09-14-batch-api-feasibility.md` | §1-§8 完成 |
 | 探测脚本 + README | `docs/verification/batch-api/` | 语法检查过，无 key 路径跑过，**未对线上运行** |
 | 草稿 PR | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`） | 等测试结果 |
-| `qwen batch` 命令（形态 A） | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`） | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖；不动 `ContentGenerator` / `pipeline.ts` |
+| `qwen batch` 命令（形态 A） | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`） | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖 |
+| headless `--batch` 置换（§6）v1 | `core/openaiContentGenerator/batch.ts`（运行器）、`pipeline.ts` 两处分支、`contentGenerator.ts` 的 `executionMode`、`llm-chat.ts` 主循环设置、`Config.getBatchMode()`、CLI `--batch` flag + `.check()` 门禁 | 已实现 v1；**未对线上跑，01 探测是验收标准** |
 
 ### 9.2 立刻要做的事（按顺序）
 
@@ -298,7 +299,13 @@ nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
 
 03 不改变方向，只决定 §7 的经验 ETA 数值和产品文案里怎么描述等待。
 
-### 9.4 如果走置换，改动点清单（不要扩大）
+### 9.4 置换——v1 已实现，对照清单
+
+v1 落地了第 1、2、4、5（入口门禁 + OAuth 拒绝）、6（自动成立：side-call 不带 `executionMode`）、10 条；
+第 3（`batch_id` 持久化 / resume）、7（显式 `enable_thinking`）、8（计量）、9 的删文件（已做）之外的部分**留到 01 验收通过后**。
+进程中途挂掉时 batch id 已打到 stderr，用 `qwen batch fetch <id>` 手动收。
+
+原始清单（保留作对照）：
 
 1. **请求级开关**：`GenerateContentParameters.config` 加 `executionMode?: 'batch'`，
    只由主循环那一次 `generateContent` 设置。原因见 §8.2——`BaseLlmClient` 与主循环共用
