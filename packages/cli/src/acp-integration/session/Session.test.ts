@@ -14271,7 +14271,7 @@ describe('Session', () => {
       // A background shell a subagent started exits while still inside the
       // subagent's AsyncLocalStorage frame; the shell registry deliberately
       // does not exit it (unlike the task/workflow registries).
-      runWithAgentContext('sub-agent-1', () =>
+      await runWithAgentContext('sub-agent-1', async () =>
         callback(
           'Background shell "npm test" completed.',
           '<task-notification><kind>shell</kind></task-notification>',
