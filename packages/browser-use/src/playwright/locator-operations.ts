@@ -39,7 +39,9 @@ export async function executeLocatorOperation(
   const options = { timeout };
   switch (method) {
     case 'locator.count':
-      return await locator.count();
+      // count accepts no timeout and a dead renderer never answers it, so
+      // bound the read by the caller's budget.
+      return await withTimeout(locator.count(), timeout);
     case 'locator.evaluate':
       return jsonResult(
         await evaluateLocator(
@@ -61,15 +63,26 @@ export async function executeLocatorOperation(
     case 'locator.allTextContents': {
       // Playwright's allTextContents takes no options and never waits, so
       // honor the caller's budget with an attach wait on the first match; a
-      // locator that never attaches still resolves [].
-      await locator
+      // locator that never attaches still resolves []. The read accepts no
+      // timeout either and a dead renderer never answers it, so race it
+      // against the same deadline — a second window would double the
+      // documented read budget. A wait that consumed the budget settled the
+      // outcome already: [] without reading.
+      const deadline = Date.now() + timeout;
+      const attached = await locator
         .first()
         .waitFor({ state: 'attached', timeout })
+        .then(() => true)
         .catch((error: unknown) => {
-          if (error instanceof Error && error.name === 'TimeoutError') return;
+          if (error instanceof Error && error.name === 'TimeoutError')
+            return false;
           throw error;
         });
-      return await locator.allTextContents();
+      if (!attached) return [];
+      return await withTimeout(
+        locator.allTextContents(),
+        deadline - Date.now(),
+      );
     }
     case 'locator.innerText':
       return await locator.innerText(options);

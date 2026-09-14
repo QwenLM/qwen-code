@@ -446,6 +446,20 @@ describe('buildLocator', () => {
   });
 });
 
+describe('locator.count', () => {
+  it('bounds the read by the caller deadline when the page stops answering', async () => {
+    const locator = { count: vi.fn(() => new Promise<number>(() => {})) };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    await expect(
+      executeLocatorOperation(
+        'locator.count',
+        { steps: [{ kind: 'locator', selector: '.row' }], timeoutMs: 50 },
+        tab,
+      ),
+    ).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' });
+  });
+});
+
 describe('locator.allTextContents', () => {
   function textsFixture() {
     const handle = { waitFor: vi.fn(async () => undefined) };
@@ -489,6 +503,42 @@ describe('locator.allTextContents', () => {
     await expect(
       executeLocatorOperation('locator.allTextContents', f.args, f.tab),
     ).rejects.toThrow('Target crashed');
+  });
+
+  it('bounds the read by the caller deadline when the page stops answering', async () => {
+    const f = textsFixture();
+    f.locator.allTextContents.mockReturnValue(new Promise<string[]>(() => {}));
+    await expect(
+      executeLocatorOperation('locator.allTextContents', f.args, f.tab),
+    ).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' });
+  });
+
+  it('resolves [] without reading once the attach wait consumes the budget', async () => {
+    const f = textsFixture();
+    f.handle.waitFor.mockImplementation(
+      () =>
+        new Promise<undefined>((_resolve, reject) =>
+          setTimeout(() => {
+            const timeout = new Error('Timeout 30ms exceeded');
+            timeout.name = 'TimeoutError';
+            reject(timeout);
+          }, 30),
+        ),
+    );
+    f.locator.allTextContents.mockImplementation(
+      () =>
+        new Promise<string[]>((resolve) =>
+          setTimeout(() => resolve(['late']), 5),
+        ),
+    );
+    await expect(
+      executeLocatorOperation(
+        'locator.allTextContents',
+        { ...f.args, timeoutMs: 30 },
+        f.tab,
+      ),
+    ).resolves.toEqual([]);
+    expect(f.locator.allTextContents).not.toHaveBeenCalled();
   });
 });
 
