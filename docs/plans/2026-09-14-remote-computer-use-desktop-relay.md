@@ -1,156 +1,158 @@
-# 远程 Qwen Code 操作本地桌面机：中继 node_repl
+# 远程 Qwen Code 使用本地桌面机：launchd 按需拉起的 node_repl 中继
 
-> 状态：方案草案 v2，未实现。v1（三个方案、中继驱动）被本版替换，替换原因见 §1。桌面侧的中继进程定为 `qwen bridge` 子命令，不做独立 app，不限平台（2026-09-14 维护者决定，见 §2 平台范围、§3.1）。
-> 基线：`origin/main` @ `c666ec1a0a`（2026-09-14）。以下结论全部读自代码和设计文档，未构建、未运行；本环境没有 Mac，需要真机的步骤见 `docs/verification/remote-computer-use/README.md`。
-> 关联：#5626（反向工具通道）、#11548（Web Shell 连接远程 daemon）、#11475（远程 daemon 工作流）、`docs/design/2026-09-03-client-filesystem-bridge.md`、`docs/design/2026-08-23-computer-use-skill.md`、`docs/users/features/computer-use.md`
+> 状态：v3，已实现（本 PR），未在真机上跑过。v1（中继驱动守护进程）和 v2（`qwen bridge` 子命令）都被替换，原因见 §1、§2。
+> 基线：`origin/main` @ `87437db784`（2026-09-14）。代码结论读自这个版本；真机验证步骤见 `docs/verification/remote-computer-use/README.md`。
+> 关联：#5626（反向工具通道）、#10962（本地文件桥）、#11548（Web Shell 连接远程 daemon）、#11475（远程 daemon 工作流）、`docs/users/features/computer-use.md`
 
-## 0. 一句话结论
+## 0. 结论
 
-可以做：把 skill 依赖的 `node_repl`（连同 SDK 和内嵌驱动）整套放在用户面前那台有图形会话的机器上（下称桌面机），通过 `qwen serve` 的反向工具通道按会话注册给远端会话。远端 skill 几乎不用改。
+用户面前那台有图形会话的机器（下称桌面机）把自己的 `node_repl`（连同 `@qwen-code/cua-sdk` 和内嵌驱动）借给一个远端会话。三个部件：
 
-缺三样东西：
+1. **桌面机上一次性安装**：`npx -y @qwen-code/node-repl-mcp@latest desktop-relay install`。它把运行时装到 `~/.qwen/desktop-relay`，并向 launchd 注册 `127.0.0.1:47821` 上的 socket（inetd 模式）。平时没有任何进程；有连接进来时 launchd 才拉起一个短命进程。
+2. **Web Shell 的“使用这台电脑”入口**：页面把 daemon 地址、`sessionId` 和 token 交给本机的中继；中继在桌面机上弹出原生确认框；用户允许后，中继拉起 `node_repl`，通过 daemon 的反向工具通道按会话注册给这一个会话。
+3. **终端 SSH 路径**：用 `RemoteForward` 把开发机上的一个 socket 转发到同一个端口，远端把它注册成 `node-repl` MCP server。第一次 `tools/call` 时弹确认框。
 
-1. 桌面机上的一个中继进程，做成 `qwen bridge` 子命令，不做独立 app：拉起本地 `node_repl`，连远端 `/acp`，中继 MCP 帧；
-2. 一个把中继进程绑定到远端具体会话的配对入口；
-3. skill 读参考文档的方式要改成不经过 `node_repl`。
+远端 skill 不用改：main 上的 `SKILL.md` 已经写明参考文档留在托管 skill 的机器上，读不到时用 `read_file`。
 
-## 1. 为什么 v1 的三个方案都不对
+## 1. 为什么中继的是 node_repl
 
-v1 把"驱动守护进程 `qwen-cua-driver serve`"当成 computer use 的核心，围绕它设计了三个方案：驱动 HTTP MCP 走 SSH 隧道（A）、SDK 经转发的 socket 连守护进程（B）、Mac 侧进程中继 `qwen-cua-driver mcp`（C）。复查代码后发现前提就错了：
+- skill 的常规路径 `ComputerUse.create()` 返回 `DriverBackend::Embedded`：驱动以原生库形式跑在 `node_repl` 进程里，不经过 `qwen-cua-driver` 守护进程。TCC 授权落在拉起 `node_repl` 的进程身份上。
+- `ComputerUse.connect({ socketPath })` 发 `trusted_session_begin`，standalone 守护进程只接受“原始的嵌入宿主连接”（`cua-driver/src/serve.rs:787`，错误码 77），经 SSH 转发的连接永远不满足。
+- 守护进程的 HTTP MCP 是给外部 agent 用的原始工具面，走它会绕过 #9856 之后的 skill 层。
 
-- **skill 的常规路径不经过守护进程。** `ComputerUse.create()` 调 `CuaDriver.createConfigured`，返回 `DriverBackend::Embedded`（`cua-driver-sdk/src/lib.rs` 的 `create_configured`）：驱动以原生库形式在 `node_repl` 进程里内嵌运行。SDK README 也写明 "In-process use inherits the host process's platform accessibility permissions"。所以 TCC 授权落在拉起 `node_repl` 的进程身份上，不是 `QwenCuaDriver.app`。
-- **方案 B 不成立。** `ComputerUse.connect({ socketPath })` 向守护进程发 `trusted_session_begin`（`cua-driver-sdk/src/service_session.rs:38`），而守护进程只接受"原始的嵌入宿主连接"（`cua-driver/src/serve.rs:787`，错误码 77）：要求 `CUA_DRIVER_EMBEDDED=1` 且对端 pid 等于守护进程的父进程 pid（`serve.rs:524`）。经 SSH 转发的连接对端是 `ssh` 进程，永远不满足；就算在同一台 Mac 上，standalone 守护进程也会拒绝。`connect()` 上方的注释称之为"released socket clients 的临时兼容路径"（`lib.rs:901`）。v1 事实第 6 条据此作废。
-- **方案 A 和 C 中继的是另一条产品线。** 守护进程的 `call` 和 HTTP MCP 暴露的是给外部 agent 用的原始工具面（`qwen-cua-driver mcp`），不是 skill 的 App API。走这条路会绕过 #9856 之后的整个 skill 层，模型拿到的是原始的点击和截图，`references/macos.md` 里的工作流全部失效。
+所以要搬的是 `node_repl` 这个 MCP server，而不是驱动。
 
-结论：远程化的对象是 `node_repl`，不是驱动。
+## 2. 形态是怎么定下来的
 
-## 2. 原理
+| 候选                              | 否决理由                                                                      |
+| --------------------------------- | ----------------------------------------------------------------------------- |
+| 独立的桌面 app（签名、菜单栏）    | 要用户额外装一个 app                                                          |
+| `qwen bridge` 子命令              | 每次使用都要在桌面机上敲命令，不是开箱即用                                    |
+| 桌面机上常驻本地 `qwen serve`     | 浏览器用户为此多跑一个服务，不合适                                            |
+| 本地 TUI 连远端 daemon            | TUI 今天没有这种模式，离本需求太远                                            |
+| **launchd socket 激活（本方案）** | 一次性安装，之后零常驻进程；浏览器里点按钮即可；SSH 终端路径复用同一个 socket |
 
-Computer use 是一个循环：观察 → 模型决策 → 发出工具调用 → 驱动在本机执行 → 再观察。模型从不直接接触机器，只输出结构化的工具调用。
+有一个事实绕不开：浏览器页面不能读别的 app 的界面、也不能替用户点鼠标，所以桌面机上必须有一个原生进程充当“桌面”这项能力的服务端。本方案让这个进程只在需要时存在。
 
-当前链路全部在同一台机器上：
+## 3. 实现
 
-```text
-computer-use skill → node_repl MCP（stdio）→ @qwen-code/cua-sdk
-  → 内嵌驱动（原生库，同进程）→ AX / CGEvent
-```
-
-`node_repl` 及其下游必须跑在被控机器的图形会话里，并以获得 TCC 授权的进程身份运行；agent 循环放在哪里都行。两者之间只隔着一层 MCP。远程控制，就是把 `node_repl` 这个 MCP server 搬到 Mac 上，再把它的调用通道搬到网络上。
-
-skill 已经预留了这种情形：它按"已连接驱动返回的平台"选择工作流（"A connected driver may control a different machine"，`SKILL.md:72`），bootstrap 也只在"`node_repl` is unavailable"时才执行（`SKILL.md:16`）。
-
-**平台范围。** 这不是 macOS 专属方案，而是"有图形会话的机器"方案：中继进程只做 MCP 帧的搬运，没有任何平台相关代码；被控端的差异由 SDK 的 `getPlatform()` 和 skill 的 `references/macos.md`、`references/windows-linux.md` 处理，SDK 的原生库也有 darwin、win32、linux 三种目标（事实 6）。macOS 是本轮核实和验证的平台，因为授权模型（TCC）的事实是在 macOS 代码路径里读出来的；Windows 和 Linux 桌面作为被控端待后续验证。
-
-## 3. 方案：`qwen bridge` 在桌面机上中继 node_repl
+### 3.1 部件
 
 ```text
-远端 Linux                                   本地桌面机（终端）
-qwen serve daemon                            qwen bridge
-  /acp WS  <------- 子命令主动连出 ------------  ├─ ACP initialize
-  ClientMcpWsConnection                          ├─ mcp_register {server:'node-repl', sessionId}
-  → addSessionRuntimeMcpServer(sessionId)        ├─ mcp_message <-> node_repl MCP（stdio 子进程）
-ACP 子进程：该会话里出现 node_repl 工具            │     └─ @qwen-code/cua-sdk → 内嵌驱动 → AX
-skill 看到 node_repl 可用，跳过 bootstrap          └─ Ctrl-C 即停止
+桌面机                                                     远端开发机
+浏览器 Web Shell ──(1) POST http://127.0.0.1:47821/connect
+                        │
+launchd（inetd 模式）拉起：node-repl-mcp desktop-relay agent
+   ├─ 原生确认框（osascript）
+   ├─ 拉起 node_repl（stdio，cwd = ~/.qwen/desktop-relay）
+   └─ (2) WebSocket /acp ────────────────────────────►  qwen serve（QWEN_SERVE_CLIENT_MCP_OVER_WS=1）
+         ACP initialize → mcp_register {server:'node-repl', sessionId}
+         mcp_message ⇄ node_repl                         该会话里出现 node_repl 工具
 ```
 
-桌面机主动连出，是因为它通常在 NAT 后面，开发机才有可达入口；反向工具通道正是为"daemon 在远端、能力在本地"设计的，本地文件桥（#10962）已经用它跑通了同类问题。
+代码都在 `packages/node-repl/src/desktop-relay/`，入口是 `node-repl-mcp desktop-relay <command>`（`src/index.ts` 按参数动态加载，普通 MCP 模式不受影响）：
 
-### 3.1 中继进程的形态与职责
+| 文件                 | 作用                                                                                                      |
+| -------------------- | --------------------------------------------------------------------------------------------------------- |
+| `cli.ts`             | `install` / `uninstall` / `status` / `socket <path>`，以及 launchd 调用的 `agent`                         |
+| `launchd.ts`         | 生成 LaunchAgent plist（`Sockets` + `inetdCompatibility { Wait: false }`），`launchctl bootstrap/bootout` |
+| `agent.ts`           | 一条连接的处理：按首字节区分 HTTP 与原始 JSON-RPC；HTTP 路由；原始模式的延迟确认                          |
+| `http.ts`            | 单请求的 HTTP/1.1 解析与响应（`Connection: close`）                                                       |
+| `consent.ts`         | 原生确认框与通知（`osascript`，消息作为参数传入，不拼进脚本）                                             |
+| `acp-relay.ts`       | 反向工具通道客户端：initialize、按会话注册、重试预热、应答 `mcp_message`                                  |
+| `mcp-child-relay.ts` | 一个 `node_repl` 子进程服务多个 MCP 客户端                                                                |
+| `runtime.ts`         | 生产环境接线：拉起子进程、`ws` 连接、`active.json` 状态文件、中继主流程                                   |
 
-**形态（已决定）**：`qwen` 的一个子命令，形如 `qwen bridge --daemon <url> --token <t> --session <id>`，在桌面机的终端里运行，实现放在 `packages/cli/src/commands/bridge.ts`，与现有的 `serve`、`mcp`、`channel` 并列。对已经装了 qwen 的开发者零新增安装。不做独立 app、不做签名与公证、不做菜单栏界面。理由：今天本地 computer use 就是 `qwen` 在终端里拉起 `node_repl`，TCC 授权记在终端名下；子命令方式与它完全对等，没有新增的授权身份或安装步骤。
+### 3.2 一条连接的处理（`agent.ts`）
 
-中继进程自己不实现 computer use。它只做中继。
+launchd 的 inetd 模式把接受的连接作为新进程的 stdin/stdout。进程先读首字节：
 
-1. **拉起本地 `node_repl`**：`npx -y @qwen-code/node-repl-mcp@<版本>`（stdio），版本与 skill bootstrap 里写的一致；确保 `@qwen-code/cua-sdk` 已安装（它的 postinstall 会从 GitHub Releases 拉当前平台的原生库，`typescript/scripts/install-native.mjs:24`）。
-2. **主动连出**：用 WebSocket 连远端 `/acp` 并带上 token。非浏览器客户端可以直接用 `Authorization` 头，也可以用 `qwen-bearer.*` 子协议。30 秒内要完成 ACP `initialize`，否则 daemon 会关闭这个未初始化的连接。
-3. **会话级注册**：发 `mcp_register { server: 'node-repl', sessionId }`，必须带 `sessionId`。收到 `register_failed: No live ACP channel` 时，先调 `POST /workspace/acp/preheat` 预热再重试。
-4. **中继**：把 `mcp_message { id, server, payload }` 里的 `payload` 交给本地 `node_repl` 子进程，再按原来的 `id` 回传结果。一次注册会触发 N+1 轮完整握手（N 是活跃会话数），`node_repl` 是单连接 stdio，所以中继层要能重复应答 `initialize` 和 `tools/list`。
-5. **权限**：TCC 授权记在拉起 `node_repl` 的进程身份上（§1）。子命令从终端启动，授权记在终端名下，与本地 computer use 一致；用户已经给终端开过辅助功能和屏幕录制的话，不需要再授权。首次运行时把这一点打印出来。
-6. **本地刹车**：远端的审批发生在开发机的 Web Shell 上；那个会话如果开了 YOLO，就不会再询问。桌面机这边的否决权就是终端里的 Ctrl-C：进程退出，WebSocket 断开，daemon 自动撤掉这个 server，远端下一次调用立即失败。退出前尽量先发 `mcp_unregister`，让远端得到干净的错误而不是超时。
-7. **连接生命周期**：断线后退避重连、处理睡眠唤醒、一台桌面机只跑一个实例。WebSocket 断开时，daemon 会自动撤掉这个 server。
+- **HTTP**（浏览器）：
+  - `Host` 必须是 `127.0.0.1:47821` 或 `localhost:47821`，否则 421。这挡住 DNS rebinding。
+  - `OPTIONS` 预检：回显 `Origin`，并带 `Access-Control-Allow-Private-Network: true`（Chrome 对“公网页面访问回环地址”的要求）。
+  - `GET /status`：返回版本；只有发起连接的那个 `Origin` 能看到当前连接的会话和阶段。
+  - `POST /connect`：必须有合法的 web `Origin`；校验 body（daemon 地址只允许 http/https、不带凭据；`sessionId`；可选 token 和 workspace）；**弹原生确认框**；拒绝或超时返回 403；允许后结束上一个中继（一台机器只有一个），写 `active.json`（不含 token），回 202，然后在同一个进程里跑中继，直到结束。
+  - `POST /disconnect`：只接受发起连接的 `Origin`，给中继进程发 SIGTERM。
+- **原始 JSON-RPC**（SSH 转发过来的 MCP 客户端）：拉起 `node_repl` 直接服务。握手和 `tools/list` 不需要确认；**第一次 `tools/call` 时弹确认框**，拒绝后这条连接上的所有 `tools/call` 都返回错误。这样远端 qwen 启动时不会弹框。
 
-### 3.2 远端侧的改动
+### 3.3 一个 node_repl 服务多个客户端（`mcp-child-relay.ts`）
 
-- **参考文档的读取**（确定要改）：skill 现在让 `node_repl` 用 `readFile(`${skillBase}/references/<platform>.md`)` 读参考文档（`SKILL.md:31-49`）。`node_repl` 跑在桌面机上时，这个远端路径在桌面机上不存在。改成用远端的 `read_file` 工具读，不经过 `node_repl`。
-- **bootstrap 不需要改**：skill 只在 `node_repl` 不可用时才安装；远端会话里已经有中继进程注册的 `node_repl`，就不会在 Linux 上执行 `qwen mcp add` 和 `npm install`。要在原型里确认模型确实这样做。
-- **同名遮蔽**：如果 Linux 用户自己也配过 `node-repl`，会话级运行时注册的同名 server 会遮蔽设置里的那一项（`McpClientManager.addRuntimeMcpServer` 的 shadow-over-settings 检测，`packages/core/src/tools/mcp-client-manager.ts`），不是拒绝。这正是想要的路由行为；但"工具名 `node_repl` 最终解析到遮蔽者"还没有在运行中确认。
+daemon 为每个活跃会话加一个用于发现的 MCP 客户端，经同一个注册接入，每个客户端的请求 id 都从 0 开始；而 `node_repl` 是只服务一个客户端的 stdio server。所以：
 
-### 3.3 配对（需要新设计）
+- 第一个 `initialize` 转发给子进程，之后的用缓存结果应答；`notifications/initialized` 只转发一次；
+- 请求 id 改写成中继自己的编号，回复时还原；`notifications/cancelled` 的 `requestId` 同样改写；
+- 子进程发起的请求一律回 -32601（反向通道只承载 daemon 发起的请求），通知丢弃；
+- 回复超过 9 MB 时换成错误（daemon 的 `/acp` 单帧上限 10 MB），提示模型减少输出，比如缩小截图；
+- 子进程退出后，挂起的和之后的请求都返回错误。
 
-本地文件桥运行在会话页面里，天然知道 `sessionId`；独立的中继进程不知道。需要在远端 Web Shell 的会话里提供一个"连接我的桌面"入口，把 daemon 地址、`sessionId` 和一次性凭据交给中继进程，形式可以是 deep link 或配对码。
+### 3.4 反向通道客户端（`acp-relay.ts`）
 
-#11548 让独立 Web Shell 能连到远程 daemon，是这个入口最自然的位置：远程开发时用户面前就是桌面机上的浏览器 Web Shell，页面知道 daemon 地址和当前 `sessionId`。但 #11548 本身没有按会话绑定或一次性凭据的逻辑，它用的是 daemon 的长期 bearer token，中继进程的凭据不应复用它。daemon 的 LAN listener 已经要求升级请求携带配对凭据、不接受运行时 token，可以参考那套机制。具体形态待定。
+行为照搬 Web Shell 本地文件桥（`bridge-client.ts`）实测过的规则：30 秒内完成 ACP `initialize`；`register_failed` 时先预热再重试（主工作区用 `POST /workspace/acp/preheat`，其他工作区用 `POST /workspaces/:w/runtime/ensure`），最多 6 次；`already_registered` 时等待而不消耗重试次数；`rate_limited` 在注册阶段计入重试，连接后忽略。
 
-#11548 还划了一条要先对齐的边界：连跨来源 daemon 时不挂载浏览器本地文件桥，理由是本机目录不应交给远程 daemon。computer use 交出去的是本机的键盘、鼠标和屏幕，风险更高，所以配对必须是明确的授权动作，不能只是一个按钮。
+有一处刻意不同：**连接断开即结束，不自动重连**。桌面控制权不会在没有新的确认的情况下恢复。
 
-### 3.4 安全
+非浏览器客户端直接用 `Authorization: Bearer` 头；`ws` 默认不发 `Origin`，所以 daemon 的跨站检查不适用。
 
-- 这等于让远端机器控制本机的键盘和鼠标。
-- 注册必须是会话级的。workspace 级注册会扩散到同一 workspace 的所有会话，包括钉钉等渠道驱动的会话，以及之后新建的会话。
-- 跨会话调用已经由 sender registry 硬拒绝。
-- 残余风险：同一 workspace 内，任何通过鉴权的 WebSocket 客户端都能绑定到该 workspace 的任意会话。文件桥 v1 接受了这个风险；对 computer use 来说风险更高，所以配对凭据应该只对单个会话有效。
+### 3.5 Web Shell 入口
 
-## 4. 已有零件与缺口
+`packages/web-shell/client/components/DesktopRelayControl.tsx`，放在侧边栏底部“本地文件”旁边（桌面端外壳默认隐藏，因为它的 daemon 本来就在本机）：
 
-| 零件                     | 位置                                                                                | 已提供                                                                   | 远程场景的缺口                                 |
-| ------------------------ | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------- |
-| node_repl MCP server     | `packages/node-repl`（npm `@qwen-code/node-repl-mcp`）                              | stdio MCP，工具名 `node_repl`（`src/mcp-server.ts:179`），状态跨调用持久 | 只能被同机进程拉起                             |
-| cua-sdk 内嵌驱动         | `packages/cua-driver/typescript`（npm `@qwen-code/cua-sdk`）                        | `create()` 在进程内运行驱动，平台由 `getPlatform()` 返回                 | 无；它就该留在桌面机上                         |
-| 反向工具通道             | `packages/cli/src/serve/acp-http/client-mcp-ws.ts`、`client-mcp-sender-registry.ts` | 客户端托管 MCP server，会话级注册，跨会话调用硬拒绝                      | 目前只有本地文件桥这一个客户端                 |
-| 反向通道的客户端参考实现 | `packages/web-shell/client/local-files/bridge-client.ts`                            | `/acp` 连接、ACP initialize、`mcp_register`、预热重试、Web Locks 选主    | 跑在浏览器里，不能拉起本地进程                 |
-| Web Shell 远程 daemon    | #11548                                                                              | 浏览器连到指定 daemon，token 按 origin 隔离                              | 没有按会话的配对凭据；跨来源时刻意不挂本地能力 |
+- 只在用户打开面板、或连接处于进行中时才探测 `/status`：未经提示就访问回环端口可能触发浏览器的本地网络权限提示，而且每次探测都会在桌面机上拉起一个短命进程。连接稳定后每 30 秒探测一次。
+- 状态：检测中 / 未设置（显示一次性安装命令和复制按钮）/ 未连接 / 等待确认 / 连接中 / 已连接 / 被其他会话使用 / 失败 / 不可用。
+- 与本地文件桥共用工作区路由规则（`resolveLocalFilesWorkspaceRoute`）：daemon 未启用 `client_mcp_over_ws`、工作区不受信任或是 live 工作区时不提供入口；页面不是安全上下文时也不提供（浏览器不允许）。
+
+### 3.6 SSH 终端路径
+
+```text
+# 桌面机的 ~/.ssh/config
+Host devbox
+  RemoteForward /home/you/.qwen/desktop-relay.sock 127.0.0.1:47821
+  StreamLocalBindUnlink yes
+```
+
+```bash
+# 开发机上
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@latest \
+  desktop-relay socket /home/you/.qwen/desktop-relay.sock
+```
+
+`desktop-relay socket` 只是把 stdio 接到这个 Unix socket 上。ssh 按 `StreamLocalBindMask`（默认 0177）创建 socket，只有本人能连。
+
+## 4. 安全模型
+
+- **被允许的会话可以在桌面机上以用户权限运行任意代码，并查看、操作屏幕。** 这是中继 `node_repl` 的直接后果（`node_repl` 没有能力沙箱），与本地 computer use 相同。确认框、README 和用户文档都这样写明。
+- 每次连接都要在桌面机上确认，不记住任何选择。确认框是原生对话框，网页无法绘制或点击。
+- 连接成功和结束时发系统通知。停止：Web Shell 里断开；或结束会话；或 `kill` 中继进程。
+- Web 路径的 token 由页面交给本机中继，只存在于中继进程的内存里，不写盘。
+- 残余风险：
+  - 任何网页都能请求 `/connect` 并弹出确认框，确认框里写着请求来源和 daemon 地址，靠用户判断。Chrome 的本地网络访问权限提示是额外的一层。
+  - TCC 授权记在 launchd 拉起的 `node` 可执行文件名下，而不是终端；其他由非终端拉起的同一个 `node` 也会继承这份授权。
+  - `/status` 会向任意来源暴露“已安装”和版本号。
 
 ## 5. 已核实的事实
 
-| #   | 事实                                                                                                                                                                 | 证据                                                                                             |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 1   | skill 的常规路径 `ComputerUse.create()` 使用 `DriverBackend::Embedded`：驱动在 `node_repl` 进程内运行，不经过守护进程                                                | `typescript/computer-use/index.js:438-446`；`cua-driver-sdk/src/lib.rs` 的 `create_configured`   |
-| 2   | `ComputerUse.connect({ socketPath })` 发 `trusted_session_begin`；standalone 守护进程对非嵌入宿主连接返回错误 77                                                     | `cua-driver-sdk/src/service_session.rs:38`；`cua-driver/src/serve.rs:787`                        |
-| 3   | "嵌入宿主连接"要求 `CUA_DRIVER_EMBEDDED=1` 且对端 pid 等于守护进程的父进程 pid                                                                                       | `cua-driver-core/src/lib.rs:37`；`cua-driver/src/serve.rs:524-536`                               |
-| 4   | 守护进程对每个 Unix socket 连接检查对端 uid 等于自身 euid                                                                                                            | `cua-driver/src/serve.rs:507-521`、`:650`                                                        |
-| 5   | SDK 与守护进程的版本检查比较 contract、tools-list schema、capability、MCP protocol 四个版本，不比较 driver 版本本身                                                  | `cua-driver-sdk/src/lib.rs:332-361`                                                              |
-| 6   | `@qwen-code/cua-sdk` 的 postinstall 按平台从 GitHub Releases 下载原生库；有 darwin、linux、win32 三种目标                                                            | `typescript/scripts/install-native.mjs:24`；`typescript/src/native-assets.ts:42-70`              |
-| 7   | skill 只在 `node_repl` 不可用时执行 bootstrap；按已连接驱动返回的平台选工作流；用 `node_repl` 内的 `readFile` 读 `${skillBase}/references/*.md`                      | `SKILL.md:16-19`、`:31-49`、`:72`                                                                |
-| 8   | `node_repl` MCP server 注册的工具名是 `node_repl`                                                                                                                    | `packages/node-repl/src/mcp-server.ts:178-179`                                                   |
-| 9   | 反向通道的帧类型是 `mcp_register` / `mcp_message` / `mcp_unregister`；每个连接最多注册 10 个 server                                                                  | `client-mcp-ws.ts`                                                                               |
-| 10  | 会话级注册带 `alwaysLoadTools: true`，工具不会藏在 `tool_search` 后面                                                                                                | `client-mcp-sender-registry.ts:309`                                                              |
-| 11  | 运行时注册的 server 与设置里的同名 server 冲突时，运行时项遮蔽设置项                                                                                                 | `packages/core/src/tools/mcp-client-manager.ts` 的 `addRuntimeMcpServer`（shadow-over-settings） |
-| 12  | `/acp` 的跨站检查只在请求带 `Origin` 时生效；非浏览器客户端可以用 `Authorization` 头；非回环地址且没有 token 的升级请求返回 403                                      | `acp-http/index.ts:1694-1755`                                                                    |
-| 13  | `/acp` WebSocket 单帧上限 10 MB                                                                                                                                      | `acp-http/index.ts:1568`                                                                         |
-| 14  | 反向通道目前只有本地文件桥这一个客户端；Chrome 扩展不使用 `mcp_register`                                                                                             | `git grep mcp_register` 只命中 `client-mcp-ws.ts` 和 `bridge-client.ts`                          |
-| 15  | #11548 连跨来源 daemon 时不挂载浏览器本地文件桥；凭据按 daemon origin 隔离                                                                                           | #11548 `docs/design/remote-web-shell-daemon.md`                                                  |
-| 16  | macOS 上 `qwen-cua-driver mcp` 和 `permissions grant` 用 `open -n -g -a QwenCuaDriver --args serve` 拉起守护进程，不转发环境变量；HTTP 端口和 token 只从环境变量读取 | `cua-driver/src/cli.rs:1121-1235`、`:1332`、`:2837`；`mcp_http.rs`                               |
+| #   | 事实                                                                                                  | 证据                                                                                      |
+| --- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 1   | skill 的常规路径 `ComputerUse.create()` 使用 `DriverBackend::Embedded`，驱动在 `node_repl` 进程内运行 | `typescript/computer-use/index.js:438-446`；`cua-driver-sdk/src/lib.rs`                   |
+| 2   | standalone 守护进程拒绝非嵌入宿主的 `trusted_session_begin`（错误码 77）                              | `cua-driver-sdk/src/service_session.rs:38`；`cua-driver/src/serve.rs:787`                 |
+| 3   | `node_repl` 的裸包从 `<cwd>/node_modules` 解析                                                        | `packages/node-repl/src/runtime/module-loader.mjs:123`                                    |
+| 4   | skill 只在 `node_repl` 不可用时 bootstrap；参考文档读不到时用 `read_file`，并写明文档不在被控桌面上   | `SKILL.md`（`origin/main` @ `87437db784`）                                                |
+| 5   | `/acp` 升级优先读 `Authorization: Bearer`；跨站检查只在请求带 `Origin` 时生效；单帧上限 10 MB         | `cli/src/serve/acp-http/index.ts:270-300`、`:1568`                                        |
+| 6   | 会话级注册带 `alwaysLoadTools: true`；运行时注册的同名 server 遮蔽设置里的那一项                      | `client-mcp-sender-registry.ts:309`；`core/src/tools/mcp-client-manager.ts`               |
+| 7   | 预热路由：`POST /workspace/acp/preheat`、`POST /workspaces/:workspace/runtime/ensure`                 | `cli/src/serve/routes/workspace-status.ts:150`；`sdk-typescript/.../DaemonClient.ts:6545` |
+| 8   | server 名称只允许 `[A-Za-z0-9_-]`，`node-repl` 合法                                                   | `cli/src/runtime/validate-server-name.ts:7`                                               |
+| 9   | MCP SDK 1.30 的 server 用一个 handler 处理 `initialize`；中继不依赖它能否重复初始化，自己缓存         | `@modelcontextprotocol/sdk/dist/esm/server/index.js:52`                                   |
 
-事实 16 属于 `qwen-cua-driver mcp` 那条产品线，与本方案无关，保留是因为它是一个独立的 bug，值得单独报 issue。
+## 6. 未验证（需要真机）
 
-## 6. 未决与需实测
+1. launchd inetd 模式下，`new net.Socket({ fd: 0 })` 能否正常读写接受的 TCP 连接；`socket.end()` 后浏览器能否立即拿到响应。
+2. `osascript display dialog` 从 LaunchAgent 进程弹出时是否在最前面、能否正常点击。
+3. Chrome（含本地网络访问权限提示）和 Safari 从 https 页面访问 `http://127.0.0.1:47821` 的实际表现。
+4. TCC 授权实际记在谁名下；第一次授权屏幕录制后是否需要重新连接。
+5. 模型看到远端注册的 `node_repl` 后是否确实跳过 bootstrap；截图体积与 10 MB 帧上限的关系。
+6. 发布：`npx … @latest desktop-relay install` 要等 `@qwen-code/node-repl-mcp` 发布包含本改动的版本后才可用；发布前用 `--package <tarball>` 安装（见验证说明）。
 
-1. **模型行为**：远端会话里已有中继进程注册的 `node_repl` 时，模型是否确实跳过 bootstrap、不在 Linux 上执行 `qwen mcp add` 和 `npm install`。
-2. **截图体积**：`node_repl` 的输出里截图以 base64 内联，Retina 全屏可能接近 10 MB 帧上限（事实 13）。需要实测；超了就在 Mac 侧缩放，或让 `node_repl` 把截图写到 Mac 本地再走文件桥。
-3. **同名遮蔽的运行时表现**（§3.2 第 3 点）。
-4. **延迟**：每次 `node_repl` 调用一个往返。AX 文本经过有界观察和增量传输后很小，模型推理才是大头；需要实测一个真实任务的总耗时作参照。
-5. **配对凭据**的形态和生命周期（§3.3）。
+## 7. 非目标与后续
 
-## 7. 实施切片
-
-**片1：`qwen bridge` 子命令**
-
-放在 `packages/cli`，形如 `qwen bridge --daemon <url> --token <t> --session <id>`：复用 `bridge-client.ts` 的连接、初始化和注册重试逻辑，拉起 `node_repl` 做 stdio 中继；同时把 skill 读参考文档的方式改成 `read_file`。
-
-验收：远端会话里出现 `node_repl` 工具，且只在该会话可见；skill 不在 Linux 上跑 bootstrap；`getPlatform()` 返回 `macos`；一个真实任务跑通；记录截图体积和单步耗时；Ctrl-C 后工具消失。步骤见 `docs/verification/remote-computer-use/README.md`。
-
-**片2：配对入口**
-
-Web Shell 会话里加"连接我的桌面"入口，凭据只对单个会话有效；入口给出的是一条可复制的 `qwen bridge …` 命令。
-
-**片3（可选，默认不做）：独立于终端的授权身份或图形化停止开关**
-
-只在出现明确需求时才考虑，例如用户不愿意给终端开屏幕录制权限。那时再评估并入 desktop-shell 或 live-host，不在本方案范围内。
-
-## 8. 非目标
-
-- 在远端 Linux 上模拟桌面（Xvfb 等）：那是控制远端机器，不是控制用户面前的桌面机。
-- 让中继进程执行任意 shell 命令。
-- 独立的桌面 app、签名与公证、菜单栏界面：已决定不做（§3.1）。
-- 本轮验证 Windows 或 Linux 桌面作为被控端：中继与平台无关，SDK 也支持它们，但本轮只在 macOS 上验证（§2 平台范围）。
-- 中继 `qwen-cua-driver` 守护进程或它的 HTTP MCP：那是给外部 agent 用的原始工具面（§1）。
+- 非目标：在远端模拟桌面（Xvfb）；独立的桌面 app；中继 `qwen-cua-driver` 守护进程或它的 HTTP MCP。
+- 后续：Linux 桌面（systemd socket 激活）和 Windows 的安装方式；是否需要比“Web Shell 断开 / kill”更直接的本地停止开关。

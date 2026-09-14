@@ -44,10 +44,12 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.7",
+    "ws": "^8.18.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/ws": "^8.5.0",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"
   },

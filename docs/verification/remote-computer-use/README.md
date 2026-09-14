@@ -1,138 +1,144 @@
-# 验证：远程开发机上的 Qwen Code 经 node_repl 中继操作本地桌面机（本轮：macOS）
+# 验证：远程会话经 launchd 中继使用本地桌面机（本轮：macOS）
 
-> 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
-> 本文所有"预期"都来自读代码（`origin/main` @ `c666ec1a0a`），**没有在真机上跑过**。
-> 不需要构建本仓库。A 部分只需要一台 Mac；B 部分还需要一台能从 Mac 连到、装好 Qwen Code 并以 `qwen serve` 运行的 Linux 开发机，以及片1 的 `qwen bridge` 子命令。
+> 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`（§6 列出了本文要回答的未验证项）；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
+> 本文所有“预期”都来自读代码，**代码没有在任何机器上构建、测试或运行过**。
+> 需要：一台 Mac（Chrome，最好再有 Safari）；一台能从 Mac 用 SSH 连到的 Linux 开发机。两边都要能构建本 PR。
 
-## A. 事实核对（不写代码，约十分钟）
+## 0. 准备
 
-回答两个问题：方案 §1 说"standalone 守护进程拒绝 SDK 的 `connect()`"，真机上是不是这样；一张全屏截图经 base64 后有多大。
-
-### A1. Mac：准备 SDK
-
-在任意空目录：
+两台机器都检出本 PR 分支并构建：
 
 ```bash
-mkdir -p ~/cua-check && cd ~/cua-check
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.6
-# 预期：postinstall 打印 "@qwen-code/cua-sdk native payload ready: ..."
+git fetch https://github.com/yiliang114/qwen-code docs/remote-computer-use-plan
+git checkout FETCH_HEAD
+npm ci && npm run build && npm run bundle
 ```
 
-### A2. Mac：本地路径能用
+Mac 上把中继打成 tarball（`@qwen-code/node-repl-mcp` 还没发布包含本改动的版本）：
 
 ```bash
-node --input-type=module -e '
-const { ComputerUse } = await import("@qwen-code/cua-sdk/computer-use");
-const c = await ComputerUse.create();
-console.log("platform:", await c.getPlatform());
-await c.close();
-'
-# 预期：platform: macos
-# 第一次运行会弹出辅助功能 / 屏幕录制授权；记下系统设置里列出的是哪个应用（预期是终端）
+cd packages/node-repl && npm run build && npm pack && cd -
+ls packages/node-repl/qwen-code-node-repl-mcp-*.tgz
 ```
 
-### A3. Mac：standalone 守护进程拒绝 `connect()`
+## A. 桌面机安装
 
 ```bash
-# 窗口 1
-qwen-cua-driver serve
-# 没装的话：CUA_DRIVER_RS_VERSION=0.20.6 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
-
-# 窗口 2
-cd ~/cua-check
-node --input-type=module -e '
-const { ComputerUse } = await import("@qwen-code/cua-sdk/computer-use");
-try {
-  const c = await ComputerUse.connect({});
-  console.log("UNEXPECTED: connected, platform", await c.getPlatform());
-  await c.close();
-} catch (e) { console.log("rejected:", e.message); }
-'
-# 预期：rejected: ... trusted service sessions require the original authenticated embedded host connection ...
-# 如果输出 UNEXPECTED，方案 §1 第二条不成立，请把完整输出贴进 results.md
+node packages/node-repl/dist/index.js desktop-relay install \
+  --package "$(pwd)/packages/node-repl/qwen-code-node-repl-mcp-0.1.4.tgz"
 ```
 
-### A4. Mac：全屏截图体积
+预期：npm 把两个包装到 `~/.qwen/desktop-relay`；打印 “registered on 127.0.0.1:47821”。然后：
 
 ```bash
-node --input-type=module -e '
-const { ComputerUse } = await import("@qwen-code/cua-sdk/computer-use");
-const c = await ComputerUse.create();
-const apps = await c.listApps();
-const app = await c.getApp(apps.find(a => /Finder/.test(a.name))?.name ?? apps[0].name);
-const s = await app.getState({ includeScreenshot: true });
-console.log(JSON.stringify(s).length, "bytes as JSON");
-await c.close();
-'
+launchctl print gui/$(id -u)/com.qwencode.desktop-relay | head -20   # 预期：能看到这个 job
+lsof -nP -iTCP:47821 -sTCP:LISTEN                                    # 预期：launchd 在监听
+pgrep -fl desktop-relay                                              # 预期：无输出（平时零进程）
+node packages/node-repl/dist/index.js desktop-relay status
 ```
 
-如果 `listApps` / `getApp` / `getState` 的名字不对，按 `node_modules/@qwen-code/cua-sdk/computer-use/index.d.ts` 里的实际 API 调整，目的只是拿到一次带截图的观察并统计 JSON 字节数。注明屏幕是否 Retina 和分辨率。
-
-## B. 片1 验收（需要 `qwen bridge` 子命令）
-
-### B1. 开发机：以 daemon 方式运行，拿到会话
+## B. 本机安全检查（不需要开发机）
 
 ```bash
-qwen serve            # 记下监听地址和 token
+# 1. /status：任何来源都能看到已安装，但看不到连接详情
+curl -s -H 'Host: 127.0.0.1:47821' -H 'Origin: https://example.com' http://127.0.0.1:47821/status
+# 预期：{"ok":true,"version":"0.1.4"}
+
+# 2. 外来 Host（模拟 DNS rebinding）
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: evil.example:47821' http://127.0.0.1:47821/status
+# 预期：421
+
+# 3. 没有 Origin 的 /connect 不会弹框
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"daemonUrl":"https://h/","sessionId":"s"}' http://127.0.0.1:47821/connect
+# 预期：{"ok":false,"code":"origin_required",...}，桌面上没有对话框
+
+# 4. 预检
+curl -s -i -X OPTIONS -H 'Origin: https://example.com' http://127.0.0.1:47821/connect | head -12
+# 预期：204，含 access-control-allow-origin 和 access-control-allow-private-network: true
+
+# 5. 有 Origin 的 /connect 弹框；点“Deny”
+curl -s -X POST -H 'Origin: https://example.com' -H 'Content-Type: application/json' \
+  -d '{"daemonUrl":"https://devbox.example/","sessionId":"s"}' http://127.0.0.1:47821/connect
+# 预期：桌面上弹出“Qwen Code”对话框，写明来源、daemon 主机和“can run code on this computer”；
+#       点 Deny 后返回 {"ok":false,"code":"denied"}
 ```
 
-在 Web Shell 里新建一个会话，记下 `sessionId`。
+记录：每个请求的耗时（`curl -w '%{time_total}'`）——每个请求都会拉起一个新进程；对话框是否在最前面、能否点击；`~/.qwen/desktop-relay/agent.log` 里有无报错。
 
-### B2. Mac：在终端里启动中继
+## C. Web Shell 路径
+
+开发机：
 
 ```bash
-qwen bridge --daemon <url> --token <token> --session <sessionId>
-# 预期：打印 initialize 完成、mcp_register 成功、tools/list 被调用 N+1 次
-# 首次运行如弹出辅助功能 / 屏幕录制授权，记下系统设置里列出的应用（预期是终端）
+QWEN_SERVE_CLIENT_MCP_OVER_WS=1 node dist/cli.js serve   # 记下端口和 token
 ```
 
-### B3. 开发机：工具可见性
+Mac：`ssh -N -L 4170:127.0.0.1:<端口> devbox`，然后在 Chrome 打开 `http://localhost:4170`（回环地址是安全上下文）。
 
-在那个会话里让模型列出可用工具：预期出现 `node_repl`。在同一 workspace 的**另一个**会话里重复：预期不出现。
+1. 新建会话。侧边栏底部点显示器图标（“Use this computer”）。预期状态：Not connected。如果显示 Not set up，说明探测失败，记录浏览器控制台的错误。
+2. 点 **Connect this computer**。预期：状态变为 Waiting for approval，桌面弹出确认框。点 Allow。预期：状态变为 Connecting…，随后 Connected；系统通知“is now using this computer”。
+3. 在同一会话里输入（保持默认审批模式）：
 
-### B4. 开发机：跑一个真实任务
+   > 用 computer use 在我的 Mac 上打开“备忘录”，新建一条备忘录，内容写 hello from remote。每一步操作之后都重新读取界面状态，确认结果。
 
-保持默认审批模式（不要开 YOLO），输入：
+   记录：模型是否执行了 bootstrap（`qwen mcp add … node-repl` 或 `npm install @qwen-code/cua-sdk`，出现就拒绝并记录）；`getPlatform()` 是否返回 `macos`；读参考文档走的是哪条路；macOS 的授权提示弹给了谁（预期是 `node`）；授权后是否需要重新连接；任务是否完成；3 次 `node_repl` 调用的耗时。
 
-> 用 computer use 在我的 Mac 上打开"备忘录"，新建一条备忘录，内容写 hello from remote。每一步操作之后都重新读取界面状态，确认结果。
+4. 让模型截一张全屏图（`app.getState({ includeScreenshot: true })`）。记录是成功还是得到“above the … byte limit”错误；注明屏幕分辨率。
+5. 在同一 workspace 的另一个会话里打开面板。预期：In use by another session。
+6. 回到原会话点 **Disconnect**。预期：状态回到 Not connected；再让模型调用 `node_repl` 时得到明确错误；`pgrep -fl desktop-relay` 无输出。
+7. 再连一次后，在开发机上重启 `qwen serve`。预期：中继结束（不重连），面板显示连接已关闭。
+8. 用 Safari 重复第 1–2 步，记录差异。
 
-观察并记录：
+## D. SSH 终端路径
 
-- 模型是否执行了 bootstrap（`qwen mcp add ... node-repl` 或 `npm install @qwen-code/cua-sdk`）。预期：没有。出现了就拒绝这次 shell 调用并记录。
-- `getPlatform()` 是否返回 `macos`。
-- 读参考文档那一步走的是 `read_file` 还是 `node_repl` 里的 `readFile`；后者预期失败（Mac 上没有那个路径），这就是 skill 要改的地方。
-- 任务是否完成；失败的调用和错误文本。
-- 3 次真实 `node_repl` 调用的耗时（qwen 界面上显示的时间即可）。
-- 带截图的那次观察，中继进程日志里的帧大小；是否触发 10 MB 上限。
+Mac 的 `~/.ssh/config`：
 
-### B5. 失败路径
+```text
+Host devbox
+  RemoteForward /home/<you>/.qwen/desktop-relay.sock 127.0.0.1:47821
+  StreamLocalBindUnlink yes
+```
 
-- 在终端里 Ctrl-C 结束中继。预期：会话里 `node_repl` 工具消失；模型再调用时得到明确错误，不是一直挂起。记录错误文本和等待时长。
-- 重新运行 `qwen bridge`。预期：工具恢复，不需要重启远端 qwen。
-- Mac 睡眠再唤醒。记录中继是否自动重连。
+开发机（用本 PR 构建的 node-repl，路径按实际修改）：
+
+```bash
+qwen mcp add --scope user node-repl node /path/to/qwen-code/packages/node-repl/dist/index.js \
+  desktop-relay socket /home/<you>/.qwen/desktop-relay.sock
+qwen
+```
+
+预期：启动 qwen 时 Mac 上**不**弹框；第一次调用 computer use 时弹框。Allow 后跑第 C.3 步的任务。再开一次 qwen，这次点 Deny，预期模型收到 “declined remote use” 的错误。断开 SSH 后，记录 qwen 里的表现。
+
+## E. 清理
+
+```bash
+node packages/node-repl/dist/index.js desktop-relay uninstall --purge
+lsof -nP -iTCP:47821 -sTCP:LISTEN   # 预期：无输出
+```
 
 ## 需要回报的内容
 
 写进同一目录下的 `results.md`，推到 PR #11799 的分支（追加提交，不要 force-push），再在 PR 里留一条评论。
 
-| 项                                                | 结果 |
-| ------------------------------------------------- | ---- |
-| macOS 版本 / 芯片 / 屏幕是否 Retina 及分辨率      |      |
-| A2：`getPlatform()` 输出；授权记在哪个应用名下    |      |
-| A3：`connect()` 的完整错误文本                    |      |
-| A4：带截图观察的 JSON 字节数                      |      |
-| B3：两个会话里 `node_repl` 的可见性               |      |
-| B4：是否出现 bootstrap；读参考文档走的是哪条路    |      |
-| B4：任务是否完成；失败的调用和错误文本            |      |
-| B4：3 次 `node_repl` 调用的耗时；最大帧大小       |      |
-| B5：Ctrl-C 后的错误表现和等待时长；重启后是否恢复 |      |
+| 项                                                                 | 结果 |
+| ------------------------------------------------------------------ | ---- |
+| macOS 版本 / 芯片 / 屏幕分辨率；Chrome 与 Safari 版本              |      |
+| A：安装输出；`launchctl print`、`lsof`、`pgrep` 的结果             |      |
+| B：五个请求的结果和耗时；对话框表现；`agent.log` 的报错            |      |
+| C.1–2：各状态是否按预期出现；Chrome 是否弹出本地网络权限提示       |      |
+| C.3：是否 bootstrap；授权记在谁名下；任务结果；三次调用耗时        |      |
+| C.4：截图结果与分辨率                                              |      |
+| C.5–7：其他会话、断开、daemon 重启时的表现                         |      |
+| C.8：Safari 的差异                                                 |      |
+| D：启动时是否弹框；首次 `tools/call` 的确认；Deny 的错误；断开表现 |      |
 
 ## 本次验证可能推翻的结论
 
-请逐条注明"成立 / 不成立 / 无法判断"：
+请逐条注明“成立 / 不成立 / 无法判断”：
 
-1. 方案 §1：standalone 守护进程拒绝 `connect()`（A3）。
-2. 方案 §1：`create()` 的授权落在拉起 node 的进程身份上（A2）。
-3. 方案 §6 第 1 点：模型看到已注册的 `node_repl` 就不执行 bootstrap（B4）。
-4. 方案 §3.2：读参考文档必须改用 `read_file`（B4）。
-5. 方案 §6 第 2 点：截图体积是否接近 10 MB 帧上限（A4、B4）。
+1. 方案 §6 第 1 点：inetd 模式下 `net.Socket({ fd: 0 })` 能正常收发，浏览器能立即拿到响应（A、B、C）。
+2. 方案 §6 第 2 点：确认框从 LaunchAgent 进程弹出时可见、可点（B.5、C.2）。
+3. 方案 §6 第 3 点：Chrome 和 Safari 允许安全页面访问 `http://127.0.0.1:47821`（C.1、C.8）。
+4. 方案 §6 第 4 点：授权记在 `node` 名下（C.3）。
+5. 方案 §6 第 5 点：模型不执行 bootstrap；截图不超过帧上限（C.3、C.4）。
