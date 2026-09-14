@@ -262,15 +262,15 @@ describe('SettingsSchema', () => {
       });
     });
 
-    // Bounds mirror resolveWebSearchTimeoutMs: without them the write paths
-    // accept any number and the runtime silently falls back to the default.
-    // The maximum is core's constant so the schema cannot drift from the
-    // runtime contract it documents.
+    // Type and bounds mirror resolveWebSearchTimeoutMs, which accepts only
+    // whole numbers in range: without them the write paths accept values the
+    // runtime silently replaces with the default. The maximum is core's
+    // constant so the schema cannot drift from the runtime contract.
     it('should bound tools.webSearch.timeoutMs to the runtime contract', () => {
       expect(
         getSettingsSchema().tools.properties.webSearch.properties.timeoutMs,
       ).toMatchObject({
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
         showInDialog: true,
@@ -281,7 +281,7 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().tools.properties.webSearch.properties.maxPerSession,
       ).toMatchObject({
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
         requiresRestart: true,

@@ -69,6 +69,15 @@ export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
   'enum',
 ]);
 
+/**
+ * Setting types edited as a number in the settings dialogs. `integer` is a
+ * number the write-time validator also requires to be whole; handling it as
+ * anything else leaves the setting uneditable.
+ */
+export function isNumericSettingType(type: SettingsType | undefined): boolean {
+  return type === 'number' || type === 'integer';
+}
+
 export interface SettingEnumOption {
   value: string | number;
   label: string;
@@ -2790,7 +2799,7 @@ const SETTINGS_SCHEMA = {
             showInDialog: true,
           },
           timeoutMs: {
-            type: 'number',
+            type: 'integer',
             label: 'Search Timeout (ms)',
             category: 'Tools',
             requiresRestart: true,
@@ -2801,7 +2810,7 @@ const SETTINGS_SCHEMA = {
             showInDialog: true,
           },
           maxPerSession: {
-            type: 'number',
+            type: 'integer',
             label: 'Max Searches per Session',
             category: 'Tools',
             requiresRestart: true,
