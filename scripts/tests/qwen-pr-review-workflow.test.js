@@ -104,13 +104,42 @@ const realPkillPath = realUtilityPath('pkill');
 const realPgrepPath = realUtilityPath('pgrep');
 
 describe('qwen pr review runner routing', () => {
-  it('isolates the long-running review job on the agent pool', () => {
+  it('isolates the long-running review job on the schedule-sized review pool', () => {
+    // `ecs-review` is sized by qwen-review-runner-schedule.yml (few runners
+    // by day, all at night). It must be neither the shared CI pool nor the
+    // autofix agent pool: CI would compete for the day slots, and autofix
+    // rounds must not share a host with the night review burst.
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
     expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-agent"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
     );
     expect(runsOn).not.toContain('ecs-qwen');
+    expect(runsOn).not.toContain('ecs-agent');
+  });
+
+  it('stamps the reviewed head with the workflow token, outside the agent step', () => {
+    const job = parse(workflow).jobs['review-pr'];
+    expect(job.permissions.statuses).toBe('write');
+    const steps = job.steps.map((s) => s.name);
+    const review = steps.indexOf('Run review');
+    const record = steps.indexOf('Record reviewed head');
+    expect(review).toBeGreaterThan(-1);
+    expect(record).toBeGreaterThan(review);
+    const step = job.steps[record];
+    expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
+    expect(step.run).toContain("-f context='qwen-review/reviewed'");
+    // Posting runs only, and only after a completed review or a recorded skip.
+    expect(step.if).toContain("steps.context.outputs.review_mode == 'comment'");
+    expect(step.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
+    );
+    expect(step.if).toContain("steps.review.outputs.unchanged_diff == 'true'");
+    // The agent's own step gets no status-writing token.
+    const runReview = job.steps[review];
+    expect(Object.keys(runReview.env)).not.toContain('STATUS_TOKEN');
+    expect(runReview.run).toContain('.github/scripts/review-unchanged-diff.sh');
+    expect(runReview.run).toContain('[ "${EVENT_ACTION:-}" = "synchronize" ]');
   });
 });
 
