@@ -3159,13 +3159,13 @@ jobs:
             echo "Could not determine the PR number; skipping fallback comment." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # A review-pr job no runner ever picked up — GitHub ends a queued
-          # job after 24 hours (failure or cancelled), and the `ecs-review` pool is deliberately
-          # small by day (qwen-review-runner-schedule.yml) — has no runner
-          # and no steps. Nothing ran, so there is no failure to report and
-          # "retry with a longer timeout" would mislead; the next push queues
-          # a fresh review. An unreadable job list keeps the comment (fail
-          # toward telling the author something).
+          # A review-pr job no runner ever picked up has no runner and no
+          # steps: GitHub ends a job queued for 24 hours (as failure or
+          # cancelled), and the `ecs-review` pool is deliberately small by
+          # day (qwen-review-runner-schedule.yml). Nothing ran, so "the
+          # review pipeline failed" would be false; the PR's next push
+          # queues a fresh review. An unreadable job list keeps the comment
+          # (fail toward telling the author something).
           if [ "$REVIEW_PR_RESULT" = "failure" ] || [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
             never_started="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:?}/jobs?per_page=100" \
               --jq '[.jobs[] | select(.name == "review-pr")] | if length == 0 then "unknown" elif all(.[]; (.runner_name // "") == "" and ((.steps // []) | length) == 0) then "true" else "false" end' 2>/dev/null)" || never_started="unknown"

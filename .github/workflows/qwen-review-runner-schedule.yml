@@ -1,9 +1,10 @@
 name: 'Qwen Review Runner Schedule'
 
 # Sizes the PR review pool (`ecs-review`, used by qwen-code-pr-review.yml's
-# review-pr job) by time of day: QWEN_REVIEW_DAY_RUNNERS hk2 runners by day,
-# every hk2 runner between QWEN_REVIEW_NIGHT_START and QWEN_REVIEW_NIGHT_END
-# (Asia/Shanghai, defaults 22 and 3). Reviews that find no runner queue and
+# review-pr job) by time of day: QWEN_REVIEW_DAY_RUNNERS (default 2) hk2
+# runners by day, every hk2 runner from QWEN_REVIEW_NIGHT_START to
+# QWEN_REVIEW_NIGHT_END (Asia/Shanghai, defaults 22 and 3). An unset or
+# malformed variable uses its default. Reviews that find no runner queue and
 # drain at night. Logic: .github/scripts/review-runner-schedule.mjs.
 #
 # The runner-label API needs repository Administration: write, which no
@@ -28,9 +29,14 @@ jobs:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
-    environment: 'qwen-review-runner-schedule'
+    # deployment: false — the job needs the environment's secret, not a
+    # deployment record every 15 minutes.
+    environment:
+      name: 'qwen-review-runner-schedule'
+      deployment: false
     steps:
-      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Checkout the schedule script'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
           sparse-checkout: '.github/scripts/review-runner-schedule.mjs'
