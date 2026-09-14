@@ -14,13 +14,10 @@ interface SessionHistoryDropdownProps {
   sessions: readonly DaemonSessionSummary[];
   currentSessionId?: string;
   searchQuery: string;
-  source: 'vscode' | 'default';
-  editable: boolean;
   loading: boolean;
   hasMore: boolean;
   error?: string;
   onSearchChange: (query: string) => void;
-  onSourceChange: (source: 'vscode' | 'default') => void;
   onSelect: (session: DaemonSessionSummary) => void;
   onRename: (session: DaemonSessionSummary, title: string) => Promise<void>;
   onDelete: (session: DaemonSessionSummary) => Promise<void>;
@@ -94,7 +91,6 @@ const DROPDOWN_CSS = `
   .qwen-session-row-actions[data-confirming] { visibility: visible; }
   .qwen-session-row:focus-visible,
   .qwen-session-search:focus-visible,
-  .qwen-session-source-button:focus-visible,
   .qwen-session-icon-button:focus-visible {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: -1px;
@@ -109,13 +105,10 @@ export function SessionHistoryDropdown({
   sessions,
   currentSessionId,
   searchQuery,
-  source,
-  editable,
   loading,
   hasMore,
   error,
   onSearchChange,
-  onSourceChange,
   onSelect,
   onRename,
   onDelete,
@@ -270,41 +263,6 @@ export function SessionHistoryDropdown({
         }}
       >
         <style>{DROPDOWN_CSS}</style>
-        <div
-          role="group"
-          aria-label={t('session.sourceLabel')}
-          style={{ display: 'flex', gap: 4, padding: '8px 10px 0' }}
-        >
-          {(['vscode', 'default'] as const).map((value) => {
-            const active = source === value;
-            return (
-              <button
-                key={value}
-                type="button"
-                className="qwen-session-source-button"
-                aria-pressed={active}
-                data-session-source={value}
-                onClick={() => onSourceChange(value)}
-                style={{
-                  flex: 1,
-                  padding: '4px 8px',
-                  border: 0,
-                  borderRadius: 4,
-                  background: active
-                    ? 'var(--vscode-list-activeSelectionBackground)'
-                    : 'transparent',
-                  color: active
-                    ? 'var(--vscode-list-activeSelectionForeground)'
-                    : 'inherit',
-                  font: 'inherit',
-                  cursor: 'pointer',
-                }}
-              >
-                {t(`session.source.${value}`)}
-              </button>
-            );
-          })}
-        </div>
         <div
           style={{
             display: 'flex',
@@ -539,7 +497,7 @@ export function SessionHistoryDropdown({
                       </span>
                     )}
 
-                    {!renaming && editable && (
+                    {!renaming && (
                       <span
                         className="qwen-session-row-actions"
                         {...(confirmDeleteId === session.sessionId
@@ -620,7 +578,7 @@ export function SessionHistoryDropdown({
             </div>
           ))}
 
-          {!loading && filtered.length === 0 && (
+          {!loading && !hasMore && filtered.length === 0 && (
             <div
               style={{
                 padding: 20,
@@ -652,6 +610,24 @@ export function SessionHistoryDropdown({
             </div>
           )}
         </div>
+        {hasMore && !loading && (
+          <button
+            type="button"
+            className="qwen-session-icon-button"
+            onClick={onLoadMore}
+            style={{
+              padding: 8,
+              border: 0,
+              borderRadius: 3,
+              background: 'transparent',
+              color: 'inherit',
+              font: 'inherit',
+              cursor: 'pointer',
+            }}
+          >
+            {t('session.loadMore')}
+          </button>
+        )}
       </div>
     </>
   );
