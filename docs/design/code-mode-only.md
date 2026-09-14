@@ -1,5 +1,7 @@
 # CodeModeOnly MVP
 
+[English](code-mode-only.md) | [简体中文](code-mode-only.zh-CN.md)
+
 ## Status
 
 Implemented for [#10377](https://github.com/QwenLM/qwen-code/issues/10377).
@@ -7,14 +9,14 @@ The feature is opt-in and defaults off.
 
 ## Goal
 
-Add a `tools.codeModeOnly` setting that replaces the ordinary model-facing
-tool surface with one `exec` JavaScript tool plus the small set of tools that
-must remain direct control-plane calls. `exec` code can call ordinary tools
+Add a `tools.mode: "code_mode_only"` setting that replaces the ordinary
+model-facing tool surface with one `exec` JavaScript tool plus the small set of
+tools that must remain direct control-plane calls. `exec` code can call ordinary tools
 through `tools.<name>(args)` without bypassing Qwen Code's validation,
 permissions, approvals, hooks, telemetry, cancellation, concurrency, or output
 budgets.
 
-Direct mode is a compatibility boundary: when the setting is false, tool
+Direct mode is a compatibility boundary: when `tools.mode` is `direct`, tool
 registration, deferred-tool behavior, provider requests, and execution remain
 unchanged.
 
@@ -32,15 +34,15 @@ unchanged.
 ```json
 {
   "tools": {
-    "codeModeOnly": true
+    "mode": "code_mode_only"
   }
 }
 ```
 
-The setting resolves once to the effective `ToolMode` value `direct` or
-`code_mode_only`. `ToolRegistry` and the execution surfaces consume that mode.
-`exec` is only registered when the setting is enabled, so disabling the setting
-also removes it from diagnostics and registry listings.
+The setting resolves once to the effective `ToolMode` value. `ToolRegistry`
+and the execution surfaces consume that mode. `exec` is only registered when a
+code mode is enabled, so selecting `direct` also removes it from diagnostics
+and registry listings.
 
 ## Exposure policy
 
@@ -171,9 +173,9 @@ closed before scheduling. Invalid arguments continue to fail in the normal
 execution chain. A sandbox startup, protocol, timeout, memory, or teardown
 failure becomes an `exec` tool error.
 
-Rollback is setting `tools.codeModeOnly` to false. No session migration or
-registry cleanup is required because code mode has no persistent state and the
-ordinary registry was never replaced.
+Rollback is setting `tools.mode` to `direct`. No session migration or registry
+cleanup is required because code mode has no persistent state and the ordinary
+registry was never replaced.
 
 ## Verification
 

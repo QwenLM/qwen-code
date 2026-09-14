@@ -20,10 +20,15 @@ export type ToolExposure =
 
 export const ToolMode = {
   Direct: 'direct',
+  CodeMode: 'code_mode',
   CodeModeOnly: 'code_mode_only',
 } as const;
 
 export type ToolMode = (typeof ToolMode)[keyof typeof ToolMode];
+
+export function isCodeModeEnabled(mode: ToolMode | undefined): boolean {
+  return mode === ToolMode.CodeMode || mode === ToolMode.CodeModeOnly;
+}
 
 const HIDDEN_TOOLS = new Set<string>([ToolNames.TOOL_SEARCH, 'tool_call']);
 
@@ -201,7 +206,26 @@ function describeBinding(binding: CodeModeToolBinding): string {
   return `tools.${binding.jsName}(args: ${params}): Promise<CodeModeToolResult>;`;
 }
 
-export function buildExecDescription(plan: CodeModeBindingPlan): string {
+export function augmentDeclarationForCodeMode(
+  declaration: FunctionDeclaration,
+  binding: CodeModeToolBinding,
+): FunctionDeclaration {
+  const params = schemaToType(binding.parametersJsonSchema);
+  return {
+    ...declaration,
+    description: `${declaration.description ?? ''}
+
+exec tool declaration:
+\`\`\`ts
+declare const tools: { ${binding.jsName}(args: ${params}): Promise<CodeModeToolResult>; };
+\`\`\``,
+  };
+}
+
+export function buildExecDescription(
+  plan: CodeModeBindingPlan,
+  codeModeOnly = true,
+): string {
   const allTools = plan.bindings.map(
     ({ name, jsName, description, deferred }) => ({
       name,
@@ -216,7 +240,12 @@ export function buildExecDescription(plan: CodeModeBindingPlan): string {
         `- ${omitted} is omitted because it collides with ${kept} as tools.${jsName}.`,
     )
     .join('\n');
-  const declarations = plan.bindings.map(describeBinding).join('\n');
+  const declarations = codeModeOnly
+    ? plan.bindings.map(describeBinding).join('\n')
+    : 'Nested tool declarations are included in their top-level tool descriptions. Deferred tools remain listed in ALL_TOOLS and receive a declaration when their top-level declaration is revealed.';
+  const toolsDescription = codeModeOnly
+    ? 'the code-mode-callable tool functions declared below.'
+    : 'the code-mode-callable tool functions declared in their top-level tool descriptions.';
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
@@ -225,7 +254,7 @@ Use async/await and call registered tools through tools.<name>(args). Calls use 
 Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls.
 
 Available globals:
-- tools: the code-mode-callable tool functions declared below.
+- tools: ${toolsDescription}
 - ALL_TOOLS: frozen metadata for every function in tools.
 - text(value): append bounded text output. Non-string values are JSON-stringified when possible.
 - image(imageUrlOrItem: string | ImageContent): append an image from a base64 data URL or Qwen MCP ImageContent. To return a nested MCP image, pass an item such as image(result.content[0]).
@@ -250,9 +279,10 @@ ${collisionText ? `\nName collisions:\n${collisionText}` : ''}`;
 export function buildExecDeclaration(
   execTool: AnyDeclarativeTool,
   plan: CodeModeBindingPlan,
+  codeModeOnly = true,
 ): FunctionDeclaration {
   return {
     ...execTool.schema,
-    description: buildExecDescription(plan),
+    description: buildExecDescription(plan, codeModeOnly),
   };
 }

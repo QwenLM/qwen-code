@@ -1276,10 +1276,14 @@
       "description": "Settings for built-in and custom tools.",
       "type": "object",
       "properties": {
-        "codeModeOnly": {
-          "description": "Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.",
-          "type": "boolean",
-          "default": false
+        "mode": {
+          "description": "Choose how tools are exposed to the model. Direct uses ordinary tool calls; Code Mode also exposes the isolated exec JavaScript tool; Code Mode Only exposes ordinary tools only through exec. Safe and bare modes always use Direct. Options: direct, code_mode, code_mode_only",
+          "enum": [
+            "direct",
+            "code_mode",
+            "code_mode_only"
+          ],
+          "default": "direct"
         },
         "sandbox": {
           "anyOf": [

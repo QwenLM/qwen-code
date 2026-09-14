@@ -1008,8 +1008,8 @@ export interface ConfigParameters {
    * auto-approval and never affects registration (#10075).
    */
   eagerTools?: string[];
-  /** Replace ordinary model-facing tools with the isolated exec bridge. */
-  codeModeOnly?: boolean;
+  /** Select how model-facing tools are exposed. */
+  toolMode?: ToolModeValue;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -3195,9 +3195,9 @@ export class Config {
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
     this.toolMode =
-      params.codeModeOnly && !this.bareMode && !this.safeMode
-        ? ToolMode.CodeModeOnly
-        : ToolMode.Direct;
+      this.bareMode || this.safeMode
+        ? ToolMode.Direct
+        : (params.toolMode ?? ToolMode.Direct);
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -10396,7 +10396,7 @@ export class Config {
     };
 
     const registerExecIfEnabled = async (): Promise<void> => {
-      if (this.getToolMode() !== ToolMode.CodeModeOnly) return;
+      if (this.getToolMode() === ToolMode.Direct) return;
       await registerLazy(ToolNames.EXEC, async () => {
         const { ExecTool } = await import('../tools/exec.js');
         return new ExecTool(this);

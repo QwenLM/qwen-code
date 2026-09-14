@@ -20,6 +20,7 @@ import {
   AuthType,
   Storage,
   SessionIdCaseConflictError,
+  ToolMode,
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
@@ -3567,39 +3568,50 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolSearchThreshold()).toBe(10);
   });
 
-  it('should enable CodeModeOnly only when explicitly configured', async () => {
+  it('should resolve the tool mode enum', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
 
     const direct = await loadCliConfig({}, argv, undefined, []);
     const codeMode = await loadCliConfig(
-      { tools: { codeModeOnly: true } },
+      { tools: { mode: ToolMode.CodeMode } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeModeOnly = await loadCliConfig(
+      { tools: { mode: ToolMode.CodeModeOnly } },
       argv,
       undefined,
       [],
     );
 
     expect(direct.getCodeModeOnly()).toBe(false);
-    expect(codeMode.getCodeModeOnly()).toBe(true);
+    expect(codeMode.getCodeModeOnly()).toBe(false);
+    expect(codeModeOnly.getCodeModeOnly()).toBe(true);
     expect(direct.getToolMode()).toBe('direct');
-    expect(codeMode.getToolMode()).toBe('code_mode_only');
+    expect(codeMode.getToolMode()).toBe('code_mode');
+    expect(codeModeOnly.getToolMode()).toBe('code_mode_only');
   });
 
-  it.each(['--safe-mode', '--bare'])(
-    'should disable CodeModeOnly in %s mode',
-    async (flag) => {
-      process.argv = ['node', 'script.js', flag];
-      const argv = await parseArguments();
-      const config = await loadCliConfig(
-        { tools: { codeModeOnly: true } },
-        argv,
-        undefined,
-        [],
-      );
+  it.each([
+    ['--safe-mode', ToolMode.CodeMode],
+    ['--safe-mode', ToolMode.CodeModeOnly],
+    ['--bare', ToolMode.CodeMode],
+    ['--bare', ToolMode.CodeModeOnly],
+  ] as const)('should force direct mode for %s with %s', async (flag, mode) => {
+    process.argv = ['node', 'script.js', flag];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { mode } },
+      argv,
+      undefined,
+      [],
+    );
 
-      expect(config.getCodeModeOnly()).toBe(false);
-    },
-  );
+    expect(config.getCodeModeOnly()).toBe(false);
+    expect(config.getToolMode()).toBe('direct');
+  });
 
   it('should default tools.listDirectory.enabled to false', async () => {
     process.argv = ['node', 'script.js'];

@@ -189,7 +189,7 @@ describe('ToolRegistry', () => {
       const baseUrl = 'https://images.example/v1';
       const config = new Config({
         ...baseConfigParams,
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
         experimentalZedIntegration: true,
         modelProvidersConfig: {
           openai: [
@@ -875,7 +875,7 @@ describe('ToolRegistry', () => {
       // is the one the previous test proves IS reported in Direct mode.
       const codeModeConfig = new Config({
         ...baseConfigParams,
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
       });
       const registry = new ToolRegistry(codeModeConfig);
       registry.registerTool(

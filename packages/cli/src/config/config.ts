@@ -30,6 +30,7 @@ import {
   type ToolName,
   type ToolInvocationGuard,
   ToolNames,
+  ToolMode,
   NativeLspClient,
   createDebugLogger,
   NativeLspService,
@@ -2257,8 +2258,10 @@ export async function loadCliConfig(
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
-    codeModeOnly:
-      !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
+    toolMode:
+      !bareMode && !safeMode
+        ? (settings.tools?.mode ?? ToolMode.Direct)
+        : ToolMode.Direct,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).

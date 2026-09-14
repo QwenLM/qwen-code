@@ -33,6 +33,7 @@ import {
   OutputFormat,
   REASONING_EFFORT_TIERS,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+  ToolMode,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
@@ -2714,15 +2715,20 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
-      codeModeOnly: {
-        type: 'boolean',
-        label: 'Code Mode Only (Experimental)',
+      mode: {
+        type: 'enum',
+        label: 'Tool Mode (Experimental)',
         category: 'Tools',
         requiresRestart: true,
-        default: false,
+        default: ToolMode.Direct,
         description:
-          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.',
+          'Choose how tools are exposed to the model. Direct uses ordinary tool calls; Code Mode also exposes the isolated exec JavaScript tool; Code Mode Only exposes ordinary tools only through exec. Safe and bare modes always use Direct.',
         showInDialog: true,
+        options: [
+          { value: ToolMode.Direct, label: 'Default' },
+          { value: ToolMode.CodeMode, label: 'Code Mode' },
+          { value: ToolMode.CodeModeOnly, label: 'Code Mode Only' },
+        ],
       },
       sandbox: {
         type: 'object',
