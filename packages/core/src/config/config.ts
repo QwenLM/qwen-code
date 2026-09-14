@@ -4860,7 +4860,7 @@ export class Config {
             await this.refreshAuth(authType, true);
           }
           if (pendingImageModelReload) {
-            await this.setImageModel(pendingImageModelReload.value);
+            await this.applyImageModel(pendingImageModelReload.value);
           }
           this.baseLlmClient?.clearPerModelGeneratorCache();
         },
@@ -5820,7 +5820,25 @@ export class Config {
    * when the selected provider route is valid.
    */
   async setImageModel(model: string | undefined): Promise<void> {
+    if (this.pendingImageModelReload) {
+      this.pendingImageModelReload = { value: model };
+      return;
+    }
+    await this.applyImageModel(model);
+  }
+
+  private async applyImageModel(model: string | undefined): Promise<void> {
+    const previous = this.imageModel;
     this.imageModel = model || undefined;
+    try {
+      await this.refreshImageModelTools();
+    } catch (error) {
+      this.imageModel = previous;
+      throw error;
+    }
+  }
+
+  private async refreshImageModelTools(): Promise<void> {
     if (!this.initialized || !this.toolRegistry) {
       return;
     }

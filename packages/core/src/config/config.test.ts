@@ -200,25 +200,56 @@ vi.mock('node:fs', async (importOriginal) => {
 
 describe('staged model-provider refresh admission', () => {
   it('applies the staged image model after the provider registry changes', async () => {
-    const setImageModel = vi.fn().mockResolvedValue(undefined);
-    const apply = vi.fn(async (refresh: (selection?: never) => Promise<void>) => {
-      await refresh();
-      return true;
-    });
+    const applyImageModel = vi.fn().mockResolvedValue(undefined);
+    const apply = vi.fn(
+      async (refresh: (selection?: never) => Promise<void>) => {
+        await refresh();
+        return true;
+      },
+    );
     const config = Object.create(Config.prototype) as Config;
     Object.assign(config, {
       modelsConfig: { applyPendingModelProvidersReload: apply },
       debugLogger: { error: vi.fn() },
       getAuthType: () => undefined,
-      setImageModel,
+      applyImageModel,
     });
     config.stageImageModelReload('openai:image');
 
-    await expect(config.applyPendingModelProvidersReload()).resolves.toBe(
-      true,
-    );
-    expect(setImageModel).toHaveBeenCalledWith('openai:image');
+    await expect(config.applyPendingModelProvidersReload()).resolves.toBe(true);
+    expect(applyImageModel).toHaveBeenCalledWith('openai:image');
     expect(config['pendingImageModelReload']).toBeUndefined();
+  });
+
+  it('keeps the latest image selection with a staged provider registry', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      imageModel: 'openai:old-image',
+      initialized: false,
+    });
+    config.stageImageModelReload('openai:image-a');
+
+    await config.setImageModel('openai:image-b');
+
+    expect(config['imageModel']).toBe('openai:old-image');
+    expect(config['pendingImageModelReload']).toEqual({
+      value: 'openai:image-b',
+    });
+  });
+
+  it('restores the previous image selection when tool refresh fails', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      imageModel: 'openai:old-image',
+      refreshImageModelTools: vi
+        .fn()
+        .mockRejectedValue(new Error('tool refresh failed')),
+    });
+
+    await expect(config.setImageModel('openai:image-a')).rejects.toThrow(
+      'tool refresh failed',
+    );
+    expect(config['imageModel']).toBe('openai:old-image');
   });
 
   it('keeps user prompts running when a staged refresh fails', async () => {
