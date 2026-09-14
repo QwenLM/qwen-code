@@ -1,16 +1,16 @@
 # 交接：远程 Qwen Code 操作本地 Mac（PR #11799）
 
 > 写给接手的 session 或 agent。按顺序阅读：本文 → 方案 `docs/plans/2026-09-14-remote-computer-use-mac-companion.md` → 真机验证说明 `docs/verification/remote-computer-use/README.md`。
-> 状态（2026-09-14）：只有文档，没有代码。用户暂不做真机验证，后续换 session 或 agent 继续。
+> 状态（2026-09-14，第二次修订）：只有文档，没有代码。方案已从 v1（中继驱动）改为 v2（中继 node_repl），原因见方案 §1。
 
 ## 1. 现在在哪
 
 - PR：https://github.com/QwenLM/qwen-code/pull/11799（草稿；base `main`；head `yiliang114:docs/remote-computer-use-plan`）。
 - 分支上的文件（只有这三个，都是文档）：
-  - `docs/plans/2026-09-14-remote-computer-use-mac-companion.md`：方案，包括原理、已有零件、三个方案、Mac 伴侣设计、已核实事实表、未决问题、实施切片；
+  - `docs/plans/2026-09-14-remote-computer-use-mac-companion.md`：方案 v2；
   - `docs/plans/2026-09-14-remote-computer-use-handoff.md`：本文；
-  - `docs/verification/remote-computer-use/README.md`：片0 真机验证说明。
-- 调研基线：`origin/main` @ `f9534f4395`。所有结论读自这个版本的代码，没有构建、没有运行。
+  - `docs/verification/remote-computer-use/README.md`：片1 原型的验证说明（替换了 v1 的片0）。
+- 调研基线：v1 读的是 `origin/main` @ `f9534f4395`，v2 复查读的是 `c666ec1a0a`。所有结论读自代码，没有构建、没有运行。
 - 用户原始诉求：远程 Linux 开发机（无图形界面）上的 Qwen Code，能通过 computer use 操作用户本地的 Mac。
 
 ## 2. 用户的工作约定（必须遵守）
@@ -24,39 +24,35 @@
 - **提交 md 前跑 prettier 的 experimental-cli**：`node node_modules/.bin/prettier --experimental-cli --config-path .prettierrc.json --check <file>`。仅文档的 PR 在 CI 里不跑这一步，但格式不对的 md 会让下一个全量 PR 的 lint 失败。
 - PR 描述：英文正文，外加 `<details>` 里的完整中文翻译，段落不要硬换行。提交信息遵循 Conventional Commits。
 
-## 3. 关键结论（细节和证据见方案 §5）
+## 3. 关键结论（细节和证据见方案 §1、§5）
 
-- **可行。** 驱动必须跑在 Mac 上，因为它要用 Mac 的图形会话和 macOS 权限；agent 循环可以在任何地方。两者之间只隔着 MCP。
-- **零件都在 main 上**：
-  - cua-driver 的 HTTP MCP（只绑回环地址，必须带 Bearer token）；
-  - SDK 的 `connect({ socketPath })`；
-  - Rust SDK 与传输方式无关的 `DriverEnvelopeChannel`；
-  - `qwen serve` 的反向工具通道（会话级注册，已带 `alwaysLoadTools`）；
-  - Web Shell 本地文件桥的客户端（可以直接当伴侣的参考实现）。
-- **推荐路线**：先用方案 A（驱动 HTTP MCP + `ssh -R`）在真机上验证，再把方案 C（Mac 伴侣接入反向工具通道）做成正式功能。
-- **写交接时新发现的坑**：macOS 上 `qwen-cua-driver mcp` 和 `permissions grant` 通过 LaunchServices 拉起守护进程时不转发环境变量（`packages/cua-driver/rust/crates/cua-driver/src/cli.rs:1121-1235`，调用点在 `:1332` 和 `:2837`），而 HTTP 端点只能靠环境变量打开。验证说明里给了两种绕过方式和检查手段。
-- **驱动的发布形态**：可执行文件 `qwen-cua-driver`，应用 `/Applications/QwenCuaDriver.app`，bundle id `com.qwencode.cua-driver`，状态目录 `~/.cua-driver`；macOS 默认 socket 是 `~/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock`（`cua-driver-core/src/daemon.rs:144`）。安装命令见 `packages/cua-driver/README.md`。
-- **正确的授权方式**是 `qwen-cua-driver permissions grant`，它会以 QwenCuaDriver 的身份申请权限；`permissions status` 只读。
+- **远程化的对象是 `node_repl`，不是驱动守护进程。** skill 的常规路径是 `ComputerUse.create()` → 驱动以原生库内嵌在 `node_repl` 进程里运行；守护进程和它的 HTTP MCP 是给外部 agent 用的另一条产品线。TCC 授权落在拉起 `node_repl` 的进程身份上。
+- **v1 的方案 B 不成立**：`connect({ socketPath })` 发 `trusted_session_begin`，standalone 守护进程只接受"嵌入宿主连接"（父进程 pid 校验），任何 SDK 客户端都会被拒，与隧道无关。v1 的方案 A 和 C 中继的是原始工具面，会绕过 skill 层。
+- **v2 方案**：Mac 伴侣拉起本地 `node_repl`，主动连远端 `/acp`，按会话 `mcp_register { server: 'node-repl' }`，中继帧。远端 skill 只需把读参考文档的方式改成 `read_file`（它现在让 `node_repl` 读远端路径，Mac 上不存在）。
+- **零件都在 main 上**：`@qwen-code/node-repl-mcp`、`@qwen-code/cua-sdk`、反向工具通道（会话级注册、`alwaysLoadTools`、同名遮蔽设置项）、本地文件桥的客户端实现。
+- **#11548 的位置**：它让 Web Shell 连到远程 daemon，是配对入口最自然的落点，但它没有按会话的配对凭据；它刻意不给跨来源 daemon 挂本地文件桥，computer use 的配对要对齐这条边界。
+- **独立的 bug**：macOS 上驱动经 LaunchServices 拉起时不转发环境变量，HTTP 端点因此无法打开（`cli.rs:1121-1235`）。与本方案无关，值得单独报 issue。
 
 ## 4. 待用户决定（不要自行决定）
 
-1. **伴侣放在哪个宿主里**：并入 live-host、并入 desktop-shell，还是做成独立应用。live-host 是实验性的 Live 语音功能，它的 daemon 发现只认回环地址。
+1. **伴侣放在哪个宿主里**：`qwen` CLI 子命令（对已装 qwen 的开发者零新增安装）、并入 live-host、并入 desktop-shell，还是独立应用。
 2. **配对凭据的形态**：deep link 还是配对码；是否复用 daemon LAN listener 的配对凭据机制；凭据是否只对单个会话有效。
 3. **片1 原型放在哪里**：`packages/cli` 的子命令，还是独立的包。
 4. **这个方案 PR 何时从草稿转为 ready**；代码 PR 是另开，还是追加到这个 PR（按"不要太碎"的原则判断，建议方案先合、代码另开）。
 
 ## 5. 下一步（按顺序）
 
-1. **片0 真机验证**：让有 Mac 的人或 agent 按 `docs/verification/remote-computer-use/README.md` 执行，把结果写成同目录的 `results.md`，推到本 PR 分支。
-2. **根据片0 的结果修订方案**：尤其是方案 §6 未决问题的第 1–3 点，以及方案 A 的启动方式。
-3. **片1：Node 命令行原型伴侣**。起点：
+1. **真机验证方案 §1 的两条事实**（不写代码，十分钟）：让有 Mac 的人按 `docs/verification/remote-computer-use/README.md` 的 A 部分执行，确认 standalone 守护进程拒绝 `connect()`，并测一张全屏截图的 base64 体积。结果写成同目录的 `results.md`，推到本 PR 分支。
+2. **片1：Node 命令行原型伴侣**。起点：
    - 连接、初始化、注册和重试逻辑：`packages/web-shell/client/local-files/bridge-client.ts`。它跑在浏览器里，Node 版需要换掉 WebSocket 实现和 `navigator.locks`；
    - 帧协议：`packages/cli/src/serve/acp-http/client-mcp-ws.ts`；
    - 会话级注册：`packages/cli/src/serve/acp-http/client-mcp-sender-registry.ts`；
    - 可以对照的测试：`packages/cli/src/serve/acp-http/client-mcp-ws.test.ts`（register → tools/list → tools/call 的完整往返）；
-   - 本地驱动：拉起 `qwen-cua-driver mcp`（stdio）做中继；
+   - 本地子进程：`npx -y @qwen-code/node-repl-mcp@0.1.4`（stdio），版本跟 `SKILL.md:19` 保持一致；
+   - skill 改动：`packages/core/src/skills/bundled/computer-use/SKILL.md` 里读 `references/*.md` 的那段改用 `read_file`；
+   - 验收和测量：验证说明的 B 部分；
    - 放在哪里：先问用户（§4 第 3 点）。
-4. **片2、片3**：见方案 §7。
+3. **片2、片3**：见方案 §7。
 
 ## 6. 操作配方
 
@@ -82,15 +78,17 @@
 ## 7. 调研路径（复查时按这个顺序读）
 
 1. `docs/users/features/computer-use.md`：现有 computer use 的用户文档和链路。
-2. `packages/core/src/skills/bundled/computer-use/SKILL.md`：skill 的 bootstrap，以及"驱动可能在另一台机器上"的表述。
-3. `docs/design/2026-08-23-computer-use-skill.md`、`docs/design/cua-driver-computer-use-sdk.md`：skill 和 SDK 的设计边界。
-4. `packages/cua-driver/README.md`：安装和发布形态。
-5. `packages/cua-driver/rust/crates/cua-driver/src/mcp_http.rs`：HTTP MCP 端点。
-6. `packages/cua-driver/rust/crates/cua-driver/src/cli.rs`：帮助文本（约 480–560 行）、LaunchServices 拉起（约 1121–1235 行）、`permissions grant`（约 2811 行起）。
-7. `packages/cua-driver/typescript/computer-use/README.md`、`index.d.ts`：`connect({ socketPath })`。
-8. `packages/cua-driver/rust/crates/cua-driver-sdk/src/remote.rs`：远程传输抽象。
-9. `docs/design/2026-09-03-client-filesystem-bridge.md` §2–§5：反向工具通道的实测事实。注意其中事实 12 已经过时。
-10. `packages/cli/src/serve/acp-http/client-mcp-ws.ts`、`client-mcp-sender-registry.ts`、`index.ts`（约 1561–1760 行）：通道、注册和 `/acp` 升级时的鉴权。
-11. `packages/web-shell/client/local-files/bridge-client.ts`：客户端参考实现。
-12. `packages/live-host/README.md`、`src/main/discovery.ts`、`src/native/appshot.mm`：现有的 Mac 原生宿主。
-13. `packages/core/src/tools/mcp-client.ts:285`：HTTP MCP 客户端对 405 的处理。
+2. `packages/core/src/skills/bundled/computer-use/SKILL.md`：bootstrap 条件（`:16`）、`create()` 调用（`:35`）、读参考文档（`:31-49`）、"驱动可能在另一台机器上"（`:72`）。
+3. `packages/cua-driver/typescript/computer-use/index.js`：`create()`（`:438`）走 `createConfigured`，`connect()`（`:469`）走 `CuaDriver.connect`。
+4. `packages/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs`：`create_configured` 返回 `Embedded`；`connect`（`:904`）的注释；`create_trusted_session`（`:1042`）按后端分派；版本检查（`:332-361`）。
+5. `packages/cua-driver/rust/crates/cua-driver-sdk/src/service_session.rs:38`：`connect_and_bind` 发 `trusted_session_begin`。
+6. `packages/cua-driver/rust/crates/cua-driver/src/serve.rs`：`authenticate_unix_peer`（`:507`）、`authenticate_embedded_host_connection`（`:524`）、接受连接（`:650`）、`trusted_session_begin` 的拒绝（`:787`）。
+7. `packages/cua-driver/rust/crates/cua-driver-core/src/lib.rs:37`：`embedded_mode()`。
+8. `packages/cua-driver/typescript/scripts/install-native.mjs`、`src/native-assets.ts`：SDK 原生库的下载与平台目标。
+9. `packages/node-repl/src/mcp-server.ts:178`：`node_repl` 工具注册。
+10. `packages/core/src/tools/mcp-client-manager.ts` 的 `addRuntimeMcpServer`：同名遮蔽设置项。
+11. `docs/design/2026-09-03-client-filesystem-bridge.md` §2–§5：反向工具通道的实测事实。注意其中事实 12 已经过时。
+12. `packages/cli/src/serve/acp-http/client-mcp-ws.ts`、`client-mcp-sender-registry.ts`、`index.ts`（约 1561–1760 行）：通道、注册和 `/acp` 升级时的鉴权。
+13. `packages/web-shell/client/local-files/bridge-client.ts`：客户端参考实现。
+14. PR #11548 的 `docs/design/remote-web-shell-daemon.md`：Web Shell 连远程 daemon 的边界。
+15. `packages/cua-driver/rust/crates/cua-driver/src/cli.rs:1121-1235`：LaunchServices 拉起不转发环境变量（独立 bug）。

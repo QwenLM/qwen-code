@@ -1,201 +1,137 @@
-# 片0 验证：远程开发机上的 Qwen Code 经 SSH 反向隧道操作本地 Mac
+# 验证：远程开发机上的 Qwen Code 经 node_repl 中继操作本地 Mac
 
-> 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-mac-companion.md` §3 方案 A；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
-> 本文所有"预期"都来自读代码（`origin/main` @ `f9534f4395`），**没有在真机上跑过**，这正是本次验证要回答的问题。
-> 不需要构建本仓库。只需要一台 Mac 和一台能从 Mac SSH 过去、装好 Qwen Code 的 Linux 开发机。
+> 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-mac-companion.md`；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
+> 本文所有"预期"都来自读代码（`origin/main` @ `c666ec1a0a`），**没有在真机上跑过**。
+> 不需要构建本仓库。A 部分只需要一台 Mac；B 部分还需要一台能从 Mac 连到、装好 Qwen Code 并以 `qwen serve` 运行的 Linux 开发机，以及片1 的原型伴侣。
 
-## 目的
+## A. 事实核对（不写代码，约十分钟）
 
-不写任何代码，回答三个问题：
+回答两个问题：方案 §1 说"standalone 守护进程拒绝 SDK 的 `connect()`"，真机上是不是这样；一张全屏截图经 base64 后有多大。
 
-1. 远端 Qwen Code 能否通过 cua-driver 的 HTTP MCP 加 `ssh -R`，在本地 Mac 上完成观察、点击、输入？
-2. 单步往返延迟是多少？一张截图有多大？
-3. 驱动守护进程的 HTTP 端点在 macOS 上怎样才能真正打开，权限最终记在谁名下？
+### A1. Mac：准备 SDK
 
-结果决定计划里的方案 C 是否继续，以及 Mac 伴侣要不要做截图压缩。本次验证**不需要做任何决定**；决策点列在交接文档 §4。
-
-## 已知的坑（先读）
-
-HTTP 端点只能通过守护进程的环境变量 `CUA_DRIVER_RS_MCP_HTTP_PORT` 和 `CUA_DRIVER_RS_MCP_HTTP_TOKEN` 打开。但在 macOS 上，`qwen-cua-driver mcp` 和 `qwen-cua-driver permissions grant` 会用 `open -n -g -a QwenCuaDriver --args serve` 通过 LaunchServices 拉起守护进程，这条路径只转发 `--socket` 和 `--grant` 参数，**不转发环境变量**（`cli.rs:1121-1235`）。
-
-所以被自动拉起的守护进程**不会**开 HTTP 端点，而且不会报错。第 3 步专门处理这一点，并用 `lsof` 确认。
-
-## 步骤
-
-下文的 `8765` 是示例端口；开发机上被占用就换一个，并在所有步骤里同步替换。
-
-### 1. Mac：安装驱动
+在任意空目录：
 
 ```bash
-CUA_DRIVER_RS_VERSION=0.20.6 \
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
+mkdir -p ~/cua-check && cd ~/cua-check
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.6
+# 预期：postinstall 打印 "@qwen-code/cua-sdk native payload ready: ..."
 ```
 
-预期安装后能看到 `qwen-cua-driver 0.20.6`，并出现 `/Applications/QwenCuaDriver.app`（bundle id `com.qwencode.cua-driver`）。
-
-### 2. Mac：授权
+### A2. Mac：本地路径能用
 
 ```bash
-qwen-cua-driver permissions grant
+node --input-type=module -e '
+const { ComputerUse } = await import("@qwen-code/cua-sdk/computer-use");
+const c = await ComputerUse.create();
+console.log("platform:", await c.getPlatform());
+await c.close();
+'
+# 预期：platform: macos
+# 第一次运行会弹出辅助功能 / 屏幕录制授权；记下系统设置里列出的是哪个应用（预期是终端）
 ```
 
-按提示在"系统设置 → 隐私与安全性"里，给 QwenCuaDriver 打开"辅助功能"和"屏幕录制"。
-
-这个命令会顺带拉起一个**不带 HTTP 端点**的守护进程。进入下一步前先停掉它：
+### A3. Mac：standalone 守护进程拒绝 `connect()`
 
 ```bash
-pgrep -fl QwenCuaDriver        # 记录输出
-pkill -f QwenCuaDriver.app
-pgrep -fl QwenCuaDriver        # 预期：无输出
+# 窗口 1
+qwen-cua-driver serve
+# 没装的话：CUA_DRIVER_RS_VERSION=0.20.6 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
+
+# 窗口 2
+cd ~/cua-check
+node --input-type=module -e '
+const { ComputerUse } = await import("@qwen-code/cua-sdk/computer-use");
+try {
+  const c = await ComputerUse.connect({});
+  console.log("UNEXPECTED: connected, platform", await c.getPlatform());
+  await c.close();
+} catch (e) { console.log("rejected:", e.message); }
+'
+# 预期：rejected: ... trusted service sessions require the original authenticated embedded host connection ...
+# 如果输出 UNEXPECTED，方案 §1 第二条不成立，请把完整输出贴进 results.md
 ```
 
-### 3. Mac：带 HTTP 端点启动守护进程
+### A4. Mac：全屏截图体积
 
 ```bash
-TOKEN="$(openssl rand -hex 32)"
-echo "$TOKEN"                  # 记下来，第 5 步要用
+node --input-type=module -e '
+const { ComputerUse } = await import("@qwen-code/cua-sdk/computer-use");
+const c = await ComputerUse.create();
+const apps = await c.listApps();
+const app = await c.getApp(apps.find(a => /Finder/.test(a.name))?.name ?? apps[0].name);
+const s = await app.getState({ includeScreenshot: true });
+console.log(JSON.stringify(s).length, "bytes as JSON");
+await c.close();
+'
 ```
 
-**方式 A（先试）**：经 LaunchServices 启动，权限应记在 QwenCuaDriver 名下。
+如果 `listApps` / `getApp` / `getState` 的名字不对，按 `node_modules/@qwen-code/cua-sdk/computer-use/index.d.ts` 里的实际 API 调整，目的只是拿到一次带截图的观察并统计 JSON 字节数。注明屏幕是否 Retina 和分辨率。
+
+## B. 片1 原型验收（需要原型伴侣）
+
+### B1. 开发机：以 daemon 方式运行，拿到会话
 
 ```bash
-open -n -g -a QwenCuaDriver \
-  --env CUA_DRIVER_RS_MCP_HTTP_PORT=8765 \
-  --env CUA_DRIVER_RS_MCP_HTTP_TOKEN="$TOKEN" \
-  --args serve
+qwen serve            # 记下监听地址和 token
 ```
 
-`open --env` 只有较新的 macOS 才支持。如果报不认识这个参数，改用方式 B，并记录 macOS 版本。
+在 Web Shell 里新建一个会话，记下 `sessionId`。
 
-**方式 B**：在终端前台直接运行。全仓只有 `mcp` 代理和 `permissions grant` 两处会走 LaunchServices 重新拉起（`cli.rs:1332`、`cli.rs:2837`），所以直接跑 `serve` 会留在当前进程，环境变量能生效。
+### B2. Mac：启动伴侣
 
 ```bash
-CUA_DRIVER_RS_MCP_HTTP_PORT=8765 CUA_DRIVER_RS_MCP_HTTP_TOKEN="$TOKEN" \
-  qwen-cua-driver serve
+qwen-mac-bridge --daemon <url> --token <token> --session <sessionId>
+# 预期：打印 initialize 完成、mcp_register 成功、tools/list 被调用 N+1 次
 ```
 
-此时 macOS 可能把权限算在终端（Terminal / iTerm）头上，需要给终端也打开辅助功能和屏幕录制。记录实际发生的情况。
+### B3. 开发机：工具可见性
 
-**不管用哪种方式，都要确认端点真的开了**（这是最容易静默失败的一步）：
+在那个会话里让模型列出可用工具：预期出现 `node_repl`。在同一 workspace 的**另一个**会话里重复：预期不出现。
 
-```bash
-lsof -nP -iTCP:8765 -sTCP:LISTEN
-# 预期：一行，监听 127.0.0.1:8765
+### B4. 开发机：跑一个真实任务
 
-curl -s -X POST http://127.0.0.1:8765/mcp \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | head -c 400
-# 预期：以 {"jsonrpc":"2.0","id":1,"result":{"tools":[ 开头
-# 把完整输出存一份，第 7 步要从里面找截图工具
+保持默认审批模式（不要开 YOLO），输入：
 
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8765/mcp \
-  -H 'Authorization: Bearer wrong' -d '{}'
-# 预期：401
+> 用 computer use 在我的 Mac 上打开"备忘录"，新建一条备忘录，内容写 hello from remote。每一步操作之后都重新读取界面状态，确认结果。
 
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8765/mcp \
-  -H "Authorization: Bearer $TOKEN" -H 'Origin: https://example.com' -d '{}'
-# 预期：403
-```
+观察并记录：
 
-### 4. Mac：建立反向隧道
+- 模型是否执行了 bootstrap（`qwen mcp add ... node-repl` 或 `npm install @qwen-code/cua-sdk`）。预期：没有。出现了就拒绝这次 shell 调用并记录。
+- `getPlatform()` 是否返回 `macos`。
+- 读参考文档那一步走的是 `read_file` 还是 `node_repl` 里的 `readFile`；后者预期失败（Mac 上没有那个路径），这就是 skill 要改的地方。
+- 任务是否完成；失败的调用和错误文本。
+- 3 次真实 `node_repl` 调用的耗时（qwen 界面上显示的时间即可）。
+- 带截图的那次观察，伴侣日志里的帧大小；是否触发 10 MB 上限。
 
-```bash
-ssh -N -R 8765:127.0.0.1:8765 <devbox>
-```
+### B5. 失败路径
 
-保持这个窗口开着。
-
-### 5. 开发机：注册 MCP
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8765/mcp \
-  -H 'Authorization: Bearer wrong' -d '{}'
-# 预期：401，说明隧道已经通到 Mac
-
-qwen mcp add --scope user --transport http cua http://127.0.0.1:8765/mcp \
-  -H "Authorization: Bearer <第 3 步的 TOKEN>"
-
-qwen mcp list
-# 预期：cua 显示已连接
-```
-
-`--scope user` 会把 token 写进开发机的用户设置，验证结束后按第 9 步删除。
-
-### 6. 开发机：跑一个真实任务
-
-在开发机上启动 `qwen`，保持默认审批模式（不要开 YOLO），输入：
-
-> 用 cua 这个 MCP 服务器提供的工具，在我的 Mac 上打开"备忘录"，新建一条备忘录，内容写 hello from remote。每一步操作之后都重新读取界面状态，确认结果。
-
-提示词里不要提 computer-use skill。如果模型仍然试图执行 skill 的 bootstrap（`qwen mcp add ... node-repl` 或 `npm install @qwen-code/cua-sdk`），拒绝这次 shell 调用并记录下来。
-
-### 7. 测量
-
-- **单步往返**：在开发机上对隧道重复 5 次，取中位数：
-
-  ```bash
-  for i in 1 2 3 4 5; do
-    curl -s -o /dev/null -w '%{time_total}\n' -X POST http://127.0.0.1:8765/mcp \
-      -H "Authorization: Bearer <TOKEN>" -H 'Content-Type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-  done
-  ```
-
-  同时记录第 6 步任务里 3 次真实工具调用的耗时（qwen 界面上显示的时间即可）。
-
-- **截图体积**：从第 3 步的 `tools/list` 输出里找到截图工具（名字里带 screenshot 或 capture），按它的 `inputSchema` 填参数，调用一次并统计字节数：
-
-  ```bash
-  curl -s -X POST http://127.0.0.1:8765/mcp \
-    -H "Authorization: Bearer <TOKEN>" -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"<工具名>","arguments":{<参数>}}}' \
-    | wc -c
-  ```
-
-  至少测一次全屏截图；如果是 Retina 屏，请注明。
-
-### 8. 失败路径
-
-- 关掉第 4 步的隧道窗口，在 qwen 里让模型再读一次界面。预期：工具调用给出明确的错误，而不是一直挂起。记录错误文本和等了多久。
-- 重新打开隧道，看工具能否恢复，以及是否需要重启 qwen 或执行 `qwen mcp reconnect`。
-
-### 9. 清理
-
-```bash
-# 开发机
-qwen mcp remove cua
-
-# Mac：方式 A
-pkill -f QwenCuaDriver.app
-# Mac：方式 B
-# 在运行 serve 的终端里按 Ctrl-C
-```
-
-token 只存在于守护进程的环境变量里，进程停掉后自然失效。
+- 关掉伴侣。预期：会话里 `node_repl` 工具消失；模型再调用时得到明确错误，不是一直挂起。记录错误文本和等待时长。
+- 重启伴侣。预期：工具恢复，不需要重启 qwen。
+- Mac 睡眠再唤醒。记录伴侣是否自动重连。
 
 ## 需要回报的内容
 
 写进同一目录下的 `results.md`，推到 PR #11799 的分支（追加提交，不要 force-push），再在 PR 里留一条评论。
 
-| 项                                                        | 结果 |
-| --------------------------------------------------------- | ---- |
-| macOS 版本 / 芯片 / 屏幕是否 Retina                       |      |
-| 开发机上 `qwen --version`                                 |      |
-| 第 3 步用的方式；`open --env` 是否可用                    |      |
-| 权限最终记在谁名下（系统设置里列出的是哪个应用）          |      |
-| `lsof` 输出；三个 `curl` 的状态码和 `tools/list` 开头部分 |      |
-| `qwen mcp list` 输出                                      |      |
-| 任务是否完成；用到了哪些工具；失败的调用和错误文本        |      |
-| 是否出现 skill bootstrap 尝试                             |      |
-| 经隧道 `tools/list` 的往返中位数；3 次真实调用的耗时      |      |
-| 全屏截图的响应字节数                                      |      |
-| 断开隧道后的错误表现和等待时长；恢复方式                  |      |
+| 项                                                 | 结果 |
+| -------------------------------------------------- | ---- |
+| macOS 版本 / 芯片 / 屏幕是否 Retina 及分辨率       |      |
+| A2：`getPlatform()` 输出；授权记在哪个应用名下     |      |
+| A3：`connect()` 的完整错误文本                     |      |
+| A4：带截图观察的 JSON 字节数                       |      |
+| B3：两个会话里 `node_repl` 的可见性                |      |
+| B4：是否出现 bootstrap；读参考文档走的是哪条路     |      |
+| B4：任务是否完成；失败的调用和错误文本             |      |
+| B4：3 次 `node_repl` 调用的耗时；最大帧大小        |      |
+| B5：关掉伴侣后的错误表现和等待时长；重启后是否恢复 |      |
 
 ## 本次验证可能推翻的结论
 
 请逐条注明"成立 / 不成立 / 无法判断"：
 
-1. 计划 §5 事实 1–4：驱动的 HTTP 端点行为，以及 Qwen 的 HTTP MCP 客户端能与它完成握手。
-2. 计划 §3 方案 A：在终端直接运行 `serve` 就足够，还是必须用方式 A 才能拿到正确的权限归属。
-3. 计划 §6 第 3 点：截图体积是否接近 `/acp` 的 10 MB 单帧上限。
-4. 本文"已知的坑"：自动拉起的守护进程确实不开 HTTP 端点。验证方法：跳过第 2 步的 `pkill`，直接做第 3 步的 `lsof` 检查，预期没有监听。
+1. 方案 §1：standalone 守护进程拒绝 `connect()`（A3）。
+2. 方案 §1：`create()` 的授权落在拉起 node 的进程身份上（A2）。
+3. 方案 §6 第 1 点：模型看到已注册的 `node_repl` 就不执行 bootstrap（B4）。
+4. 方案 §3.2：读参考文档必须改用 `read_file`（B4）。
+5. 方案 §6 第 2 点：截图体积是否接近 10 MB 帧上限（A4、B4）。
