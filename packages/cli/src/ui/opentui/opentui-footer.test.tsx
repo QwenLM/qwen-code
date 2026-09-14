@@ -92,8 +92,18 @@ vi.mock('../../i18n/index.js', async (importOriginal) => {
 
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  SPINNER_FRAMES,
+  SPINNER_INTERVAL_MS,
+  WAITING_SPINNER_FRAME,
+} from '../constants.js';
 import { WITTY_LOADING_PHRASES } from '../hooks/usePhraseCycler.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
+
+/** The indicator's first text cell is the spinner's own 2-column box. */
+function spinnerCell(container: HTMLElement): string {
+  return (container.querySelector('span')?.textContent ?? '').trim();
+}
 
 function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -120,6 +130,26 @@ describe('OpenTuiLoadingIndicator', () => {
     const { container } = render(<OpenTuiLoadingIndicator streaming />);
     expect(container.textContent).toContain('esc to cancel');
     expect(container.textContent).toContain('(0s');
+  });
+
+  it('advances the spinner frame while the turn is in flight', () => {
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    expect(spinnerCell(container)).toBe(SPINNER_FRAMES[0]);
+    act(() => {
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 3);
+    });
+    expect(spinnerCell(container)).toBe(SPINNER_FRAMES[3]);
+  });
+
+  it("holds ink's static frame once a call is parked on a confirmation", () => {
+    const { container } = render(
+      <OpenTuiLoadingIndicator streaming={false} waiting />,
+    );
+    expect(container.textContent).toContain('Waiting for user confirmation...');
+    act(() => {
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 20);
+    });
+    expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
   });
 
   it('ticks the elapsed counter once per second', () => {

@@ -26,7 +26,11 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import { SPINNER_FRAMES, SPINNER_INTERVAL_MS } from '../constants.js';
+import {
+  SPINNER_FRAMES,
+  SPINNER_INTERVAL_MS,
+  WAITING_SPINNER_FRAME,
+} from '../constants.js';
 import { usePhraseCycler } from '../hooks/usePhraseCycler.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useTimer } from '../hooks/useTimer.js';
@@ -45,17 +49,24 @@ import { C } from './theme.js';
 
 /**
  * Owns its frame timer so the high-frequency tick re-renders ONLY this 1-cell
- * component, not the whole transcript tree.
+ * component, not the whole transcript tree. ink's `RespondingSpinner` animates
+ * while responding and draws one static frame while a call is parked on a
+ * confirmation, so that row emits no bytes at all until the user answers.
  */
-function Spinner() {
+function Spinner({ waiting }: { waiting: boolean }) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
+    if (waiting) return;
     const spin = setInterval(() => setFrame((f) => f + 1), SPINNER_INTERVAL_MS);
     return () => clearInterval(spin);
-  }, []);
+  }, [waiting]);
   return (
     <box width={2}>
-      <text fg={C.dim}>{SPINNER_FRAMES[frame % SPINNER_FRAMES.length]}</text>
+      <text fg={C.dim}>
+        {waiting
+          ? WAITING_SPINNER_FRAME
+          : SPINNER_FRAMES[frame % SPINNER_FRAMES.length]}
+      </text>
     </box>
   );
 }
@@ -127,7 +138,7 @@ export function OpenTuiLoadingIndicator({
   return (
     <box paddingLeft={2} flexDirection={isNarrow ? 'column' : 'row'}>
       <box flexDirection="row">
-        <Spinner />
+        <Spinner waiting={waiting} />
         <text fg={C.dim}>
           {isNarrow || !suffix ? phraseText : `${phraseText} ${suffix}`}
         </text>

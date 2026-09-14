@@ -807,6 +807,39 @@ Removing the compaction fails exactly those two tests and no other, with
 over-length displays of forty-one thousand and thirty-seven thousand characters
 named in the failing assertions.
 
+## Decision 28 — the waiting row freezes while the dialog is open
+
+While a call was parked on a confirmation, this renderer kept repainting the
+waiting row and ink's did not. Measured rather than inferred: a probe replaying
+the question-dialog scenario sampled the reconstructed screen once a second for
+fifteen seconds with the dialog open, and the ink leg emitted zero bytes on
+every sample while this one emitted about twelve, its row holding a different
+frame each time. Twelve bytes a second is that renderer's own cadence — the
+shared spinner interval is eighty milliseconds, and a repaint that changes one
+cell costs roughly a byte. A leg with no dialog open emits nothing at all on
+either renderer, so this was not the whole tree redrawing.
+
+The gate lives in ink's `RespondingSpinner`: it animates in the responding state
+and otherwise draws the `nonRespondingDisplay` string it is handed, and
+`LoadingIndicator` hands it one static frame while the state is waiting for
+confirmation — no timer runs at all in that state. This renderer's spinner owned
+an unconditional interval, so the row asked for attention while the user's
+answer was the only thing that could stop it. The cost is not only visual: the
+acceptance harness decides a leg has settled by watching its output go quiet, so
+every parked leg of a confirmation scenario burned the full sixty-second idle
+timeout (measured at 60,088 ms and 39,798 bytes on one leg of one scenario).
+Checkpoints are declared by the scenario rather than timed, so no verdict was
+invalidated — each parked leg simply paid the wait, and the frame comparison
+counted every one of those rows as the spinner-frame difference this document
+already records rather than as content.
+
+The gate is ported, and the frame it freezes on is shared rather than copied: it
+joins the spinner constants both renderers already read from one place, which ink
+had spelled out as a literal until now. Two tests cover the pair — the frame
+advances while a turn is in flight, and holds that one frame while a call is
+parked. Each is killed by its own mutation and by nothing else: removing the gate
+fails the parked test, removing the interval fails the in-flight one.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
