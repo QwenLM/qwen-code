@@ -167,8 +167,9 @@ C 源码就放在旁边 `packages/core/vendor/landlock-run/src/qwen-landlock-run
 最宽松的模式。否则：
 
 1. `QWEN_SANDBOX_NET=closed` ⇒ closed（硬拒绝，优先于代理配置）。
-2. 否则设置了 `QWEN_SANDBOX_PROXY_COMMAND` ⇒ proxied。
-3. 否则 ⇒ open。
+2. `QWEN_SANDBOX_NET=proxied` 但未提供非空白的 `QWEN_SANDBOX_PROXY_COMMAND` ⇒ 启动报错。
+3. 否则设置了 `QWEN_SANDBOX_PROXY_COMMAND` ⇒ proxied。
+4. 否则 ⇒ open。
 
 这与 Seatbelt 的 profile 矩阵（open/closed/proxied）一致，且 v1 不引入新的
 profile 词汇表。
@@ -364,9 +365,7 @@ _存活_。结果是一个永远不会显示为已死的 owner，于是交接与
    那是既有缺陷，不是本阶段引入的，而修它会改变 macOS 行为——不在本处范围内
    （§ 非目标：不改动 Seatbelt 路径），改为记录在 § 待决问题 中。bwrap 分支与 sandbox 子命令共享 `runBwrap` 和 `buildBwrapEnv`，通过子进程环境传递代理变量。与 Seatbelt 共享执行器仍留待其环境变量缺陷修复之后。
 
-5. **spawn 契约** —— `stdio: 'inherit'`，spawn 前 `process.stdin.pause()` /
-   close 时 `resume()`，以子进程退出码 resolve ——与 seatbelt 分支一致
-   （`sandbox.ts` (`start_sandbox`, Seatbelt spawn)）。
+5. **spawn 契约** —— `stdio: 'inherit'`，spawn 前 `process.stdin.pause()` / close 时 `resume()`，以子进程退出码 resolve。异步执行器使用 POSIX `detached: true` 创建不持有宿主控制终端的会话；同步验证探针传入 bwrap `--new-session`。异步执行器把 SIGINT/SIGTERM 转发给沙箱进程组，把信号退出映射为 130/143，并转发 SIGWINCH，让终端尺寸变化仍能到达 TUI。在代理就绪期间取消会停止代理，不会在随后启动载荷。这一会话行为仅用于 bwrap；Seatbelt 路径不变。
 
 ### `llm.tsx` 的交接
 
@@ -406,6 +405,8 @@ sandbox-exec 分支（它们是原地 hop，不是镜像——没有
 注册。之所以拉进 P0 而不是延后：§ 已核实的兼容性影响 里的每一项影响，在任务
 中途出错之前都是不可见的，所以后端和证明它能工作的手段必须一起交付——下面的
 计划中的 CI 通道与 E2E 表也都要求这一点。本 PR 尚未实现 Linux bwrap CI 通道。
+
+从宿主机上的项目目录运行 `QWEN_SANDBOX=bwrap qwen sandbox`，显式检查该后端。原始会话的一次性环境变量赋值不会保留在宿主 shell 中。报告使用该目录的 settings；会话单独传入的 `--include-directories` 授权可能不同。
 
 - `qwen sandbox` —— 打印解析出的后端、探测结果、强制等级、可写根（含解析出的
   git 目录）与网络模式。
@@ -526,19 +527,21 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
 后端与 macOS 不受影响。这张表是 P3 翻默认值时必须回答的；在那之前，它们是一个
 显式启用 flag 的既有后果。
 
-| 领域                                                                       | 影响                    | 机制                                                                                                                                                                                               | v1 中的处理                                                                                                      |
-| -------------------------------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| worktree 检出里的 git                                                      | 会完全不可用            | git dir 与 common dir 解析到 cwd 之外（布局已在 § Phase P0 核实）                                                                                                                                  | **已修** —— 两者都是可写根                                                                                       |
-| 跨进程 owner 存活性                                                        | 会静默挂起              | `process.kill(pid, 0)` 返回非 `ESRCH` ⇒ 存活，而 PID 通过 `~/.qwen` 共享（`conversation-runtime-ownership.ts:44-65`、`serve/live/discovery.ts:147`、`worktreeSessionService.ts:424-446`）          | **已规避** —— 完全不用 PID 命名空间（D6）                                                                        |
-| GUI 启动（OAuth 登录、`artifact` 打开）                                    | 浏览器无法在约束下运行  | `xdg-open` 子进程继承约束，而 `~/.config/<browser>` 不是可写根                                                                                                                                     | 删除 display 变量 ⇒ 确定地走打印 URL 路径                                                                        |
-| `git push` 的 ssh-agent 认证                                               | 不受影响                | agent socket 通常位于 `/run/user/$UID`（经只读主机绑定保持可达）；`/tmp/ssh-*` 下的 socket 也可用，因为主机 `/tmp` 保持绑定、没有被 tmpfs 替换 —— 共享 `/tmp` 暴露的面见 § 安全考量                | ——                                                                                                               |
-| 语音输入                                                                   | 不可用                  | `--dev /dev` 遮蔽 `/dev/snd`；`voice-availability.ts:50` 还需要 `PULSE_SERVER`                                                                                                                     | 已记录 —— 改用容器后端或无约束运行                                                                               |
-| 自更新                                                                     | 部分受影响              | 受管更新根是 `~/.qwen/updates/npm`（`scripts/cli-entry.js:149-150`）——那是可写根，因此退出码 44 的受管流程可用；而 npm-global 的 `updateCommand`（`installationInfo.ts:350`）写全局 prefix，会失败 | 受管安装与独立安装正常更新；npm-global 用户从主机侧更新                                                          |
-| IDE companion、主机 `qwen serve`、localhost MCP                            | 仅在 `closed` 下不可达  | `--unshare-net` 移除 loopback（D5）                                                                                                                                                                | `open` / `proxied` 下仍可用                                                                                      |
-| 对 `~/.config`、`~/.kube`、`~/.ssh`、`/usr/local` 的写入                   | 被拒绝                  | 它们不是可写根 —— 这正是沙箱的意义                                                                                                                                                                 | 确有工作流需要时通过 `--include-directories` 单独加入                                                            |
-| 会话数据、检查点、worktree、Arena、IDE 锁文件、MCP OAuth token、token 账本 | 不受影响                | 全部位于 `QWEN_DIR` / `RUNTIME_DIR` 之下（`storage.ts:193-241`、`gitWorktreeService.ts:419`、`ArenaManager.ts:136`）                                                                               | ——                                                                                                               |
-| `docker.sock`、D-Bus、Wayland 及其他主机 unix socket                       | 在 bwrap 上可达（实测） | 内核的只读文件系统写检查豁免 `S_ISSOCK`（只有 `S_ISREG`/`S_ISDIR`/`S_ISLNK` 会返回 `EROFS`），因此 `--ro-bind / /` 之下的 socket 仍接受 `connect()`                                                | 在 bwrap 上**已核实** —— 位于所有可写根之外的 socket 仍接受 `connect()`；Landlock 后端留作 P1 的 `--verify` 用例 |
-| procfs 魔法链接（`/proc/<pid>/root/…`）                                    | 在挂载策略之外          | 访问使用 `PTRACE_MODE_READ_FSCREDS`，不是 Yama 的 ATTACH 进程关系限制                                                                                                                              | **保留的限制** —— 不能从 `ptrace_scope=1` 推导保护成立；更强隔离依赖 D6 前置条件                                 |
+| 领域                                                                       | 影响                    | 机制                                                                                                                                                                                                                | v1 中的处理                                                                                                      |
+| -------------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| worktree 检出里的 git                                                      | 会完全不可用            | git dir 与 common dir 解析到 cwd 之外（布局已在 § Phase P0 核实）                                                                                                                                                   | **已修** —— 两者都是可写根                                                                                       |
+| 跨进程 owner 存活性                                                        | 会静默挂起              | `process.kill(pid, 0)` 返回非 `ESRCH` ⇒ 存活，而 PID 通过 `~/.qwen` 共享（`conversation-runtime-ownership.ts:44-65`、`serve/live/discovery.ts:147`、`worktreeSessionService.ts:424-446`）                           | **已规避** —— 完全不用 PID 命名空间（D6）                                                                        |
+| GUI 启动（OAuth 登录、`artifact` 打开）                                    | 浏览器无法在约束下运行  | `xdg-open` 子进程继承约束，而 `~/.config/<browser>` 不是可写根                                                                                                                                                      | 删除 display 变量 ⇒ 确定地走打印 URL 路径                                                                        |
+| `git push` 的 ssh-agent 认证                                               | 不受影响                | agent socket 通常位于 `/run/user/$UID`（经只读主机绑定保持可达）；`/tmp/ssh-*` 下的 socket 也可用，因为主机 `/tmp` 保持绑定、没有被 tmpfs 替换 —— 共享 `/tmp` 暴露的面见 § 安全考量                                 | ——                                                                                                               |
+| 语音输入                                                                   | 不可用                  | `--dev /dev` 遮蔽 `/dev/snd`；`voice-availability.ts:50` 还需要 `PULSE_SERVER`                                                                                                                                      | 已记录 —— 改用容器后端或无约束运行                                                                               |
+| 自更新                                                                     | 部分受影响              | 默认受管更新根是 `QWEN_DIR/updates/npm`（Qwen home 遵循 `QWEN_HOME`）；暂存目录、版本目录和 active 清单需要可写，宿主启动器随后会执行其中的代码；自定义固定更新根可能位于授权之外，npm-global 更新则写入全局 prefix | 保留默认受管更新授权及其宿主执行风险；安装目标位于可写根之外时从主机侧更新                                       |
+| IDE companion、主机 `qwen serve`、localhost MCP                            | 仅在 `closed` 下不可达  | `--unshare-net` 移除 loopback（D5）                                                                                                                                                                                 | `open` / `proxied` 下仍可用                                                                                      |
+| 对 `~/.config`、`~/.kube`、`~/.ssh`、`/usr/local` 的写入                   | 被拒绝                  | 它们不是可写根 —— 这正是沙箱的意义                                                                                                                                                                                  | 拒绝额外的 home 内部根；home 之外的路径可通过 `--include-directories` 授权                                       |
+| 会话数据、检查点、worktree、Arena、IDE 锁文件、MCP OAuth token、token 账本 | 不受影响                | 全部位于 `QWEN_DIR` / `RUNTIME_DIR` 之下（`storage.ts:193-241`、`gitWorktreeService.ts:419`、`ArenaManager.ts:136`）                                                                                                | ——                                                                                                               |
+| `docker.sock`、D-Bus、Wayland 及其他主机 unix socket                       | 在 bwrap 上可达（实测） | 内核的只读文件系统写检查豁免 `S_ISSOCK`（只有 `S_ISREG`/`S_ISDIR`/`S_ISLNK` 会返回 `EROFS`），因此 `--ro-bind / /` 之下的 socket 仍接受 `connect()`                                                                 | 在 bwrap 上**已核实** —— 位于所有可写根之外的 socket 仍接受 `connect()`；Landlock 后端留作 P1 的 `--verify` 用例 |
+| procfs 魔法链接（`/proc/<pid>/root/…`）                                    | 在挂载策略之外          | 访问使用 `PTRACE_MODE_READ_FSCREDS`，不是 Yama 的 ATTACH 进程关系限制                                                                                                                                               | **保留的限制** —— 不能从 `ptrace_scope=1` 推导保护成立；更强隔离依赖 D6 前置条件                                 |
+
+额外目录限制同样适用于 CLI 和 settings 条目，因为解析器接收的是没有来源信息的合并路径。内建授权之外的 home 内部条目会阻止启动，而不是把请求的可写目录静默降级。home 之外的额外根即使来自工作区 settings 也仍然可写；P0 不承诺只有操作者才能添加授权。区分显式操作者授权和仓库配置属于独立的配置策略变更。
 
 ## 安全考量
 
@@ -566,6 +569,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   主机 Debian 13 上实测）。closed 模式下因此仍留有一条 DNS 形态的旁路。
 - **setuid 提权**：在施加约束之前设置 `no_new_privs`（对非特权 Landlock 而言
   这也是强制要求）。
+- **终端会话**：两个 bwrap 启动点都创建独立的 POSIX 会话，同时保留标准输入输出。这样移除了对宿主控制终端的持有关系，处理了 [bubblewrap 安全文档](https://github.com/containers/bubblewrap#sandbox-security) 中描述的终端会话问题。异步启动器使用 `detached: true`，使 bwrap 及其载荷仍处于同一进程组以转发信号。同步探针使用 bwrap `--new-session`，不使用异步信号转发。这并不增加 PID 或宿主进程隔离。
 - **孤儿进程**：bwrap 上用 `--die-with-parent`；Landlock ruleset 是进程作用域的，
   随进程消失。
 - **解析与 exec 之间的符号链接替换**：通过在 spawn 前紧邻解析来收窄；残余竞态
@@ -601,6 +605,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
   独占创建、0600 权限生成空文件，再进行只读绑定；已有内容绝不覆盖。空文件会
   留在主机上，包括执行检查命令之后，以便后续解析使用同一路径。非普通文件、
   符号链接、多个硬链接或准备文件失败都会终止操作，而不是省略保护。
+- **其他 Qwen 状态仍可写，并会被后续宿主运行信任**：`.env` 的覆盖绑定只保护该环境输入路径。用户 `settings.json`（包括 MCP 和 hook 配置）、自定义命令、记忆和受管更新文件仍然可写。配置修改可能影响之后未受约束的启动，受管启动器也会执行从更新根选中的代码。这些是为持久化配置和受管更新保留的能力，不能据此声称所有后续宿主执行输入都已受到保护。收窄它们需要单独设计写入策略和更新交接。
 - **运行态标记由启动器提供**：项目和 home 作用域的 `.env` 以及 settings.env
   均不能设置 `SANDBOX` 与 `SANDBOX_ENFORCEMENT`，包括重载与运行时快照。
   启动器已有的值仍正常继承；通过独立的 `QWEN_SANDBOX` 操作者配置选择后端的

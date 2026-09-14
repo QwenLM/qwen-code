@@ -140,6 +140,18 @@ describe('resolveSandboxNetworkMode', () => {
     expect(resolveSandboxNetworkMode(env)).toBe(mode);
   });
 
+  it.each([undefined, '', '   '])(
+    'rejects explicit proxied mode with proxy command %j',
+    (command) => {
+      expect(() =>
+        resolveSandboxNetworkMode({
+          QWEN_SANDBOX_NET: 'proxied',
+          QWEN_SANDBOX_PROXY_COMMAND: command,
+        }),
+      ).toThrow(/proxied.*QWEN_SANDBOX_PROXY_COMMAND/);
+    },
+  );
+
   // A typo on the hard-deny switch must not fall through to the least
   // restrictive mode: the operator asked for confinement and gets told.
   it.each(['close', 'blocked', 'none', 'off'])(

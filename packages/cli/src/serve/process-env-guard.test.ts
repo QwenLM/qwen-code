@@ -237,9 +237,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
         'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move. The bwrap backend added a second copy of that ' +
-        'assembly (the in-place hop cannot prefix a shell command with the ' +
-        'assignments, so everything travels on the spawn env), plus ' +
+        'leaf-layer move. The bwrap backend forwards its launch environment ' +
+        'through whole-environment references; proxy settings are read from ' +
+        'the resulting baseEnv parameter rather than process.env. It also reads ' +
         'XDG_CACHE_HOME to grant the cache directory the Seatbelt profiles ' +
         'already grant.',
       accesses: {
@@ -257,9 +257,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:GOOGLE_CLOUD_PROJECT': 2,
         'key:GOOGLE_GENAI_USE_GCA': 2,
         'key:GOOGLE_GENAI_USE_VERTEXAI': 2,
-        'key:HTTP_PROXY': 3,
-        'key:HTTPS_PROXY': 3,
-        'key:NO_PROXY': 3,
+        'key:HTTP_PROXY': 2,
+        'key:HTTPS_PROXY': 2,
+        'key:NO_PROXY': 2,
         'key:NODE_ENV': 1,
         'key:NODE_OPTIONS': 2,
         'key:OPENAI_API_KEY': 2,
@@ -272,7 +272,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_CODE_WARNINGS_FILE': 2,
         'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 2,
         'key:QWEN_CODE_TEST_VAR': 2,
-        'key:QWEN_SANDBOX_PROXY_COMMAND': 3,
+        'key:QWEN_SANDBOX_PROXY_COMMAND': 2,
         'key:SANDBOX_ENV': 2,
         'key:SANDBOX_FLAGS': 2,
         'key:SANDBOX_MOUNTS': 2,
@@ -282,10 +282,10 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:TERM': 2,
         'key:VIRTUAL_ENV': 1,
         'key:XDG_CACHE_HOME': 1,
-        'key:http_proxy': 3,
-        'key:https_proxy': 3,
-        'key:no_proxy': 3,
-        whole: 8,
+        'key:http_proxy': 2,
+        'key:https_proxy': 2,
+        'key:no_proxy': 2,
+        whole: 9,
       },
     },
   ],

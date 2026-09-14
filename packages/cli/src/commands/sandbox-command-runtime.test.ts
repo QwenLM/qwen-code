@@ -83,7 +83,7 @@ describe('qwen sandbox command runtime contract', () => {
   beforeEach(() => {
     exitListeners = new Set(process.listeners('exit'));
     signalListeners = new Map(
-      (['SIGINT', 'SIGTERM'] as const).map((event) => [
+      (['SIGINT', 'SIGTERM', 'SIGWINCH'] as const).map((event) => [
         event,
         new Set(process.listeners(event)),
       ]),
@@ -194,7 +194,61 @@ describe('qwen sandbox command runtime contract', () => {
     const argv = call?.[1] as string[];
     expect(argv.slice(argv.indexOf('--') + 1)).toEqual(cmd);
     expect(call?.[2]?.stdio).toBe('inherit');
+    expect(call?.[2]?.detached).toBe(true);
     expect(process.exitCode).toBe(42);
+  });
+
+  it.each(['SIGINT', 'SIGTERM'] as const)(
+    'forwards %s to the dedicated sandbox group and removes its listeners',
+    async (signal) => {
+      const payload = mockChild(54322);
+      spawnMock.mockReturnValueOnce(payload);
+      const completion = run({ '--': ['echo', 'fixture'] });
+      await vi.waitFor(() => expect(backendCalls()).toHaveLength(1));
+      process.emit(signal);
+      expect(process.kill).toHaveBeenCalledWith(-54322, signal);
+      payload.emit('close', null, signal);
+      await completion;
+      expect(process.exitCode).toBe(signal === 'SIGINT' ? 130 : 143);
+      expectProcessListenersRestored();
+    },
+  );
+
+  it('cancels proxy readiness on SIGTERM without launching a late payload', async () => {
+    vi.stubEnv('QWEN_SANDBOX_NET', 'proxied');
+    vi.stubEnv('QWEN_SANDBOX_PROXY_COMMAND', 'fixture-proxy-command');
+    const proxy = mockChild();
+    spawnMock.mockReturnValueOnce(proxy);
+    let ready:
+      | ((error: Error | null, stdout: string, stderr: string) => void)
+      | undefined;
+    execMock.mockImplementationOnce((...args: unknown[]) => {
+      ready = args.at(-1) as NonNullable<typeof ready>;
+      return new EventEmitter();
+    });
+    const completion = run({ '--': ['echo', 'fixture'] });
+    await vi.waitFor(() => expect(execMock).toHaveBeenCalledOnce());
+    process.emit('SIGTERM');
+    await completion;
+    expect(process.exitCode).toBe(143);
+    expect(process.kill).toHaveBeenCalledWith(-54321, 'SIGTERM');
+    ready?.(null, '', '');
+    await Promise.resolve();
+    expect(backendCalls()).toHaveLength(0);
+    expectProcessListenersRestored();
+  });
+
+  it('forwards terminal resize without ending the sandbox run', async () => {
+    const payload = mockChild(54322);
+    spawnMock.mockReturnValueOnce(payload);
+    const completion = run({ '--': ['echo', 'fixture'] });
+    await vi.waitFor(() => expect(backendCalls()).toHaveLength(1));
+    process.emit('SIGWINCH');
+    expect(process.kill).toHaveBeenCalledWith(-54322, 'SIGWINCH');
+    expect(process.exitCode).toBeUndefined();
+    payload.emit('close', 0, null);
+    await completion;
+    expectProcessListenersRestored();
   });
 
   it('supplies proxy environment when executing in proxied mode', async () => {
@@ -339,7 +393,7 @@ describe('qwen sandbox command runtime contract', () => {
 
     expect(spawnMock.mock.calls.length).toBe(2);
     expect(backendCalls().length).toBe(1);
-    expect(payload.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(process.kill).toHaveBeenCalledWith(-54322, 'SIGTERM');
     expect(process.exitCode).toBe(1);
     expect(process.stdin.resume).toHaveBeenCalled();
     expect(proxy.listenerCount('error')).toBe(0);
@@ -359,6 +413,7 @@ describe('qwen sandbox command runtime contract', () => {
     await run({ verify: true });
     expect(backendCalls().length).toBeGreaterThan(0);
     for (const call of backendCalls()) {
+      expect(call[1]).toContain('--new-session');
       expect(call[2]?.env?.SANDBOX).toBe('bwrap');
       expect(call[2]?.env?.SANDBOX_ENFORCEMENT).toBe('full');
       expect(call[2]?.env?.LC_ALL).toBe('C');

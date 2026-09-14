@@ -259,6 +259,11 @@ export function resolveSandboxNetworkMode(
   if (requested === 'closed') {
     return 'closed';
   }
+  if (requested === 'proxied' && !env['QWEN_SANDBOX_PROXY_COMMAND']?.trim()) {
+    throw new FatalSandboxError(
+      'QWEN_SANDBOX_NET=proxied requires QWEN_SANDBOX_PROXY_COMMAND.',
+    );
+  }
   return env['QWEN_SANDBOX_PROXY_COMMAND'] ? 'proxied' : 'open';
 }
 
@@ -467,7 +472,8 @@ export function resolveBwrapWritableRoots(
   // selection, network mode, the host-side proxy command) that every later
   // launch re-reads, and QWEN_DIR itself must stay writable — so the file
   // gets a read-only bind layered over the writable root, keeping a confined
-  // process from rewriting what the host next trusts.
+  // process from rewriting this environment input. Other QWEN_DIR settings
+  // and managed update files remain writable and can affect later host runs.
   const qwenEnvFile = path.join(qwenDir, '.env');
   let protectedEnvFile: string;
   try {
@@ -589,6 +595,15 @@ export function runBwrap(
     let finished = false;
     let stdinPaused = false;
     const readiness = new AbortController();
+    const signalSandbox = (signal: NodeJS.Signals) => {
+      if (sandboxProcess?.pid) {
+        try {
+          process.kill(-sandboxProcess.pid, signal);
+        } catch {
+          // The sandbox group may already have exited.
+        }
+      }
+    };
     const stopProxy = () => {
       if (proxyProcess?.pid) {
         try {
@@ -603,16 +618,25 @@ export function runBwrap(
       finished = true;
       readiness.abort();
       process.removeListener('exit', stopProxy);
-      process.removeListener('SIGINT', stopProxy);
-      process.removeListener('SIGTERM', stopProxy);
+      process.removeListener('SIGINT', onSigint);
+      process.removeListener('SIGTERM', onSigterm);
+      process.removeListener('SIGWINCH', onSigwinch);
       proxyProcess?.removeListener('error', proxyError);
       proxyProcess?.removeListener('close', proxyClosed);
-      if (error) sandboxProcess?.kill('SIGTERM');
+      if (error) signalSandbox('SIGTERM');
       stopProxy();
       if (stdinPaused) process.stdin.resume();
       if (error) reject(error);
       else resolve(code);
     };
+    const forwardSignal = (signal: 'SIGINT' | 'SIGTERM') => {
+      if (finished) return;
+      if (sandboxProcess?.pid) signalSandbox(signal);
+      else finish(null, signal === 'SIGINT' ? 130 : 143);
+    };
+    const onSigint = () => forwardSignal('SIGINT');
+    const onSigterm = () => forwardSignal('SIGTERM');
+    const onSigwinch = () => signalSandbox('SIGWINCH');
     const proxyError = (error: Error) =>
       finish(new FatalSandboxError(`Sandbox proxy failed: ${error.message}`));
     const proxyClosed = (code: number | null, signal: NodeJS.Signals | null) =>
@@ -629,13 +653,25 @@ export function runBwrap(
         sandboxProcess = spawn('bwrap', buildBwrapArgs(options), {
           stdio: 'inherit',
           env,
+          // A separate session removes the host controlling terminal. Keep
+          // bwrap and its payload in one group so signals reach both.
+          detached: true,
         });
         sandboxProcess.once('error', (error) => finish(error));
-        sandboxProcess.once('close', (code) => finish(null, code ?? 1));
+        sandboxProcess.once('close', (code, signal) =>
+          finish(
+            null,
+            code ??
+              (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1),
+          ),
+        );
       } catch (error) {
         finish(error as Error);
       }
     };
+    process.on('SIGINT', onSigint);
+    process.on('SIGTERM', onSigterm);
+    process.on('SIGWINCH', onSigwinch);
     if (options.networkMode !== 'proxied') {
       launch();
       return;
@@ -654,8 +690,6 @@ export function runBwrap(
         writeStderrLine(data.toString()),
       );
       process.once('exit', stopProxy);
-      process.once('SIGINT', stopProxy);
-      process.once('SIGTERM', stopProxy);
       const proxy = env['HTTPS_PROXY'] || 'http://localhost:8877';
       writeStderrLine('waiting for proxy to start ...');
       void execAsync(

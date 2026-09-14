@@ -251,13 +251,16 @@ export const sandboxCommand: CommandModule = {
     ): { status: number | null; output: string; stdout: string } => {
       const result = spawnSync(
         'bwrap',
-        buildBwrapArgs({
-          writableRoots: roots,
-          targetDir,
-          networkMode,
-          cliArgs: cmdArgv,
-          readOnlyOverrides,
-        }),
+        [
+          '--new-session',
+          ...buildBwrapArgs({
+            writableRoots: roots,
+            targetDir,
+            networkMode,
+            cliArgs: cmdArgv,
+            readOnlyOverrides,
+          }),
+        ],
         // The battery matches on message text rendered by the confined
         // libc, and glibc localizes strerror() through its own catalogs —
         // under a non-English LC_ALL/LANG the EROFS message comes back

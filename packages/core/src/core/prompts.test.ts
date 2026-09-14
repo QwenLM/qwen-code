@@ -341,6 +341,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     // /dev is a fresh minimal devtmpfs, so host device nodes are absent
     // (ENOENT), not read-only — the remedy is an argv change, not a root grant.
     expect(prompt).toContain('minimal synthetic device tree');
+    expect(prompt).toContain('QWEN_SANDBOX=bwrap qwen sandbox');
     // The inspection remedy is addressed to the user, from the project
     // directory, with the settings-derived scope of the report named.
     expect(prompt).toContain(
