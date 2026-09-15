@@ -235,9 +235,17 @@ async function render(raw, opts) {
       // text (the normal way to label a coloured badge, e.g. vitest's project
       // badge) would vanish as black-on-black; lift it to the default grey.
       const colour = mapped === BG ? FG_DEFAULT : mapped;
+      // font-weight="bold" alone rasterises as a no-op on a host without a
+      // bold face for the matched family (the release fleet has no fonts at
+      // all), silently dropping the weight this renderer exists to show.
+      // Stroke the glyph in its own fill so bold survives any host font stack.
+      const boldAttrs = cell.bold
+        ? ` font-weight="bold" stroke="${colour}" stroke-width="0.6"` +
+          ' paint-order="stroke" stroke-linejoin="round"'
+        : '';
       body +=
         `<text x="${(PAD + cell.x * CELL_W).toFixed(1)}" y="${baseline}" ` +
-        `fill="${colour}"${cell.bold ? ' font-weight="bold"' : ''}>` +
+        `fill="${colour}"${boldAttrs}>` +
         `${escapeXml(cell.chars)}</text>`;
     }
   });
