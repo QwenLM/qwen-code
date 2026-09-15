@@ -299,6 +299,54 @@ describe('ordinary REST session Managed owner', () => {
     await createManagedSession();
   });
 
+  it('does not publish an ordinary session when transcript write fails', async () => {
+    vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
+    await writeSettings();
+    spawnHarness.blockLegacySpawn = true;
+    app = bootApp();
+
+    const sessionId = randomUUID();
+    const transcriptPath = sessionService().getSessionTranscriptPath(sessionId);
+    await mkdir(transcriptPath, { recursive: true });
+    try {
+      const failed = await request(app)
+        .post('/session')
+        .set('Host', host())
+        .send({ sessionId });
+      expect(failed.status).not.toBe(200);
+      expect(JSON.stringify(failed.body)).not.toContain('legacy-spawn-blocked');
+      expect(failed.body?.sessionId).toBeUndefined();
+
+      const leftover = await sessionService()
+        .readExecutionEngine(sessionId)
+        .catch(() => undefined);
+      expect(leftover).toBeUndefined();
+
+      const prompt = await request(app)
+        .post(`/session/${sessionId}/prompt`)
+        .set('Host', host())
+        .send({ prompt: [{ type: 'text', text: 'say ping' }] });
+      expect(prompt.status).toBe(404);
+    } finally {
+      await rm(transcriptPath, { recursive: true, force: true });
+    }
+
+    const created = await request(app)
+      .post('/session')
+      .set('Host', host())
+      .send({ sessionId });
+    expect(created.status).toBe(200);
+    expect(created.body.sessionId).toBe(sessionId);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      recorded: true,
+      sessionId,
+    });
+  });
+
   it('runs prompt, events, and cancel on the ordinary Managed session', async () => {
     await startModelServer();
     await writeSettings();
