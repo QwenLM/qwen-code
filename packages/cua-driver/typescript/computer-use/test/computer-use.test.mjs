@@ -52,7 +52,7 @@ function toolResult({
   };
 }
 
-function fakeDriver({ revisionCapability = true, results = {} } = {}) {
+function fakeDriver({ revisionCapability = true, results = {}, platform = "windows" } = {}) {
   const calls = [];
   const asyncOptions = [];
   const driver = {
@@ -65,6 +65,7 @@ function fakeDriver({ revisionCapability = true, results = {} } = {}) {
     },
     async listToolsJson() {
       return JSON.stringify({
+        platform,
         tools: [
           {
             name: "get_window_state",
@@ -449,7 +450,6 @@ for (const [readComplete, details] of [
   [undefined, ["AXTitle: ax_error -25204", "walk: max_elements truncated"]],
   [false, ["walk: max_elements truncated"]],
   [undefined, ["provider_unresponsive", "max_elements_reached"]],
-  [undefined, ["walk_deadline_reached", "max_depth_reached"]],
 ]) {
   test(`mixed read failure and truncation retries once (read flag ${readComplete})`, async () => {
     let reads = 0;
@@ -484,6 +484,49 @@ for (const [readComplete, details] of [
     assert.equal(observation.diagnostics.captureComplete, false);
     assert.equal(observation.elements[0].element_token, "rv1:bounded:0");
   });
+}
+
+for (const reason of ["walk_deadline_reached", "element_bounds_timeout"]) {
+  for (const nested of [false, true]) {
+    test(`deadline capture returns its prefix without another walk (${reason}, nested ${nested})`, async () => {
+      const complete = (id) => toolResult({ structured: {
+        tree_markdown: "Ready",
+        elements: [{ element_token: `rv1:${id}:0` }],
+        capture_complete: true,
+        observation_revision: {
+          mode: "full", lineage_id: id, revision_id: `${id}:r1`, stable_element_ids: true,
+        },
+      } });
+      const capture = {
+        capture_complete: false,
+        capture_truncated: true,
+        capture_incomplete_details: [reason, "max_depth_reached"],
+      };
+      const results = [complete("old"), toolResult({ structured: {
+        ...(nested ? {} : capture),
+        tree_markdown: "Completed prefix",
+        elements: [{ element_index: 0, element_token: "s00000001:0" }],
+        observation_revision: {
+          ...(nested ? capture : {}),
+          mode: "full", revision_id: "transient:r0", stable_element_ids: false,
+          resync_reason: "capture_incomplete",
+        },
+      } }), complete("recovered")];
+      const driver = fakeDriver({ results: { getWindowState: () => results.shift() } });
+      const computer = new ComputerUse(driver, { sdk: fakeSdk });
+      await computer.observeWindow({ pid: 42, windowId: 7 });
+      const partial = await computer.observeWindow({ pid: 42, windowId: 7 });
+      assert.equal(driver.calls.length, 2);
+      assert.match(partial.text, /Completed prefix/);
+      assert.equal(partial.elements[0].element_token, "s00000001:0");
+      assert.equal(partial.diagnostics.captureReadComplete, false);
+      assert.equal(partial.diagnostics.stableElementIds, false);
+      const recovered = await computer.observeWindow({ pid: 42, windowId: 7 });
+      assert.equal(driver.calls.length, 3);
+      assert.equal(driver.calls[2].input.observationRevision.baseRevisionId, undefined);
+      assert.equal(recovered.diagnostics.stableElementIds, true);
+    });
+  }
 }
 
 for (const detail of ["max_elements_reached", "max_depth_reached"]) {
@@ -1209,13 +1252,60 @@ test("an explicit delivery mode overrides the environment default", async () => 
   assert.equal(driver.calls[0].input.deliveryMode, "background");
 });
 
-test("an unset environment default resolves every supported action to background", async () => {
+test("an unset environment default preserves Windows background delivery", async () => {
   const driver = fakeDriver();
   const computer = new ComputerUse(driver, { sdk: fakeSdk, environment: {} });
 
   await computer.click({ pid: 42, windowId: 7, x: 10, y: 20 });
 
   assert.equal(driver.calls[0].input.deliveryMode, "background");
+});
+
+test("Linux defaults authorize native focus preparation for every input action", async () => {
+  const driver = fakeDriver({ platform: "linux" });
+  let inventories = 0;
+  const owner = { listToolsJson() { inventories += 1; return '{"platform":"linux"}'; } };
+  const computer = new ComputerUse(driver, { sdk: fakeSdk, owner });
+  const target = { pid: 42, windowId: 7 };
+  const element = { ...target, elementToken: "rv1:l_a:1" };
+  await computer.click(element);
+  await computer.doubleClick(element);
+  await computer.rightClick(element);
+  await computer.drag({ ...target, fromX: 1, fromY: 2, toX: 3, toY: 4 });
+  await computer.scroll({ ...element, direction: "down" });
+  await computer.typeText({ ...element, text: "once" });
+  await computer.pressKey({ ...target, key: "Enter" });
+  await computer.hotkey({ ...target, keys: ["ctrl", "a"] });
+  assert.equal(inventories, 1);
+  assert.equal(driver.calls.length, 8);
+  assert.ok(driver.calls.every(({ input }) => input.deliveryMode === "foreground"));
+  assert.ok(driver.calls.every(({ input }) => input.pid === 42 && input.windowId === 7n));
+  assert.equal(driver.calls[0].input.elementToken, element.elementToken);
+});
+
+test("Linux automatic delivery never replays an uncertain mutation error", async () => {
+  const driver = fakeDriver({ platform: "linux", results: {
+    windowTypeText: toolResult({ isError: true, structured: {
+      code: "verification_failed", effect: "unverifiable",
+    } }),
+  } });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  await assert.rejects(computer.typeText({ pid: 42, windowId: 7, text: "once" }), {
+    code: "verification_failed",
+  });
+  assert.equal(driver.calls.length, 1);
+});
+
+test("refreshing the connected platform refreshes the input default", async () => {
+  const driver = fakeDriver();
+  let platform = "linux";
+  const owner = { listToolsJson: () => JSON.stringify({ platform }) };
+  const computer = new ComputerUse(driver, { sdk: fakeSdk, owner });
+  await computer.pressKey({ pid: 42, windowId: 7, key: "Tab" });
+  platform = "windows";
+  await computer.getPlatform();
+  await computer.pressKey({ pid: 42, windowId: 7, key: "Tab" });
+  assert.deepEqual(driver.calls.map(({ input }) => input.deliveryMode), ["foreground", "background"]);
 });
 
 test("an invalid environment delivery default fails before dispatch", async () => {

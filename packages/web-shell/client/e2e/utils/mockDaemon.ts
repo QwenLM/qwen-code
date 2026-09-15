@@ -704,7 +704,9 @@ function filterScenarioSessions(
     ? workspaceSessions.filter(
         (session) =>
           session.sourceType === sourceType ||
-          (sourceType === 'default' && session.sourceType === undefined),
+          (sourceType === 'default' &&
+            (session.sourceType === undefined ||
+              session.sourceType === 'qwen-live')),
       )
     : workspaceSessions;
   return group === 'pinned'
