@@ -12,20 +12,30 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  addPeerController,
   ApprovalMode,
   buildDeliveryStatusFrame,
   buildUserFrame,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  parsePeerFrame,
+  PEER_ADMISSION_LIMITS,
+  PeerAdmission,
+  setSendPacerClockForTest,
+  removePeerController,
+  resetPeerControllerRegistryPathForTest,
+  resetSendPacerForTest,
   resetSentPeerMessagesForTest,
   sendPeerFrame,
   startPeerInbox,
   trackSentPeerMessageForTest,
   type InboundPolicy,
   type PolicyScope,
+  type PeerControlFrame,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
@@ -95,15 +105,26 @@ let messaging: PeerMessaging | null = null;
 /** Stands in for the peer that sent us something, to collect receipts. */
 let senderInbox: PeerInbox | null = null;
 let receipts: PeerFrame[];
+/** Addresses whose send-side mirror a receipt emptied. */
+let drained: string[];
+let forgotten: Array<{ ipcPath: string; messageIds: readonly string[] }>;
+let refunded: Array<{ ipcPath: string; messageIds: readonly string[] }>;
+let tokenRefunded: Array<{ ipcPath: string; messageIds: readonly string[] }>;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
   receipts = [];
+  drained = [];
+  forgotten = [];
+  refunded = [];
+  tokenRefunded = [];
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
-  // The ledger is a module singleton shared by every test in this file.
+  // The ledger and the pacer are module singletons shared by every test
+  // in this file.
   resetSentPeerMessagesForTest();
+  resetSendPacerForTest();
 });
 
 afterEach(async () => {
@@ -111,6 +132,13 @@ afterEach(async () => {
   messaging = null;
   await senderInbox?.close();
   senderInbox = null;
+  for (const socket of slowSockets) socket.destroy();
+  slowSockets.clear();
+  if (slowServer) {
+    const server = slowServer;
+    slowServer = null;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -128,18 +156,83 @@ async function startSenderInbox(): Promise<PeerInbox> {
   return inbox;
 }
 
+let slowServer: net.Server | null = null;
+const slowSockets = new Set<net.Socket>();
+
+/**
+ * A peer inbox that reads nothing until `delayMs` after each connection
+ * arrives, mirroring a peer whose event loop is busy: receipts addressed
+ * to it still land, just late.
+ */
+async function startSlowSenderInbox(
+  delayMs: number,
+): Promise<{ socketPath: string; received: PeerFrame[] }> {
+  const received: PeerFrame[] = [];
+  const socketPath = path.join(tmpDir, 'socks', 'slow-sender.sock');
+  await fs.mkdir(path.dirname(socketPath), { recursive: true });
+  const server = net.createServer((socket) => {
+    slowSockets.add(socket);
+    socket.on('close', () => slowSockets.delete(socket));
+    setTimeout(() => {
+      let buffer = '';
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        let newline = buffer.indexOf('\n');
+        while (newline !== -1) {
+          const frame = parsePeerFrame(buffer.slice(0, newline));
+          if (frame) received.push(frame);
+          buffer = buffer.slice(newline + 1);
+          newline = buffer.indexOf('\n');
+        }
+      });
+      socket.on('end', () => socket.end());
+    }, delayMs);
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  slowServer = server;
+  return { socketPath, received };
+}
+
+/** A meter that admits everything, so policy tests stay policy tests. */
+function unmeteredAdmission(): PeerAdmission {
+  return new PeerAdmission({
+    limits: {
+      bucketCapacity: 1e6,
+      refillPerSecond: 1e6,
+      globalBucketCapacity: 1e6,
+      globalRefillPerSecond: 1e6,
+      dedupWindowMs: 0,
+    },
+  });
+}
+
 async function start(
   mode: ApprovalMode | null = ApprovalMode.DEFAULT,
   extra: {
     getSessionId?: () => string;
+    ownsSessionId?: (id: string) => boolean;
     settleSentMessage?: (
       msgId: string,
       status: string,
-    ) => { address: string; previous: 'pending' | 'held' } | undefined;
+    ) =>
+      | {
+          address: string;
+          ipcPath: string;
+          previous: 'pending' | 'held';
+          ageMs: number;
+        }
+      | undefined;
     reassertSessionRecord?: () => Promise<void>;
     getPolicySetting?: () => InboundPolicy | undefined;
     getHeldExpiryMs?: () => number | null;
     getPolicyScope?: () => PolicyScope | undefined;
+    controllerRegistryPath?: string;
+    admission?: PeerAdmission;
+    dropReceiptTrailMs?: number;
+    drainMirror?: (ipcPath: string) => void;
+    forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
+    refundMirror?: (ipcPath: string, messageId: string) => void;
+    refundMirrorToken?: (ipcPath: string, messageId: string) => void;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -153,6 +246,17 @@ async function start(
     updateSessionRegistryIpcPath: async () => {},
     ipcToken: TEST_TOKEN,
     childToken: TEST_CHILD_TOKEN,
+    // Most cases here send more than a burst, or send one body over and
+    // over, and neither is what they are about. The admission cases build
+    // their own meter.
+    admission: unmeteredAdmission(),
+    drainMirror: (ipcPath: string) => drained.push(ipcPath),
+    forgetMirror: (ipcPath, messageIds) =>
+      forgotten.push({ ipcPath, messageIds }),
+    refundMirror: (ipcPath, messageId) =>
+      refunded.push({ ipcPath, messageIds: [messageId] }),
+    refundMirrorToken: (ipcPath, messageId) =>
+      tokenRefunded.push({ ipcPath, messageIds: [messageId] }),
     ...extra,
   });
   if (!started) throw new Error('peer messaging failed to start');
@@ -192,7 +296,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         msgId === 'sent-0001'
           ? {
               address: 'docs-cd [ab12cd]',
+              ipcPath: '/tmp/peer.sock',
               previous: 'pending',
+              ageMs: 0,
             }
           : undefined,
     });
@@ -238,6 +344,58 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await settle();
 
     expect(seen).toEqual([]);
+    expect(forgotten).toEqual([]);
+  });
+
+  it('forgets a sent body when a non-delivery receipt settles it', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => ({
+        address: 'docs-cd',
+        ipcPath: '/tmp/peer.sock',
+        previous: 'pending',
+        ageMs: 0,
+      }),
+    });
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'expired',
+        origMsgId: 'sent-0002',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(forgotten).toEqual([
+      { ipcPath: '/tmp/peer.sock', messageIds: ['sent-0002'] },
+    ]);
+  });
+
+  it('refunds a misaddressed send against its recorded path', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      settleSentMessage: () => ({
+        address: 'docs-cd',
+        ipcPath: '/tmp/actual-peer.sock',
+        previous: 'pending',
+        ageMs: 0,
+      }),
+    });
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'misaddressed',
+        origMsgId: 'sent-0003',
+        from: '/tmp/forged-peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(refunded).toEqual([
+      { ipcPath: '/tmp/actual-peer.sock', messageIds: ['sent-0003'] },
+    ]);
+    expect(forgotten).toEqual([]);
   });
 
   it('settles receipts through the real ledger when none is injected', async () => {
@@ -301,7 +459,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m } = await start(ApprovalMode.DEFAULT, {
       settleSentMessage: () => ({
         address: 'docs-cd',
+        ipcPath: '/tmp/peer.sock',
         previous: 'pending',
+        ageMs: 0,
       }),
     });
     const seen: unknown[] = [];
@@ -341,6 +501,74 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       origMsgId: frame.msgId,
       from: m.socketPath,
     });
+  });
+
+  it('delivers to a host of several sessions only when the frame names one it holds', async () => {
+    const sender = await startSenderInbox();
+    const hosted = new Set(['session-a', 'session-b']);
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      ownsSessionId: (id) => hosted.has(id),
+    });
+
+    const mine = peerFrame({
+      content: 'for session-b',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-b',
+    });
+    await send(m.socketPath!, mine);
+    await settle();
+    expect(submitted).toHaveLength(1);
+
+    const stranger = peerFrame({
+      content: 'for nobody here',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-gone',
+    });
+    await send(m.socketPath!, stranger);
+    await settle();
+
+    expect(submitted).toHaveLength(1);
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'misaddressed',
+      origMsgId: stranger.msgId,
+    });
+  });
+
+  it('refuses an unpinned frame at a host of several sessions', async () => {
+    // The one place the two rules differ. A process holding one session
+    // takes an unpinned frame — it could only have meant that one. A
+    // process hosting several has nothing to guess from, and the
+    // protocol page tells senders to always pin for exactly this reason.
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      ownsSessionId: () => true,
+    });
+    const unpinned = peerFrame({
+      content: 'to whom it may concern',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+    });
+    await send(m.socketPath!, unpinned);
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'misaddressed',
+      origMsgId: unpinned.msgId,
+    });
+  });
+
+  it('refuses to be wired as both one session and a host of several', async () => {
+    // A configuration mistake, not a runtime condition: a process that
+    // answered both would judge pins by whichever check ran first.
+    await expect(
+      start(ApprovalMode.DEFAULT, {
+        getSessionId: () => 'session-now',
+        ownsSessionId: () => true,
+      }),
+    ).rejects.toThrow('getSessionId or ownsSessionId');
   });
 
   it('admits a pinned message when it has no session id to judge it against', async () => {
@@ -470,6 +698,34 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted).toHaveLength(1);
   });
 
+  it('starts a fresh admission conversation after the session id changes', async () => {
+    let current = 'session-a';
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      getSessionId: () => current,
+      admission: new PeerAdmission(),
+    });
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'same words',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      }),
+    );
+    current = 'session-b';
+    await send(
+      m.socketPath!,
+      peerFrame({
+        content: 'same words',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-b',
+      }),
+    );
+    await settle();
+
+    expect(submitted).toHaveLength(2);
+  });
+
   it('drops a held frame when the session id swaps before reevaluation', async () => {
     const sender = await startSenderInbox();
     let mode = ApprovalMode.YOLO;
@@ -540,6 +796,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(queued).toEqual([
       {
         msgId: frame.msgId,
+        admissionKey: `peer:${sender.socketPath}`,
         from: sender.socketPath,
         toSessionId: 'session-a',
       },
@@ -552,6 +809,18 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       .filter((receipt) => receipt.type === 'control')
       .map((receipt) => receipt.status);
     expect(statuses).toEqual(['delivered', 'misaddressed']);
+
+    current = 'session-a';
+    await send(
+      started.socketPath!,
+      peerFrame({
+        content: 'queued before /clear',
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+      }),
+    );
+    await settle();
+    expect(queued).toHaveLength(2);
   });
 
   it('drains a matching or unpinned queued envelope', async () => {
@@ -828,10 +1097,11 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(seen).toEqual([1]);
   });
 
-  it('caps the accepted backlog and receipts the overflow as expired', async () => {
+  it('caps the accepted backlog and receipts the overflow as dropped', async () => {
     // Accepted frames drain at one per model turn but arrive at socket
     // speed; once the backlog is full the gate must refuse with an honest
-    // receipt instead of growing the queue without bound.
+    // receipt instead of growing the queue without bound. The receipt is
+    // a drop naming the queue, not an expiry: no decision was pending.
     const sender = await startSenderInbox();
     const started = await PeerMessaging.start({
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
@@ -839,6 +1109,11 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
       ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
+      // Above the burst's own spread, so five drops arriving over several
+      // socket round trips still fold into one batch, and well under the
+      // wait loop's ceiling so that batch lands inside the test.
+      dropReceiptTrailMs: 250,
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -859,18 +1134,30 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
       );
     }
-    for (
-      let waits = 0;
-      waits < 50 && receipts.length < MAX_ACCEPTED_BACKLOG + overflow;
-      waits++
-    ) {
+    // Waits on what the assertions below need. Folding means the old
+    // condition — one receipt per message — can never hold, so the loop
+    // used to burn its whole ceiling and the exact counts passed by
+    // accident of timing rather than by synchronisation.
+    const droppedReceipts = () =>
+      receipts.filter((r) => r.type === 'control' && r.status === 'dropped');
+    for (let waits = 0; waits < 50 && droppedReceipts().length < 2; waits++) {
       await settle();
     }
 
     expect(accepted).toBe(MAX_ACCEPTED_BACKLOG);
+    // Five drops, two receipts: the first answers at once and the rest
+    // are folded, so a flood costs the receiver connections it can spare.
+    const dropped = receipts.filter(
+      (r): r is PeerControlFrame =>
+        r.type === 'control' && r.status === 'dropped',
+    );
+    expect(dropped).toHaveLength(2);
+    expect(dropped.every((r) => r.dropReason === 'queue-full')).toBe(true);
+    expect(dropped[0]?.droppedMsgIds).toBeUndefined();
+    expect(dropped[1]?.droppedMsgIds).toHaveLength(overflow - 2);
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
-    ).toHaveLength(overflow);
+    ).toHaveLength(0);
   });
 
   it('bounds the pre-wiring buffer and flushes it in order once wired', async () => {
@@ -881,6 +1168,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
       ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -894,7 +1182,10 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     }
     for (
       let waits = 0;
-      waits < 50 && receipts.length < MAX_ACCEPTED_BACKLOG + overflow;
+      waits < 50 &&
+      receipts.filter(
+        (r) => r.type === 'control' && r.dropReason === 'queue-full',
+      ).length < 1;
       waits++
     ) {
       await settle();
@@ -911,9 +1202,17 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted[MAX_ACCEPTED_BACKLOG - 1]).toContain(
       `early ${MAX_ACCEPTED_BACKLOG - 1}`,
     );
+    // The buffer filling up is the same wall as the queue filling up, so
+    // the overflow is receipted the same way: dropped, naming the queue.
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
-    ).toHaveLength(overflow);
+    ).toHaveLength(0);
+    expect(
+      receipts.filter(
+        (r): r is PeerControlFrame =>
+          r.type === 'control' && r.dropReason === 'queue-full',
+      ).length,
+    ).toBeGreaterThan(0);
   });
 
   it('delivers every shutdown expiry receipt past the send cap', async () => {
@@ -939,6 +1238,56 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
     ).toHaveLength(heldCount);
+  });
+
+  it('does not let held expiry receipts crowd out backlog corrections', async () => {
+    const slow = await startSlowSenderInbox(800);
+    const sender = await startSenderInbox();
+    let policy: InboundPolicy | undefined = 'hold';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => policy,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      await send(
+        started.socketPath!,
+        peerFrame({ content: `held ${i}`, from: slow.socketPath }),
+      );
+    }
+    await vi.waitFor(() =>
+      expect(started.getHeld()).toHaveLength(MAX_HELD_MESSAGES),
+    );
+
+    policy = undefined;
+    for (let i = 0; i < MAX_ACCEPTED_BACKLOG; i++) {
+      await send(
+        started.socketPath!,
+        peerFrame({ content: `buffered ${i}`, from: sender.socketPath }),
+      );
+    }
+    await vi.waitFor(() =>
+      expect(
+        receipts.filter(
+          (frame) => frame.type === 'control' && frame.status === 'delivered',
+        ),
+      ).toHaveLength(MAX_ACCEPTED_BACKLOG),
+    );
+
+    await started.close();
+    messaging = null;
+
+    expect(
+      receipts.filter(
+        (frame) => frame.type === 'control' && frame.status === 'expired',
+      ),
+    ).toHaveLength(MAX_ACCEPTED_BACKLOG);
   });
 
   it('corrects the delivered receipt of a buffered message dropped at exit', async () => {
@@ -1084,6 +1433,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       getPolicySetting: () => undefined,
       updateSessionRegistryIpcPath: async () => {},
       ipcToken: TEST_TOKEN,
+      admission: unmeteredAdmission(),
     });
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
@@ -1582,5 +1932,678 @@ describe.skipIf(isWindows)('held message expiry', () => {
       .filter((frame) => frame.type === 'control')
       .map((frame) => (frame as { status: string }).status);
     expect(statuses).toEqual(['refused']);
+  });
+});
+
+describe.skipIf(isWindows)('controller grants', () => {
+  let registryPath: string;
+
+  beforeEach(() => {
+    registryPath = path.join(tmpDir, 'peer-controllers.json');
+  });
+
+  async function grant(label: string): Promise<{ id: string; token: string }> {
+    const { record, token } = await addPeerController(label, registryPath);
+    return { id: record.id, token };
+  }
+
+  it('delivers a message the parity rule would hold, and says which grant let it in', async () => {
+    // No fromMode at all — an external program has no review class — into
+    // a prompting receiver, which holds exactly this under parity alone.
+    const { token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(m.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain(
+      '<cross_session_message from="controller" origin="controller" controller="voice bridge">',
+    );
+    expect(submitted[0].modelText).toContain(
+      "relaying your user's instructions",
+    );
+    expect(submitted[0].displayText).toBe(
+      'Message from a trusted controller (voice bridge): open the diff',
+    );
+  });
+
+  it('holds the same frame when it arrives on the published peer token', async () => {
+    // The grant is a fact about the connection, not about the sender: the
+    // same bytes on an ordinary peer token are held as before.
+    await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }));
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+    expect(m.getHeld()[0].controller).toBeUndefined();
+  });
+
+  it('stops admitting a revoked token at once, with no restart', async () => {
+    const { id, token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'first' }), {
+      authToken: token,
+    });
+    await settle();
+    expect(submitted).toHaveLength(1);
+
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+
+    // The connection is now dropped at the auth line: nothing is
+    // submitted, nothing is held, and no receipt comes back — the same
+    // as any other unknown token.
+    await send(m.socketPath!, buildUserFrame({ content: 'second' }), {
+      authToken: token,
+    }).catch(() => {});
+    await settle();
+    expect(submitted).toHaveLength(1);
+    expect(m.getHeld()).toHaveLength(0);
+  });
+
+  it('admits a grant minted after the session started', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+    const { token } = await grant('voice bridge');
+
+    await send(m.socketPath!, buildUserFrame({ content: 'later' }), {
+      authToken: token,
+    });
+    await settle();
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).toContain('origin="controller"');
+  });
+
+  it('pins a relative controller registry path before the cwd changes', async () => {
+    const originalCwd = process.cwd();
+    const originalHome = process.env['QWEN_HOME'];
+    const relativeHome = 'relative-qwen-home';
+    try {
+      process.env['QWEN_HOME'] = relativeHome;
+      process.chdir(tmpDir);
+      resetPeerControllerRegistryPathForTest();
+      const expectedRegistry = path.join(
+        tmpDir,
+        relativeHome,
+        'peer-controllers.json',
+      );
+      const { token } = await addPeerController(
+        'voice bridge',
+        expectedRegistry,
+      );
+      const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT);
+
+      process.chdir(path.dirname(tmpDir));
+      await send(m.socketPath!, buildUserFrame({ content: 'after cd' }), {
+        authToken: token,
+      });
+      await settle();
+
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0].modelText).toContain('origin="controller"');
+    } finally {
+      process.chdir(originalCwd);
+      if (originalHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalHome;
+      resetPeerControllerRegistryPathForTest();
+    }
+  });
+
+  it('keeps controller attribution while waiting for the UI submitter', async () => {
+    const { token } = await grant('voice bridge');
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+      controllerRegistryPath: registryPath,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    await send(started.socketPath!, buildUserFrame({ content: 'buffered' }), {
+      authToken: token,
+    });
+    await settle();
+
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toContain(
+      'origin="controller" controller="voice bridge"',
+    );
+  });
+
+  it('parks a controller message under an explicit hold and releases it as itself', async () => {
+    const { token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+      getPolicySetting: () => 'hold',
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([
+      { cause: 'explicit-setting', controller: { label: 'voice bridge' } },
+    ]);
+    expect(m.decide(m.getHeld()[0].frame.msgId, 'approve')).toBe('done');
+    expect(submitted[0].modelText).toContain(
+      'origin="controller" controller="voice bridge"',
+    );
+  });
+
+  it('keeps a revoked controller message parked without controller authority', async () => {
+    let policy: 'hold' | undefined = 'hold';
+    const { id, token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+      getPolicySetting: () => policy,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+    expect(m.forgetController(id)).toBe(1);
+    expect(m.getHeld()[0].controller).toBeUndefined();
+
+    policy = undefined;
+    expect(m.reevaluate('setting cleared')).toBe(0);
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+  });
+
+  it('keeps an externally revoked controller message parked without controller authority', async () => {
+    let policy: 'hold' | undefined = 'hold';
+    const { id, token } = await grant('voice bridge');
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+      getPolicySetting: () => policy,
+    });
+
+    await send(m.socketPath!, buildUserFrame({ content: 'open the diff' }), {
+      authToken: token,
+    });
+    await settle();
+
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+    policy = undefined;
+    expect(m.reevaluate('setting cleared')).toBe(0);
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toMatchObject([{ cause: 'no-mode-asserted' }]);
+    expect(m.getHeld()[0].controller).toBeUndefined();
+  });
+
+  it('removes revoked controller authority from startup-buffered messages', async () => {
+    const { id, token } = await grant('voice bridge');
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      childToken: TEST_CHILD_TOKEN,
+      controllerRegistryPath: registryPath,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    await send(started.socketPath!, buildUserFrame({ content: 'buffered' }), {
+      authToken: token,
+    });
+    await settle();
+    expect(await removePeerController(id, registryPath)).not.toBeNull();
+
+    expect(started.reevaluate('controller removed')).toBe(0);
+    const submitted: Array<{ modelText: string; displayText: string }> = [];
+    started.setSubmitFn((modelText, displayText) => {
+      submitted.push({ modelText, displayText });
+      return true;
+    });
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].modelText).not.toContain('origin="controller"');
+    expect(submitted[0].displayText).toBe(
+      'Message from another session (unknown session): buffered',
+    );
+  });
+
+  it('is unavailable when this home has minted nothing', async () => {
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      controllerRegistryPath: registryPath,
+    });
+    await send(m.socketPath!, buildUserFrame({ content: 'let me in' }), {
+      authToken: `qpc_${'f'.repeat(64)}`,
+    }).catch(() => {});
+    await settle();
+    expect(submitted).toHaveLength(0);
+    expect(m.getHeld()).toHaveLength(0);
+  });
+});
+
+describe.skipIf(isWindows)('PeerMessaging drops', () => {
+  it('answers a flood with one receipt now and one folding the rest', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      admission: new PeerAdmission({ limits: { bucketCapacity: 2 } }),
+      dropReceiptTrailMs: 250,
+    });
+
+    for (let i = 0; i < 6; i++) {
+      await send(
+        m.socketPath!,
+        peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
+      );
+    }
+    for (let waits = 0; waits < 50 && receipts.length < 4; waits++) {
+      await settle();
+    }
+
+    expect(submitted).toHaveLength(2);
+    const dropped = receipts.filter(
+      (r): r is PeerControlFrame =>
+        r.type === 'control' && r.status === 'dropped',
+    );
+    expect(dropped).toHaveLength(2);
+    expect(dropped[0]?.dropReason).toBe('rate-limited');
+    expect(dropped[0]?.droppedMsgIds).toBeUndefined();
+    expect(dropped[1]?.droppedMsgIds).toHaveLength(2);
+  });
+
+  it('tells this session user once, with the count it stands for', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+    });
+    const notices: Array<{ reason: string; suppressed: number }> = [];
+    m.onDropped(({ reason, suppressed }) =>
+      notices.push({ reason, suppressed }),
+    );
+
+    for (let i = 0; i < 5; i++) {
+      await send(
+        m.socketPath!,
+        peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
+      );
+    }
+    await settle();
+
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toEqual({ reason: 'rate-limited', suppressed: 0 });
+  });
+
+  it('settles every id a folded receipt names, and reports once', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const emitted: Array<{
+      status: string;
+      dropped?: number;
+      dropReason?: string;
+      address: string;
+    }> = [];
+    m.onReceipt(({ status, dropped, dropReason, address }) =>
+      emitted.push({ status, dropped, dropReason, address }),
+    );
+
+    // The receipt's `from` is the receiver's own socket path, which is
+    // exactly what the send-side mirror is keyed by — so this also pins
+    // that the drain reaches the right bucket.
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    trackSentPeerMessageForTest('sent-a', 'app-ab', receiverPath);
+    trackSentPeerMessageForTest('sent-b', 'app-ab', receiverPath);
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'sent-a',
+        from: receiverPath,
+        dropReason: 'rate-limited',
+        // One this session never sent: answered for nothing, like every
+        // other receipt naming a stranger's id.
+        droppedMsgIds: ['sent-b', 'never-sent'],
+      }),
+    );
+    await settle();
+
+    expect(emitted).toEqual([
+      {
+        status: 'dropped',
+        dropped: 2,
+        dropReason: 'rate-limited',
+        address: 'app-ab',
+      },
+    ]);
+    expect(drained).toEqual([receiverPath]);
+    expect(forgotten).toEqual([
+      { ipcPath: receiverPath, messageIds: ['sent-a', 'sent-b'] },
+    ]);
+  });
+
+  it('corrects the per-message baseline for every dropped receipt', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    trackSentPeerMessageForTest('sent-c', 'app-ab', receiverPath);
+    trackSentPeerMessageForTest('sent-d', 'app-ab', receiverPath);
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'sent-c',
+        from: receiverPath,
+        dropReason: 'queue-full',
+      }),
+    );
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'sent-d',
+        from: receiverPath,
+        dropReason: 'duplicate',
+      }),
+    );
+    await settle();
+
+    // Queue-full never retained the body. Duplicate did retain the same
+    // body and charged no token, so its mirror record stays as the baseline.
+    expect(drained).toEqual([]);
+    expect(forgotten).toEqual([
+      { ipcPath: receiverPath, messageIds: ['sent-c'] },
+    ]);
+    expect(tokenRefunded).toEqual([
+      { ipcPath: receiverPath, messageIds: ['sent-d'] },
+    ]);
+  });
+
+  it('does not empty the mirror for a wall the receiver has refilled past', async () => {
+    // A receipt can wait: when the window's receipt budget is spent, a
+    // drop is parked in a trailing batch and answered later. By then the
+    // bucket it describes may have refilled completely, and emptying the
+    // mirror against it would hold this session back from sends the
+    // receiver would take — the one thing a mirror must never do.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    const refillMs =
+      (PEER_ADMISSION_LIMITS.bucketCapacity /
+        PEER_ADMISSION_LIMITS.refillPerSecond) *
+      1000;
+    let wall = 0;
+    setSendPacerClockForTest(undefined, () => wall);
+    try {
+      trackSentPeerMessageForTest('sent-old', 'app-ab', receiverPath);
+      wall = refillMs + 1;
+
+      await send(
+        m.socketPath!,
+        buildDeliveryStatusFrame({
+          status: 'dropped',
+          origMsgId: 'sent-old',
+          from: receiverPath,
+          dropReason: 'rate-limited',
+        }),
+      );
+      await settle();
+
+      // The sender still learns the message is gone; only the throttle
+      // computed from a stale level is withheld.
+      expect(forgotten).toEqual([
+        { ipcPath: receiverPath, messageIds: ['sent-old'] },
+      ]);
+      expect(drained).toEqual([]);
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('empties the mirror for a receipt that still describes the level now', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const receiverPath = path.join(tmpDir, 'socks', 'receiver.sock');
+    let wall = 0;
+    setSendPacerClockForTest(undefined, () => wall);
+    try {
+      trackSentPeerMessageForTest('sent-fresh', 'app-ab', receiverPath);
+      wall = 1_000;
+
+      await send(
+        m.socketPath!,
+        buildDeliveryStatusFrame({
+          status: 'dropped',
+          origMsgId: 'sent-fresh',
+          from: receiverPath,
+          dropReason: 'rate-limited',
+        }),
+      );
+      await settle();
+
+      expect(drained).toEqual([receiverPath]);
+    } finally {
+      setSendPacerClockForTest();
+    }
+  });
+
+  it('ignores a dropped receipt for messages it never sent', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const emitted: string[] = [];
+    m.onReceipt(({ status }) => emitted.push(status));
+
+    await send(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'dropped',
+        origMsgId: 'never-sent',
+        dropReason: 'duplicate',
+      }),
+    );
+    await settle();
+
+    expect(emitted).toHaveLength(0);
+  });
+
+  it('sends a batch still waiting when the session closes', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+      // Long enough that only the close path can flush it.
+      dropReceiptTrailMs: 60_000,
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await send(
+        m.socketPath!,
+        peerFrame({ content: `flood ${i}`, from: sender.socketPath }),
+      );
+    }
+    await settle();
+    expect(
+      receipts.filter((r) => r.type === 'control' && r.status === 'dropped'),
+    ).toHaveLength(1);
+
+    await m.close();
+    messaging = null;
+    for (let waits = 0; waits < 50 && receipts.length < 2; waits++) {
+      await settle();
+    }
+
+    expect(
+      receipts.filter((r) => r.type === 'control' && r.status === 'dropped'),
+    ).toHaveLength(2);
+  });
+
+  it('receipts or refuses a drop that arrives while the session closes', async () => {
+    // A drop noted while close() runs must not vanish: either the sender
+    // gets its folded receipt, or the inbox is already gone and the send
+    // itself fails. A frame accepted into silence is the one outcome
+    // close() must not have.
+    const slow = await startSlowSenderInbox(800);
+    const sender = await startSenderInbox();
+    let policy: InboundPolicy | undefined = 'hold';
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => policy,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: new PeerAdmission({ limits: { bucketCapacity: 2 } }),
+      // Long enough that only the close path can flush it.
+      dropReceiptTrailMs: 60_000,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const m = started;
+
+    // a1 parks, so settling held messages at close takes the slow path;
+    // a2 lands but is never consumed, so settling the backlog does too.
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a1', from: slow.socketPath }),
+    );
+    policy = undefined;
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a2', from: slow.socketPath }),
+    );
+    // b1 and b2 spend the fast sender's bucket, b3 answers at once, and
+    // b4 folds into a batch only close can flush.
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'b1', from: sender.socketPath }),
+    );
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'b2', from: sender.socketPath }),
+    );
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'b3', from: sender.socketPath }),
+    );
+    const b4 = peerFrame({ content: 'b4', from: sender.socketPath });
+    await send(m.socketPath!, b4);
+
+    const closing = m.close();
+    messaging = null;
+    // Shutdown is over once the held message's expiry reaches the slow
+    // inbox; the settle window — its own slow expiry receipt — is still
+    // open, and the probe lands inside it.
+    for (
+      let waits = 0;
+      waits < 50 &&
+      !slow.received.some(
+        (r) => r.type === 'control' && r.status === 'expired',
+      );
+      waits++
+    ) {
+      await settle();
+    }
+    // No further settles: the two that used to sit here let close() get
+    // far enough that the listener was always gone, so the 'sent' arm
+    // below could never run and a regression that really did accept a
+    // frame into silence would have left this test green.
+    const probeFrame = peerFrame({ content: 'late', from: sender.socketPath });
+    const probe = await send(m.socketPath!, probeFrame).then(
+      () => 'sent' as const,
+      () => 'refused' as const,
+    );
+    await closing;
+
+    // The folded batch close flushed still reached the fast sender.
+    expect(
+      receipts.some(
+        (r) =>
+          r.type === 'control' &&
+          r.status === 'dropped' &&
+          r.origMsgId === b4.msgId,
+      ),
+    ).toBe(true);
+
+    if (probe === 'sent') {
+      // The inbox took the late frame, so its drop is owed a receipt —
+      // either addressed for it, or naming it among the ids a batch it
+      // joined folded in. A drop noted while a batch is pending always
+      // rides in `droppedMsgIds`, never in `origMsgId`.
+      const answered = () =>
+        receipts.some(
+          (r) =>
+            r.type === 'control' &&
+            r.status === 'dropped' &&
+            (r.origMsgId === probeFrame.msgId ||
+              r.droppedMsgIds?.includes(probeFrame.msgId) === true),
+        );
+      for (let waits = 0; waits < 10 && !answered(); waits++) {
+        await settle();
+      }
+      expect(answered()).toBe(true);
+    }
+  });
+
+  it('flushes a folded batch whose receipt is slow before close resolves', async () => {
+    // A slow-but-alive peer is still owed what was folded before close()
+    // resolves: the flush waits inside the cleanup budget rather than
+    // giving up while the receipt is mid-write.
+    const slow = await startSlowSenderInbox(600);
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+      // Long enough that only the close path can flush it.
+      dropReceiptTrailMs: 60_000,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const m = started;
+
+    // a1 parks; a2 and a3 are turned away by the meter — the first
+    // answers at once, the second folds into a batch only close flushes.
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a1', from: slow.socketPath }),
+    );
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'a2', from: slow.socketPath }),
+    );
+    const a3 = peerFrame({ content: 'a3', from: slow.socketPath });
+    await send(m.socketPath!, a3);
+
+    await m.close();
+    messaging = null;
+
+    // The folded receipt took the slow path (~800 ms, outside the stock
+    // flush bound) and is still there when close() resolves.
+    expect(
+      slow.received.some(
+        (r) =>
+          r.type === 'control' &&
+          r.status === 'dropped' &&
+          r.origMsgId === a3.msgId,
+      ),
+    ).toBe(true);
   });
 });

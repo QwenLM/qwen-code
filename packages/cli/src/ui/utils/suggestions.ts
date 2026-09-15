@@ -44,3 +44,13 @@ export interface Suggestion {
 }
 
 export const MAX_SUGGESTIONS_TO_SHOW = 8;
+
+/**
+ * Collapse all runs of whitespace (including newlines from multi-line
+ * SKILL.md/command descriptions) into single spaces so a description renders
+ * as a single logical line. Without this, frontmatter line breaks are
+ * preserved verbatim and a single long description can fill the whole terminal.
+ */
+export function normalizeDescription(description: string): string {
+  return description.replace(/\s+/g, ' ').trim();
+}

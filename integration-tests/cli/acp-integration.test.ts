@@ -5,13 +5,15 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
-import { startFakeOpenAIServer } from '../fake-openai-server.js';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
+import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -124,8 +126,11 @@ function setupAcpTest(
   // the `set_config_option` test (acp-integration.test.ts:516). A per-agent
   // QWEN_HOME redirects `getGlobalQwenDir()` so the authenticate -> session/new
   // round-trip reads back exactly what this agent wrote.
-  const qwenHome = join(rig.testDir!, '.qwen-home');
-  mkdirSync(qwenHome, { recursive: true });
+  // The agent keeps writing under QWEN_HOME for a few hundred ms after it
+  // exits (measured: memory/projects/usage_record files landing ~300 ms after
+  // cleanup() returns), so inside rig.testDir those late writes race the
+  // global teardown's recursive rm with ENOTEMPTY.
+  const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
 
   const agent = spawn(
     'node',
@@ -301,6 +306,7 @@ function setupAcpTest(
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
     await waitForExit();
+    await removeScratchDir(qwenHome);
   };
 
   return {
@@ -962,6 +968,23 @@ function setupAcpTest(
   it('blocks write tools in plan mode (issue #1806)', async () => {
     const rig = new TestRig();
     await rig.setup('acp plan mode enforcement');
+    let streamingRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      if (streamingRequestIndex++ === 0) {
+        return {
+          toolCalls: [
+            fakeToolCall('write_file', {
+              file_path: join(rig.testDir!, 'test.txt'),
+              content: 'Hello World',
+            }),
+          ],
+        };
+      }
+      return { content: 'Done.' };
+    });
 
     const toolCallEvents: Array<{
       toolName: string;
@@ -970,12 +993,13 @@ function setupAcpTest(
     }> = [];
 
     const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
-      permissionHandler: (request) => {
-        // Cancel exit_plan_mode to keep plan mode active
-        if (request.toolCall?.kind === 'switch_mode') {
-          return { outcome: 'cancelled' };
-        }
-        return { optionId: 'proceed_once' };
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
       },
     });
 
@@ -1010,41 +1034,39 @@ function setupAcpTest(
       });
       expect(promptResult).toBeDefined();
 
-      // Give time for tool calls to be processed
-      await delay(2000);
-
       // Collect tool call events from session updates
       sessionUpdates.forEach((update) => {
         if (update.update?.sessionUpdate === 'tool_call_update') {
           const toolUpdate = update.update as {
             sessionUpdate: string;
-            toolName?: string;
             status?: string;
-            error?: { message?: string };
+            content?: Array<{ content?: { text?: string } }>;
+            _meta?: { toolName?: string };
           };
-          if (toolUpdate.toolName) {
+          if (toolUpdate._meta?.toolName) {
             toolCallEvents.push({
-              toolName: toolUpdate.toolName,
+              toolName: toolUpdate._meta.toolName,
               status: toolUpdate.status ?? 'unknown',
-              error: toolUpdate.error?.message,
+              error: toolUpdate.content
+                ?.map(({ content }) => content?.text ?? '')
+                .join('\n'),
             });
           }
         }
       });
 
-      // Verify that if write_file was attempted, it was blocked
       const writeFileEvents = toolCallEvents.filter(
         (e) => e.toolName === 'write_file',
       );
 
-      // If the LLM tried to call write_file in plan mode, it should have been blocked
-      if (writeFileEvents.length > 0) {
-        const blockedEvent = writeFileEvents.find(
-          (e) => e.status === 'error' && e.error?.includes('Plan mode'),
-        );
-        expect(blockedEvent).toBeDefined();
-        expect(blockedEvent?.error).toContain('Plan mode is active');
-      }
+      const blockedEvent = writeFileEvents.find(
+        (e) => e.status === 'failed' && e.error?.includes('Plan mode'),
+      );
+      expect(
+        blockedEvent,
+        `expected a failed write_file tool_call_update blocked by plan mode; events=${JSON.stringify(toolCallEvents)}`,
+      ).toBeDefined();
+      expect(blockedEvent?.error).toContain('Plan mode is active');
 
       // Verify the file was NOT created
       const fs = await import('fs');
@@ -1057,6 +1079,7 @@ function setupAcpTest(
       throw e;
     } finally {
       await cleanup();
+      await fakeServer.close();
     }
   });
 

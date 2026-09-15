@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   useActions,
   useConnection,
@@ -21,8 +28,10 @@ import type {
 import {
   ArchiveIcon,
   ArrowUpDownIcon,
-  CheckIcon,
-  CopyIcon,
+  CircleIcon,
+  CircleHelpIcon,
+  InfoIcon,
+  ShieldQuestionIcon,
   DownloadIcon,
   FunnelIcon,
   PenLineIcon,
@@ -43,12 +52,7 @@ import {
 import { useI18n } from '../i18n';
 import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
-import {
-  warnClipboardWriteFailure,
-  writeClipboardText,
-} from '../utils/clipboard';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
-import { isExternalOpenUrl } from '../utils/externalOpen';
 import { workspaceLabel, workspaceLabelForCwd } from '../utils/workspace';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
@@ -74,12 +78,7 @@ import {
   DataTablePagination,
   type DataTableColumnMeta,
 } from './ui/data-table';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from './ui/tooltip';
+import { TooltipProvider } from './ui/tooltip';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -102,68 +101,6 @@ const STATUS_POLL_MS = 10000;
 const PAGE_SIZE = 50;
 const PAGE_SIZES = [10, 50, 100] as const;
 const PAGE_SIZE_STORAGE_KEY = 'qwen-web-shell-session-overview-page-size';
-
-function SessionIdCell({ sessionId }: { sessionId: string }) {
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const resetTimerRef = useRef<number | undefined>(undefined);
-
-  useEffect(() => () => window.clearTimeout(resetTimerRef.current), []);
-
-  return (
-    <div className="flex min-w-0 items-center gap-1">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            className="block min-w-0 flex-1 truncate whitespace-nowrap text-xs text-current"
-            data-web-shell-session-id
-          >
-            {sessionId}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>{sessionId}</TooltipContent>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className={cx(
-              'size-5 shrink-0 cursor-pointer text-current transition-opacity focus-visible:opacity-100',
-              copied ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-            )}
-            aria-label={
-              copied ? t('sidebar.sessionIdCopied') : t('sidebar.copySessionId')
-            }
-            data-web-shell-session-id-copy
-            onClick={(event) => {
-              event.stopPropagation();
-              void writeClipboardText(sessionId)
-                .then(() => {
-                  setCopied(true);
-                  window.clearTimeout(resetTimerRef.current);
-                  resetTimerRef.current = window.setTimeout(
-                    () => setCopied(false),
-                    2000,
-                  );
-                })
-                .catch(warnClipboardWriteFailure);
-            }}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>
-          {copied ? t('sidebar.sessionIdCopied') : t('sidebar.copySessionId')}
-        </TooltipContent>
-      </Tooltip>
-      <span className="sr-only" aria-live="polite">
-        {copied ? t('sidebar.sessionIdCopied') : ''}
-      </span>
-    </div>
-  );
-}
 
 function readPageSize(): number {
   if (typeof window === 'undefined') return PAGE_SIZE;
@@ -203,6 +140,27 @@ export interface SessionCard {
   gitBranch?: string;
   /** The workspace the session lives in. */
   workspaceCwd: string;
+}
+
+type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
+
+const STATUS_FILTERS: SessionStatusFilter[] = [
+  'all',
+  'attention',
+  'running',
+  'idle',
+];
+
+function matchesStatus(
+  card: SessionCard,
+  filter: SessionStatusFilter,
+): boolean {
+  return (
+    filter === 'all' ||
+    (filter === 'attention'
+      ? card.status === 'needsApproval' || card.status === 'askUserQuestion'
+      : card.status === filter)
+  );
 }
 
 type SessionIdentity = Pick<SessionCard, 'sessionId' | 'workspaceCwd'>;
@@ -263,7 +221,8 @@ export function deriveSessionCards(
         ? 'needsApproval'
         : askUserQuestion
           ? 'askUserQuestion'
-          : (session.hasActivePrompt ?? status?.hasActivePrompt)
+          : (session.hasActivePrompt ?? status?.hasActivePrompt) ||
+              session.activeWorkState === 'active'
             ? 'running'
             : 'idle',
       updatedAt: session.updatedAt || session.createdAt,
@@ -371,7 +330,7 @@ function SessionOverviewPanelInner({
   const currentWorkspaceCwd =
     connection.workspaceCwd || workspaceCwd || primaryCwd;
 
-  // Live-state (2s channel) is the sidebar's refresh path: it patches the
+  // Live-state is the sidebar's refresh path: it patches the
   // catalog store's sessions with hasActivePrompt / isWaitingForPermission /
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
   // something actually changed. Adopt it only when trusted live-state routes
@@ -402,11 +361,12 @@ function SessionOverviewPanelInner({
       false) &&
     liveStateWorkspaceCwds.length > 0;
   // Live state only replaces catalog/status polling when this panel runs the
-  // channel itself. When the sidebar owns it, its trusted-only coverage can
-  // miss workspaces this panel shows — so this panel keeps polling then.
+  // channel itself. When another view owns it, keep the fallback because that
+  // view may cover a narrower workspace set.
   const liveStateActive = manageLiveState && liveStateEnabled;
   useWorkspaceSessionLiveState(workspace.client, {
     enabled: liveStateActive,
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     workspaceCwds: liveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });
@@ -483,10 +443,21 @@ function SessionOverviewPanelInner({
   const [popupBlocked, setPopupBlocked] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<SessionStatusFilter>('all');
   const [excludedWorkspaceCwds, setExcludedWorkspaceCwds] = useState<
     Set<string>
   >(() => new Set());
   const [workspaceFilterOpen, setWorkspaceFilterOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState<{
+    identity: string;
+    click: boolean;
+  } | null>(null);
+  // One replacement owner for every details entry point of this panel, so
+  // the focus rescue only fires within the overview.
+  const sessionDetailsOwner = useId();
+  // Stable column renderers keep the hover anchor mounted as details change.
+  const detailsOpenRef = useRef(detailsOpen);
+  detailsOpenRef.current = detailsOpen;
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<SessionCard[] | null>(
@@ -499,6 +470,7 @@ function SessionOverviewPanelInner({
   // Inline rename state — mirrors the sidebar's double-click/rename flow.
   const [editingCard, setEditingCard] = useState<SessionCard | null>(null);
   const [editingName, setEditingName] = useState('');
+  const focusSortAfterRenameRef = useRef(false);
   const editingIdentity = editingCard
     ? getSessionIdentity(editingCard)
     : undefined;
@@ -547,7 +519,7 @@ function SessionOverviewPanelInner({
     });
   }, [excludedWorkspaceCwds, workspaceOptions]);
 
-  const filteredCards = useMemo(() => {
+  const searchedCards = useMemo(() => {
     let list = cards;
     if (excludedWorkspaceCwds.size > 0) {
       list = list.filter(
@@ -559,11 +531,49 @@ function SessionOverviewPanelInner({
       list = list.filter(
         (card) =>
           card.label.toLowerCase().includes(query) ||
-          card.sessionId.toLowerCase().includes(query),
+          card.sessionId.toLowerCase().includes(query) ||
+          card.gitBranch?.toLowerCase().includes(query) ||
+          card.prs?.some((pr) => `#${pr.number}`.includes(query)),
       );
     }
     return list;
   }, [cards, excludedWorkspaceCwds, searchQuery]);
+  const filteredCards = useMemo(
+    () => searchedCards.filter((card) => matchesStatus(card, statusFilter)),
+    [searchedCards, statusFilter],
+  );
+  const sessionDetailsProps = useCallback(
+    (card: SessionCard, click = false) => {
+      const identity = getSessionIdentity(card);
+      return {
+        openOnClick: click,
+        ownerToken: sessionDetailsOwner,
+        open:
+          detailsOpenRef.current?.identity === identity &&
+          detailsOpenRef.current.click === click,
+        onOpenChange: (open: boolean) =>
+          setDetailsOpen((current) =>
+            open
+              ? { identity, click }
+              : current?.identity === identity && current.click === click
+                ? null
+                : current,
+          ),
+        session: {
+          ...sessionByIdentity.get(getSessionIdentity(card)),
+          sessionId: card.sessionId,
+          workspaceCwd: card.workspaceCwd,
+          hasActivePrompt: card.status === 'running',
+          isWaitingForPermission: card.status === 'needsApproval',
+          isWaitingForUserQuestion: card.status === 'askUserQuestion',
+        },
+        label: card.label,
+        time: card.updatedAt ? formatRelativeTime(card.updatedAt, t) : '',
+        completedUnread: false,
+      };
+    },
+    [sessionByIdentity, sessionDetailsOwner, t],
+  );
 
   const isPrimaryCard = useCallback(
     (card: SessionCard) => {
@@ -769,6 +779,7 @@ function SessionOverviewPanelInner({
 
   const startRename = useCallback((card: SessionCard) => {
     setActionError(null);
+    setDetailsOpen(null);
     setEditingCard(card);
     setEditingName(card.label);
   }, []);
@@ -1017,7 +1028,8 @@ function SessionOverviewPanelInner({
       prev.pageIndex === 0 ? prev : { ...prev, pageIndex: 0 },
     );
     setRowSelection({});
-  }, [excludedWorkspaceCwds, searchQuery]);
+    setDetailsOpen(null);
+  }, [excludedWorkspaceCwds, searchQuery, statusFilter]);
   useEffect(() => {
     const validIds = new Set(filteredCards.map(getSessionIdentity));
     setRowSelection((prev) => {
@@ -1077,267 +1089,192 @@ function SessionOverviewPanelInner({
         cell: ({ row }) => {
           const card = row.original;
           return (
-            <div className="flex min-w-0 items-center gap-2">
-              {card.color && (
-                <span
-                  className={cx(styles.colorDot, colorDotClass(card.color))}
-                  aria-hidden="true"
-                />
-              )}
-              {editingIdentity === getSessionIdentity(card) ? (
-                <form
-                  className="min-w-0 flex-1"
-                  onClick={(event) => event.stopPropagation()}
-                  onKeyDown={(event) => event.stopPropagation()}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    saveRenameRef.current();
-                  }}
-                >
-                  <Input
-                    autoFocus
-                    value={editingNameRef.current}
-                    onChange={(event) => setEditingName(event.target.value)}
-                    onBlur={cancelRename}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        cancelRename();
-                      }
-                    }}
-                    aria-label={`${t('sidebar.rename')}: ${card.label}`}
-                    maxLength={256}
-                    className="h-7 w-full text-xs"
+            <div className="min-w-0 space-y-1 py-1">
+              <div className="flex min-w-0 items-center gap-2">
+                {card.color && (
+                  <span
+                    className={cx(styles.colorDot, colorDotClass(card.color))}
+                    aria-hidden="true"
                   />
-                </form>
-              ) : (
-                <div className="flex min-w-0 flex-1 items-center gap-1 px-1 font-semibold text-current">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
+                )}
+                {editingIdentity === getSessionIdentity(card) ? (
+                  <form
+                    className="min-w-0 flex-1"
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveRenameRef.current();
+                    }}
+                  >
+                    <Input
+                      autoFocus
+                      value={editingNameRef.current}
+                      onChange={(event) => setEditingName(event.target.value)}
+                      onBlur={cancelRename}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault();
+                          cancelRename();
+                        }
+                      }}
+                      aria-label={`${t('sidebar.rename')}: ${card.label}`}
+                      maxLength={256}
+                      className="h-7 w-full text-xs"
+                    />
+                  </form>
+                ) : (
+                  <div className="flex min-w-0 flex-1 items-center gap-1 px-1 font-semibold text-current">
+                    {card.status !== 'idle' && (
+                      <span
+                        className={cx('inline-flex shrink-0', styles.attention)}
+                        data-web-shell-session-status-cue={card.status}
+                        aria-hidden="true"
+                        title={t(`sessionsOverview.status.${card.status}`)}
+                      >
+                        {card.status === 'running' ? (
+                          <span className={styles.loading} aria-hidden="true" />
+                        ) : card.status === 'needsApproval' ? (
+                          <ShieldQuestionIcon
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <CircleHelpIcon
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </span>
+                    )}
+                    <SessionDetailsTooltip {...sessionDetailsProps(card)}>
                       <button
                         type="button"
-                        className="inline-block w-fit min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-left text-xs leading-5 text-current"
+                        className="inline-block w-fit min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-left text-sm leading-5 text-current"
                         data-web-shell-session-title
                         onClick={(event) => {
                           event.stopPropagation();
+                          if (
+                            event.detail > 0 &&
+                            window.getSelection()?.isCollapsed === false
+                          )
+                            return;
                           onOpenSession(card.sessionId, card.workspaceCwd);
                         }}
                       >
                         {card.label}
                       </button>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-sm whitespace-normal">
-                      {card.label}
-                    </TooltipContent>
-                  </Tooltip>
-                  {card.status !== 'idle' && (
+                    </SessionDetailsTooltip>
+                    {card.isCurrent && (
+                      <Badge
+                        variant="secondary"
+                        className={cx(
+                          'shrink-0 text-[11px]',
+                          styles.currentBadge,
+                        )}
+                      >
+                        {t('sessionsOverview.current')}
+                      </Badge>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <span
+                  className="max-w-[40%] truncate"
+                  data-web-shell-session-workspace
+                  title={card.workspaceCwd}
+                >
+                  {workspaceLabelForCwd(
+                    card.workspaceCwd,
+                    registeredWorkspaces,
+                  )}
+                </span>
+                {card.gitBranch && (
+                  <>
+                    <span aria-hidden="true">·</span>
                     <span
-                      className={styles.loading}
-                      data-web-shell-session-loading
-                      aria-label={t(`sessionsOverview.status.${card.status}`)}
-                      title={t(`sessionsOverview.status.${card.status}`)}
-                    />
-                  )}
-                  {card.isCurrent && (
-                    <Badge
-                      variant="secondary"
-                      className={cx(
-                        'shrink-0 text-[11px]',
-                        styles.currentBadge,
-                      )}
+                      className="min-w-0 truncate"
+                      data-web-shell-session-git
+                      title={card.gitBranch}
                     >
-                      {t('sessionsOverview.current')}
-                    </Badge>
-                  )}
-                </div>
-              )}
+                      {card.gitBranch}
+                    </span>
+                  </>
+                )}
+                <SessionPrBadge prs={card.prs ?? []} />
+              </div>
             </div>
           );
         },
         meta: {
           fixed: 'left',
           fixedEdge: true,
-          width: 224,
-          fluidWeight: 22,
+          width: 260,
+          fluidWeight: 80,
           truncate: (card) => editingIdentity !== getSessionIdentity(card),
         } satisfies DataTableColumnMeta<SessionCard>,
       },
       {
-        id: 'git',
-        header: t('sessionsOverview.worktree'),
+        id: 'status',
+        header: t('sessionsOverview.statusColumn'),
         cell: ({ row }) => {
-          const card = row.original;
-          const { gitBranch, prs } = card;
-          const session = sessionByIdentity.get(getSessionIdentity(card)) ?? {
-            sessionId: card.sessionId,
-            workspaceCwd: card.workspaceCwd,
-            clientCount: 0,
-            hasActivePrompt: card.status !== 'idle',
-            prs,
-            branch: gitBranch ? { name: gitBranch, baseBranch: '' } : undefined,
-          };
-          const content = (
-            <div className="flex min-w-0 items-center">
-              <span
-                className={cx(
-                  'block min-w-0 text-xs text-current',
-                  gitBranch && 'flex-1 truncate',
-                )}
-                data-web-shell-session-git
-              >
-                {gitBranch ?? '-'}
-              </span>
-              <SessionPrBadge prs={prs ?? []} />
-            </div>
-          );
-          if (!gitBranch && !prs?.some((pr) => isExternalOpenUrl(pr.url))) {
-            return content;
-          }
+          const { status } = row.original;
+          const StatusIcon =
+            status === 'needsApproval'
+              ? ShieldQuestionIcon
+              : status === 'askUserQuestion'
+                ? CircleHelpIcon
+                : CircleIcon;
           return (
-            <SessionDetailsTooltip
-              session={session}
-              label={card.label}
-              time={card.updatedAt ? formatRelativeTime(card.updatedAt, t) : ''}
-              completedUnread={false}
-              worktreeOnly
+            <span
+              className={cx(
+                'inline-flex items-center gap-1.5 text-xs',
+                (status === 'needsApproval' || status === 'askUserQuestion') &&
+                  styles.attention,
+                status === 'idle' && 'text-muted-foreground',
+              )}
+              data-web-shell-session-status={status}
+              title={t(`sessionsOverview.status.${status}`)}
             >
-              {content}
-            </SessionDetailsTooltip>
+              {status === 'running' ? (
+                <span
+                  className={styles.loading}
+                  data-web-shell-session-loading
+                  aria-hidden="true"
+                />
+              ) : (
+                <StatusIcon className="size-3.5" aria-hidden="true" />
+              )}
+              {t(`sessionsOverview.status.${status}`)}
+            </span>
           );
         },
-        meta: {
-          width: 144,
-          fluidWeight: 20,
-        } satisfies DataTableColumnMeta,
-      },
-      {
-        id: 'sessionId',
-        header: t('sessionsOverview.sessionId'),
-        cell: ({ row }) => <SessionIdCell sessionId={row.original.sessionId} />,
-        meta: {
-          width: 136,
-          fluidWeight: 18,
-        } satisfies DataTableColumnMeta,
-      },
-      {
-        id: 'workspace',
-        header: () => (
-          <div className="flex min-w-0 items-center gap-1">
-            <span>{t('sessionsOverview.folder')}</span>
-            {workspaceOptions.length > 1 && (
-              <Popover
-                open={workspaceFilterOpen}
-                onOpenChange={setWorkspaceFilterOpen}
-              >
-                <PopoverTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    className={cx(
-                      'size-5 cursor-pointer',
-                      workspaceOptions.some((option) =>
-                        excludedWorkspaceCwds.has(option.cwd),
-                      ) && 'text-primary',
-                    )}
-                    aria-label={t('sessionsOverview.workspaceFilter')}
-                    title={t('sessionsOverview.workspaceFilter')}
-                  >
-                    <FunnelIcon />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent
-                  align="start"
-                  sideOffset={2}
-                  className="w-56 gap-1.5 p-2"
-                  role="dialog"
-                  aria-label={t('sessionsOverview.workspaceFilter')}
-                >
-                  <Label
-                    htmlFor="session-overview-workspace-all"
-                    className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
-                  >
-                    <Checkbox
-                      id="session-overview-workspace-all"
-                      checked={
-                        workspaceOptions.every(
-                          (option) => !excludedWorkspaceCwds.has(option.cwd),
-                        ) ||
-                        (workspaceOptions.some(
-                          (option) => !excludedWorkspaceCwds.has(option.cwd),
-                        ) &&
-                          'indeterminate')
-                      }
-                      onCheckedChange={(checked) =>
-                        setExcludedWorkspaceCwds(
-                          checked === true
-                            ? new Set()
-                            : new Set(workspaceOptions.map(({ cwd }) => cwd)),
-                        )
-                      }
-                    />
-                    <span>{t('sessionsOverview.allWorkspaces')}</span>
-                  </Label>
-                  <div className="max-h-48 overflow-auto rounded-md border bg-muted/50 p-0.5">
-                    {workspaceOptions.map((option, index) => {
-                      const id = `session-overview-workspace-${index}`;
-                      return (
-                        <Label
-                          key={option.cwd}
-                          htmlFor={id}
-                          className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
-                        >
-                          <Checkbox
-                            id={id}
-                            checked={!excludedWorkspaceCwds.has(option.cwd)}
-                            onCheckedChange={(checked) => {
-                              setExcludedWorkspaceCwds((current) => {
-                                const next = new Set(current);
-                                if (checked === true) next.delete(option.cwd);
-                                else next.add(option.cwd);
-                                return next;
-                              });
-                            }}
-                          />
-                          <span className="min-w-0 flex-1 truncate">
-                            {option.label}
-                          </span>
-                        </Label>
-                      );
-                    })}
-                  </div>
-                </PopoverContent>
-              </Popover>
-            )}
-          </div>
-        ),
-        cell: ({ row }) => (
-          <span
-            className="block max-w-full truncate text-xs text-current"
-            data-web-shell-session-workspace
-          >
-            {workspaceLabelForCwd(
-              row.original.workspaceCwd,
-              registeredWorkspaces,
-            )}
-          </span>
-        ),
-        meta: {
-          width: 128,
-          fluidWeight: 12,
-          tooltip: (card) => card.workspaceCwd,
-        } satisfies DataTableColumnMeta<SessionCard>,
+        meta: { width: 144, fluidWeight: 0 } satisfies DataTableColumnMeta,
       },
       {
         id: 'updatedAt',
         accessorFn: (card) => card.updatedAt ?? '',
         header: ({ column }) => (
           <Button
+            ref={(button) => {
+              // Ending rename recreates the header; focus its new button.
+              if (button && focusSortAfterRenameRef.current) {
+                focusSortAfterRenameRef.current = false;
+                button.focus();
+              }
+            }}
             type="button"
             variant="ghost"
             size="xs"
             className="px-0 text-sm"
-            onClick={() => column.toggleSorting()}
+            onClick={() => {
+              if (editingIdentity) {
+                focusSortAfterRenameRef.current = true;
+                cancelRename();
+              }
+              column.toggleSorting();
+            }}
           >
             {t('sessionsOverview.time')}
             <ArrowUpDownIcon className="size-3" />
@@ -1351,7 +1288,7 @@ function SessionOverviewPanelInner({
           </span>
         ),
         meta: {
-          width: 112,
+          width: 96,
           fluidWeight: 5,
         } satisfies DataTableColumnMeta,
       },
@@ -1367,6 +1304,21 @@ function SessionOverviewPanelInner({
           const canExport = canExportCard(card);
           return (
             <div className="flex items-center justify-center gap-1 [&_button]:cursor-pointer">
+              <SessionDetailsTooltip {...sessionDetailsProps(card, true)}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  disabled={Boolean(editingIdentity)}
+                  aria-label={t('sessionsOverview.details', {
+                    name: card.label,
+                  })}
+                  data-web-shell-session-details
+                >
+                  <InfoIcon className="size-4" />
+                </Button>
+              </SessionDetailsTooltip>
               {(isCurrentCard(card) || sessionMetadataEnabled) && (
                 <Button
                   type="button"
@@ -1441,7 +1393,7 @@ function SessionOverviewPanelInner({
         meta: {
           fixed: 'right',
           fixedEdge: true,
-          width: 128,
+          width: 156,
           fixedWidth: true,
           headerClassName: 'text-center',
           stopRowClick: true,
@@ -1463,13 +1415,10 @@ function SessionOverviewPanelInner({
       isCurrentCard,
       onOpenSession,
       registeredWorkspaces,
-      excludedWorkspaceCwds,
       sessionMetadataEnabled,
-      sessionByIdentity,
+      sessionDetailsProps,
       startRename,
       t,
-      workspaceOptions,
-      workspaceFilterOpen,
     ],
   );
 
@@ -1486,6 +1435,24 @@ function SessionOverviewPanelInner({
     getRowId: getSessionIdentity,
     autoResetPageIndex: false,
   });
+  const visibleRows = table.getRowModel().rows;
+  const clampPending =
+    pagination.pageIndex > Math.max(0, table.getPageCount() - 1);
+  useEffect(() => {
+    // A shrinking catalog can leave the page empty until the clamp commits.
+    if (clampPending) return;
+    if (
+      editingIdentity &&
+      !visibleRows.some((row) => row.id === editingIdentity)
+    ) {
+      cancelRename();
+    }
+    setDetailsOpen((current) =>
+      current && !visibleRows.some((row) => row.id === current.identity)
+        ? null
+        : current,
+    );
+  }, [visibleRows, clampPending, editingIdentity, cancelRename]);
   const selectedCards = table
     .getSortedRowModel()
     .rows.filter((row) => row.getIsSelected())
@@ -1547,6 +1514,16 @@ function SessionOverviewPanelInner({
     return () => observer.disconnect();
   }, [filteredCards.length, pagination.pageSize]);
 
+  const workspaceFilterLabel =
+    excludedWorkspaceCwds.size === 0
+      ? t('sessionsOverview.workspaceAll')
+      : t('sessionsOverview.workspacesSelected', {
+          count: workspaceOptions.filter(
+            (option) => !excludedWorkspaceCwds.has(option.cwd),
+          ).length,
+          total: workspaceOptions.length,
+        });
+
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative w-full max-w-[300px]">
@@ -1559,6 +1536,92 @@ function SessionOverviewPanelInner({
           aria-label={t('sessionsOverview.searchPlaceholder')}
         />
       </div>
+      {workspaceOptions.length > 1 && (
+        <Popover
+          open={workspaceFilterOpen}
+          onOpenChange={setWorkspaceFilterOpen}
+        >
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={cx(
+                'cursor-pointer',
+                workspaceOptions.some((option) =>
+                  excludedWorkspaceCwds.has(option.cwd),
+                ) && 'text-primary',
+              )}
+              aria-label={`${t('sessionsOverview.workspaceFilter')}: ${workspaceFilterLabel}`}
+              title={t('sessionsOverview.workspaceFilter')}
+            >
+              <FunnelIcon />
+              {workspaceFilterLabel}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="start"
+            sideOffset={2}
+            className="w-56 gap-1.5 p-2"
+            role="dialog"
+            aria-label={t('sessionsOverview.workspaceFilter')}
+          >
+            <Label
+              htmlFor="session-overview-workspace-all"
+              className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+            >
+              <Checkbox
+                id="session-overview-workspace-all"
+                checked={
+                  workspaceOptions.every(
+                    (option) => !excludedWorkspaceCwds.has(option.cwd),
+                  ) ||
+                  (workspaceOptions.some(
+                    (option) => !excludedWorkspaceCwds.has(option.cwd),
+                  ) &&
+                    'indeterminate')
+                }
+                onCheckedChange={(checked) =>
+                  setExcludedWorkspaceCwds(
+                    checked === true
+                      ? new Set()
+                      : new Set(workspaceOptions.map(({ cwd }) => cwd)),
+                  )
+                }
+              />
+              <span>{t('sessionsOverview.allWorkspaces')}</span>
+            </Label>
+            <div className="max-h-48 overflow-auto rounded-md border bg-muted/50 p-0.5">
+              {workspaceOptions.map((option, index) => {
+                const id = `session-overview-workspace-${index}`;
+                return (
+                  <Label
+                    key={option.cwd}
+                    htmlFor={id}
+                    className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+                  >
+                    <Checkbox
+                      id={id}
+                      checked={!excludedWorkspaceCwds.has(option.cwd)}
+                      onCheckedChange={(checked) => {
+                        setExcludedWorkspaceCwds((current) => {
+                          const next = new Set(current);
+                          if (checked === true) next.delete(option.cwd);
+                          else next.add(option.cwd);
+                          return next;
+                        });
+                      }}
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {option.label}
+                    </span>
+                  </Label>
+                );
+              })}
+            </div>
+          </PopoverContent>
+        </Popover>
+      )}
       <Button
         type="button"
         size="sm"
@@ -1578,9 +1641,49 @@ function SessionOverviewPanelInner({
   );
 
   return (
-    <div ref={panelRef} className={styles.panel} data-web-shell-session-panel>
-      {/* Row 1: search + workspace filter + refresh (right). */}
+    <div
+      ref={panelRef}
+      tabIndex={-1}
+      className={styles.panel}
+      data-web-shell-session-panel
+      onMouseDownCapture={(event) => {
+        const target = event.target as HTMLElement;
+        if (
+          editingCard &&
+          event.button === 0 &&
+          target.closest('[data-web-shell-session-table-viewport] tr') &&
+          !target.closest('input')
+        ) {
+          event.preventDefault();
+        }
+      }}
+    >
+      {/* Search, workspace filter, and manual refresh. */}
       {toolbar}
+      <div
+        className="flex flex-wrap items-center gap-1"
+        role="group"
+        aria-label={t('sessionsOverview.statusFilter')}
+      >
+        {STATUS_FILTERS.map((filter) => (
+          <Button
+            key={filter}
+            type="button"
+            size="sm"
+            variant={statusFilter === filter ? 'secondary' : 'ghost'}
+            aria-pressed={statusFilter === filter}
+            onClick={() => setStatusFilter(filter)}
+          >
+            {t(`sessionsOverview.filter.${filter}`)}
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {
+                searchedCards.filter((card) => matchesStatus(card, filter))
+                  .length
+              }
+            </span>
+          </Button>
+        ))}
+      </div>
 
       {popupBlocked && (
         <div className={styles.notice} role="alert">
@@ -1611,7 +1714,11 @@ function SessionOverviewPanelInner({
           }
           className={styles.tableViewport}
           rowClassName="cursor-pointer"
-          onRowClick={(row) => row.toggleSelected()}
+          onRowClick={(row) => {
+            if (editingCard || window.getSelection()?.isCollapsed === false)
+              return;
+            onOpenSession(row.original.sessionId, row.original.workspaceCwd);
+          }}
           data-web-shell-session-table-viewport
         />
       </TooltipProvider>
@@ -1626,71 +1733,78 @@ function SessionOverviewPanelInner({
           data-web-shell-session-footer
         >
           <span className="text-xs text-muted-foreground">
-            {t('sessionsOverview.selectedRows', {
-              count: selectedCount,
-              total: filteredCards.length,
-            })}
+            {t(
+              selectedCount > 0
+                ? 'sessionsOverview.selectedRows'
+                : 'sessionsOverview.sessionCount',
+              {
+                count: selectedCount,
+                total: filteredCards.length,
+              },
+            )}
           </span>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!canArchiveSelection || batchBusy}
-              onClick={() => setArchiveTarget(selectedCards)}
-              title={t('sessionsOverview.bulkArchiveHint', {
-                count: selectedCount,
-              })}
-            >
-              {t('sessionsOverview.bulkArchive')}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!canDeleteSelection || batchBusy}
-              onClick={() => setDeleteTarget(selectedCards)}
-              title={t('sessionsOverview.bulkDeleteHint', {
-                count: selectedCount,
-              })}
-            >
-              {t('sessionsOverview.bulkDelete')}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!canOpenSelection}
-              onClick={() => openInNewTab(splitIds)}
-              title={
-                selectedCount > MAX_SPLIT_PANES
-                  ? t('sessionsOverview.splitLimit', {
-                      max: MAX_SPLIT_PANES,
-                    })
-                  : t('sessionsOverview.openInTabHint')
-              }
-            >
-              {t('sessionsOverview.openInTab')}
-            </Button>
-            {onOpenSplit && (
+          {selectedCount > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!canArchiveSelection || batchBusy}
+                onClick={() => setArchiveTarget(selectedCards)}
+                title={t('sessionsOverview.bulkArchiveHint', {
+                  count: selectedCount,
+                })}
+              >
+                {t('sessionsOverview.bulkArchive')}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!canDeleteSelection || batchBusy}
+                onClick={() => setDeleteTarget(selectedCards)}
+                title={t('sessionsOverview.bulkDeleteHint', {
+                  count: selectedCount,
+                })}
+              >
+                {t('sessionsOverview.bulkDelete')}
+              </Button>
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
                 disabled={!canOpenSelection}
-                onClick={() => onOpenSplit(splitIds)}
+                onClick={() => openInNewTab(splitIds)}
                 title={
                   selectedCount > MAX_SPLIT_PANES
                     ? t('sessionsOverview.splitLimit', {
                         max: MAX_SPLIT_PANES,
                       })
-                    : t('sessionsOverview.openInSplitHint')
+                    : t('sessionsOverview.openInTabHint')
                 }
               >
-                {t('sessionsOverview.openInSplit')}
+                {t('sessionsOverview.openInTab')}
               </Button>
-            )}
-          </div>
+              {onOpenSplit && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!canOpenSelection}
+                  onClick={() => onOpenSplit(splitIds)}
+                  title={
+                    selectedCount > MAX_SPLIT_PANES
+                      ? t('sessionsOverview.splitLimit', {
+                          max: MAX_SPLIT_PANES,
+                        })
+                      : t('sessionsOverview.openInSplitHint')
+                  }
+                >
+                  {t('sessionsOverview.openInSplit')}
+                </Button>
+              )}
+            </div>
+          )}
           <DataTablePagination
             table={table}
             pageSizes={PAGE_SIZES}

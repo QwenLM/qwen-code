@@ -47,6 +47,11 @@ import type {
  * Covers all built-in tools plus common aliases (including Claude Code's "Bash").
  */
 export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  // Exec tool
+  exec: 'exec',
+  Exec: 'exec',
+  ExecTool: 'exec',
+
   // Shell tool
   run_shell_command: 'run_shell_command',
   Shell: 'run_shell_command',
@@ -249,6 +254,8 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   artifact: 'artifact',
   Artifact: 'artifact',
   record_artifact: 'record_artifact',
+  record_source: 'record_source',
+  RecordSource: 'record_source',
   RecordArtifact: 'record_artifact',
 
   // Report Findings tool
@@ -313,6 +320,32 @@ export function resolveToolName(rawName: string): string {
   return Object.hasOwn(TOOL_NAME_ALIASES, rawName)
     ? TOOL_NAME_ALIASES[rawName]!
     : rawName;
+}
+
+const TOOL_NAME_ALIASES_BY_CANONICAL: ReadonlyMap<string, readonly string[]> =
+  (() => {
+    const byCanonical = new Map<string, string[]>();
+    for (const [alias, canonical] of Object.entries(TOOL_NAME_ALIASES)) {
+      const aliases = byCanonical.get(canonical);
+      if (aliases) {
+        aliases.push(alias);
+      } else {
+        byCanonical.set(canonical, [alias]);
+      }
+    }
+    return byCanonical;
+  })();
+
+/**
+ * Every name that {@link resolveToolName} resolves to the given canonical tool
+ * name, including Claude Code's names (`Bash`, `Read`, `Write`). Exact names
+ * only: the meta-categories applied by {@link toolMatchesRuleToolName} (a
+ * `Read` rule also covering `grep_search`, a `Bash` rule also covering
+ * `monitor`) are not expanded here. Empty for a name the table does not know,
+ * such as an MCP tool.
+ */
+export function getToolNameAliases(canonicalName: string): readonly string[] {
+  return TOOL_NAME_ALIASES_BY_CANONICAL.get(canonicalName) ?? [];
 }
 
 /**

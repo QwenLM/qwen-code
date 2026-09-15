@@ -200,7 +200,12 @@ const MERMAID_RENDER_TIMEOUT_MS = 10_000;
 function MermaidBlock({ code }: { code: string }) {
   const { t } = useI18n();
   const appTheme = useTheme();
-  const documentMode = useTranscriptRenderMode() === 'document';
+  // Document mode no longer reaches this component: since #11091 CodeBlock
+  // renders a mermaid fence as a plain <pre> there, so the export bundle can
+  // drop mermaid entirely. The render limits below were never about the export
+  // format though — they are about rendering a transcript the viewer did not
+  // author and cannot interrupt, which is equally true of readonly replay.
+  const untrustedMode = useTranscriptRenderMode() !== 'interactive';
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
@@ -295,7 +300,7 @@ function MermaidBlock({ code }: { code: string }) {
         .then(async (mod) => {
           if (cancelled) return;
           const mermaid = mod.default;
-          const configKey = `${mermaidTheme}:${documentMode ? 'document' : 'runtime'}`;
+          const configKey = `${mermaidTheme}:${untrustedMode ? 'hardened' : 'runtime'}`;
           const render = mermaidRenderQueue.then(async () => {
             if (cancelled) throw new Error('Mermaid render skipped');
             if (lastMermaidConfigKey !== configKey) {
@@ -304,7 +309,7 @@ function MermaidBlock({ code }: { code: string }) {
                 theme: mermaidTheme,
                 securityLevel: 'strict',
                 suppressErrorRendering: true,
-                ...(documentMode
+                ...(untrustedMode
                   ? {
                       maxTextSize: MAX_MERMAID_TEXT_CHARS,
                       maxEdges: MAX_MERMAID_EDGES,
@@ -318,7 +323,7 @@ function MermaidBlock({ code }: { code: string }) {
               lastMermaidConfigKey = configKey;
             }
             const id = `mermaid-${++mermaidRenderId}`;
-            if (!documentMode) return mermaid.render(id, code.trim());
+            if (!untrustedMode) return mermaid.render(id, code.trim());
             let timeoutId: ReturnType<typeof setTimeout> | undefined;
             try {
               return await Promise.race([
@@ -355,7 +360,7 @@ function MermaidBlock({ code }: { code: string }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code, documentMode, mermaidTheme]);
+  }, [code, untrustedMode, mermaidTheme]);
 
   const handleCopy = () => {
     void writeClipboardText(code)
@@ -546,7 +551,11 @@ function CodeBlock({
       .catch(warnClipboardWriteFailure);
   };
 
-  if (lang === 'mermaid' && !isStreaming) {
+  // In document mode a mermaid fence falls through to the plain <pre> below,
+  // holding its own source: the same degradation this component already applies
+  // to syntax highlighting there, and what lets the export bundle drop mermaid
+  // and its graph dependencies (#11091).
+  if (lang === 'mermaid' && !isStreaming && !documentMode) {
     return <MermaidBlock code={code} />;
   }
 

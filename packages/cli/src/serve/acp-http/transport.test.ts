@@ -1862,6 +1862,54 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it.each([
+    { meta: undefined, context: {} },
+    { meta: { 'qwen.daemon.submittedPrompt': 'forged' }, context: {} },
+    {
+      meta: {
+        'qwen.submittedPrompt': 'label',
+        'qwen.daemon.channelPromptAuthorization': 'revoked-worker',
+      },
+      context: {},
+    },
+    {
+      meta: { 'qwen.submittedPrompt': ' original text\n' },
+      context: { submittedPrompt: ' original text\n' },
+    },
+  ])(
+    'admits only public submission declarations over ACP HTTP: $meta',
+    async ({ meta, context }) => {
+      const send = vi.spyOn(bridge, 'sendPrompt');
+      const connId = await initialize();
+      await newSession(connId);
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'wrapper' }],
+          ...(meta ? { _meta: meta } : {}),
+        },
+      });
+      expect(ack.status).toBe(202);
+      await vi.waitFor(() => expect(send).toHaveBeenCalled());
+      expect(send).toHaveBeenCalledWith(
+        'sess-1',
+        expect.anything(),
+        expect.any(AbortSignal),
+        expect.objectContaining({
+          ...context,
+        }),
+      );
+      if (Object.keys(context).length === 0) {
+        expect((send.mock.calls[0] as unknown[])[3]).not.toHaveProperty(
+          'submittedPrompt',
+        );
+      }
+    },
+  );
+
   it('prompt streams session/update then the final result', async () => {
     bridge.promptBehavior = async (_s, q) => {
       q.push({
