@@ -1038,6 +1038,7 @@ export async function runForcedToolCallScenario(options: {
   vi.stubEnv('QWEN_MODEL', 'fake-model');
   vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
   vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'off');
   vi.stubEnv('NO_PROXY', noProxy);
   vi.stubEnv('no_proxy', noProxy);
 

@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   normalize,
   tokenLimit,
   knownTokenLimit,
+  hasExplicitOutputLimit,
   clampOutputTokensToWindow,
   outputClampMargin,
   defaultOutputCeiling,
@@ -13,6 +14,14 @@ import {
   MIN_CLAMPED_OUTPUT_TOKENS,
   OUTPUT_TOKEN_CEILING,
 } from './tokenLimits.js';
+
+vi.mock('../models/model-catalog.js', () => {
+  const entries: Record<string, { context?: number; output?: number }> = {
+    'catalog-model': { context: 123_456, output: 7_890 },
+    'qwen-catalog-context-only': { context: 5 },
+  };
+  return { lookupModelCatalog: (model: string) => entries[model] };
+});
 
 describe('normalize', () => {
   it('keeps unrecognized batch routing tags out of token lookup', () => {
@@ -633,5 +642,30 @@ describe('reconcileMaxTokens', () => {
     expect(reconcileMaxTokens(8_000, undefined)).toBeUndefined();
     expect(reconcileMaxTokens(undefined, 8_000)).toBeUndefined();
     expect(reconcileMaxTokens(null, null)).toBeUndefined();
+  });
+});
+
+describe('models.dev catalog', () => {
+  it('takes limits from the catalog before the regex tables', () => {
+    expect(tokenLimit('catalog-model', 'input')).toBe(123_456);
+    expect(tokenLimit('catalog-model', 'output')).toBe(7_890);
+    expect(knownTokenLimit('catalog-model', 'output')).toBe(7_890);
+    expect(hasExplicitOutputLimit('catalog-model')).toBe(true);
+  });
+
+  it('falls back per field when the catalog entry is partial', () => {
+    expect(tokenLimit('qwen-catalog-context-only', 'input')).toBe(5);
+    expect(tokenLimit('qwen-catalog-context-only', 'output')).toBe(32_768);
+    expect(hasExplicitOutputLimit('qwen-catalog-context-only')).toBe(true);
+  });
+
+  it('looks the catalog up by normalized id', () => {
+    expect(tokenLimit('provider/Catalog-Model:free', 'input')).toBe(123_456);
+  });
+
+  it('keeps the regex tables and defaults for models the catalog lacks', () => {
+    expect(tokenLimit('gpt-5', 'input')).toBe(272_000);
+    expect(tokenLimit('unknown-model', 'input')).toBe(DEFAULT_TOKEN_LIMIT);
+    expect(hasExplicitOutputLimit('unknown-model')).toBe(false);
   });
 });

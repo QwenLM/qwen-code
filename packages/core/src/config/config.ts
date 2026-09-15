@@ -7,6 +7,7 @@
 import type { SessionSourceService } from '../services/session-sources.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
   validateReasoningCapabilities,
@@ -3636,6 +3637,7 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
+    void refreshModelCatalog();
     options?.signal?.throwIfAborted();
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
