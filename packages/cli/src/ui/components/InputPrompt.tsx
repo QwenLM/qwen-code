@@ -1985,6 +1985,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         isOnCursorLine,
         cursorCol: cursorVisualColAbsolute,
         showCursor: showCursorOpt,
+        drawSoftwareCursor,
         absoluteVisualIndex,
         buffer: buf,
       } = opts;
@@ -2023,9 +2024,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               cursorVisualColAbsolute - segStart,
               cursorVisualColAbsolute - segStart + 1,
             );
-            const highlighted = showCursorOpt
-              ? renderSoftwareCursor(charToHighlight)
-              : charToHighlight;
+            const highlighted =
+              showCursorOpt && drawSoftwareCursor
+                ? renderSoftwareCursor(charToHighlight)
+                : charToHighlight;
             display =
               cpSlice(seg.text, 0, cursorVisualColAbsolute - segStart) +
               highlighted +
@@ -2052,7 +2054,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (ghostText && showCursorOpt && ghostText.text.length > 0) {
           if (ghostText.showCursorBeforeText) {
             renderedLine.push(
-              <Text key="ghost-cursor">{renderSoftwareCursor(' ')}</Text>,
+              <Text key="ghost-cursor">
+                {drawSoftwareCursor ? renderSoftwareCursor(' ') : ' '}
+              </Text>,
             );
             renderedLine.push(
               <Text key="ghost-rest" color={theme.text.secondary}>
@@ -2064,7 +2068,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             const firstChar = ghostText.text[0]!;
             const rest = ghostText.text.slice(firstChar.length);
             renderedLine.push(
-              <Text key="ghost-cursor">{renderSoftwareCursor(firstChar)}</Text>,
+              <Text key="ghost-cursor">
+                {drawSoftwareCursor
+                  ? renderSoftwareCursor(firstChar)
+                  : firstChar}
+              </Text>,
             );
             if (rest.length > 0) {
               renderedLine.push(
@@ -2079,7 +2087,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
           renderedLine.push(
             <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
-              {showCursorOpt ? renderSoftwareCursor(' ') + '\u200B' : ' \u200B'}
+              {showCursorOpt && drawSoftwareCursor
+                ? renderSoftwareCursor(' ') + '\u200B'
+                : ' \u200B'}
             </Text>,
           );
         }
