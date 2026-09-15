@@ -48,7 +48,7 @@ const mocks = vi.hoisted(() => {
         return React.createElement(
           type === 'box' ? 'div' : 'span',
           {
-            key: key ?? null,
+            ...(key === undefined ? null : { key }),
             ...(bg === undefined ? null : { 'data-bg': bg }),
           },
           children,
