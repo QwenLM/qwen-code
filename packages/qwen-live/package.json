@@ -48,6 +48,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
     "@node-rs/jieba": "2.0.2",
+    "@node-rs/jieba-wasm32-wasi": "2.0.2",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "ansi-regex": "^6.2.2",
     "prompts": "^2.4.2",
