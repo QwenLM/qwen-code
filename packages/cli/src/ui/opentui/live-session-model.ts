@@ -40,8 +40,13 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
   confirmBody?: string;
   /** Rows the dialog renders outside the body window (info's urls block,
    * exec's warnings, edit's fileName row and warnings, ask_user_question's
-   * tallest question block) — charged in addition to the windowed body. */
+   * opening question block) — charged in addition to the windowed body. */
   confirmExtra?: string;
+  /** ask_user_question's candidate question blocks: the flow paints one
+   * block at a time and the wrap decides which paints tallest at the
+   * dialog's columns, so the pending card's price takes the max of the
+   * candidates (R10-1). */
+  confirmExtras?: string[];
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -371,6 +376,7 @@ export function foldLiveEvent(
           confirmType: ev.confirmType,
           confirmBody: ev.confirmBody,
           confirmExtra: ev.confirmExtra,
+          confirmExtras: ev.confirmExtras,
         };
         return items;
       }
@@ -387,6 +393,7 @@ export function foldLiveEvent(
         confirmType: ev.confirmType,
         confirmBody: ev.confirmBody,
         confirmExtra: ev.confirmExtra,
+        confirmExtras: ev.confirmExtras,
       });
       return items;
     }

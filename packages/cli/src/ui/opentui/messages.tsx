@@ -313,6 +313,19 @@ const FRESH_TRANSCRIPT_ROWS = 5;
 const MCP_CONFIRM_BODY_ROWS = 5;
 
 /**
+ * The lone mcp pending card's minimum description budget. The mcp
+ * confirmation dialog shows only the server and tool names, so the pending
+ * card is the only surface carrying the call's arguments (R5-9) — and once
+ * the grown transcript saturates the shared region the fixed-body dialog
+ * is off the alt screen no matter what the card yields, so yielding past
+ * that point stops buying the dialog rows and only deletes the head of the
+ * payload being approved (R12-1). Eleven budget rows (≈ 1061 visible
+ * description columns at a 110-column terminal) restore the head-room the
+ * pre-overage budget measured for a ~4k-column args payload at h=80.
+ */
+export const MCP_PENDING_CARD_MIN_ROWS = 11;
+
+/**
  * Measured at a 110-column terminal the card's flex row gives the
  * description ~79 of the 108 columns capToolCardDescription budgets with
  * (the name column takes the rest), so a budget of B rows renders about
@@ -353,12 +366,16 @@ export function cardDescriptionColumns(cols: number, nameCols: number): number {
  * diff, whose tail-windowed lines wrap, so the card prices them by painted
  * height; `extra` is the rows the dialog renders OUTSIDE the body window
  * (info's urls block, exec's warnings, edit's fileName row and warnings,
- * ask_user_question's tallest question block).
+ * ask_user_question's opening question block); `extras` is
+ * ask_user_question's candidate question blocks — the flow paints one at a
+ * time and the wrap decides which paints tallest, so the price takes the
+ * max of the candidates at the dialog's columns (R10-1).
  */
 export interface PendingDialogBody {
   type?: string;
   body?: string;
   extra?: string;
+  extras?: string[];
 }
 
 /**
@@ -388,7 +405,9 @@ export interface PendingDialogBody {
  * warnings list — charged the windowed lines' PAINTED height when the
  * diff arrives (the logical-line window wraps; R10-1), the flat collapsed
  * window when it does not — and ask_user_question's flow paints one
- * question block at a time, charged the tallest block with no collapsed
+ * question block at a time, charged the painted-tallest candidate block —
+ * the wrap decides which at the dialog's columns, so the candidates arrive
+ * as `extras` and the max is taken at pricing time — with no collapsed
  * window at all (ConfirmationBody renders no body for it). Both carry
  * those outside-the-window rows as `extra`, charged in addition to the
  * body: a PreToolUse 'ask' bounce can prepend hook-authored warnings of
@@ -465,8 +484,19 @@ function dialogBodyMeasure(
   }
   if (type === 'ask_user_question') {
     // ConfirmationBody renders nothing for ask — the flow paints one
-    // question block at a time and the adapter's extra carries the tallest
-    // — so there is no collapsed body window to charge (R10-1).
+    // question block at a time — so there is no collapsed body window to
+    // charge: the price covers the block that paints TALLEST at these
+    // columns, and the wrap decides which candidate that is, so the
+    // adapter carries every block and the max is taken here where the
+    // columns live (R10-1). A wire that predates the candidates falls back
+    // to the single extra.
+    const blocks = dialog?.extras;
+    if (blocks && blocks.length > 0) {
+      return {
+        expanded: null,
+        collapsed: Math.max(...blocks.map((block) => extraRows(block))),
+      };
+    }
     return { expanded: null, collapsed: extraRows(dialog?.extra) };
   }
   return { expanded: payloadRows, collapsed: CONFIRM_BODY_COLLAPSED_ROWS };
@@ -493,7 +523,13 @@ function dialogBodyMeasure(
  * painted height outside the pending cards (transcript-view's per-item
  * model) — the reserve prices a fresh session's five rows, so only the
  * overage spends from the region. A lone pending card never drops
- * below the settled cap (the short-terminal fallback), but once siblings
+ * below the settled cap (the short-terminal fallback) — unless its dialog
+ * is mcp: that dialog shows only the server and tool names, so the card is
+ * the only surface carrying the call's arguments (R5-9), and past
+ * transcript saturation the fixed-body dialog is off the alt screen
+ * whatever the card yields, so the floor lifts to MCP_PENDING_CARD_MIN_ROWS
+ * — yielding further stops buying the dialog rows and only deletes the
+ * head of the payload being approved (R12-1). Once siblings
  * share the region the floor drops to one row — a floor at the settled cap
  * would lift the divided bound back up from the batch size where it falls
  * below it, and N cards at the cap grow the region linearly past the
@@ -583,7 +619,11 @@ export function pendingCardMaxRows(
             Math.max(pendingCount, 1),
         );
   return Math.max(
-    pendingCount > 1 ? 1 : TOOL_CARD_DESCRIPTION_ROWS,
+    pendingCount > 1
+      ? 1
+      : dialog?.type === 'mcp'
+        ? MCP_PENDING_CARD_MIN_ROWS
+        : TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
       collapsedDialogBound,

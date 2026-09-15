@@ -2063,6 +2063,70 @@ describe('livePromptEvents', () => {
     ]);
   });
 
+  it("carries an ask_user_question confirmation's candidate blocks as the confirm event's extras (R10-1)", async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'w11',
+            name: 'ask_user_question',
+            args: {
+              __confirmDetails: {
+                type: 'ask_user_question',
+                title: 'Answer?',
+                questions: [
+                  {
+                    header: 'Pick',
+                    question: 'Which one?',
+                    options: [{ label: 'a' }, { label: 'b' }],
+                    multiSelect: true,
+                  },
+                  {
+                    header: 'Confirm',
+                    question: 'Sure?',
+                    options: [{ label: 'yes' }],
+                  },
+                ],
+              },
+            },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // The card prices the ask dialog by the candidate block that paints
+    // tallest at the dialog's columns, so the live path must forward every
+    // candidate block — not just the opening one — or a later, taller step
+    // goes under-priced.
+    expect(events.filter((e) => e.type === 'confirm')).toEqual([
+      {
+        type: 'confirm',
+        id: 'w11',
+        tool: 'ask_user_question',
+        title: 'Answer?',
+        confirmType: 'ask_user_question',
+        confirmExtra: '\nPick (1/2)\nWhich one?\n\n[ ] a\n[ ] b',
+        confirmExtras: [
+          '\nPick (1/2)\nWhich one?\n\n[ ] a\n[ ] b',
+          '\nConfirm (2/2)\nSure?\n\nyes',
+        ],
+      },
+    ]);
+  });
+
   it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {
     const sendMessageStream = vi.fn(function* (): Generator<{
       type: string;

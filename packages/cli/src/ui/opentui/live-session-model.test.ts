@@ -170,6 +170,32 @@ describe('foldLiveEvent confirm (pending card dialog measure)', () => {
       confirmExtra: undefined,
     });
   });
+
+  it('carries the ask candidate blocks onto the parked card (R10-1)', () => {
+    // The pending card prices an ask_user_question dialog by the
+    // painted-tallest candidate at the dialog's columns, so the blocks must
+    // reach the card with the rest of the confirm payload.
+    const items = foldLiveEvent([runningTool()], {
+      type: 'confirm',
+      id: 'tool1',
+      tool: 'ask_user_question',
+      title: 'Answer?',
+      confirmType: 'ask_user_question',
+      confirmExtra: '\nPick (1/2)\nWhich one?\n\na\nb',
+      confirmExtras: [
+        '\nPick (1/2)\nWhich one?\n\na\nb',
+        '\nConfirm (2/2)\nSure?\n\nyes',
+      ],
+    });
+    expect(items[0]).toMatchObject({
+      confirm: 'pending',
+      confirmExtra: '\nPick (1/2)\nWhich one?\n\na\nb',
+      confirmExtras: [
+        '\nPick (1/2)\nWhich one?\n\na\nb',
+        '\nConfirm (2/2)\nSure?\n\nyes',
+      ],
+    });
+  });
 });
 
 describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {

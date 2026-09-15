@@ -74,15 +74,17 @@ function isAskQuestion(value: unknown): value is AskQuestionLike {
  * plus one ⚠ row per warning (a PreToolUse 'ask' bounce can prepend
  * hook-authored text of arbitrary length there) — ride as the extra.
  * ask_user_question has no window at all — the flow paints one block per
- * question (header, question text, option labels) — so the TALLEST block
- * is the extra: the card's static price must cover whichever step is
- * showing, and summing every block would charge rows the dialog never
- * paints together (R10-1). The two fields feed
+ * question (header, question text, option labels) — so the candidate
+ * blocks ride as `extras` and the block the flow opens with as the extra:
+ * the card's static price must cover whichever step paints TALLEST, the
+ * wrap decides that at the dialog's columns (knowledge this module does
+ * not have), and summing every block would charge rows the dialog never
+ * paints together (R10-1). The fields feed
  * the pending card's dialog-body measure (pendingCardMaxRows),
- * which charges extra IN ADDITION to the windowed body — the same split the
- * render makes, so a body filling the collapsed window can never swallow
- * the block's rows. This lives here, not in dialogs-confirm, so this module
- * stays free of UI-runtime imports.
+ * which charges the outside-window rows IN ADDITION to the windowed body —
+ * the same split the render makes, so a body filling the collapsed window
+ * can never swallow the block's rows. This lives here, not in
+ * dialogs-confirm, so this module stays free of UI-runtime imports.
  */
 export function confirmationDialogBody(details: {
   type?: string;
@@ -94,7 +96,7 @@ export function confirmationDialogBody(details: {
   fileName?: unknown;
   fileDiff?: unknown;
   questions?: unknown;
-}): { body?: string; extra?: string } | undefined {
+}): { body?: string; extra?: string; extras?: string[] } | undefined {
   // Version-skew guard: a field present in an unexpected shape fails the
   // whole body back to undefined, so the card keeps its payload proxy.
   const skewedStrings = (v: unknown): v is string[] =>
@@ -168,12 +170,15 @@ export function confirmationDialogBody(details: {
     }
     // The flow paints one question block at a time — header, question
     // text, option labels — and the card's static price must cover
-    // whichever step is showing, so the TALLEST block is the extra:
-    // summing every block would charge rows the dialog never paints
-    // together (R10-1). The footer and title stay in the chrome reserve.
-    let tallest: string[] = [];
-    questions.forEach((question, index) => {
-      const block = [
+    // whichever step paints TALLEST, which the wrap decides at the
+    // dialog's columns: a block with fewer lines but a long wrapping
+    // question paints taller than a many-option block, and this module has
+    // no columns to measure that with. So every candidate block rides as
+    // the extras and the pricing site takes the painted max (R10-1);
+    // `extra` keeps the block the flow opens with. The footer and title
+    // stay in the chrome reserve.
+    const blocks = questions.map((question, index) =>
+      [
         '',
         `${question.header} (${index + 1}/${questions.length})`,
         question.question,
@@ -181,10 +186,9 @@ export function confirmationDialogBody(details: {
         ...question.options.map((option) =>
           question.multiSelect === true ? `[ ] ${option.label}` : option.label,
         ),
-      ];
-      if (block.length > tallest.length) tallest = block;
-    });
-    return { extra: tallest.join('\n') };
+      ].join('\n'),
+    );
+    return { extra: blocks[0], extras: blocks };
   }
   return undefined;
 }
@@ -241,9 +245,14 @@ export type OpenTuiStreamEvent =
       confirmBody?: string;
       /** Rows the dialog renders outside the body window: info's urls
        * block, exec's warnings, edit's fileName row and warnings,
-       * ask_user_question's tallest question block
+       * ask_user_question's opening question block
        * (LiveToolItem.confirmExtra). */
       confirmExtra?: string;
+      /** ask_user_question's candidate question blocks: the flow paints
+       * one at a time and the wrap decides which paints tallest, so the
+       * pending card's price takes the max at the dialog's columns
+       * (LiveToolItem.confirmExtras). */
+      confirmExtras?: string[];
     }
   /** The call left awaiting_approval (approved, declined, or bounced):
    * releases the transcript card's pending marker and records how it left
@@ -707,6 +716,7 @@ export function createEventMapper(
           confirmType: v.details.type,
           confirmBody: dialogBody?.body,
           confirmExtra: dialogBody?.extra,
+          confirmExtras: dialogBody?.extras,
         });
         const args = formatToolArgs(v.request.args);
         if (args) out.push({ type: 'tool-args', id, args });

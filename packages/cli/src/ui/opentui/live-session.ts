@@ -930,6 +930,7 @@ export async function* livePromptEvents(
             confirmType: c.confirmationDetails.type,
             confirmBody: dialogBody?.body,
             confirmExtra: dialogBody?.extra,
+            confirmExtras: dialogBody?.extras,
           });
           options?.onWaitingCall?.({
             callId,

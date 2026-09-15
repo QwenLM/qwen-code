@@ -517,6 +517,7 @@ export function OpenTuiTranscriptView({
   const pendingDialogType = mountedPending?.confirmType;
   const pendingDialogBody = mountedPending?.confirmBody;
   const pendingDialogExtra = mountedPending?.confirmExtra;
+  const pendingDialogExtras = mountedPending?.confirmExtras;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -534,6 +535,7 @@ export function OpenTuiTranscriptView({
             pendingDialogType={pendingDialogType}
             pendingDialogBody={pendingDialogBody}
             pendingDialogExtra={pendingDialogExtra}
+            pendingDialogExtras={pendingDialogExtras}
             rowsAbove={rowsAbove}
             thoughtsExpanded={thoughtsExpanded}
           />
@@ -552,6 +554,7 @@ function TranscriptItem({
   pendingDialogType,
   pendingDialogBody,
   pendingDialogExtra,
+  pendingDialogExtras,
   rowsAbove,
   thoughtsExpanded,
 }: {
@@ -563,6 +566,7 @@ function TranscriptItem({
   pendingDialogType?: string;
   pendingDialogBody?: string;
   pendingDialogExtra?: string;
+  pendingDialogExtras?: string[];
   rowsAbove: number;
   thoughtsExpanded: boolean;
 }) {
@@ -584,6 +588,7 @@ function TranscriptItem({
           pendingDialogType={pendingDialogType}
           pendingDialogBody={pendingDialogBody}
           pendingDialogExtra={pendingDialogExtra}
+          pendingDialogExtras={pendingDialogExtras}
           rowsAbove={rowsAbove}
         />
       );
@@ -730,6 +735,7 @@ function ToolCard({
   pendingDialogType,
   pendingDialogBody,
   pendingDialogExtra,
+  pendingDialogExtras,
   rowsAbove,
 }: {
   item: LiveToolItem;
@@ -740,6 +746,7 @@ function ToolCard({
   pendingDialogType?: string;
   pendingDialogBody?: string;
   pendingDialogExtra?: string;
+  pendingDialogExtras?: string[];
   rowsAbove: number;
 }) {
   const status = toolStatusMeta(item);
@@ -779,6 +786,7 @@ function ToolCard({
                 type: pendingDialogType,
                 body: pendingDialogBody,
                 extra: pendingDialogExtra,
+                extras: pendingDialogExtras,
               },
               pendingCount,
               // The budget's physical-to-budget conversion spends the name
@@ -800,6 +808,7 @@ function ToolCard({
       pendingDialogType,
       pendingDialogBody,
       pendingDialogExtra,
+      pendingDialogExtras,
       rowsAbove,
       item.confirm,
       item.done,

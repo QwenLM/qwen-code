@@ -23,6 +23,7 @@ vi.mock('@opentui/core', () => ({
 import {
   GENERIC_TOOL_SUMMARIES,
   MAX_RESULT_DISPLAY_CHARACTERS,
+  MCP_PENDING_CARD_MIN_ROWS,
   TOOL_CARD_DESCRIPTION_ROWS,
   assistantMessageMeta,
   capToolCardDescription,
@@ -418,6 +419,50 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(pendingCardMaxRows(80, 2000, 108, { type: 'mcp' }, 1)).toBe(34);
   });
 
+  it('prices an ask_user_question dialog by the painted-tallest candidate block (R10-1)', () => {
+    // The flow paints one question block at a time, so the card's static
+    // price must cover the block that paints TALLEST at the dialog's
+    // columns — and the wrap decides which, knowledge the event producer
+    // does not have: the candidates arrive as the extras and the max is
+    // taken here. The opening block below paints 5 rows and the second 14,
+    // so the collapsed charge is 14 and the bound (80-26-14)*0.7 = 28;
+    // charging the opening block alone would hand back 34.
+    const opening = ['', 'Scope (1/2)', 'Which scope?', '', 'This file'].join(
+      '\n',
+    );
+    const taller = [
+      '',
+      'Details (2/2)',
+      'Sure?',
+      '',
+      ...Array.from({ length: 10 }, (_, i) => `option ${i}`),
+    ].join('\n');
+    expect(
+      pendingCardMaxRows(
+        80,
+        0,
+        108,
+        {
+          type: 'ask_user_question',
+          extra: opening,
+          extras: [opening, taller],
+        },
+        1,
+      ),
+    ).toBe(28);
+    // A wire that predates the candidates keeps the single-extra charge:
+    // (80-26-5)*0.7 = 34.
+    expect(
+      pendingCardMaxRows(
+        80,
+        0,
+        108,
+        { type: 'ask_user_question', extra: opening },
+        1,
+      ),
+    ).toBe(34);
+  });
+
   it('prices an edit dialog body by the windowed diff’s painted rows (R10-1)', () => {
     // DiffBody tail-windows the diff's LOGICAL lines and those lines wrap:
     // 40 added 200-column lines keep 19 windowed lines that paint 38 rows
@@ -503,8 +548,21 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2, 6, 200)).toBe(
       1,
     );
-    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 200)).toBe(
+    expect(pendingCardMaxRows(80, 3900, 110, undefined, 1, 6, 200)).toBe(
       TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    // ...unless the lone card's dialog is mcp: that dialog shows only the
+    // server and tool names and is off the alt screen past saturation
+    // whatever the card yields, so dropping the card to the settled cap
+    // only deletes the head of the payload being approved (R12-1). The mcp
+    // floor is the args-surface minimum — at rowsAbove 48 the region price
+    // is already floor((80-26-5-43)*0.7) = 4, so both pins below ARE the
+    // floor.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 48)).toBe(
+      MCP_PENDING_CARD_MIN_ROWS,
+    );
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 200)).toBe(
+      MCP_PENDING_CARD_MIN_ROWS,
     );
   });
 

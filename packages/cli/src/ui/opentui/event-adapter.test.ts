@@ -283,7 +283,9 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ]);
     // An ask_user_question dialog has no body window at all: the flow
     // paints one block per question (header, question text, option labels),
-    // so the blocks travel as the extra.
+    // so the candidate blocks travel as the extras — which of them paints
+    // tallest is a wrap question only the pricing site's columns answer —
+    // and the extra keeps the block the flow opens with.
     expect(
       map({
         type: 'tool_call_confirmation',
@@ -310,6 +312,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         title: 'Answer?',
         confirmType: 'ask_user_question',
         confirmExtra: '\nScope (1/1)\nWhich scope?\n\nThis file\nWorkspace',
+        confirmExtras: ['\nScope (1/1)\nWhich scope?\n\nThis file\nWorkspace'],
       },
     ]);
   });
@@ -318,7 +321,11 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     // AskUserQuestionFlow paints ONE question block at a time, so the
     // card's static price covers whichever step is showing — the tallest
     // block. Summing every block charged rows the dialog never paints
-    // together and shrank the card's budget for nothing.
+    // together and shrank the card's budget for nothing. Which block paints
+    // tallest is a wrap question, though, and this module has no columns to
+    // answer it with: the candidates travel as the extras and the price
+    // takes the max at the dialog's columns, while the extra keeps the
+    // block the flow opens with.
     const map = createEventMapper();
     expect(
       map({
@@ -352,6 +359,62 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         title: 'Answer?',
         confirmType: 'ask_user_question',
         confirmExtra: '\nPick (1/2)\nWhich one?\n\n[ ] a\n[ ] b\n[ ] c',
+        confirmExtras: [
+          '\nPick (1/2)\nWhich one?\n\n[ ] a\n[ ] b\n[ ] c',
+          '\nConfirm (2/2)\nSure?\n\nyes',
+        ],
+      },
+    ]);
+
+    // The discriminating case: the FIRST block has fewer logical lines but
+    // a long wrapping question, so at the dialog's columns it paints taller
+    // than the many-option block. A logical-line comparator picks the
+    // second block here and the price would under-cover the step the flow
+    // opens with — so the selection must not key on line count: the extra
+    // is the first block, and the painted-tallest is settled from the
+    // candidates where the columns live.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c11', name: 'ask_user_question' },
+          details: {
+            title: 'Answer?',
+            type: 'ask_user_question',
+            questions: [
+              {
+                header: 'Scope',
+                question: `Which scope? ${'x'.repeat(900)}`,
+                options: [{ label: 'This file' }],
+              },
+              {
+                header: 'Details',
+                question: 'Sure?',
+                options: [
+                  { label: 'a' },
+                  { label: 'b' },
+                  { label: 'c' },
+                  { label: 'd' },
+                  { label: 'e' },
+                  { label: 'f' },
+                ],
+              },
+            ],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c11',
+        tool: 'ask_user_question',
+        title: 'Answer?',
+        confirmType: 'ask_user_question',
+        confirmExtra: `\nScope (1/2)\nWhich scope? ${'x'.repeat(900)}\n\nThis file`,
+        confirmExtras: [
+          `\nScope (1/2)\nWhich scope? ${'x'.repeat(900)}\n\nThis file`,
+          '\nDetails (2/2)\nSure?\n\na\nb\nc\nd\ne\nf',
+        ],
       },
     ]);
   });

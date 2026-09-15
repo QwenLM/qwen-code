@@ -541,6 +541,23 @@ describe('OpenTuiTranscriptView', () => {
     from = mocks.pendingSpy.mock.calls.length;
     rerender(view([renamed, sibling], 100, 40));
     expect(mainCardCalls()).not.toHaveLength(0);
+
+    // The dialog's candidate blocks only (the pendingDialogExtras dep): an
+    // ask_user_question dialog prices by the painted-tallest candidate, so
+    // replacing them must re-price even with type/body/extra unchanged —
+    // and the candidates must reach the budget as the dialog's extras.
+    const withExtras = {
+      ...renamed,
+      confirmExtras: ['\nA (1/2)\none?\n\nx', '\nB (2/2)\ntwo?\n\ny\nz'],
+    };
+    from = mocks.pendingSpy.mock.calls.length;
+    rerender(view([withExtras, sibling], 100, 40));
+    const extrasCalls = mainCardCalls();
+    expect(extrasCalls).not.toHaveLength(0);
+    const lastDialog = extrasCalls.at(-1)?.[3] as
+      | { extras?: string[] }
+      | undefined;
+    expect(lastDialog?.extras).toEqual(withExtras.confirmExtras);
   });
 
   it('drops the pending budget when the call resolves or completes', () => {
@@ -897,6 +914,53 @@ describe('OpenTuiTranscriptView', () => {
     expect(text).toContain('awaiting approval');
     expect(text).toContain('HEAD_MARKER');
     expect(text).not.toContain('MID_MARKER');
+  });
+
+  it('keeps the mcp args surface readable past transcript saturation (R12-1)', () => {
+    // Fifteen exchanges (60 painted rows) above one parked mcp card: the
+    // transcript overage alone prices the card's region negative, and the
+    // settled-cap floor would cut the args JSON to the 5-row budget's 412
+    // visible columns — hiding the payload the approval is for. The mcp
+    // dialog shows only the server and tool names and is off the alt screen
+    // at this transcript height whatever the card yields, so the card — the
+    // only surface still carrying the arguments — keeps the args-surface
+    // floor: 11 budget rows = 1061 visible columns at 110. GROWN_MARKER
+    // sits past the 412-column cut but inside the floor's budget.
+    const history: LiveHistoryItem[] = [];
+    for (let i = 0; i < 15; i++) {
+      history.push({ kind: 'user', id: `u${i}`, text: `question ${i}` });
+      history.push({
+        kind: 'assistant',
+        id: `a${i}`,
+        text: `answer ${i}`,
+        streaming: false,
+      });
+    }
+    const description =
+      '{"content":"' +
+      'a'.repeat(600) +
+      'GROWN_MARKER' +
+      'b'.repeat(1500) +
+      '"}';
+    const { container } = render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          ...history,
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description,
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('awaiting approval');
+    expect(text).toContain('GROWN_MARKER');
+    expect(text).toContain('... last');
   });
 
   it('hands the painted transcript height to the pending budget (R2-2)', () => {
