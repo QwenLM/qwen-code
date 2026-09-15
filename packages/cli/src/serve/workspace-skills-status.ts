@@ -25,17 +25,25 @@
  * shim is sufficient — no full `Config` construction (and no `initialize()`
  * side effects) required. The live child, when present, stays authoritative:
  * the facade only falls back here after a real child answer and the cached
- * last answer are both unavailable, and this daemon-local view intentionally
- * omits extension-provided skills (there is no active-extension context
- * outside the child) — those still surface once a session exists.
+ * last answer are both unavailable. This daemon-local view includes installed
+ * extension Skills using the persistent extension store without binding a
+ * runtime Config to the ExtensionManager.
  */
 
-import { SkillManager, isSafeModeEnv } from '@qwen-code/qwen-code-core';
-import type { Config, SkillLevel } from '@qwen-code/qwen-code-core';
+import {
+  ExtensionManager,
+  ExtensionStore,
+  SkillManager,
+  Storage,
+  isSafeModeEnv,
+  getExtensionDisplayName,
+} from '@qwen-code/qwen-code-core';
+import type { Config, Extension, SkillLevel } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import * as fs from 'node:fs/promises';
 import { loadSettings } from '../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../i18n/index.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
@@ -76,6 +84,12 @@ type SkillManagerConfigShim = Pick<
   | 'getDisabledSkillLevels'
 >;
 
+interface WorkspaceSkillManagers {
+  skillManager: SkillManager;
+  extensionManager?: ExtensionManager;
+  extensionSkillStates: Map<Extension, Map<string, boolean>>;
+}
+
 export function createWorkspaceSkillsStatusProvider(
   options: WorkspaceSkillsStatusProviderOptions = {},
 ): WorkspaceSkillsStatusProvider {
@@ -84,7 +98,7 @@ export function createWorkspaceSkillsStatusProvider(
   // globs for) every level on each call. This is a best-effort pre-child
   // fallback, so slight staleness between explicit invalidation points is
   // acceptable: the live child re-lists authoritatively once a session exists.
-  const managers = new Map<string, SkillManager>();
+  const managers = new Map<string, WorkspaceSkillManagers>();
   const provider = ((workspaceCwd: string) =>
     buildWorkspaceSkillsStatus(
       workspaceCwd,
@@ -98,7 +112,7 @@ export function createWorkspaceSkillsStatusProvider(
 
 async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
-  managers: Map<string, SkillManager>,
+  managers: Map<string, WorkspaceSkillManagers>,
   workspaceTrusted: boolean,
   includeUntrustedSkills: boolean,
 ): Promise<ServeWorkspaceSkillsStatus> {
@@ -109,8 +123,14 @@ async function buildWorkspaceSkillsStatus(
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,
     });
-    let skillManager = managers.get(workspaceCwd);
-    if (!skillManager) {
+    const rawLanguage = settings.merged.general?.language;
+    const locale = resolveLanguage(
+      resolveLanguageSetting(
+        typeof rawLanguage === 'string' ? rawLanguage : undefined,
+      ),
+    );
+    let cached = managers.get(workspaceCwd);
+    if (!cached) {
       // Mirror the CLI guard in loadCliConfig: safe mode nullifies
       // disabledSkillLevels so the child session loads all bundled skills.
       const rawLevels =
@@ -127,6 +147,49 @@ async function buildWorkspaceSkillsStatus(
       );
       const safeMode =
         (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
+      let extensionManager: ExtensionManager | undefined;
+      const extensionSkillStates = new Map<Extension, Map<string, boolean>>();
+      if (workspaceTrusted && !safeMode) {
+        const directory = Storage.getUserExtensionsDir();
+        const entry = await fs
+          .lstat(directory)
+          .catch((error: NodeJS.ErrnoException) => {
+            if (error.code === 'ENOENT') return undefined;
+            throw error;
+          });
+        if (entry) {
+          await fs.readdir(directory);
+          const extensionStore = new ExtensionStore();
+          extensionManager = new ExtensionManager({
+            extensionStore,
+            workspaceDir: workspaceCwd,
+            isWorkspaceTrusted: workspaceTrusted,
+            locale,
+          });
+          const snapshot = await extensionManager.refreshCacheWithSnapshot();
+          for (const extension of extensionManager.getLoadedExtensions()) {
+            const states = new Map<string, boolean>();
+            for (const skill of extension.skills ?? []) {
+              const name = skill.name.trim().toLowerCase();
+              const defaults = extension.config.skillStates;
+              const defaultEnabled =
+                defaults && Object.hasOwn(defaults, name)
+                  ? defaults[name]!
+                  : true;
+              states.set(
+                name,
+                extensionStore.getSkillWorkspaceOverride(
+                  snapshot,
+                  extension.id,
+                  workspaceCwd,
+                  name,
+                ) ?? defaultEnabled,
+              );
+            }
+            extensionSkillStates.set(extension, states);
+          }
+        }
+      }
       const shim: SkillManagerConfigShim = {
         // Honor the safe-mode env the same way `Config` does when no explicit
         // flag is passed, so an operator running in safe mode gets the same
@@ -136,12 +199,12 @@ async function buildWorkspaceSkillsStatus(
         // bare, so it is always off here.
         getBareMode: () => false,
         getProjectRoot: () => workspaceCwd,
-        // Extension skills need active-extension context that only the child
-        // has; omit them here and let the session snapshot surface them.
-        getActiveExtensions: () => [],
+        getActiveExtensions: () =>
+          extensionManager?.getLoadedExtensions().filter((e) => e.isActive) ??
+          [],
         getDisabledSkillLevels: () => disabledLevels,
       };
-      skillManager = new SkillManager(shim as Config);
+      const skillManager = new SkillManager(shim as Config);
       if (!safeMode) {
         for (const level of ['project', 'user'] as const) {
           if (disabledLevels.has(level)) continue;
@@ -156,17 +219,65 @@ async function buildWorkspaceSkillsStatus(
           }
         }
       }
-      managers.set(workspaceCwd, skillManager);
+      cached = { skillManager, extensionManager, extensionSkillStates };
+      managers.set(workspaceCwd, cached);
     }
-    const disablements = resolveSkillSettings(settings).disablements;
+    const { disablements, enabledNames } = resolveSkillSettings(settings);
+    const { skillManager, extensionManager, extensionSkillStates } = cached;
+    const extensions = extensionManager?.getLoadedExtensions() ?? [];
     const skills = await skillManager.listSkills();
+    const statuses = skills.map((skill) => {
+      const extension =
+        skill.level === 'extension'
+          ? extensions.find((e) => e.name === skill.extensionName)
+          : undefined;
+      const enabled = extension
+        ? extensionSkillStates
+            .get(extension)
+            ?.get(skill.name.trim().toLowerCase())
+        : undefined;
+      // Preserve missing display names; the helper otherwise falls back to the name.
+      const localizedSkill =
+        extension?.displayName !== undefined
+          ? {
+              ...skill,
+              extensionDisplayName: getExtensionDisplayName(extension, locale),
+            }
+          : skill;
+      return mapSkillConfigToStatus(localizedSkill, disablements, {
+        enabled:
+          enabledNames.has(skill.name.trim().toLowerCase()) ||
+          enabled !== false,
+      });
+    });
+    for (const extension of extensions) {
+      if (extension.isActive) continue;
+      const seenNames = new Set<string>();
+      for (const skill of extension.skills ?? []) {
+        if (seenNames.has(skill.name)) continue;
+        seenNames.add(skill.name);
+        statuses.push(
+          mapSkillConfigToStatus(
+            {
+              ...skill,
+              level: 'extension',
+              extensionName: extension.name,
+              extensionDisplayName:
+                extension.displayName === undefined
+                  ? undefined
+                  : getExtensionDisplayName(extension, locale),
+            },
+            disablements,
+            { disabled: true },
+          ),
+        );
+      }
+    }
     return {
       v: STATUS_SCHEMA_VERSION,
       workspaceCwd,
       initialized: true,
-      skills: skills.map((skill) =>
-        mapSkillConfigToStatus(skill, disablements),
-      ),
+      skills: statuses.sort((a, b) => a.name.localeCompare(b.name)),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
