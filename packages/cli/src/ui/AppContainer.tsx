@@ -164,6 +164,7 @@ import {
 } from './contexts/VimModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { ToolDetailsExpandedProvider } from './contexts/ToolDetailsExpandedContext.js';
+import { toggleInSet } from './utils/toggle-in-set.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -955,30 +956,14 @@ export const AppContainer = (props: AppContainerProps) => {
     ReadonlySet<number>
   >(() => new Set<number>());
   const toggleThoughtExpanded = useCallback((headId: number) => {
-    setExpandedThoughtHeadIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(headId)) {
-        next.delete(headId);
-      } else {
-        next.add(headId);
-      }
-      return next;
-    });
+    setExpandedThoughtHeadIds((prev) => toggleInSet(prev, headId));
   }, []);
 
   const [expandedToolBatchIds, setExpandedToolBatchIds] = useState<
     ReadonlySet<string>
   >(() => new Set<string>());
   const toggleToolBatch = useCallback((batchId: string) => {
-    setExpandedToolBatchIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(batchId)) {
-        next.delete(batchId);
-      } else {
-        next.add(batchId);
-      }
-      return next;
-    });
+    setExpandedToolBatchIds((prev) => toggleInSet(prev, batchId));
   }, []);
 
   // Terminal and layout hooks
