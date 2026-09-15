@@ -44,6 +44,7 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -78,6 +79,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
   onInsightReportOpen,
@@ -237,6 +239,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             showRetryHint={showRetryHint && message.retryable === true}
@@ -341,6 +344,11 @@ export const MessageItem = memo(function MessageItem({
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
+      hideTimestamp={
+        message.role === 'system' &&
+        (message.source === 'background_task_completed' ||
+          message.source === 'background_notification_turn_started')
+      }
       chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
       copyText={
@@ -392,6 +400,8 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
+    return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;

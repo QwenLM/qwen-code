@@ -771,7 +771,7 @@ describe('WorkflowOrchestrator', () => {
     // Cross-realm: the sandbox wraps the host error in a vm-realm Error
     // (per T1/T8/T14 defense). The dispatch is never invoked because the
     // gate short-circuits before scheduler.run.
-    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('token budget exceeded');
     expect(String(caught)).toContain('1000');
     expect(dispatchCalls).toBe(0);
   });
@@ -798,7 +798,7 @@ describe('WorkflowOrchestrator', () => {
     }
     // q1 = 60/100, q2 = 120/100 (overshoot), q3 = gate refuses
     expect(dispatchCalls).toBe(2);
-    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('token budget exceeded');
     expect(budget.spent()).toBe(120);
   });
 
@@ -871,7 +871,7 @@ describe('WorkflowOrchestrator', () => {
           agentCompleted: () => completed++,
         },
       }),
-    ).rejects.toThrow(/exceeded the token budget/);
+    ).rejects.toThrow(/token budget exceeded/);
     // ASSERT it doesn't reach 10 (the without-fix overshoot value):
     // with the scheduler pinned to limit 1, slot-acquire re-checks are
     // serialized, so exactly 3 dispatches pass (spent 0/40/80 at acquire;
@@ -918,7 +918,7 @@ describe('WorkflowOrchestrator', () => {
         resumeReplay: buildReplay(priorEntries),
         emitter: { resumeRespawn: (line) => respawns.push(line) },
       }),
-    ).rejects.toThrow(/exceeded the token budget/);
+    ).rejects.toThrow(/token budget exceeded/);
 
     expect(dispatchCalls).toBe(3);
     expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(3);
@@ -949,7 +949,7 @@ describe('WorkflowOrchestrator', () => {
         emitter: { resumeRespawn: (line) => respawns.push(line) },
       });
       if (round < 3) {
-        await expect(run).rejects.toThrow(/exceeded the token budget/);
+        await expect(run).rejects.toThrow(/token budget exceeded/);
       } else {
         await expect(run).resolves.toMatchObject({
           result: Array.from({ length: 10 }, (_, i) => `slot${i}`),
@@ -975,6 +975,43 @@ describe('WorkflowOrchestrator', () => {
   // sites); no dedicated test — debugLogger has its own enable/disable
   // gating and a spy here would be brittle. Manual verification path:
   // run with DEBUG=WORKFLOW=1 and trigger a budget-exhausted dispatch.
+
+  // A turn target is gated on the whole turn's spend — the main loop and
+  // every other run included — while the registry keeps mirroring this run
+  // alone: its own spend, and no cap, since the target is not this run's.
+  it('gates a turn target on the turn spend and reports only the run to the registry', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    let turnSpent = 499_999;
+    const budget = new WorkflowBudgetImpl(500_000, {
+      source: 'directive',
+      turnSpent: () => turnSpent,
+    });
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      // Tokens spent elsewhere in the turn while this agent ran.
+      turnSpent += 10;
+      return 'ok';
+    });
+    const budgetUpdates: Array<{ spent: number; total: number | null }> = [];
+    const caught = await orchestrator
+      .run({
+        script: `await agent('q1'); await agent('q2'); return 'done';`,
+        args: undefined,
+        budget,
+        emitter: {
+          budgetUpdated: (spent, total) => budgetUpdates.push({ spent, total }),
+        },
+      })
+      .catch((e: unknown) => e);
+
+    expect(dispatchCalls).toBe(1);
+    expect(String(caught)).toContain(
+      'token budget exceeded (500009 / 500000 output tokens)',
+    );
+    expect(budget.runSpent()).toBe(0);
+    expect(budgetUpdates).toEqual([{ spent: 0, total: null }]);
+  });
 
   // ── P5 T4: budgetUpdated emitter event ─────────────────────────────────
 
@@ -1283,7 +1320,7 @@ describe('WorkflowOrchestrator', () => {
 
     scheduler.resume();
     await expect(run).resolves.toMatchObject({
-      result: expect.stringContaining('exceeded the token budget'),
+      result: expect.stringContaining('token budget exceeded'),
     });
     expect(dispatchCalls).toBe(0);
   });
@@ -1377,7 +1414,7 @@ describe('WorkflowOrchestrator', () => {
     controller.abort();
 
     await expect(run).resolves.toMatchObject({
-      result: expect.stringContaining('exceeded the token budget'),
+      result: expect.stringContaining('token budget exceeded'),
     });
   });
 
@@ -1451,7 +1488,7 @@ describe('WorkflowOrchestrator', () => {
       caught = e;
     }
     // parent p1 spends 60; nested n1 spends 60 (total 120); nested n2 gated.
-    expect(String(caught)).toMatch(/exceeded the token budget/);
+    expect(String(caught)).toMatch(/token budget exceeded/);
     expect(budget.spent()).toBe(120);
   });
 
@@ -1891,7 +1928,9 @@ describe('WorkflowOrchestrator', () => {
 
       expect(dispatch).toHaveBeenCalledOnce();
       expect(entries.map((entry) => entry.type)).toEqual(['started', 'result']);
-      expect(entries.some((entry) => entry.key === keyB)).toBe(false);
+      expect(
+        entries.some((entry) => entry.type !== 'source' && entry.key === keyB),
+      ).toBe(false);
       expect(respawns).toEqual([]);
     } finally {
       if (previous === undefined) {
@@ -2950,7 +2989,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
           args: undefined,
           budget,
         }),
-      ).rejects.toThrow(/exceeded the token budget/);
+      ).rejects.toThrow(/token budget exceeded/);
 
       const capOrchestrator = new WorkflowOrchestrator(async () => {
         throw new WorkflowAgentCapExceededError(1000);
