@@ -5,7 +5,7 @@ import {
   replayCompleteEvent,
 } from './utils/mockDaemon';
 
-const TURNS = 20;
+const TURNS = 40;
 
 function recordEvent(record: number, text: string) {
   return {
@@ -57,6 +57,15 @@ function markerOffsetRatio(page: Page): Promise<number | null> {
     const rail = viewport.getBoundingClientRect();
     const tick = current.getBoundingClientRect();
     return (tick.top - rail.top) / rail.height;
+  });
+}
+
+function railScrollTop(page: Page): Promise<number | null> {
+  return page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>(
+      '[data-global-turn-navigation] div',
+    );
+    return viewport ? viewport.scrollTop : null;
   });
 }
 
@@ -136,12 +145,14 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
     )
     .toBe('none');
 
-  // The rail highlights the reading position without any click.
+  // The rail highlights the reading position without any click, sitting at
+  // its own bottom edge while the transcript is at the live tail.
   await expect.poll(() => ariaOrdinal(page)).not.toBeNull();
   const atBottom = (await ariaOrdinal(page))!;
   expect(atBottom).toBeGreaterThanOrEqual(TURNS - 6);
   await expect.poll(() => inRangeCount(page)).toBeGreaterThan(0);
   await expect.poll(() => markerOffsetRatio(page)).toBeGreaterThan(0.85);
+  await expect.poll(() => railScrollTop(page)).toBeGreaterThan(0);
 
   // Scrolling up moves the highlight to older turns.
   await scrollTranscriptTo(page, 0.3);
@@ -153,10 +164,24 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   await scrollTranscriptTo(page, 0);
   await expect.poll(() => ariaOrdinal(page)).toBe(0);
   await expect.poll(() => markerOffsetRatio(page)).toBeLessThan(0.15);
+  await expect.poll(() => railScrollTop(page)).toBe(0);
 
   // Scrolling back down moves it to newer turns again.
   await scrollTranscriptTo(page, 0.9);
   await expect.poll(() => ariaOrdinal(page)).toBeGreaterThan(inMiddle + 3);
+
+  // Narrowing below the rail threshold hides the rail; scrolling there must
+  // not corrupt its window — widening brings the marker back inside the band.
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await expect(rail).toBeHidden();
+  await scrollTranscriptTo(page, 0.5);
+  await expect.poll(() => ariaOrdinal(page)).toBeNull();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(rail).toBeVisible();
+  await expect.poll(() => ariaOrdinal(page)).not.toBeNull();
+  const ratio = await markerOffsetRatio(page);
+  expect(ratio).toBeGreaterThanOrEqual(0);
+  expect(ratio).toBeLessThanOrEqual(1);
 
   // Clicking a tick still jumps, and the highlight lands on the jumped turn.
   await rail
@@ -166,6 +191,7 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
       element.scrollTop = 0;
     });
   await rail.locator('[data-turn-ordinal="0"]').click();
+  await expect(page.getByText('QUESTION 0').first()).toBeVisible();
   await expect
     .poll(() => ariaOrdinal(page), { timeout: 15_000 })
     .toBeLessThanOrEqual(3);

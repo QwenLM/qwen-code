@@ -23,6 +23,24 @@ import timelineStyles from './MessageList.module.css';
 const ROW_HEIGHT = 16;
 const OVERSCAN = 4;
 
+function revealOrdinal(
+  element: HTMLElement,
+  ordinal: number,
+  height: number,
+): boolean {
+  const topEdge = ordinal * ROW_HEIGHT;
+  const bottomEdge = topEdge + ROW_HEIGHT;
+  const target =
+    topEdge < element.scrollTop
+      ? topEdge
+      : bottomEdge > element.scrollTop + height
+        ? bottomEdge - height
+        : undefined;
+  if (target === undefined) return false;
+  element.scrollTop = target;
+  return true;
+}
+
 export function GlobalTurnNavigation({
   state,
   store,
@@ -88,16 +106,11 @@ export function GlobalTurnNavigation({
     if (currentOrdinal === undefined) return;
     const element = viewport.current;
     if (!element) return;
-    const topEdge = currentOrdinal * ROW_HEIGHT;
-    const bottomEdge = topEdge + ROW_HEIGHT;
-    const target =
-      topEdge < element.scrollTop
-        ? topEdge
-        : bottomEdge > element.scrollTop + height
-          ? bottomEdge - height
-          : undefined;
-    if (target === undefined) return;
-    element.scrollTop = target;
+    if (!revealOrdinal(element, currentOrdinal, height)) return;
+    if (element.contains(document.activeElement)) {
+      pendingFocus.current = true;
+      setFocus(currentOrdinal);
+    }
     setTop(element.scrollTop);
   }, [currentOrdinal, count, height]);
 
@@ -224,14 +237,7 @@ export function GlobalTurnNavigation({
                           event.preventDefault();
                           const target = Math.max(0, Math.min(count - 1, next));
                           const element = viewport.current!;
-                          if (target * ROW_HEIGHT < element.scrollTop)
-                            element.scrollTop = target * ROW_HEIGHT;
-                          else if (
-                            (target + 1) * ROW_HEIGHT >
-                            element.scrollTop + height
-                          )
-                            element.scrollTop =
-                              (target + 1) * ROW_HEIGHT - height;
+                          revealOrdinal(element, target, height);
                           setTop(element.scrollTop);
                           pendingFocus.current = true;
                           setFocus(target);

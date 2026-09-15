@@ -75,11 +75,20 @@ The follow range recomputes:
   a reading anchor or locating a jump target; recomputed once when the restore
   loop finishes),
 - after layout when `messages`, the view key, or the ordinal map changes
-  (streaming growth, historical page admission, view switches).
+  (streaming growth, historical page admission, view switches),
+- when the transcript scroller resizes (floating panels, window resizes), via
+  a `ResizeObserver` on the scroller element.
+
+While the rail is hidden below its width threshold, both the follow
+recomputation and the `follow` prop are gated off: a boxless element drops
+`scrollTop` writes, and nothing may re-window a rail that is not painted.
 
 `GlobalTurnNavigation` renders the effective current ordinal as
 `selected?.ordinal` while a click selection is still loading, otherwise
-`follow?.current ?? selected?.ordinal`. The current tick keeps the existing
+`follow?.current ?? selected?.ordinal`. Selecting a tick also drops the stale
+follow range, so the clicked ordinal owns the marker for the whole jump; the
+reading line takes over again when the jump lands. The current tick keeps the
+existing
 `sessionTimelineButtonCurrent` style and takes over `aria-current`. Ordinals
 inside `follow.start..end` additionally get `sessionTimelineButtonInRange`
 (and `data-in-current-range`), exactly like the in-list timeline. A layout
@@ -104,7 +113,11 @@ for the visible ticks, which fills `locations`, and follow resumes.
   earliest turn; the visual error is at most one tick.
 - While a click selection is in flight the highlight shows the clicked tick
   instead of the reading position; this is deliberate click feedback and
-  resolves as soon as the jump lands.
+  resolves as soon as the jump lands. Because the jump centers its target row,
+  a target row shorter than a third of the viewport leaves the reading line
+  above it, so the marker can settle on the previous turn once the reading
+  line takes over; aligning the landed row with the reading line is a possible
+  follow-up.
 
 ## Validation plan
 

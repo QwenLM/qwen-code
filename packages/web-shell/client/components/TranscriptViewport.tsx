@@ -193,7 +193,7 @@ export const TranscriptViewport = forwardRef<
   const followFrame = useRef<number | undefined>(undefined);
   const updateFollow = useCallback(() => {
     const scroll = scroller();
-    if (!scroll || !blockOrdinal) {
+    if (!scroll || !blockOrdinal || !navigationVisible) {
       setFollow(undefined);
       return;
     }
@@ -224,7 +224,7 @@ export const TranscriptViewport = forwardRef<
         ? previous
         : next,
     );
-  }, [scroller, rows, blockOrdinal]);
+  }, [scroller, rows, blockOrdinal, navigationVisible]);
   const scheduleFollow = useCallback(() => {
     if (followFrame.current !== undefined) return;
     followFrame.current = requestAnimationFrame(() => {
@@ -235,6 +235,15 @@ export const TranscriptViewport = forwardRef<
   useLayoutEffect(() => {
     scheduleFollow();
   }, [scheduleFollow, messages, blockOrdinal]);
+  useLayoutEffect(() => {
+    const scroll = scroller();
+    if (!scroll || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => scheduleFollow());
+    observer.observe(scroll);
+    return () => observer.disconnect();
+  }, [scheduleFollow, scroller, viewKey]);
+  const updateFollowRef = useRef(updateFollow);
+  updateFollowRef.current = updateFollow;
   useLayoutEffect(
     () => () => {
       if (followFrame.current !== undefined)
@@ -325,7 +334,7 @@ export const TranscriptViewport = forwardRef<
       else {
         anchor.current = undefined;
         restoring.current = false;
-        updateFollow();
+        updateFollowRef.current();
       }
     };
     restore();
@@ -333,16 +342,7 @@ export const TranscriptViewport = forwardRef<
       cancelAnimationFrame(frame);
       restoring.current = false;
     };
-  }, [
-    messages,
-    viewKey,
-    historical,
-    viewport.target,
-    capture,
-    rows,
-    scroller,
-    updateFollow,
-  ]);
+  }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
   const load = (direction: 'older' | 'newer') => {
     if (loadFrame.current !== undefined) return;
@@ -428,10 +428,11 @@ export const TranscriptViewport = forwardRef<
           <GlobalTurnNavigation
             state={viewport.navigation}
             store={viewport.store}
-            follow={follow}
+            follow={navigationVisible ? follow : undefined}
             onSelect={(ordinal) => {
               handleScrollIntent();
               anchor.current = undefined;
+              setFollow(undefined);
               void viewport.selectOrdinal(ordinal);
             }}
           />

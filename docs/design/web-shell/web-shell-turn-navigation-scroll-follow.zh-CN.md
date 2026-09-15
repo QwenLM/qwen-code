@@ -38,9 +38,12 @@
 跟随区间在以下时机重算：
 
 - transcript 滚动时（rAF 节流；恢复阅读锚点或定位跳转期间跳过，恢复循环结束时补算一次），
-- `messages`、view key 或序号映射变化后的布局阶段（流式增长、历史页载入、视图切换）。
+- `messages`、view key 或序号映射变化后的布局阶段（流式增长、历史页载入、视图切换），
+- transcript 滚动容器尺寸变化时（浮动面板、窗口调整），经容器上的 `ResizeObserver` 触发。
 
-`GlobalTurnNavigation` 计算有效当前序号：点击选择仍在加载时取 `selected?.ordinal`，否则取 `follow?.current ?? selected?.ordinal`。当前刻度沿用现有 `sessionTimelineButtonCurrent` 样式并接管 `aria-current`。落在 `follow.start..end` 内的序号额外附加 `sessionTimelineButtonInRange`（及 `data-in-current-range`），与内嵌时间轴完全一致。仅当当前刻度离开可视窗口时，布局副作用才让轨条视口贴边滚动到刚好可见，因此用户浏览轨条本身永远不会被争抢。
+轨条在宽度阈值以下隐藏时，跟随重算与 `follow` prop 同时关闭：无盒模型元素会丢弃 `scrollTop` 写入，未被绘制的轨条不允许被重开窗。
+
+`GlobalTurnNavigation` 计算有效当前序号：点击选择仍在加载时取 `selected?.ordinal`，否则取 `follow?.current ?? selected?.ordinal`。选中刻度还会丢弃过时的跟随区间，让被点序号在整个跳转期间持有标记；跳转落地后由阅读线接管。当前刻度沿用现有 `sessionTimelineButtonCurrent` 样式并接管 `aria-current`。落在 `follow.start..end` 内的序号额外附加 `sessionTimelineButtonInRange`（及 `data-in-current-range`），与内嵌时间轴完全一致。仅当当前刻度离开可视窗口时，布局副作用才让轨条视口贴边滚动到刚好可见，因此用户浏览轨条本身永远不会被争抢。
 
 覆盖能力是自愈的：滚动到深处历史时，若某轮的 index page 尚未加载，行到序号的映射会出现空洞，高亮只是暂时停住；轨条现有的缺页加载器会为可见刻度拉取 index page，回填 `locations` 后跟随即恢复。
 
@@ -52,7 +55,7 @@
 ## 风险
 
 - 块 id 跨轮次边界的行会解析到较早的轮次；视觉误差最多一个刻度。
-- 点击选择进行期间，高亮显示被点击的刻度而非阅读位置；这是有意的点击反馈，跳转落地后即一致。
+- 点击选择进行期间，高亮显示被点击的刻度而非阅读位置；这是有意的点击反馈，跳转落地后即一致。由于跳转会把目标行居中，短于视口三分之一的目标行会让阅读线落在其上方，阅读线接管后标记可能停在前一轮；把落地行对齐到阅读线是可选的后续项。
 
 ## 验证计划
 
