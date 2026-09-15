@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { AuthType } from '../../utils/auth-type.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { ProviderConfig } from '../types.js';
 
 export const CUSTOM_API_KEY_ENV_PREFIX = 'QWEN_CUSTOM_API_KEY_';

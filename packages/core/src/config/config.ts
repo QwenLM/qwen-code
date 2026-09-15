@@ -4827,7 +4827,7 @@ export class Config {
   stageReasoningOverrides(
     providers: ModelProvidersConfig | undefined,
     protocols: ProviderProtocolConfig = {},
-  ): void {
+  ): string | undefined {
     const previous =
       this.latestReasoningSnapshot ?? this.getReasoningSnapshot();
     const models = this.getAllConfiguredModels().map((model) => {
@@ -4861,10 +4861,12 @@ export class Config {
         },
       };
     });
-    this.captureLatestReasoning(models);
+    return this.captureLatestReasoning(models);
   }
 
-  private captureLatestReasoning(models = this.getAllConfiguredModels()): void {
+  private captureLatestReasoning(
+    models = this.getAllConfiguredModels(),
+  ): string | undefined {
     try {
       const next = captureReasoningSnapshot(models);
       for (const row of next) {
@@ -4887,11 +4889,12 @@ export class Config {
           true,
         );
       this.latestReasoningSnapshot = next;
+      return undefined;
     } catch (error) {
-      this.debugLogger.error(
-        'Invalid reasoning configuration; keeping the previous reasoning settings',
-        error,
-      );
+      const message = `Reasoning settings not applied; keeping the previous configuration. ${getErrorMessage(error)}`;
+      // eslint-disable-next-line no-console -- configuration rejection must be visible without debug logging
+      console.warn(message);
+      return message;
     }
   }
 

@@ -155,8 +155,9 @@ controls display its active table and update when that session adopts the change
 
 Runtime resolution of invalid declarations returns no override, preserving
 existing behavior even in a fresh session. Strict staging validation rejects
-invalid reasoning updates, keeps the previous valid table, and reports a
-model/field error through existing error channels. They must not reject unrelated
+invalid reasoning updates and keeps the previous valid table. The CLI prints
+a warning; ACP reload sends a discrete message naming the model/field.
+They must not reject unrelated
 settings updates or erase healthy model rows. Validate static fields independently
 from endpoint inference; no global boot failure based on placeholder URLs.
 
@@ -169,8 +170,8 @@ Use direct core-module imports in CLI production code. No unrelated cleanup.
 
 | Group                                                 | Changed-line budget |
 | ----------------------------------------------------- | ------------------: |
-| Production implementation                             |               1,450 |
-| Focused unit tests                                    |               1,350 |
+| Production implementation                             |               1,410 |
+| Focused unit tests                                    |               1,390 |
 | Local E2E harness and scenarios                       |                 270 |
 | Both design languages, user docs and generated schema |                 430 |
 | Review reserve                                        |                   0 |

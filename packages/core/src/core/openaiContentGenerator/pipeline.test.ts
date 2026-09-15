@@ -2410,6 +2410,7 @@ describe('ContentGenerationPipeline', () => {
     );
 
     it.each([
+      ['https://api.deepseek.com/v1', 'openai-effort', 'reasoning_content', ''],
       [
         'https://api.cerebras.ai/v1',
         'deepseek-openai',

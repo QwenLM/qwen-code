@@ -124,19 +124,6 @@ export function validateReasoningDeclaration(
       (input.efforts && !input.efforts.includes(input.defaultEffort)))
   )
     return invalidReasoning(route);
-  if (
-    !input.profile &&
-    !getGptReasoningCapabilities(route.model) &&
-    !(route.authType === 'anthropic' && parseClaudeModelVersion(route.model)) &&
-    !ALL_PROVIDERS.some((provider) =>
-      provider.models?.some(
-        (model) =>
-          model.capabilities?.reasoning &&
-          (model.id === route.model || model.id === normalize(route.model)),
-      ),
-    )
-  )
-    return invalidReasoning(route);
   return input;
 }
 

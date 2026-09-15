@@ -520,6 +520,7 @@ describe('prompt reasoning snapshots', () => {
   it.each([false, true, 'unknown'])(
     'retains a valid observed update after invalid input (inactive implicit route: %s)',
     (inactive) => {
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
       let models = [model('alias', 'low')];
       const generation = {
         ...route,
@@ -567,6 +568,10 @@ describe('prompt reasoning snapshots', () => {
       expect(
         config.getContentGeneratorConfig()?.reasoningSnapshot,
       ).toHaveLength(1);
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining('capabilities.reasoning'),
+      );
+      warning.mockRestore();
     },
   );
 });

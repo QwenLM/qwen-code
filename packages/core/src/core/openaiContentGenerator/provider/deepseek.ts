@@ -137,7 +137,9 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
       const content = this.contentGeneratorConfig.modalities?.image
         ? message
         : flattenContentParts(message);
-      return !profile || profile === 'deepseek-openai'
+      return isDeepSeekHostname(this.contentGeneratorConfig) ||
+        !profile ||
+        profile === 'deepseek-openai'
         ? ensureReasoningContentOnAssistantMessage(content)
         : content;
     });
