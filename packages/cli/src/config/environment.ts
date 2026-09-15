@@ -48,9 +48,6 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'ENV',
   'PATH',
   'HOME',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
 ]);
 
 // Windows env lookup is case-insensitive, so a reload matching only the
@@ -505,10 +502,9 @@ function canApplyParsedEnvKey(
   // repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
   // #8653 cross-workspace vector.
   if (isLoaderEnvKey(key)) return false;
-  // Private daemon→child provenance markers are fixed constants, so unlike the
+  // Launcher→child provenance markers are fixed constants, so unlike the
   // hardcoded project tier they are rejected at every scope — a home `.env`
-  // must not be able to forge Conversations provenance onto an ordinary
-  // session either.
+  // must not be able to forge sandbox or Conversations runtime state either.
   if (isPrivateProvenanceEnvKey(key)) return false;
   if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {

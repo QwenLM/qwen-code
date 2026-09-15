@@ -371,7 +371,8 @@ export interface WorkflowRunRequest {
    */
   runId?: string;
   /**
-   * P5: optional per-run token budget. When provided, `countedDispatch`
+   * P5: optional token budget — the turn's `+500k` target or an operator's
+   * per-run cap (see `workflow-budget.ts`). When provided, `countedDispatch`
    * checks `budget.remaining() > 0` BEFORE each `agent()` dispatch and
    * throws `WorkflowBudgetExceededError` if the cap is hit. Also
    * surfaced via `SandboxOptions.budget` so the script-side `budget`
@@ -453,6 +454,20 @@ export type WorkflowCountedDispatch = (
   opts: WorkflowAgentOpts,
   dispatchId?: string,
 ) => Promise<WorkflowAgentResult | null>;
+
+/**
+ * The per-run figures the registry mirrors: this run's own spend and the cap
+ * on this run alone, which differ from `spent()` / `total` when the budget is
+ * the whole turn's.
+ */
+function runBudgetFigures(
+  budget: WorkflowBudget,
+): [spent: number, total: number | null] {
+  return [
+    budget.runSpent ? budget.runSpent() : budget.spent(),
+    budget.runCap ? budget.runCap() : budget.total,
+  ];
+}
 
 function generateRunId(): string {
   return `wf_${randomBytes(8).toString('hex')}`;
@@ -2135,7 +2150,7 @@ export class WorkflowOrchestrator {
             // for the registry to mirror.
             if (budget) {
               try {
-                emitter?.budgetUpdated?.(budget.spent(), budget.total);
+                emitter?.budgetUpdated?.(...runBudgetFigures(budget));
               } catch (e) {
                 debugLogger.warn('emitter.budgetUpdated threw:', e);
               }
@@ -2156,7 +2171,7 @@ export class WorkflowOrchestrator {
             //      next success.
             if (budget) {
               try {
-                emitter?.budgetUpdated?.(budget.spent(), budget.total);
+                emitter?.budgetUpdated?.(...runBudgetFigures(budget));
               } catch (e) {
                 debugLogger.warn('emitter.budgetUpdated threw:', e);
               }

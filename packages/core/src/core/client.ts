@@ -113,6 +113,10 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import {
+  extractTurnBudgetDirectiveText,
+  parseTurnBudgetDirective,
+} from './turn-budget.js';
 import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
@@ -2869,6 +2873,42 @@ export class LlmClient {
     this.stopHookForcedPromptIds.delete(promptId);
   }
 
+  /**
+   * Open the turn's token budget: the session's output-token total now, and
+   * the `+500k`-style target the user typed, if any. Only a user query or its
+   * retry can carry a directive; a cron, goal, notification or teammate turn
+   * starts with none. A retry of the same prompt keeps the snapshot it
+   * already has, so the failed attempt's tokens still count against it.
+   */
+  private beginTurnBudget(
+    messageType: SendMessageType,
+    request: PartListUnion,
+    promptId: string,
+  ): void {
+    const turnBudget = this.config.getTurnBudget?.();
+    if (!turnBudget) return;
+    const sessionId = this.config.getSessionId();
+    if (
+      messageType === SendMessageType.Retry &&
+      turnBudget.current(sessionId)?.promptId === promptId
+    ) {
+      return;
+    }
+    const directive =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Retry
+        ? parseTurnBudgetDirective(extractTurnBudgetDirectiveText(request))
+        : null;
+    turnBudget.beginTurn({
+      promptId,
+      sessionId,
+      budget: directive?.total ?? null,
+      ...(directive ? { directiveText: directive.text } : {}),
+      outputTokensAtTurnStart:
+        uiTelemetryService.getTotalOutputTokens(sessionId),
+    });
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     callerSignal: AbortSignal,
@@ -3231,6 +3271,11 @@ export class LlmClient {
     if (startsInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+      // A side question asked while a turn is running is not a new turn: it
+      // must not move the running turn's starting point or drop its target.
+      if (!options?.isConcurrentSideQuery) {
+        this.beginTurnBudget(messageType, request, prompt_id);
+      }
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
       this.clearStopHookForced(prompt_id);

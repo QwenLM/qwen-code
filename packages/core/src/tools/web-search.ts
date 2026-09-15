@@ -86,6 +86,33 @@ export function resolveWebSearchTimeoutMs(value: number | undefined): number {
 }
 
 /**
+ * Per-session cap on web_search calls. Each call is a full side request plus
+ * server-side search and page-read charges on the user's own key, and the
+ * default Auto approval mode approves searches without prompting, so a
+ * looping turn or a subagent fan-out needs a ceiling. Matches Claude Code's
+ * default for CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION.
+ */
+export const DEFAULT_WEB_SEARCH_MAX_PER_SESSION = 200;
+/** Upper bound for a configured cap; larger values fall back to the default. */
+export const MAX_WEB_SEARCH_MAX_PER_SESSION = 10_000;
+
+/**
+ * Effective cap for `tools.webSearch.maxPerSession`: a positive integer up to
+ * the bound. Anything else falls back to the default rather than being
+ * clamped, mirroring {@link resolveWebSearchTimeoutMs}.
+ */
+export function resolveWebSearchMaxPerSession(
+  value: number | undefined,
+): number {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= MAX_WEB_SEARCH_MAX_PER_SESSION
+    ? value
+    : DEFAULT_WEB_SEARCH_MAX_PER_SESSION;
+}
+
+/**
  * Parameters for the WebSearch tool. Deliberately just the query: the
  * DashScope Responses API silently ignores every domain-filter shape, and
  * shipping knobs that pretend to work is worse than not having them.
@@ -120,6 +147,11 @@ export interface WebSearchSettings {
    * WEB_SEARCH_TIMEOUT_MS); see {@link resolveWebSearchTimeoutMs}.
    */
   timeoutMs?: number;
+  /**
+   * Maximum web_search calls per session (`tools.webSearch.maxPerSession` /
+   * WEB_SEARCH_MAX_PER_SESSION); see {@link resolveWebSearchMaxPerSession}.
+   */
+  maxPerSession?: number;
 }
 
 export type WebSearchGateResult =
@@ -806,6 +838,21 @@ class WebSearchToolInvocation extends BaseToolInvocation<
     };
   }
 
+  /**
+   * The session has used its web_search budget. Not an error: the model
+   * should carry on with what it has gathered rather than retry, and nothing
+   * here came from an external source, so there is no safety footer.
+   */
+  private sessionBudgetExhaustedResult(calls: number, cap: number): ToolResult {
+    gateDebugLogger.debug(
+      `[WebSearch] session budget used (${calls}/${cap}); skipping search`,
+    );
+    return {
+      llmContent: `Web search was not performed: this session has used its web search budget (${calls} of ${cap} web_search calls). Continue with the information already gathered instead of issuing more searches. If more searches are genuinely needed, ask the user to raise tools.webSearch.maxPerSession (or WEB_SEARCH_MAX_PER_SESSION).`,
+      returnDisplay: `Skipped: session web search budget used (${calls}/${cap})`,
+    };
+  }
+
   async execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
@@ -824,6 +871,19 @@ class WebSearchToolInvocation extends BaseToolInvocation<
     // (issue #7264); web search runs outside the content-generator preload
     // path.
     await preloadRuntimeFetchModule();
+
+    // Check and count in one synchronous block: web_search calls batched in
+    // the same turn run concurrently, and an await between the two would let
+    // every one of them pass the check. A search that later fails still
+    // counts, because the request was sent. Derived Configs share the counter.
+    const usage = this.config.getWebSearchSessionUsage();
+    const cap = resolveWebSearchMaxPerSession(
+      this.config.getWebSearchSettings()?.maxPerSession,
+    );
+    if (usage.calls >= cap) {
+      return this.sessionBudgetExhaustedResult(usage.calls, cap);
+    }
+    usage.calls++;
 
     const startedAt = Date.now();
     const result = await createWebSearchBackend(
