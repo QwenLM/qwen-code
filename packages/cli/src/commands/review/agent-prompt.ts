@@ -1427,6 +1427,7 @@ function worktreeEvidenceBlock(
   // `[build]`/`[test]` finding is pre-confirmed and skips verification, which
   // is how a stray probe file becomes a merge-blocking phantom Critical.
   if (opts.rule !== false) {
+    const sourceRoot = inertPath(resolve(wt));
     parts.push(
       '',
       '**Your working directory is a SHARED review worktree.** Other agents read it ' +
@@ -1441,6 +1442,10 @@ function worktreeEvidenceBlock(
         "not the PR's code, so it is neither evidence nor a finding. (An auditor of a " +
         "real run took a verifier's live probe for the PR's own code and came within a " +
         'step of filing a Critical against it.)',
+      '',
+      `**Repository source root:** \`${sourceRoot}\`. Read every repository source ` +
+        `file from this exact root. The diff artifact's directory is evidence storage, ` +
+        'not a source-tree root; do not resolve source paths relative to it.',
     );
   }
   if (residue?.unmeasured) {
