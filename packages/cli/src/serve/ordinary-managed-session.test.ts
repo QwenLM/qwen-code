@@ -104,6 +104,7 @@ describe('ordinary REST session Managed owner', () => {
       });
       modelServer = undefined;
     }
+    modelHold = undefined;
     resetHomeEnvBootstrapForTesting();
     resetEnvironmentTrackingForTesting();
     resetTrustedFoldersForTesting();
@@ -135,9 +136,9 @@ describe('ordinary REST session Managed owner', () => {
         return;
       }
       let raw = '';
-      let closed = false;
-      req.on('close', () => {
-        closed = true;
+      let aborted = false;
+      req.on('aborted', () => {
+        aborted = true;
       });
       req.on('data', (chunk: Buffer | string) => {
         raw += typeof chunk === 'string' ? chunk : chunk.toString();
@@ -145,7 +146,7 @@ describe('ordinary REST session Managed owner', () => {
       req.on('end', () => {
         void (async () => {
           if (modelHold) await modelHold;
-          if (closed) return;
+          if (aborted || res.destroyed) return;
           let body: { stream?: boolean; model?: string } = {};
           try {
             body = JSON.parse(raw) as { stream?: boolean; model?: string };
@@ -383,6 +384,92 @@ describe('ordinary REST session Managed owner', () => {
     expect(res.status).toBe(200);
     expect(res.body.sessionId).toBe(sessionId);
     expect(JSON.stringify(res.body)).toContain(ASSISTANT_TEXT);
+  });
+
+  it('queues a second ordinary prompt on the live Managed session', async () => {
+    await startModelServer();
+    await writeSettings();
+    app = bootApp();
+    const sessionId = await createManagedSession();
+
+    let releaseHold!: () => void;
+    modelHold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+
+    const first = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'first' }] });
+    expect(first.status).toBe(202);
+    const firstId = first.body.promptId as string;
+
+    await vi.waitFor(
+      async () => {
+        const running = await request(app!)
+          .get(`/session/${sessionId}/turns/${firstId}`)
+          .set('Host', host());
+        const body = running.body as { state?: string };
+        expect(running.status).toBe(200);
+        expect(body.state).toBe('running');
+      },
+      { timeout: 15_000, interval: 50 },
+    );
+
+    const second = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'second' }] });
+    expect(second.status).toBe(202);
+    const secondId = second.body.promptId as string;
+
+    const pending = await request(app)
+      .get(`/session/${sessionId}/pending-prompts`)
+      .set('Host', host());
+    expect(pending.status).toBe(200);
+    expect(pending.body.pendingPrompts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ promptId: firstId, state: 'running' }),
+        expect.objectContaining({ promptId: secondId, state: 'queued' }),
+      ]),
+    );
+
+    const queuedTurn = await request(app)
+      .get(`/session/${sessionId}/turns/${secondId}`)
+      .set('Host', host());
+    const queuedBody = queuedTurn.body as { state?: string };
+    expect(queuedTurn.status).toBe(200);
+    expect(queuedBody.state).toBe('queued');
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+
+    releaseHold();
+    await vi.waitFor(
+      async () => {
+        const idle = await request(app!)
+          .get(`/session/${sessionId}/pending-prompts`)
+          .set('Host', host());
+        expect(idle.status).toBe(200);
+        expect(idle.body.pendingPrompts).toEqual([]);
+      },
+      { timeout: 45_000, interval: 50 },
+    );
+    const firstTurn = await waitForTurn(sessionId, firstId);
+    const secondTurn = await waitForTurn(sessionId, secondId);
+    expect(firstTurn.state).toBe('completed');
+    expect(secondTurn.state).toBe('completed');
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
   });
 
   it('keeps MCP settings on the legacy factory at the same REST entry', async () => {
