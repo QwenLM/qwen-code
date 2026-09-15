@@ -2251,6 +2251,44 @@ describe('WorkflowRunRegistry', () => {
     expect(modelText).not.toContain('<recovery>');
   });
 
+  // A qualified run name only comes from the extension tier; the advice must
+  // not call a third-party file the user's saved workflow, and must name a
+  // destination the next extension update will not overwrite.
+  it('names an extension workflow in the recovery and diagnostics advice', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const failed = r.register(
+      reg('wf_ext_fail', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_fail/journal.jsonl',
+      }),
+    );
+    failed.workflowName = 'gcp:audit';
+    r.fail(failed.runId, 'boom', 2_000);
+
+    const recovery = completion.mock.calls[0][1] as string;
+    expect(recovery).toContain(
+      'This reads the /gcp:audit workflow the gcp extension ships; copy it into .qwen/workflows before making a run-specific change.',
+    );
+    expect(recovery).not.toContain('saved /gcp:audit');
+
+    const completed = r.register(
+      reg('wf_ext_done', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_done/journal.jsonl',
+      }),
+    );
+    completed.workflowName = 'gcp:audit';
+    r.complete(completed.runId, [], 3_000);
+
+    const diagnostics = completion.mock.calls[1][1] as string;
+    expect(diagnostics).toContain('Re-run the /gcp:audit extension workflow:');
+    expect(diagnostics).not.toContain('Re-run the saved /gcp:audit');
+  });
+
   // An unpersisted inline script (no storage, symlinked root) leaves nothing
   // to resume from, and a run with no journal has nothing to read: the
   // notification must then say neither rather than name a path that is not
@@ -2660,4 +2698,50 @@ describe('workflow status guards', () => {
       expect(isTerminalWorkflowStatus(status)).toBe(false);
     },
   );
+});
+
+// The registry keeps the first large-run warning and nothing after it: the flag
+// tells the user a run grew past what was expected, once, while it can still
+// be stopped.
+describe('WorkflowRunRegistry.onSizeWarning', () => {
+  const warning = {
+    axis: 'agents' as const,
+    scheduledAgents: 16,
+    totalTokens: 0,
+    projectedTokens: 1_120_000,
+    agentCap: 15,
+    tokenCap: 1_500_000,
+    capFromGuideline: true,
+    at: 1_700_000_000_500,
+  };
+
+  it('records the first warning, logs it and notifies, and ignores later ones', () => {
+    const r = new WorkflowRunRegistry();
+    const changes = vi.fn();
+    r.setStatusChangeCallback(changes);
+    const entry = r.register(reg('wf_size'));
+    changes.mockClear();
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(true);
+    expect(r.get(entry.runId)?.sizeWarning).toEqual(warning);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toBe(
+      '[size] Large workflow: 16 agents scheduled (warning threshold 15, from the size guideline) — /workflows to stop.',
+    );
+    expect(changes).toHaveBeenCalled();
+
+    expect(
+      r.onSizeWarning(entry.runId, { ...warning, scheduledAgents: 40 }),
+    ).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning?.scheduledAgents).toBe(16);
+  });
+
+  it('does not flag a run that has already settled, or one it does not know', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_settled'));
+    r.complete(entry.runId, [], 1_700_000_001_000);
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning).toBeUndefined();
+    expect(r.onSizeWarning('wf_unknown', warning)).toBe(false);
+  });
 });

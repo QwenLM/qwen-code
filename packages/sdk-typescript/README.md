@@ -255,9 +255,9 @@ await endpoint.send({
 Things to know:
 
 - A session has an inbox only while its `agents.crossSessionMessaging` setting
-  is on, and the setting is off by default. Without it the session does not
-  appear in `list()`, and its own `list_agents` and `send_message` cannot see
-  or reach the program either. `qwen sessions ps` lists the program regardless.
+  is on, which it is by default. A session that turned it off does not appear
+  in `list()`, and its own `list_agents` and `send_message` cannot see or
+  reach the program either. `qwen sessions ps` lists the program regardless.
 - A message is delivered without review in exactly two cases: the send
   presents a controller token (`controller: true`), or its `fromMode` names the
   receiving session's own review class. `fromMode` is a claim nothing

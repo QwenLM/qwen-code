@@ -97,6 +97,8 @@ export interface ExecResultMessage {
   errorName?: string;
   errorMessage?: string;
   errorStack?: string;
+  errorCode?: string;
+  errorDetails?: string;
 }
 
 export interface AddModuleRootResultMessage {
