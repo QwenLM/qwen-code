@@ -23,7 +23,8 @@ import type { MeshAgent } from './types.js';
  * mentions of `example` and `b`. Trailing punctuation is left outside the
  * capture so "ask @alice, then @bob." resolves both names.
  */
-const MENTION_PATTERN = /(?<![\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu;
+const MENTION_PATTERN =
+  /(?<![\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu;
 
 export interface ParsedMentions {
   /** Agent ids, in first-appearance order, deduplicated. */

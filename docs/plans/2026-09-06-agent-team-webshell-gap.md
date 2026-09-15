@@ -6,19 +6,19 @@
 
 ## 0. Summary
 
-The target experience — *declare durable agents, put repos and work items in a workspace, create a
-task against a workspace, pick one or more agents, and let several agents self-organise* — is the
+The target experience — _declare durable agents, put repos and work items in a workspace, create a
+task against a workspace, pick one or more agents, and let several agents self-organise_ — is the
 Multica model. Qwen Code today implements a **different** model: one interactive session's model
 calls `team_create`, and teammates are spawned **inside that session's process**.
 
-The two open PRs are the *observability + plumbing* leg of the current model. They are correct and
+The two open PRs are the _observability + plumbing_ leg of the current model. They are correct and
 worth landing, but they do not move the topology toward the target. Everything the target needs —
 durable agent identity, runtime binding, a work-item/run record, UI-initiated team formation, and a
 process per agent — is still unbuilt, and one of its prerequisites (#10247 §5, the Agent View
 supervisor wiring) is stalled on an unmade decision.
 
-Rough distance: the coordination *runtime* is ~80% there for the in-session topology; the
-*orchestration product* the user described is ~10–15% there, and most of the remaining work is new
+Rough distance: the coordination _runtime_ is ~80% there for the in-session topology; the
+_orchestration product_ the user described is ~10–15% there, and most of the remaining work is new
 daemon state, not model plumbing.
 
 ## 1. The two PRs, precisely
@@ -43,12 +43,12 @@ Two things, not one:
 
 CI is green (including the real-daemon E2E and web-shell smoke). No reviews yet. Still draft.
 Before #11072, `qwen serve` had the Agent Team runtime but no path for a teammate to reach the
-leader or the user — so this is the PR that makes Agent Team *usable at all* in WebShell.
+leader or the user — so this is the PR that makes Agent Team _usable at all_ in WebShell.
 
 ### #11140 — `feat(web-shell): expose Agent management in sidebar` (draft, base `codex/agent-team-roster-web-shell`, +120, 7 files)
 
 Its own delta is 120 lines: one `agents` entry in the WebShell primary sidebar between New Task and
-Plugins, opening the **existing** `AgentsManagerPage` (Agent *definition* CRUD), plus one sentence
+Plugins, opening the **existing** `AgentsManagerPage` (Agent _definition_ CRUD), plus one sentence
 explaining that Qwen can coordinate definitions in an Agent Team. No runtime behaviour.
 
 Two caveats:
@@ -56,39 +56,39 @@ Two caveats:
 - It is stacked on #11072, and a PR based on a non-`main` branch **runs no unit tests and no
   Lint & Static** in this repo (`ci.yml` triggers only on `main`/`release/**`). Its checks are all
   `skipping`.
-- The entry is called "Agents" but manages *prompt/tool/model definitions*, not runnable agents.
+- The entry is called "Agents" but manages _prompt/tool/model definitions_, not runnable agents.
   Against the target model that name is a promise the daemon cannot yet keep.
 
 ## 2. What actually exists today (traced)
 
-| Layer | Exists | Where | Note |
-| --- | --- | --- | --- |
-| Agent **definitions** | Yes | `.qwen/agents/*.md`, `SubagentManager`, `GET/POST /workspace/agents` (`serve/workspace-agents.ts:180`), WebShell `AgentsManagerPage` | Prompt + tools + MCP + hooks + model. **No runtime binding, no identity, no run history.** |
-| Agent **team runtime** | Yes | `packages/core/src/agents/team/` (~6.9k lines): `TeamManager`, `tasks.ts`, `mailbox.ts`, `leaderPermissionBridge.ts`, `promptAddendum.ts` | Persisted at `~/.qwen/teams/{team}/config.json`, shared tasks at `~/.qwen/tasks/{team}/`. Gated behind experimental `agentTeam` setting, **default off** (`settingsSchema.ts:3650`). |
-| Team **creation** | Model-only | `team_create` tool (`config.ts:8197`) | There is no API or UI that creates a team. The LLM decides. |
-| Teammate **process** | In-process | `detectBackend` (`agents/backends/detect.ts:41`) defaults to `InProcessBackend`; `TmuxBackend` is opt-in via `agents.displayMode` and CLI-only | Under `qwen serve`, teammates are `AgentCore` loops **inside the daemon process**. |
-| Daemon **workspaces** | Yes | `serve/workspace-registry.ts` — `WorkspaceRuntime` = id + cwd + trust + bridge + services | A workspace is **one cwd**, not a set of repos, and holds no work items. |
-| Daemon **sessions** | Yes | `POST /session` (`routes/session.ts:1318`) — cwd, model, approvalMode, scope | No agent/persona binding at creation. |
-| Spawn a **fresh top-level session** | Yes | `create_sub_session` tool + daemon handler `serve/create-sub-session.ts` | The closest existing primitive to "a new agent that is a real main loop". Fire-and-forget or first-turn result; not kept resident. |
-| Supervised **child processes** | Stranded | `packages/cli/src/agent-view/` (~3.1k prod lines) | `supervisor-runner.ts:38` spawns `qwen --internal-agent-view-supervisor`; **nothing on `main` parses that flag** and yargs is `.strict()`, so the supervisor exits immediately. Tracked as #10247 §5 with two competing wiring stacks (#7802/#7803 vs #10942/#10943/#10949/#10954) and an unmade choice. |
-| **Remote / cloud** agents | No | — | Nearest: #11003 delegates one subagent turn to an external agent (Claude Code) over ACP — local child process, per-turn, not a hosted agent. #11139 separates leader/worker credentials. |
-| Cross-process work sharing | Design + PR | #9402 agent board (`~/.qwen/boards/`), design `docs/plans/2026-08-18-peer-session-collaboration.md` | Pull-based, no membership, no wake path. Explicitly **not** a scheduler. |
+| Layer                               | Exists      | Where                                                                                                                                          | Note                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent **definitions**               | Yes         | `.qwen/agents/*.md`, `SubagentManager`, `GET/POST /workspace/agents` (`serve/workspace-agents.ts:180`), WebShell `AgentsManagerPage`           | Prompt + tools + MCP + hooks + model. **No runtime binding, no identity, no run history.**                                                                                                                                                                                                               |
+| Agent **team runtime**              | Yes         | `packages/core/src/agents/team/` (~6.9k lines): `TeamManager`, `tasks.ts`, `mailbox.ts`, `leaderPermissionBridge.ts`, `promptAddendum.ts`      | Persisted at `~/.qwen/teams/{team}/config.json`, shared tasks at `~/.qwen/tasks/{team}/`. Gated behind experimental `agentTeam` setting, **default off** (`settingsSchema.ts:3650`).                                                                                                                     |
+| Team **creation**                   | Model-only  | `team_create` tool (`config.ts:8197`)                                                                                                          | There is no API or UI that creates a team. The LLM decides.                                                                                                                                                                                                                                              |
+| Teammate **process**                | In-process  | `detectBackend` (`agents/backends/detect.ts:41`) defaults to `InProcessBackend`; `TmuxBackend` is opt-in via `agents.displayMode` and CLI-only | Under `qwen serve`, teammates are `AgentCore` loops **inside the daemon process**.                                                                                                                                                                                                                       |
+| Daemon **workspaces**               | Yes         | `serve/workspace-registry.ts` — `WorkspaceRuntime` = id + cwd + trust + bridge + services                                                      | A workspace is **one cwd**, not a set of repos, and holds no work items.                                                                                                                                                                                                                                 |
+| Daemon **sessions**                 | Yes         | `POST /session` (`routes/session.ts:1318`) — cwd, model, approvalMode, scope                                                                   | No agent/persona binding at creation.                                                                                                                                                                                                                                                                    |
+| Spawn a **fresh top-level session** | Yes         | `create_sub_session` tool + daemon handler `serve/create-sub-session.ts`                                                                       | The closest existing primitive to "a new agent that is a real main loop". Fire-and-forget or first-turn result; not kept resident.                                                                                                                                                                       |
+| Supervised **child processes**      | Stranded    | `packages/cli/src/agent-view/` (~3.1k prod lines)                                                                                              | `supervisor-runner.ts:38` spawns `qwen --internal-agent-view-supervisor`; **nothing on `main` parses that flag** and yargs is `.strict()`, so the supervisor exits immediately. Tracked as #10247 §5 with two competing wiring stacks (#7802/#7803 vs #10942/#10943/#10949/#10954) and an unmade choice. |
+| **Remote / cloud** agents           | No          | —                                                                                                                                              | Nearest: #11003 delegates one subagent turn to an external agent (Claude Code) over ACP — local child process, per-turn, not a hosted agent. #11139 separates leader/worker credentials.                                                                                                                 |
+| Cross-process work sharing          | Design + PR | #9402 agent board (`~/.qwen/boards/`), design `docs/plans/2026-08-18-peer-session-collaboration.md`                                            | Pull-based, no membership, no wake path. Explicitly **not** a scheduler.                                                                                                                                                                                                                                 |
 
 ## 3. Agent Team vs subagents — what the difference actually is here
 
 The user's mental model ("subagents can't talk; teams can") is directionally right but not quite
-this codebase's distinction, because Qwen Code's background subagents *can* already be messaged
+this codebase's distinction, because Qwen Code's background subagents _can_ already be messaged
 mid-flight (`send_message` with `task_id`, `background-agent-resume.ts`). The real differences:
 
-| | Subagent (`agent` tool) | Teammate (Agent Team) |
-| --- | --- | --- |
-| Lifetime | One task, then terminates | Long-lived: goes **idle** and picks up the next task; idle is deliberately distinct from completed |
-| Identity | Ephemeral `task_id` from the launch response | Named `name@team`, persisted on disk with PID liveness; discoverable via `list_agents` |
-| Work assignment | Parent hands it a prompt | Shared task list with `claim` semantics, `blocks`/`blockedBy`, owner field — teammates **pull** work (`promptAddendum.ts` literally instructs: call `task_list`, claim, do, report, mark complete, repeat) |
-| Topology | Star: parent ↔ child | Leader + named peers, broadcast `*`, structured mailbox (`shutdown_request`, `plan_approval_request`, `task_assignment`) with cross-process file locks |
-| Approvals | Routed to the parent session | `leaderPermissionBridge` + optional plan mode: teammate must `exit_plan_mode` and get leader approval before writing |
-| Leader blocking | Inline subagent blocks the turn; background ones notify | Leader stays idle and is **resumed** by a teammate report (this is what #11072 wires into ACP) |
-| Process | In the session process (or backgrounded) | In-process, or a real `qwen` process per teammate under the tmux backend |
+|                 | Subagent (`agent` tool)                                 | Teammate (Agent Team)                                                                                                                                                                                      |
+| --------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lifetime        | One task, then terminates                               | Long-lived: goes **idle** and picks up the next task; idle is deliberately distinct from completed                                                                                                         |
+| Identity        | Ephemeral `task_id` from the launch response            | Named `name@team`, persisted on disk with PID liveness; discoverable via `list_agents`                                                                                                                     |
+| Work assignment | Parent hands it a prompt                                | Shared task list with `claim` semantics, `blocks`/`blockedBy`, owner field — teammates **pull** work (`promptAddendum.ts` literally instructs: call `task_list`, claim, do, report, mark complete, repeat) |
+| Topology        | Star: parent ↔ child                                   | Leader + named peers, broadcast `*`, structured mailbox (`shutdown_request`, `plan_approval_request`, `task_assignment`) with cross-process file locks                                                     |
+| Approvals       | Routed to the parent session                            | `leaderPermissionBridge` + optional plan mode: teammate must `exit_plan_mode` and get leader approval before writing                                                                                       |
+| Leader blocking | Inline subagent blocks the turn; background ones notify | Leader stays idle and is **resumed** by a teammate report (this is what #11072 wires into ACP)                                                                                                             |
+| Process         | In the session process (or backgrounded)                | In-process, or a real `qwen` process per teammate under the tmux backend                                                                                                                                   |
 
 **What that buys.** Warm, stateful workers that survive across tasks (no re-priming per task),
 pull-based distribution so the leader isn't a dispatch bottleneck, mid-flight steering without a
@@ -102,7 +102,7 @@ leader round trip. With N warm workers on a long task the coordination term is n
 The payoff is wall-clock parallelism and keeping the leader's context clean — the same context
 argument that justifies ordinary subagents, plus concurrency.
 
-**Correction worth internalising:** an Agent Team is *not* a stronger version of a subagent; it is a
+**Correction worth internalising:** an Agent Team is _not_ a stronger version of a subagent; it is a
 different **allocation model** (pull from a shared board) with a different **lifetime** (warm and
 reusable). The chat-vs-no-chat framing understates it.
 
@@ -110,19 +110,19 @@ reusable). The chat-vs-no-chat framing understates it.
 
 The described workflow is Multica's, near one-to-one:
 
-| Target concept | Multica | Qwen Code today |
-| --- | --- | --- |
-| Agent = reusable identity, bound to a runtime and model, with availability + workload status | `Agent` + `Runtime` | **Definition only.** No runtime binding, no online/offline, no workload. |
-| Workspace holds repos and work items | `Workspace` + `Projects` + `Issues` | Workspace = one cwd. No projects, no issues. Nearest: goals, scheduled tasks. |
-| Create a task, pick workspace + agent(s) | Assign an issue to an agent | New Task creates a chat session; no agent picker. |
-| Several agents → coordinated by a leader | `Squad` (leader routes, members triggered by `@mention`) | Agent Team, but created **by the model inside a session**, not declared by the user. |
-| Each run is a real, isolated execution with a record | `Run` (transcript, tokens, retries) | Sessions and workflow runs exist; not tied to a work item or an agent identity. |
-| Agents may be remote/cloud | Daemon runtimes, cloud runners | None. |
+| Target concept                                                                               | Multica                                                  | Qwen Code today                                                                      |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Agent = reusable identity, bound to a runtime and model, with availability + workload status | `Agent` + `Runtime`                                      | **Definition only.** No runtime binding, no online/offline, no workload.             |
+| Workspace holds repos and work items                                                         | `Workspace` + `Projects` + `Issues`                      | Workspace = one cwd. No projects, no issues. Nearest: goals, scheduled tasks.        |
+| Create a task, pick workspace + agent(s)                                                     | Assign an issue to an agent                              | New Task creates a chat session; no agent picker.                                    |
+| Several agents → coordinated by a leader                                                     | `Squad` (leader routes, members triggered by `@mention`) | Agent Team, but created **by the model inside a session**, not declared by the user. |
+| Each run is a real, isolated execution with a record                                         | `Run` (transcript, tokens, retries)                      | Sessions and workflow runs exist; not tied to a work item or an agent identity.      |
+| Agents may be remote/cloud                                                                   | Daemon runtimes, cloud runners                           | None.                                                                                |
 
 Note the topology difference that is easy to miss: a Multica **squad leader routes and stops** —
 coordination is coarse, durable, and mediated by issue comments; runs are fresh processes. A Qwen
 **Agent Team leader stays live** and its teammates share an in-memory/on-disk task board with
-fine-grained messaging. The target wants Multica's *outer* loop with (optionally) Qwen's *inner*
+fine-grained messaging. The target wants Multica's _outer_ loop with (optionally) Qwen's _inner_
 loop inside a single run. These compose; they do not conflict.
 
 ## 5. Gap, in dependency order
@@ -142,7 +142,7 @@ loop inside a single run. These compose; they do not conflict.
    snapshots are the closest existing shape and are worth reusing rather than re-inventing.
 4. **UI-initiated team formation.** Today `team_create` is a model tool. Needs an API that
    pre-creates a team and binds a session to it, so "pick 3 agents for this task" is a user action
-   rather than a prompt the leader has to be talked into. This is the *smallest* remaining item —
+   rather than a prompt the leader has to be talked into. This is the _smallest_ remaining item —
    `TeamManager` already accepts an externally-constructed team file.
 5. **Remote / cloud agents.** ACP over a network transport plus a credential model. #11003 and
    #11139 are the first two bricks; there is no third yet.

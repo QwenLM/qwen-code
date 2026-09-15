@@ -874,11 +874,7 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onExternalMessage = (event: AgentExternalMessageEvent) => {
-    recordUserMessage(
-      event.text,
-      event.kind ?? 'message',
-      event.deliveryId,
-    );
+    recordUserMessage(event.text, event.kind ?? 'message', event.deliveryId);
   };
 
   if (options.bootstrapHistory !== undefined) {
