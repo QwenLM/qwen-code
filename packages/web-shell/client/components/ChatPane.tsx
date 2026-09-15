@@ -229,6 +229,10 @@ export interface ChatPaneProps {
   ) => void;
   registerContextUsageControls?: RegisterContextUsageControls;
   onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -274,6 +278,7 @@ export function ChatPane({
   onPaneArtifactsChange,
   registerContextUsageControls,
   onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
   onFirstPromptAdmitted,
@@ -300,11 +305,13 @@ export function ChatPane({
   );
   // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
   // live prompt state into its own provider (#9487).
-  const sessionHasActivePrompt = useDaemonActivePromptBridge(
+  const daemonHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePrompt =
+    daemonHasActivePrompt || !!connection.backgroundTurn;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
@@ -689,13 +696,14 @@ export function ChatPane({
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
   // pane opened mid-turn shows the real elapsed time, not a reset-to-zero clock.
   const activeTurnStartedAt = useMemo(() => {
+    if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (message?.role === 'user') return message.timestamp;
     }
     return undefined;
-  }, [messages, isResponding]);
+  }, [messages, isResponding, connection.backgroundTurn]);
 
   const controlGoal = useCallback(
     async (
@@ -1432,6 +1440,10 @@ export function ChatPane({
     clearFollowup();
     if (connection.sessionId) onBeforeContextCompress?.(connection.sessionId);
   }, [clearFollowup, connection.sessionId, onBeforeContextCompress]);
+  const handleOpenContextUsage = useCallback(() => {
+    if (connection.sessionId)
+      onOpenContextUsage?.(connection.sessionId, actions);
+  }, [actions, connection.sessionId, onOpenContextUsage]);
   const contextUsageControls = useContextUsageControls({
     connection,
     actions,
@@ -1622,7 +1634,25 @@ export function ChatPane({
           enabled={monitorDetailsSupported}
           onOpen={openMonitorDetails}
         >
-          <SubagentDetailsProvider onOpen={openSubagentDetails}>
+          <SubagentDetailsProvider
+            onOpen={openSubagentDetails}
+            onOpenBackground={
+              onRightPanelOpen && connection.sessionId
+                ? (turn) => {
+                    if (!connection.sessionId) return;
+                    onRightPanelOpen({
+                      id: `background:${connection.sessionId}:${turn.taskId}`,
+                      kind: 'background_task',
+                      title: turn.label ?? turn.kind,
+                      turnId: turn.turnId,
+                      backgroundTurn: turn,
+                      sourceSessionId: connection.sessionId,
+                      workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
+                    });
+                  }
+                : undefined
+            }
+          >
             <WorkflowDetailsProvider tasks={sessionTasks}>
               <TranscriptViewport
                 ref={transcriptViewportRef}
@@ -1718,6 +1748,10 @@ export function ChatPane({
             startedAt={activeTurnStartedAt}
             showPhrase={false}
             hasActivePrompt={sessionHasActivePrompt}
+            backgroundLabel={
+              connection.backgroundTurn?.label ??
+              connection.backgroundTurn?.kind
+            }
           />
           {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
             <div
@@ -1795,6 +1829,14 @@ export function ChatPane({
             }
             onShowContextUsage={
               contextUsageAvailable ? handleShowContextUsage : undefined
+            }
+            contextUsageControls={
+              onOpenContextUsage ? contextUsageControls : undefined
+            }
+            onOpenContextUsage={
+              contextUsageAvailable && onOpenContextUsage
+                ? handleOpenContextUsage
+                : undefined
             }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}

@@ -21,6 +21,32 @@ function invalidPlugin(
 }
 
 describe('channel registry', () => {
+  it('adds the shared output descriptor only when a plugin opts in', async () => {
+    registerPlugin({
+      channelType: 'valid-output-mode',
+      displayName: 'Shared output mode',
+      supportsOutputMode: true,
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-output-mode',
+    );
+    const fields = entry?.fields.filter((field) => field.key === 'outputMode');
+    expect(fields).toHaveLength(1);
+    expect(fields?.[0]).toMatchObject({
+      kind: 'enum',
+      options: [
+        { value: 'per_task' },
+        { value: 'per_response' },
+        { value: 'per_turn' },
+      ],
+    });
+    expect(fields?.[0]?.default).toBe('per_turn');
+  });
+
   it('publishes a plugin session-scope descriptor once with its runtime default', async () => {
     registerPlugin({
       channelType: 'valid-custom-session-scope',
@@ -74,6 +100,19 @@ describe('channel registry', () => {
   });
 
   it.each([
+    {
+      type: 'invalid-output-mode-descriptor',
+      fields: [
+        {
+          key: 'outputMode',
+          label: 'Output Mode',
+          kind: 'enum',
+          options: [{ value: 'all', label: 'All' }],
+        },
+      ],
+      message:
+        'Channel field "outputMode" is shared; declare supportsOutputMode instead.',
+    },
     {
       type: 'invalid-nested-secret',
       fields: [
@@ -774,6 +813,13 @@ describe('channel registry', () => {
         .filter((entry) => entry.manageable)
         .map((entry) => entry.type),
     ).toEqual(['dingtalk', 'dws', 'wecom', 'feishu', 'github', 'gitlab']);
+    expect(
+      builtinCatalog
+        .filter((entry) =>
+          entry.fields.some((field) => field.key === 'outputMode'),
+        )
+        .map((entry) => entry.type),
+    ).toEqual(['dingtalk']);
     // The registry skips the shared `instructions` injection for any channel
     // that declares its own, so pin the render invariants the editor depends on
     // for every manageable built-in: exactly one field, plus the multiline hint
