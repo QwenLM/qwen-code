@@ -565,8 +565,9 @@ one gap per chip, two columns of prefix per header, and two more for each
 answered mark. It is recomputed on every render, because answering changes the
 marks.
 
-One divergence is deliberate. ink answers a typed free-text entry twice for one
-keystroke — the dialog's own key handler and the input widget it mounts both
+Two divergences are deliberate, and they are of different kinds. The first is a
+defect ink has and this port does not. ink answers a typed free-text entry twice
+for one keystroke — the dialog's own key handler and the input widget it mounts both
 subscribe, and the key layer broadcasts to every subscriber with no notion of
 focus — and each answer advances a tab, so the question after the one being
 answered is skipped without ever being drawn. This was not reasoned from source
@@ -577,6 +578,20 @@ defect rather than the experience, and fixing ink would move the reference the
 whole sweep is measured against, so the divergence is recorded instead. The
 scenario was rearranged to exercise the free-text row on the last question,
 where the tab index clamps and both legs arrive at the review tab together.
+
+The second divergence is one this port loses. The option rows are drawn by hand
+rather than by the shared select widget, and the widget's pointer wiring did not
+cross with them: clicking an option no longer answers it and hovering no longer
+highlights it, while the outcome list a few rows below — still that widget —
+responds to both. Keys answer every question ink's dialog answers, which is the
+bar this sweep set, and the pointer is deferred to its own change rather than
+argued away. A click needs a meaning on the chips, on the free-text row and on
+the submit and cancel rows, each of which answers a different question; and the
+hazard class these rows just went through is a pointer hazard too, since a click
+landing in the same read as a keystroke is one burst from another source. No leg
+measures it: the harness writes one character per stdin write and emits no mouse
+sequence, and the run that reported this could not start this renderer in its own
+environment.
 
 The free-text row keeps its value in a mirror written synchronously beside the
 state update. Key events can arrive inside one React batch, and a handler that
@@ -607,11 +622,13 @@ indent for indent, including the mark appearing on a chip as soon as its
 free-text box is checked and before anything is committed, the comma-and-space
 join of a multi-select answer with the typed entry counted into it, and the
 review tab's own hint, which drops the cancel clause exactly where ink drops
-it. Two residuals stand: where a long path wraps, and vertical anchoring. A third
-recorded here originally — which frame the waiting row shows — is closed by
-Decision 28, and a fourth, the startup update notice, was falsified: that notice
-comes from the runtime rather than this renderer, and the harness suppresses it on
-both legs.
+it. One residual stands: where a long path wraps. A second listed here
+originally — vertical anchoring — was retracted above: the two screens occupy the
+same place in the terminal, and what differs is where the harness rebuilds ink's
+block. A third recorded here originally — which frame the waiting row shows — is
+closed by Decision 28, and a fourth, the startup update notice, was falsified:
+that notice comes from the runtime rather than this renderer, and the harness
+suppresses it on both legs.
 
 ## Decision 22 — the confirmation is drawn where the conversation is
 
@@ -657,7 +674,10 @@ token and cancel suffixes — there is no in-flight
 request to cancel and no tokens to count. That waiting row renders for a tool
 confirmation only: the server-startup approval, the trust gate and the action
 confirmations all arrive while the session is idle, where ink's own indicator
-renders nothing, and the captured frames agree on both halves.
+renders nothing, and the captured frames agree on both halves. Where the block
+sits vertically is not something these frames can settle: the difference recorded
+above belongs to the reconstruction, not to either screen, so it is neither
+confirmed nor ruled out here.
 
 ## Decision 23 — a card's rendering preference is re-derived per event
 
@@ -862,8 +882,11 @@ The gate is ported, and the frame it freezes on is shared rather than copied: it
 joins the spinner constants both renderers already read from one place, which ink
 had spelled out as a literal until now. Two tests cover the pair — the frame
 advances while a turn is in flight, and holds that one frame while a call is
-parked. Each is killed by its own mutation and by nothing else: removing the gate
-fails the parked test, removing the interval fails the in-flight one.
+parked. The frame each leg shows is pinned: taking the parked branch out fails the
+parked test, taking the interval out fails the in-flight one. What the first of
+those did not pin was the timer itself — a row that went on ticking but kept
+printing the same frame passed — so the parked test now asserts that no interval
+is left running, which is the cost this decision measured on a machine.
 
 Re-running the full matrix afterwards confirms it on the machine rather than in a
 test: eleven checkpoints taken while a dialog is parked each shed one row on both
@@ -948,6 +971,14 @@ that read that list have no production caller, so the keystroke falls through as
 text. The rows are reachable here only for the length of a turn, which is also
 why no scenario in the matrix produces a durable queue on either leg.
 
+One scope was set rather than discovered: these rows list the steering queue, and
+the shell's own deferred lane is not in it. A submission made while a held command
+still runs waits in a second list the shell keeps for itself, and neither the rows
+nor the badge — which read the one mirrored queue — says it is waiting, so that
+text appears on screen only once it runs. ink has a single queue and shows both.
+Listing them together is one change with the key that would make a queue durable:
+badge and rows have to move together, or the two counts disagree on the screen.
+
 Coverage is unit-level across three layers: five component tests (nothing when
 the queue is empty, one row per prompt with whitespace flattened, the three-row
 cap with its overflow row, the hint that shows on three fills and not the
@@ -956,8 +987,10 @@ assertions on the queued texts at each of those sites, and a shell test that
 fixes the placement — rows in the persistent chrome between the loading
 indicator and the composer, not in the scroll region. Eleven mutations — one at
 each component behaviour, one at each mirror site and one at the mount — each
-fail at least one test. The five component rows and the mount fail their own
-and no other; the mirror sites do not map one to one, because a list never
+fail at least one test, with one limitation: the mount is caught as containment
+and not as order, because the shell test asserts the rows land in the persistent
+chrome rather than which side of the composer. The five component rows fail their
+own and no other; the mirror sites do not map one to one, because a list never
 given its first entry, or never emptied, is still being asserted turns later:
 draining without mirroring fails one assertion, pushing without it fails four,
 popping for editing two.
@@ -1020,9 +1053,11 @@ field can receive, and every other key goes back to the dialog — which is what
 ink needs, since its dialog stops handling the arrows once the field owns the
 row. Word jumps, delete-word-right, kill-line and undo/redo are recorded as not
 ported, all four of them bound by ink. Two absences are forced: ctrl+D belongs
-to the app's global exit binding, which takes the key before any field sees it,
-and a field whose value another keystroke replaced wholesale has its caret pulled
-back inside the string rather than left pointing past it.
+to the app's global exit binding, which acts on the key without swallowing it —
+the focused field sees it too and hands it back unhandled, so there is no edit
+for that key to port — and a field whose value another keystroke replaced
+wholesale has its caret pulled back inside the string rather than left pointing
+past it.
 
 Three rendering differences stand. ink windows a field to a fixed column count
 and shows only the line the caret is on, so a pasted multi-line value hides
@@ -1357,7 +1392,7 @@ What was verified, and how far the verification reaches:
   sweep was compared that way. The margin above is therefore the first spacing
   claim in this document backed by frames, and it is backed by a separate
   measurement of the transcript region alone — total blank-row counts are not
-  usable while the two renderers anchor differently.
+  usable while the reconstruction puts ink's block at rows of its own choosing.
 - **The blank rows around ink's banner are deliberately not reproduced.** Two
   facts were read directly. ink's captured stream begins with a carriage return
   and a newline immediately before the banner's first row. And ink appends
@@ -1632,3 +1667,36 @@ What was verified, and how far the verification reaches:
   row moving, on top of the three each side already loses to the wrap break at
   the same checkpoint. Decision 22 fixed what the inline confirmation draws;
   this is where it is mounted, which is a separate change.
+- A dialog field ports the one-line slice of ink's buffer, not all of it. Four
+  key families ink's text input binds are not ported: word jumps
+  (ctrl/alt+←/→, alt+b/f), delete-word-right (alt+d, ctrl/alt+Delete), kill-line
+  (ctrl+k/ctrl+u) and undo/redo (ctrl+z). Every operation they need already exists
+  in this model, so it is one change over the line editor and its tests rather
+  than a per-dialog one.
+- What a refused keystroke leaves on screen diverges, as Decision 32 says. The
+  context-window field keeps digits only and this renderer prints the accepted
+  value, so a letter — or the Space that step binds — vanishes without a trace,
+  while ink's buffer owns its display and goes on showing what its own flow threw
+  away. The quieter of the two was chosen on purpose; matching ink means moving the
+  row onto the buffer, which is ink's defect to fix.
+- The two app-wide handlers disagree about claiming their key. The thought-toggle
+  handler marks the keystroke consumed; the exit handler for ctrl+C and ctrl+D
+  does not, so those keys also reach whatever else is mounted in the same read.
+  At this head nothing else acts on them — the shared line reducer hands ctrl+D
+  back unhandled — but that is a fact about the bindings that exist today, not a
+  guarantee the exit handler keeps.
+- Seven further pins were measured by review as not holding, and this pass did not
+  re-run them. Deleting the shell's mount of the waiting row leaves every unit test
+  green, because the indicator's own suite renders it directly; moving the queue
+  rows below the composer passes the test titled for that placement, which asserts
+  containment rather than order; the pending-card probe retuned from 46 rows to 48
+  now equals the reserve sum, so the case no longer reaches the floor it is
+  titled for; an args-row placement assertion compares against a string its
+  fixture never renders; the arguments-row wiring is observed only by a case that
+  mocks both of its consumers to render nothing; the paste handler's guard
+  against a row that is not the free-text one is reached only by a case that
+  presses a digit first; and two branches carry no test at all — the model
+  dialog's custom-ID caret, and the line-join branch of delete-word-left. One
+  shape runs through them: the assertion reads what was rendered, so a change
+  that renders the same thing survives. That is one pass over those suites in the
+  other direction, not seven separate fixes.
