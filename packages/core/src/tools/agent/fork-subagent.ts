@@ -108,9 +108,18 @@ export const FORK_PLACEHOLDER_RESULT =
 
 export function buildForkExecutionAllowlist(
   requestedTools: readonly string[] | undefined,
-  declaredTools: readonly string[],
+  inheritedExecutionTools: readonly string[],
+  advertisedTools: readonly string[] = inheritedExecutionTools,
 ): string[] {
-  return (requestedTools ?? declaredTools).filter(
+  const allowedTools = new Set(requestedTools ?? inheritedExecutionTools);
+  if (requestedTools !== undefined) {
+    for (const bridgeTool of [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]) {
+      if (advertisedTools.includes(bridgeTool)) {
+        allowedTools.add(bridgeTool);
+      }
+    }
+  }
+  return [...allowedTools].filter(
     (toolName) => toolName !== ToolNames.ASK_USER_QUESTION,
   );
 }

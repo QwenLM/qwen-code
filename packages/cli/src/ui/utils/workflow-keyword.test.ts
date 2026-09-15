@@ -93,8 +93,10 @@ describe('buildWorkflowSteeringNotice', () => {
   });
 
   it('names the ToolSearch detour when the Skill tool is deferred', () => {
+    // The detour must route through the bridge: tool_search reviews the
+    // schema, tool_call invokes it (R27-1).
     expect(buildWorkflowSteeringNotice('pointer-via-tool-search')).toContain(
-      'If the Skill tool is not in your tool list, reveal it with ToolSearch first.',
+      'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
     );
   });
 
@@ -140,12 +142,17 @@ describe('buildWorkflowKeywordPrefix', () => {
     ).toBe(null);
   });
 
-  // When ToolSearch can reveal it, the reminder has to say so, or the model is
-  // steered toward a tool it has no declaration for.
-  it('tells the model to reveal a deferred Workflow tool first', () => {
+  // When the bridge can reach it, the reminder has to say so, or the model
+  // is steered toward a tool it has no declaration for.
+  it('tells the model to reach a deferred Workflow tool through the bridge', () => {
     const prefix = buildWorkflowKeywordPrefix(
       stubConfig({
-        toolNames: [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
+        toolNames: [
+          ToolNames.SKILL,
+          ToolNames.WORKFLOW,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ],
         deferred: [ToolNames.WORKFLOW],
         recordedSurface: 'pointer',
       }),
@@ -153,8 +160,27 @@ describe('buildWorkflowKeywordPrefix', () => {
     );
 
     expect(prefix).toContain(
-      'If the Workflow tool is not in your tool list, reveal it with ToolSearch first.',
+      'If the Workflow tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
     );
+  });
+
+  // tool_search alone can review the schema but never invoke it: with the
+  // invocation half missing the Workflow tool is out of reach, and steering
+  // toward it helps nobody (R27-2).
+  it('returns nothing when the Workflow tool is deferred and tool_call is absent', () => {
+    expect(
+      buildWorkflowKeywordPrefix(
+        stubConfig({
+          toolNames: [
+            ToolNames.SKILL,
+            ToolNames.WORKFLOW,
+            ToolNames.TOOL_SEARCH,
+          ],
+          deferred: [ToolNames.WORKFLOW],
+        }),
+        'build me a workflow',
+      ),
+    ).toBe(null);
   });
 
   // Steering toward a tool that is not in the request helps nobody.

@@ -2377,7 +2377,11 @@ describe('BackgroundAgentResumeService', () => {
         | undefined,
       includeDisplayImage: false,
       deniedTool: 'Edit',
-      expectedExecutionAllowedTools: ['Read'],
+      expectedExecutionAllowedTools: [
+        'Read',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ],
     },
     {
       format: 'history-only bootstrap',
@@ -2385,7 +2389,13 @@ describe('BackgroundAgentResumeService', () => {
       executionAllowedTools: undefined as string[] | undefined,
       includeDisplayImage: false,
       deniedTool: ToolNames.ASK_USER_QUESTION,
-      expectedExecutionAllowedTools: ['Read', 'Edit'],
+      expectedExecutionAllowedTools: [
+        'Read',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        'Edit',
+        'mcp__docs__search',
+      ],
     },
     {
       format: 'legacy fork without a persisted display policy',
@@ -2393,7 +2403,13 @@ describe('BackgroundAgentResumeService', () => {
       executionAllowedTools: undefined as string[] | undefined,
       includeDisplayImage: true,
       deniedTool: ToolNames.DISPLAY_IMAGE,
-      expectedExecutionAllowedTools: ['Read', 'Edit'],
+      expectedExecutionAllowedTools: [
+        'Read',
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+        'Edit',
+        'mcp__docs__search',
+      ],
     },
   ])(
     'resumes fork agents with the current parent prompt and live tool registry ($format)',
@@ -2532,6 +2548,14 @@ describe('BackgroundAgentResumeService', () => {
           systemInstruction: currentSystemInstruction,
           advertisedTools: [
             { name: 'Read', description: 'advertised current schema' },
+            {
+              name: ToolNames.TOOL_SEARCH,
+              description: 'advertised deferred tool search',
+            },
+            {
+              name: ToolNames.TOOL_CALL,
+              description: 'advertised deferred tool call',
+            },
             ...(includeDisplayImage
               ? [
                   {
@@ -2549,6 +2573,14 @@ describe('BackgroundAgentResumeService', () => {
           ],
           registeredTools: [
             { name: 'Read', description: 'registered current schema' },
+            {
+              name: ToolNames.TOOL_SEARCH,
+              description: 'registered deferred tool search',
+            },
+            {
+              name: ToolNames.TOOL_CALL,
+              description: 'registered deferred tool call',
+            },
             ...(includeDisplayImage
               ? [
                   {
@@ -2561,6 +2593,10 @@ describe('BackgroundAgentResumeService', () => {
             {
               name: ToolNames.ASK_USER_QUESTION,
               description: 'registered interactive question schema',
+            },
+            {
+              name: 'mcp__docs__search',
+              description: 'registered deferred MCP target',
             },
           ],
         },
@@ -2592,6 +2628,8 @@ describe('BackgroundAgentResumeService', () => {
       expect(createArgs?.[5]).toEqual({
         tools: [
           'Read',
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
           ...(includeDisplayImage ? [ToolNames.DISPLAY_IMAGE] : []),
           'Edit',
           ToolNames.ASK_USER_QUESTION,
@@ -2625,6 +2663,161 @@ describe('BackgroundAgentResumeService', () => {
       createSpy.mockRestore();
     },
   );
+
+  it('restores the persisted disallowedTools blocklist on fork resume', async () => {
+    // R29-1: the launch sidecar persisted only executionAllowedTools, so a
+    // backgrounded fork resumed with its mcp__* allowlist but without the
+    // disallowedTools blocklist that was the only thing bounding it — the
+    // resumed fork would execute the very MCP tool the launching agent was
+    // configured never to reach. Mutation check: dropping the disallowedTools
+    // restore in createResumedForkSubagent turns this red (the mcp__*
+    // allowlist then admits the call and deniedError stays undefined).
+    const sessionId = 'session-fork-blocklist';
+    const agentId = 'agent-fork-blocklist';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+    const launchPrompt = 'Investigate the retry loop and patch it';
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: FORK_SUBAGENT_TYPE,
+      description: launchPrompt,
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: FORK_SUBAGENT_TYPE,
+      resolvedApprovalMode: 'default',
+      executionAllowedTools: ['mcp__*'],
+      disallowedTools: ['mcp__slack'],
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'sys1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          systemPayload: {
+            kind: 'fork',
+            history: [
+              { role: 'user', parts: [{ text: 'bootstrap env' }] },
+              { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: 'sys1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launchPrompt }] },
+        }),
+        JSON.stringify({
+          uuid: 'sys2',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'system',
+          subtype: 'agent_launch_prompt',
+          systemPayload: {
+            displayText: buildChildMessage(launchPrompt),
+          },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'sys2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Working silently' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: launchPrompt,
+      subagentType: FORK_SUBAGENT_TYPE,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: launchPrompt,
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    const originalCreate = AgentHeadless.create;
+    let deniedError: unknown;
+    const deniedBuild = vi.fn();
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockImplementation(async (...args) => {
+        const subagent = await originalCreate(...args);
+        vi.spyOn(subagent, 'execute').mockImplementation(async () => {
+          const denial = await subagent.getCore().processFunctionCalls(
+            [
+              {
+                id: 'call-denied',
+                name: 'mcp__slack__post_message',
+                args: {},
+              },
+            ],
+            new AbortController(),
+            'resume-blocklist-test',
+            1,
+            [{ name: 'Read' }, { name: 'mcp__slack__post_message' }],
+          );
+          deniedError =
+            denial.messages[0]?.parts?.[0]?.functionResponse?.response?.[
+              'error'
+            ];
+        });
+        vi.spyOn(subagent, 'getTerminateMode').mockReturnValue(
+          AgentTerminateMode.GOAL,
+        );
+        vi.spyOn(subagent, 'getFinalText').mockReturnValue('done');
+        return subagent;
+      });
+    const { service, stubToolRegistry } = createService({
+      currentForkRuntime: {
+        systemInstruction: 'current parent system instruction',
+        advertisedTools: [
+          { name: 'Read', description: 'advertised read schema' },
+          {
+            name: 'mcp__slack__post_message',
+            description: 'advertised slack schema',
+          },
+        ],
+      },
+    });
+    // The allowlist's mcp__* pattern resolves through the registry's raw
+    // server/tool identity, so the stub must supply it — otherwise the
+    // mutation probe could not admit the call even with the blocklist lost.
+    stubToolRegistry.getTool.mockReturnValue({
+      name: 'mcp__slack__post_message',
+      serverName: 'slack',
+      serverToolName: 'post_message',
+      build: deniedBuild,
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    const toolConfig = createSpy.mock.calls[0]?.[5];
+    expect(toolConfig?.executionAllowedTools).toEqual(['mcp__*']);
+    expect(toolConfig?.disallowedTools).toEqual(['mcp__slack']);
+    expect(deniedError).toContain('execution allowlist');
+    expect(deniedError).not.toContain('not found');
+    expect(deniedBuild).not.toHaveBeenCalled();
+    createSpy.mockRestore();
+  });
 
   it('keeps legacy fork tasks paused when transcript bootstrap is missing', async () => {
     const sessionId = 'session-fork-legacy';
@@ -2925,7 +3118,7 @@ describe('BackgroundAgentResumeService', () => {
       .spyOn(AgentHeadless, 'create')
       .mockResolvedValue(subagent as unknown as AgentHeadless);
 
-    const { service } = createService({
+    const { service, stubToolRegistry } = createService({
       currentForkRuntime: {
         systemInstruction: 'current parent system instruction',
         // SKILL must be in the resolved tool surface so the skills branch of
@@ -2955,6 +3148,15 @@ describe('BackgroundAgentResumeService', () => {
         isSkillActive: vi.fn().mockReturnValue(true),
       },
     });
+
+    // The deferred-tools reminder advertises "invoke it with tool_call", so
+    // model a session where the bridge is registered; buildDeferredToolsReminder
+    // suppresses the reminder when either bridge half is absent.
+    stubToolRegistry.getTool.mockImplementation((name: string) =>
+      name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+        ? ({ name } as never)
+        : undefined,
+    );
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
