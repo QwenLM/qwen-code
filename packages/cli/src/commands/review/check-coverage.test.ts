@@ -209,6 +209,13 @@ function transcript(
      */
     ranges?: Array<[number, number]>;
     /**
+     * Per-call tool-result text for the diff reads, in call order — for the
+     * `Showing lines X-Y of Z total lines.` header the harness prefixes a
+     * cut-short read with, or the `... [truncated]` marker it appends to a
+     * line returned in part. Defaults to a headerless full return.
+     */
+    outputs?: string[];
+    /**
      * The path the reads target. Defaults to the module's diff constant;
      * the drift fixture binds its plan to a real file of its own.
      */
@@ -267,7 +274,7 @@ function transcript(
                 name: 'read_file',
                 response: opts.failed
                   ? { error: 'permission denied' }
-                  : { output: 'diff bytes' },
+                  : { output: opts.outputs?.[i] ?? 'diff bytes' },
               },
             },
           ],
@@ -3693,6 +3700,93 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(chunkReadNothing(admitted)).toBe(false);
   });
 
+  it('fails CLOSED on the chunk-LESS twin of a refused declaration', () => {
+    // The twin of the test above, one seal further out: the identity line
+    // itself is paraphrased, so the assignment grammar refuses the record
+    // (`chunk === null`). The declaration arm refuses it the same — a
+    // marker-less record over an identity-carrying plan cannot prove it
+    // belongs to this plan (R20-6/R21-8) — and the `unopened` fact note
+    // rides `noteChunkCause`'s NAMING seal, which a count-less record with
+    // no read reaching the chunk cannot pass either. That is deliberate:
+    // any cause attached here would be a fact this run cannot attribute,
+    // and the repair the operator needs — relaunch chunk 2 — flows through
+    // `missingChunks` unchanged. Pinned so a later round reads the shape
+    // as designed, not as the fact the assigned route records (R41-2's
+    // twin, confirmed in round 42).
+    const diffPath = join(dir, 'd-identity.txt');
+    const text = 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+new\n';
+    writeFileSync(diffPath, text);
+    const chunks = [
+      { id: 1, startLine: 1, endLine: 100, maxLineChars: 42 },
+      {
+        id: 2,
+        startLine: 101,
+        endLine: 200,
+        maxLineChars: READ_FILE_CHAR_CAP + 1,
+      },
+    ];
+    const sel = buildSelectionIdentity(
+      text,
+      chunks as unknown as DiffChunk[],
+      3,
+    );
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 5000,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks,
+        selection: sel,
+      }),
+    );
+    satisfyRoster(p);
+    const token = planIdentityToken(sel) as string;
+    const mk = (c: number, tok: boolean) =>
+      `You are review agent \`chunk ${c} of 2\` — the territory agent.\n` +
+      (tok ? `Plan identity: ${token}\n` : '') +
+      `read_file(file_path="${briefPath(p, `chunk-${c}`)}")\n` +
+      `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
+    for (const c of [1, 2]) {
+      built(p, c, mk(c, true));
+      writeFileSync(briefPath(p, `chunk-${c}`), 'b');
+    }
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    transcript('a1', mk(1, true), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    // The fully paraphrased delivery: no identity line the grammar reads,
+    // no token, the spelled read and the declaration both kept, zero calls.
+    transcript(
+      'a2',
+      'Please review chunk 2 of 2 carefully.\n' +
+        `read_file(file_path="${briefPath(p, 'chunk-2')}")\n` +
+        `read_file(file_path="${diffPath}", offset=100, limit=100)`,
+      {
+        calls: 0,
+        opens: [briefPath(p, 'chunk-2')],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+    const entry = entryFor(r, 2);
+    // Unattributable, and said so — never `unopened`, which would claim a
+    // fact about THIS plan's chunk from a record the run cannot name.
+    expect(entry.classification).toBe('no-agent');
+    expect(entry.causes).toEqual([]);
+  });
+
   it('reads the FACT axis, not the collapsed repair class', () => {
     // `classify()` ranks causes by which repair subsumes which, so an idle
     // chunk whose prompt was also rewritten reports `rewritten-prompt`.
@@ -6093,6 +6187,37 @@ describe('coverage — a declaration must be evidenced by the declarer\u2019s ow
     // Neither declaration is admitted — the annihilation is intact...
     expect(r.uncoverableChunks).toEqual([]);
     // ...and the spanning read does not step into its place.
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('a chunk agent with NO ranged read cannot stand a declaration down', () => {
+    // The veto's reach filter failed open on `diffReads.length === 0` for
+    // BOTH directions, so a chunk-assigned record that made one UNRANGED
+    // call counted as the non-declaring repair: it broke unanimity, and
+    // its told-range presumption was then itself credited — `covered` over
+    // a chunk whose only agent that provably reached its lines reported it
+    // unreadable (R42-2, the silent pass R34-10's veto exists to stop).
+    // The non-declaring side now votes only on positive reach.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2first', good(2), {
+      calls: 1,
+      range: [100, 100],
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    // Verbatim chunk-2 launch, one diff-naming call with no `limit`, no
+    // declaration — neither a declarer nor a repair.
+    transcript('a2silent', good(2), { calls: 1 });
+    transcript('w', wholeDiff(), {
+      ranges: [
+        [0, 100],
+        [100, 100],
+      ],
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.uncoverableChunks).toEqual([]);
     expect(r.coveredChunks).toEqual([1]);
     expect(r.missingChunks).toEqual([2]);
     expect(r.ok).toBe(false);
@@ -8710,6 +8835,58 @@ describe('coverage — an oversized window is paged, or it is refused and said s
         [0, 300],
         [300, 300],
         [600, 300],
+      ],
+    });
+    expect(coverageFromTranscripts(p, ENV).coveredChunks).toEqual([1]);
+  });
+
+  it('two reads that each TRUNCATED do not page an oversized window', () => {
+    // `pagedAcross` merged the ranges the reads REQUESTED, so two sub-window
+    // reads that each came back short still spanned the window between them
+    // and certified the chunk off a view that never arrived — the R39-3
+    // harm on the multi-read branch (R42-1). The tool's own
+    // `Showing lines X-Y of Z total lines.` header says what arrived.
+    const { p, mk } = oversizedPlan();
+    transcript('a1', mk(900), {
+      ranges: [
+        [0, 450],
+        [450, 450],
+      ],
+      outputs: [
+        'Showing lines 1-230 of 900 total lines.\n\n---\n\ndiff bytes',
+        'Showing lines 451-680 of 900 total lines.\n\n---\n\ndiff bytes',
+      ],
+    });
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([]);
+    expect(r.missingChunks).toEqual([1]);
+    rmSync(join(dir, 'subagents', 'S1', 'agent-a1.jsonl'));
+
+    // A part returned only in part — the `... [truncated]` marker means its
+    // last line is missing its tail — is not a part at all.
+    transcript('a1', mk(900), {
+      ranges: [
+        [0, 450],
+        [450, 450],
+      ],
+      outputs: [
+        'Showing lines 1-450 of 900 total lines.\n\n---\n\ndiff bytes... [truncated]',
+        'Showing lines 451-900 of 900 total lines.\n\n---\n\ndiff bytes',
+      ],
+    });
+    expect(coverageFromTranscripts(p, ENV).missingChunks).toEqual([1]);
+    rmSync(join(dir, 'subagents', 'S1', 'agent-a1.jsonl'));
+
+    // The control: headers reporting full returns over the same requests
+    // page the window, and the chunk is credited.
+    transcript('a1', mk(900), {
+      ranges: [
+        [0, 450],
+        [450, 450],
+      ],
+      outputs: [
+        'Showing lines 1-450 of 900 total lines.\n\n---\n\ndiff bytes',
+        'Showing lines 451-900 of 900 total lines.\n\n---\n\ndiff bytes',
       ],
     });
     expect(coverageFromTranscripts(p, ENV).coveredChunks).toEqual([1]);

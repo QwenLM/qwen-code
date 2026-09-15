@@ -320,6 +320,7 @@ describe('wasGivenTheDiff', () => {
     successfulToolCalls: 0,
     diffToolCalls: 0,
     diffReads: [],
+    diffReadReturns: [],
     successfulCallArgs: [],
     successfulReadFileArgs: [],
     finalText: '',

@@ -1810,11 +1810,19 @@ export function coverageFromTranscripts(
     // a re-read of the head for detail, or a plain retry of the same
     // truncated call, the most natural thing an agent does after seeing a
     // truncation marker — certify the whole chunk (R39-3).
-    const parts = rec.diffReads.filter(
-      ([s, e]) =>
-        s <= c.endLine &&
-        e >= c.startLine &&
-        !(s <= c.startLine && e >= c.endLine),
+    //
+    // Judged on what each call RETURNED, never on what it asked for. Two
+    // sub-window reads that each truncated still merge to the window as
+    // REQUESTED, and certified the chunk off a view that never arrived —
+    // the R38-124/R39-3 harm on the multi-read branch (R42-1). A read the
+    // tool cut short (`null`) is not a part at all, and an unranged read
+    // appears in neither list — both fail closed here.
+    const parts = rec.diffReadReturns.filter(
+      (r): r is [number, number] =>
+        r !== null &&
+        r[0] <= c.endLine &&
+        r[1] >= c.startLine &&
+        !(r[0] <= c.startLine && r[1] >= c.endLine),
     );
     // ...and they have to COVER it between them. Two sub-window reads of the
     // same third of the chunk page nothing.
@@ -1822,12 +1830,6 @@ export function coverageFromTranscripts(
       parts.length > 1 &&
       merge(parts).some(([s, e]) => s <= c.startLine && e >= c.endLine)
     );
-    // Residual, named rather than enumerated: two STRICT sub-window reads can
-    // still each exceed `READ_FILE_CHAR_CAP` on a big enough chunk. Closing
-    // that needs a per-read character measurement, which only the tool result
-    // carries — the transcript records the requested range, not the returned
-    // size. The plan's `chars` is the whole window, so it cannot answer for a
-    // half of it.
   };
   const planContradictsDeclaration = (chunkId: number): boolean => {
     const c = plan.chunks.find((k) => k.id === chunkId);
@@ -1967,12 +1969,33 @@ export function coverageFromTranscripts(
         // nothing disclosed, over a chunk both of its own agents reported
         // unreadable (R37-2).
         //
-        // The two fail-open arms are kept deliberately: a limit-less read
-        // (`diffReads` empty) and a chunk the plan proves unspannable both
-        // leave the honest declarer in the set, exactly as the span test did.
-        // A read that does not overlap at all — the `[0,50]`-against-101-200
-        // whiff — is still excluded, which is the pinned case.
-        declarerTouchedItsChunk(r, chunkId) &&
+        (declaresOwnUncoverable(r, chunkId)
+          ? // The DECLARING side keeps its two fail-open arms (a limit-less
+            // read, a plan-proven unspannable chunk) — they protect the
+            // honest declarer, exactly as the span test did. One exclusion:
+            // a declaration from an EARLIER attempt whose obligation this
+            // session redid is stale, and the veto must not re-pin what the
+            // declaration arm's suppression already stands down — a prior
+            // declarer whose relaunch satisfied the chunk would otherwise
+            // veto the relaunch's own coverage (regression pinned by 'a
+            // superseded prior-attempt declaration does not delete the
+            // chunk it covers'). Scoped to PRIOR records: a same-run
+            // declaration is live, and a same-run record with no reach must
+            // not stand it down (R42-2), nor may two same-run declarers
+            // drop each other here — their annihilation is what the veto
+            // exists to land in `missingChunks` (R34-10).
+            declarerTouchedItsChunk(r, chunkId) &&
+            !(r.fromPriorSession === true && supersededByCurrent(r, chunkId))
+          : // The non-declaring side gets no fail-open: a record that made
+            // not one RANGED read reached nothing it can vote with, and
+            // letting it stand the declarations down certified the chunk
+            // off its told-range presumption below — `coveredChunks` over a
+            // chunk whose only agent that provably reached its lines
+            // reported it unreadable, the silent pass the veto was added to
+            // stop (R42-2, R34-10's rule restated). A read that does not
+            // overlap at all — the `[0,50]`-against-101-200 whiff — is
+            // still excluded on either side, which is the pinned case.
+            r.diffReads.length > 0 && readsReachChunk(r.diffReads, chunkId)) &&
         // Sealed like every other arm that lets a declaration reach a
         // verdict: a record from an earlier chunking carries an id that can
         // collide with a planned one, and a STALE declaration must not veto

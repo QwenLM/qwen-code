@@ -26,6 +26,7 @@ function rec(over: Partial<AgentRecord>): AgentRecord {
     successfulToolCalls: 0,
     diffToolCalls: 0,
     diffReads: [],
+    diffReadReturns: [],
     successfulCallArgs: [],
     successfulReadFileArgs: [],
     recordedSession: 's1',
