@@ -28,6 +28,7 @@ import type {
   BrowserHistoryEntry,
   BrowserInfo,
   DispatchResult,
+  FinalizeTabDisposition,
   LogEntry,
 } from '../core/primitives.js';
 import { commandSchemas, type SupportedCommand } from '../core/schemas.js';
@@ -150,7 +151,7 @@ export class PlaywrightRuntime {
     switch (method) {
       case 'browsers.list':
         try {
-          await this.bridge.request('ping', {}, 1_500);
+          await this.bridge.request('ping');
           return [this.browserInfo()];
         } catch (error) {
           if (
@@ -195,6 +196,14 @@ export class PlaywrightRuntime {
       case 'tabs.selected':
         this.assertBrowser(stringArg(args, 'browserId'));
         return await this.session.selectedTabInfo();
+      case 'tabs.finalize':
+        this.assertBrowser(stringArg(args, 'browserId'));
+        await this.session.finalizeTabs(
+          Array.isArray(args.keep)
+            ? (args.keep as FinalizeTabDisposition[])
+            : [],
+        );
+        return null;
       case 'tab.goto': {
         const tab = this.tab(args);
         const url = stringArg(args, 'url');

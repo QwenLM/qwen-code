@@ -16,7 +16,7 @@ This runtime controls the user's existing Chrome through an explicitly installed
 - A claim fails closed if the tab title or URL changed after discovery; list open tabs again instead of claiming a different tab.
 - Do not guess tab ids. Only claim ids that came from the current openTabs() result.
 - tabs.new() creates a new agent tab in the user's Chrome; it shares the profile's cookies and signed-in state.
-- browser.user.history({ queries?, from?, to?, limit? }) lists recent browsing history ordered by dateVisited descending.
+- browser.user.history({ queries?, from?, to?, limit? }) lists recent browsing history ordered by dateVisited descending. Without from, Chrome searches the last 24 hours; pass from explicitly to include older visits.
 - Kernel reset loses JavaScript handles but does not close Chrome or erase its profile. Re-run setup and claim the tab again.
 
 ## API
@@ -38,7 +38,7 @@ This runtime controls the user's existing Chrome through an explicitly installed
 - tab.dev.logs({ filter?, levels?, limit? }) returns console messages and uncaught exceptions captured since the tab was claimed.
 - JavaScript dialogs: opening a dialog does not by itself make an already-dispatched click or keypress fail. Call tab.getJsDialog() to read the dialog type and message. While a dialog is open, page operations fail with DIALOG_OPEN instead of waiting for a timeout. Alerts can be dismissed, confirms and before-unload dialogs can be accepted or dismissed, and prompts require text when accepted. A dialog handle applies only to the dialog that was read; get a new handle if it has closed or been replaced.
 - A claimed tab that is closed, crashed, or whose debugger the user revoked reports STALE_TAB on the next command; claim a tab again to continue.
-- Screenshots return JPEG image objects for nodeRepl.emitImage(). Their metadata reports the original image dimensions, viewport, device pixel ratio and CSS-pixel coordinate space. Only a viewport screenshot is directly usable as cua coordinate space; for clip and fullPage captures the metadata origin names the document point of the image's top-left pixel.
+- Screenshots return JPEG bytes, mimeType and metadata with the original image dimensions, viewport, device pixel ratio and CSS-pixel coordinate space. Pass the complete object to nodeRepl.emitImage(await tab.screenshot()) so metadata stays attached to the image. Only a viewport screenshot is directly usable as cua coordinate space; for clip and fullPage captures the metadata origin names the document point of the image's top-left pixel.
 - Clipboard and raw CDP are not exposed.
 
 - Browser transport, serialization, snapshot truncation and screenshot budgets are runtime details rather than model-facing controls.`;
