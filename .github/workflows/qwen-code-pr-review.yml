@@ -196,7 +196,7 @@ jobs:
           # A command-triggered run executes against the base branch, so its
           # `review-pr` check attaches to main's commit and never shows under
           # this PR's checks — the link here is the only way to watch it.
-          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is running in [workflow run](%s). A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued for an available runner; follow the [workflow run](%s) for progress. A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
           # One ack per PR, and it must sit right under the command that asked
           # for it. Editing the previous ack in place kept the count at one but
           # left the notice wherever the FIRST request landed — on a 15-comment

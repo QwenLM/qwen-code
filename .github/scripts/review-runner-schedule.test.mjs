@@ -34,7 +34,7 @@ describe('review runner schedule', () => {
         id: onlineRunners[i].id,
         name: onlineRunners[i].name,
         add: ['ecs-review'],
-        remove: ['ecs-qwen', 'ecs-agent'],
+        remove: ['ecs-qwen'],
       });
     }
     assert.deepEqual(
@@ -66,7 +66,7 @@ describe('review runner schedule', () => {
           id: 2,
           name: 'ecs-qwen-hk1-2',
           add: ['ecs-qwen'],
-          remove: ['ecs-agent'],
+          remove: [],
         },
       ],
     );

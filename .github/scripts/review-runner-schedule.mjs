@@ -14,7 +14,7 @@ import { appendFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
-const MANAGED_LABELS = ['ecs-review', 'ecs-qwen', 'ecs-agent'];
+const MANAGED_LABELS = ['ecs-review', 'ecs-qwen'];
 
 export function planLabels(runners, mode) {
   if (!['review', 'ci'].includes(mode)) {
