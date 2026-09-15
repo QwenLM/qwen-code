@@ -19807,6 +19807,16 @@ describe('ChannelBase', () => {
       expect((ch as any).isLocalCommand('/clear')).toBe(true);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((ch as any).isLocalCommand('/btw')).toBe(true);
+      const noBtw = bridge.btw;
+      delete bridge.btw;
+      try {
+        // /btw forwards to the agent when the bridge cannot answer out of
+        // band, so it is not a locally handled command then.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((ch as any).isLocalCommand('/btw why?')).toBe(false);
+      } finally {
+        bridge.btw = noBtw;
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((ch as any).isLocalCommand('/cancel')).toBe(false);
       ch.enableCancelCommand();

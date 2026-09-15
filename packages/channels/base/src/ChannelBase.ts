@@ -4947,10 +4947,23 @@ export abstract class ChannelBase {
     );
   }
 
+  /**
+   * The registered local command `text` carries, or null. `/btw` counts only
+   * when the bridge can answer it out of band — without the capability it
+   * forwards to the agent, so it is NOT local then. Adapters use this to skip
+   * model-facing work (quote wrappers, media downloads) on turns the agent
+   * will never see. Synchronous and session-free like parseCommand.
+   */
+  protected localCommandName(text: string): string | null {
+    const parsed = this.parseCommand(text);
+    if (!parsed) return null;
+    if (parsed.command === 'btw') return this.bridge.btw ? 'btw' : null;
+    return this.commands.has(parsed.command) ? parsed.command : null;
+  }
+
   /** Check if a message text matches a registered local command. */
   protected isLocalCommand(text: string): boolean {
-    const parsed = this.parseCommand(text);
-    return parsed !== null && this.commands.has(parsed.command);
+    return this.localCommandName(text) !== null;
   }
 
   private findActiveSessionId(envelope: Envelope): string | undefined {
