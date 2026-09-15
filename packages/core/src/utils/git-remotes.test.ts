@@ -1934,6 +1934,28 @@ describe('repository-scope listing and removal', () => {
     );
   });
 
+  it('refuses up front a repository-scope section whose alias lives at an inherited scope', async () => {
+    const dir = makeRepo();
+    // Push resolution spans scopes: a GLOBAL pushInsteadOf alias keeps
+    // the listed repository-scope name resolving push-side, so the
+    // refusal fires even though the panel never lists the scope the
+    // alias lives in — fail-closed, terminal-only escape.
+    git(dir, 'remote', 'add', 'word', 'https://example.com/w/r.git');
+    git(
+      dir,
+      'config',
+      '--global',
+      'url.https://real.example/x.pushinsteadof',
+      'word',
+    );
+    await expect(gitRemoteRemove(dir, 'word', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--local', '--list')).toContain(
+      'remote.word.url',
+    );
+  });
+
   it('keeps the inherited refusal ahead of the pushInsteadOf refusal', async () => {
     const dir = makeRepo();
     // Both pre-destruction refusals can co-fire (inherited section AND

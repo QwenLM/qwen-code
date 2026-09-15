@@ -459,8 +459,13 @@ export async function gitRemoteRemove(
   // repository-scoped to destroy (the block check's own doctrine —
   // fall through to git's 404, the answer the client's stale-row
   // convergence keys on), and a never-configured alias-shaped name
-  // keeps the 404 + converge-skip doctrine (nothing to sweep). The
-  // converge arm keeps its own copy of the check to skip its sweep.
+  // keeps the 404 + converge-skip doctrine (nothing to sweep). An alias
+  // at an INHERITED scope (global/system/unknown) refuses as well —
+  // push resolution spans scopes — so the cause can sit in a file the
+  // panel never lists; and the 409 names no alias at ANY scope, so the
+  // UI never shows the cause: fail-closed, with the terminal (removing
+  // the alias) the only escape while it lives. The converge arm keeps
+  // its own copy of the check to skip its sweep.
   if (
     [...remoteSectionScopesFromRaw(sectionCheck.raw, name, true)].some(
       (scope) => REPOSITORY_SCOPES.has(scope),

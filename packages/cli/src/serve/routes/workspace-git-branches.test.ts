@@ -470,6 +470,7 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         'remote_config_unparsable',
       ],
       ['fatal: not a git repository', 404, 'not_a_git_repository'],
+      ['fatal: invalid reference: refs/heads/x', 404, 'not_a_git_repository'],
       [
         'error: Your local changes to the following files would be overwritten by merge',
         409,
@@ -505,6 +506,22 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       const early = classify('error: the working tree is dirty');
       expect(early.status).toBe(409);
       expect(early.body['error']).toBe('dirty_working_tree');
+      // The not-a-repo family shares the bound: past the cap its
+      // keywords must leave a long unclassified dump unclassified.
+      const deepRepo = classify(`${'x'.repeat(600)} not a git repository`);
+      expect(deepRepo.body['error']).not.toBe('not_a_git_repository');
+      const deepRef = classify(`${'x'.repeat(600)} invalid reference`);
+      expect(deepRef.body['error']).not.toBe('not_a_git_repository');
+    });
+
+    it('anchors the remote-already-exists arm to line 1', () => {
+      // The anchored arm binds line 1 only, so a remote-already-exists
+      // text on a later line falls to the loose keyword arm instead.
+      const out = classify(
+        'fatal: pushing failed\nfatal: remote dup already exists.',
+      );
+      expect(out.status).toBe(409);
+      expect(out.body['error']).toBe('branch_already_exists');
     });
 
     it('keeps redaction linear over a long whitespace-free run', () => {
