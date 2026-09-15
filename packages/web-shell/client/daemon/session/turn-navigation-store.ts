@@ -27,6 +27,7 @@ import {
   HistoricalTranscriptPageTable,
   type HistoricalTranscriptPage,
   type HistoricalTranscriptRange,
+  type HistoricalViewportRange,
   type MaterializedTranscriptPage,
   type TranscriptGapResolution,
 } from './transcript-page-table.js';
@@ -134,12 +135,53 @@ export interface DaemonTurnNavigationStore {
   retry(): Promise<void>;
 }
 
+export interface DaemonHistoryViewportSnapshot {
+  sessionId?: string;
+  revision: number;
+  connected: boolean;
+  pages: ReadonlyMap<string, HistoricalTranscriptPage>;
+  ranges: readonly HistoricalViewportRange[];
+}
+
+export interface HistoryViewportRequest {
+  isCurrent(): boolean;
+}
+
+export interface DaemonHistoryNavigationStore
+  extends DaemonTurnNavigationStore {
+  locateViewportOrdinal(
+    ordinal: number,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation>;
+  getViewportSnapshot(): DaemonHistoryViewportSnapshot;
+  captureLiveBoundary(): LiveHistoryBoundary;
+  hasLiveOverlap(rangeId: string): boolean;
+  openBeforeLive(
+    beforeRecordId: string,
+    request: HistoryViewportRequest,
+  ): Promise<string>;
+  setViewportAnchor(viewportId: string, pageId?: string): void;
+  loadViewportBoundary(
+    rangeId: string,
+    direction: 'older' | 'newer',
+    request: HistoryViewportRequest,
+    beforeAdmit?: () => void,
+  ): Promise<void>;
+}
+
 export interface CreateDaemonTurnNavigationStoreOptions {
+  captureLiveBoundary?: () => LiveHistoryBoundary;
   indexPageSize?: number;
   maxIndexPages?: number;
   maxIndexBytes?: number;
   maxHistoricalPages?: number;
   maxHistoricalBytes?: number;
+}
+
+export interface LiveHistoryBoundary extends HistoryViewportRequest {
+  beforeRecordId?: string;
+  reachable: boolean;
 }
 
 const EMPTY_MAP = new Map<never, never>();
@@ -161,7 +203,7 @@ interface InternalIndexPage extends DaemonTurnIndexPage {
 
 export function createDaemonTurnNavigationStore(
   options: CreateDaemonTurnNavigationStoreOptions = {},
-): DaemonTurnNavigationStore {
+): DaemonHistoryNavigationStore {
   const indexPageSize = options.indexPageSize ?? WEB_SHELL_TURN_INDEX_PAGE_SIZE;
   const maxIndexPages = options.maxIndexPages ?? WEB_SHELL_TURN_INDEX_MAX_PAGES;
   const maxIndexBytes = options.maxIndexBytes ?? WEB_SHELL_TURN_INDEX_MAX_BYTES;
@@ -184,10 +226,18 @@ export function createDaemonTurnNavigationStore(
   let liveBlockIdByPromptId = new Map<string, string>();
   let lastLiveBlocks: readonly DaemonTranscriptBlock[] | undefined;
   let headRequest: Promise<void> | undefined;
+  let headReadGeneration = 0;
+  let ownerRevision = 0;
   let headDirty = false;
   let headRetryPending = false;
   let tooLarge = false;
   let pageTable = createPageTable();
+  let viewportSnapshot: DaemonHistoryViewportSnapshot = Object.freeze({
+    revision: 0,
+    connected: false,
+    pages: EMPTY_MAP,
+    ranges: Object.freeze([]),
+  });
 
   function createPageTable(): HistoricalTranscriptPageTable {
     return new HistoricalTranscriptPageTable({
@@ -211,7 +261,25 @@ export function createDaemonTurnNavigationStore(
   }
 
   function publish(update: Partial<DaemonTurnNavigationSnapshot> = {}): void {
+    const selected = 'selected' in update ? update.selected : snapshot.selected;
+    if (selected?.location?.view !== 'historical') pageTable.clearSelection();
     const table = pageTable.getSnapshot();
+    const legacyRanges = table.ranges.filter(
+      (range): range is HistoricalTranscriptRange => 'anchorTurnId' in range,
+    );
+    const legacyPageIds = new Set(
+      legacyRanges.flatMap((range) => range.pageIds),
+    );
+    const legacyPages = new Map(
+      [...table.pages].filter(([id]) => legacyPageIds.has(id)),
+    );
+    const historicalPages =
+      legacyPages.size === snapshot.historicalPages.size &&
+      [...legacyPages].every(
+        ([id, page]) => snapshot.historicalPages.get(id) === page,
+      )
+        ? snapshot.historicalPages
+        : legacyPages;
     const error = 'error' in update ? update.error : snapshot.error;
     const boundaryOperation =
       error?.operation === 'older' || error?.operation === 'newer'
@@ -236,7 +304,7 @@ export function createDaemonTurnNavigationStore(
         locations.set(turnId, location);
       }
     }
-    for (const range of table.ranges) {
+    for (const range of legacyRanges) {
       for (const pageId of range.pageIds) {
         const page = table.pages.get(pageId);
         if (!page) continue;
@@ -267,9 +335,16 @@ export function createDaemonTurnNavigationStore(
       provisionalTurns: Object.freeze([...provisionals]),
       effectiveTurnCount:
         (update.totalTurns ?? snapshot.totalTurns) + provisionals.length,
-      historicalPages: table.pages,
-      historicalRanges: table.ranges,
+      historicalPages,
+      historicalRanges: Object.freeze(legacyRanges),
       locations,
+    });
+    viewportSnapshot = Object.freeze({
+      sessionId,
+      revision: ownerRevision + chainEpoch,
+      connected: client !== undefined,
+      pages: table.pages,
+      ranges: table.ranges,
     });
     for (const listener of listeners) listener();
   }
@@ -380,6 +455,7 @@ export function createDaemonTurnNavigationStore(
       return;
     }
     if (!next.client) {
+      const disconnected = client !== undefined;
       let releasedBoundary = false;
       if (client) {
         sessionEpoch += 1;
@@ -392,6 +468,7 @@ export function createDaemonTurnNavigationStore(
       clientWasConnected = false;
       if (
         sessionChanged ||
+        disconnected ||
         releasedBoundary ||
         snapshot.selected?.status === 'loading'
       ) {
@@ -411,6 +488,7 @@ export function createDaemonTurnNavigationStore(
     }
     const ownerChanged = clientOwner !== next.client.owner;
     if (ownerChanged && clientOwner !== undefined) {
+      ownerRevision += 1;
       sessionEpoch += 1;
       selectionGeneration += 1;
       headRequest = undefined;
@@ -426,6 +504,7 @@ export function createDaemonTurnNavigationStore(
     client = next.client;
     clientOwner = next.client.owner;
     clientWasConnected = true;
+    if (shouldRefresh) publish();
     if (!shouldRefresh || snapshot.fallbackReason === 'too_large') return;
     if (pages.size === 0)
       publish({ mode: 'loading', fallbackReason: undefined });
@@ -603,6 +682,7 @@ export function createDaemonTurnNavigationStore(
         if (!activeClient) return;
         const capturedSession = sessionEpoch;
         const capturedChain = chainEpoch;
+        const readGeneration = ++headReadGeneration;
         try {
           const response = await activeClient.getTurnIndexPage({
             limit: indexPageSize,
@@ -610,6 +690,7 @@ export function createDaemonTurnNavigationStore(
           if (
             capturedSession !== sessionEpoch ||
             capturedChain !== chainEpoch ||
+            readGeneration !== headReadGeneration ||
             !isCurrentClient(activeClient)
           ) {
             return;
@@ -619,6 +700,7 @@ export function createDaemonTurnNavigationStore(
           if (
             capturedSession !== sessionEpoch ||
             capturedChain !== chainEpoch ||
+            readGeneration !== headReadGeneration ||
             !isCurrentClient(activeClient)
           ) {
             return;
@@ -712,7 +794,11 @@ export function createDaemonTurnNavigationStore(
     }
   }
 
-  async function locateOrdinal(ordinal: number): Promise<DaemonTurnLocation> {
+  async function locateOrdinal(
+    ordinal: number,
+    request?: HistoryViewportRequest,
+    releaseAnchor?: () => void,
+  ): Promise<DaemonTurnLocation> {
     assertOrdinal(ordinal);
     const generation = ++selectionGeneration;
     publish({
@@ -725,7 +811,7 @@ export function createDaemonTurnNavigationStore(
     });
     try {
       await loadOrdinal(ordinal, generation);
-      if (generation !== selectionGeneration)
+      if (generation !== selectionGeneration || request?.isCurrent() === false)
         throw new Error('Selection changed');
       const entryWithSnapshot = findIndexEntry(ordinal);
       if (!entryWithSnapshot) throw new Error('Turn metadata is unavailable');
@@ -759,6 +845,7 @@ export function createDaemonTurnNavigationStore(
       });
       if (
         generation !== selectionGeneration ||
+        request?.isCurrent() === false ||
         capturedSession !== sessionEpoch ||
         capturedChain !== chainEpoch ||
         !isCurrentClient(activeClient)
@@ -786,6 +873,7 @@ export function createDaemonTurnNavigationStore(
         });
         return live;
       }
+      releaseAnchor?.();
       const target = pageTable.admitAnchor(
         ordinal,
         entryWithSnapshot.entry.turnId,
@@ -810,7 +898,10 @@ export function createDaemonTurnNavigationStore(
       });
       return location;
     } catch (error) {
-      if (generation === selectionGeneration) {
+      if (
+        generation === selectionGeneration &&
+        request?.isCurrent() !== false
+      ) {
         if (isTranscriptTooLarge(error)) {
           enterTooLargeFallback();
         } else {
@@ -833,9 +924,12 @@ export function createDaemonTurnNavigationStore(
   async function loadBoundary(
     rangeId: string,
     direction: 'older' | 'newer',
+    viewportRequest?: HistoryViewportRequest,
+    beforeAdmit?: () => void,
   ): Promise<void> {
     const activeClient = client;
-    if (!activeClient) return;
+    if (!activeClient || (viewportRequest && !viewportRequest.isCurrent()))
+      return;
     const request = pageTable.beginBoundaryLoad(rangeId, direction);
     if (!request) return;
     const clearBoundaryError = () =>
@@ -855,15 +949,23 @@ export function createDaemonTurnNavigationStore(
         capturedChain === chainEpoch &&
         isCurrentClient(activeClient) &&
         boundary?.kind === 'loading' &&
-        boundary.request === request
+        boundary.request === request &&
+        (viewportRequest?.isCurrent() ?? true)
       );
     };
     try {
       let response: DaemonSessionTranscriptPage;
       let recovery: TranscriptGapResolution | undefined;
       if (request.kind === 'gap') {
+        const origin = pageTable
+          .getSnapshot()
+          .ranges.find((range) => range.id === rangeId);
+        if (!origin) return;
+        const beforeAnchor = 'beforeRecordId' in origin || request.beforeAnchor;
         response = await activeClient.getTranscriptPage({
-          atRecordId: request.anchorRecordId,
+          ...(beforeAnchor
+            ? { beforeRecordId: request.anchorRecordId }
+            : { atRecordId: request.anchorRecordId }),
           snapshot: request.snapshot,
           limit: WEB_SHELL_HISTORY_PAGE_SIZE,
         });
@@ -876,6 +978,8 @@ export function createDaemonTurnNavigationStore(
           validateHistoricalResponse(response, sessionId);
           if (
             fromAnchor &&
+            !beforeAnchor &&
+            'anchorTurnId' in origin &&
             response.targetRecordId !== request.anchorRecordId
           ) {
             throw new Error('Gap recovery response did not contain its anchor');
@@ -940,6 +1044,8 @@ export function createDaemonTurnNavigationStore(
         ? table.pages.get(firstPageId)?.snapshot
         : undefined;
       if (!rangeSnapshot) return;
+      beforeAdmit?.();
+      if (!isCurrentBoundary()) return;
       pageTable.admitBoundary(
         rangeId,
         direction,
@@ -965,7 +1071,143 @@ export function createDaemonTurnNavigationStore(
         if (extractHttpStatus(error) === 409) void refreshHead();
       }
       throw error;
+    } finally {
+      if (
+        viewportRequest &&
+        !viewportRequest.isCurrent() &&
+        capturedSession === sessionEpoch &&
+        capturedChain === chainEpoch
+      ) {
+        pageTable.cancelBoundaryLoad(rangeId, direction, request);
+        publish();
+      }
     }
+  }
+
+  async function openBeforeLive(
+    beforeRecordId: string,
+    request: HistoryViewportRequest,
+  ): Promise<string> {
+    const activeClient = client;
+    if (!activeClient || snapshot.mode === 'legacy' || !beforeRecordId) {
+      throw new Error('Session history is unavailable');
+    }
+    const epoch = sessionEpoch;
+    const chain = chainEpoch;
+    const current = () =>
+      epoch === sessionEpoch &&
+      chain === chainEpoch &&
+      isCurrentClient(activeClient) &&
+      request.isCurrent();
+    const head = await readFreshHead(activeClient, current);
+    let response = await activeClient.getTranscriptPage({
+      beforeRecordId,
+      snapshot: head.snapshot,
+      limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+    });
+    let previousCursor: string | undefined;
+    while (current()) {
+      validateHistoricalResponse(response, sessionId);
+      const target = pageTable.admitBefore(
+        beforeRecordId,
+        head.snapshot,
+        response,
+      );
+      if (target) {
+        publish();
+        return target.rangeId;
+      }
+      if (
+        !response.hasMore ||
+        !response.nextCursor ||
+        response.nextCursor === previousCursor
+      ) {
+        throw new Error('Earlier history could not be displayed');
+      }
+      previousCursor = response.nextCursor;
+      response = await activeClient.getTranscriptPage({
+        cursor: response.nextCursor,
+        limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+      });
+    }
+    throw new Error('History view changed');
+  }
+
+  async function readFreshHead(
+    activeClient: DaemonTurnNavigationClient,
+    current: () => boolean,
+  ): Promise<DaemonSessionTurnIndexPage> {
+    await headRequest;
+    if (!current()) throw new Error('History view changed');
+    const generation = ++headReadGeneration;
+    try {
+      const head = await activeClient.getTurnIndexPage({
+        limit: indexPageSize,
+      });
+      if (!current() || generation !== headReadGeneration)
+        throw new Error('History view changed');
+      admitHead(head);
+      if (!current()) throw new Error('History view changed');
+      return head;
+    } catch (error) {
+      if (current() && generation === headReadGeneration)
+        handleIndexError(error);
+      throw error;
+    }
+  }
+
+  async function loadViewportBoundary(
+    rangeId: string,
+    direction: 'older' | 'newer',
+    request: HistoryViewportRequest,
+    beforeAdmit?: () => void,
+  ): Promise<void> {
+    const range = pageTable
+      .getSnapshot()
+      .ranges.find((range) => range.id === rangeId);
+    if (!range || !request.isCurrent()) return;
+    if (direction !== 'newer' || range.newer.kind !== 'live') {
+      return loadBoundary(rangeId, direction, request, beforeAdmit);
+    }
+    const boundary = options.captureLiveBoundary?.();
+    const activeClient = client;
+    if (
+      !activeClient ||
+      !boundary?.reachable ||
+      !boundary.beforeRecordId ||
+      hasLiveOverlap(range.id) ||
+      ('beforeRecordId' in range &&
+        boundary.beforeRecordId === range.beforeRecordId)
+    )
+      return;
+    const revision = viewportSnapshot.revision;
+    const current = () =>
+      request.isCurrent() &&
+      boundary.isCurrent() &&
+      viewportSnapshot.revision === revision &&
+      isCurrentClient(activeClient);
+    const head = await readFreshHead(activeClient, current);
+    pageTable.reopenLiveBoundary(
+      rangeId,
+      boundary.beforeRecordId,
+      head.snapshot,
+    );
+    publish();
+    return loadBoundary(
+      rangeId,
+      direction,
+      { isCurrent: current },
+      beforeAdmit,
+    );
+  }
+
+  function hasLiveOverlap(rangeId: string): boolean {
+    const table = pageTable.getSnapshot();
+    const range = table.ranges.find((range) => range.id === rangeId);
+    const edge = range
+      ? table.pages.get(range.pageIds.at(-1)!)?.lastRecordId
+      : undefined;
+    return edge !== undefined && liveRecordIds.has(edge);
   }
 
   async function retry(): Promise<void> {
@@ -1229,6 +1471,19 @@ export function createDaemonTurnNavigationStore(
 
   return {
     getSnapshot: () => snapshot,
+    getViewportSnapshot: () => viewportSnapshot,
+    hasLiveOverlap,
+    captureLiveBoundary: () =>
+      options.captureLiveBoundary?.() ?? {
+        reachable: false,
+        isCurrent: () => false,
+      },
+    openBeforeLive,
+    setViewportAnchor: (viewportId, pageId) => {
+      pageTable.setViewportAnchor(viewportId, pageId);
+      if (pageId) pageTable.clearSelection();
+    },
+    loadViewportBoundary,
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -1240,6 +1495,7 @@ export function createDaemonTurnNavigationStore(
     handleSessionEvent,
     loadOrdinal,
     locateOrdinal,
+    locateViewportOrdinal: locateOrdinal,
     refreshHead,
     loadOlder: (rangeId) => loadBoundary(rangeId, 'older'),
     loadNewer: (rangeId) => loadBoundary(rangeId, 'newer'),

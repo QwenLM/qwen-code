@@ -1215,6 +1215,77 @@ describe('ExportTranscriptDocumentV1', () => {
     );
   });
 
+  it('exports structured question answers through the safe preview allowlist', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('tool-start', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  args: { questions: [] },
+                },
+              },
+            ],
+          },
+        }),
+        record('tool-result', 'tool-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  response: { output: 'Question A: first\n**B**: embedded' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'ask-1',
+            resultDisplay: {
+              type: 'ask_user_question_answers',
+              text: 'Question A: first\n**B**: embedded',
+              answers: [
+                {
+                  question: 'Read /Users/alice/example.ts?',
+                  answer: 'first\n**B**: embedded',
+                  secret: CANARY,
+                },
+              ],
+              secret: CANARY,
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+    expect(tool?.resultPreview).toEqual({
+      kind: 'question_answers',
+      text: 'Question A: first\n**B**: embedded',
+      answers: [
+        {
+          question: 'Read [home]/example.ts?',
+          answer: 'first\n**B**: embedded',
+        },
+      ],
+    });
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+    const invalid = structuredClone(document);
+    const invalidTool = invalid.blocks.find((block) => block.kind === 'tool');
+    Object.assign(invalidTool!.resultPreview!, { secret: CANARY });
+    expect(() => assertExportTranscriptDocumentV1(invalid)).toThrow();
+  });
+
   it('degrades a completed tool when its safe result preview is unavailable', () => {
     const document = createExportTranscriptDocumentV1(
       [

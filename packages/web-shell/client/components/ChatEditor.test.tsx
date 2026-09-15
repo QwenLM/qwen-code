@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from 'react';
+import { act, createRef, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonWorkspaceGitStatus,
@@ -151,6 +151,10 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   imageDragActive: false,
+  navigatePrevHistory: vi.fn(),
+  navigateNextHistory: vi.fn(),
+  shellMode: false,
+  setShellMode: vi.fn(),
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
@@ -268,8 +272,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         clear: vi.fn(),
         retryLast: vi.fn(),
         replaceEditorText: vi.fn(),
-        shellMode: false,
-        setShellMode: vi.fn(),
+        shellMode: composerCoreState.shellMode,
+        setShellMode: composerCoreState.setShellMode,
         toggleShellMode: vi.fn(),
         currentMode: 'default',
         sessionName: undefined,
@@ -287,8 +291,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           handleSearchInput: vi.fn(),
           handleSearchCompositionEnd: vi.fn(),
         },
-        navigatePrevHistory: vi.fn(),
-        navigateNextHistory: vi.fn(),
+        navigatePrevHistory: composerCoreState.navigatePrevHistory,
+        navigateNextHistory: composerCoreState.navigateNextHistory,
         showShortcutHints: false,
         followupState: { isVisible: false, suggestion: '' },
         disabled: false,
@@ -346,6 +350,10 @@ afterEach(() => {
   composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
+  composerCoreState.navigatePrevHistory.mockReset();
+  composerCoreState.navigateNextHistory.mockReset();
+  composerCoreState.setShellMode.mockReset();
+  composerCoreState.shellMode = false;
   composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
@@ -362,7 +370,11 @@ afterEach(() => {
   latestComposerCoreOptions.current = null;
 });
 
-interface ChatEditorRenderProps {
+interface ChatEditorRenderProps
+  extends Pick<
+    ComponentProps<typeof ChatEditor>,
+    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+  > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
   pastedFiles?: Array<{
@@ -379,6 +391,11 @@ interface ChatEditorRenderProps {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
+  planMode?: boolean;
+  modeControlsDisabled?: boolean;
+  onTogglePlan?: () => void;
+  isRunning?: boolean;
+  onCancel?: () => void;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
   sessionWorkflowEnabled?: boolean;
@@ -398,12 +415,17 @@ interface ChatEditorRenderProps {
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
+  attachmentsEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
   language?: WebShellLanguage;
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
@@ -533,6 +555,27 @@ describe('ChatEditor add menu (+)', () => {
       visibleToolbarActions: ['approvalMode', 'voice'],
     });
     expect(trigger(container)).toBeNull();
+  });
+
+  it('keeps session attachments available without workspace actions', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: true,
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+
+    expect(
+      portalRoot.querySelector('[data-testid="composer-add-menu-file-attach"]'),
+    ).not.toBeNull();
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-file-upload"]:not([data-disabled])',
+      ),
+    ).toBeNull();
   });
 
   it('stays off by default when the host passes no toolbar list', () => {
@@ -887,6 +930,10 @@ describe('ChatEditor context usage ring', () => {
     const button = ring(container)!;
     expect(button).not.toBeNull();
     expect(button.getAttribute('aria-label')).toBe('34.3% context used');
+    expect(button.textContent).toBe('34.3%');
+    expect(
+      button.querySelector('[data-level]')?.getAttribute('data-level'),
+    ).toBe('normal');
     const liveVoice = container.querySelector(
       '[data-testid="live-voice-button"]',
     )!;
@@ -921,6 +968,70 @@ describe('ChatEditor context usage ring', () => {
     expect(ring(noWindow)).toBeNull();
   });
 
+  it('discards a pending hover when the owning session changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        sessionId: 'session-a',
+        tokenCount: 100,
+        contextWindow: 1000,
+        onShowContextUsage: vi.fn(),
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        ring(container)!.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true }),
+        ),
+      );
+      rerenderChatEditor(container, { ...props, sessionId: 'session-b' });
+      expect(ring(container)).not.toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(350));
+      expect(
+        document.querySelector('[data-web-shell-context-popover]'),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps live hover actions available for an always-visible ring with unknown counts', async () => {
+    const compress = vi.fn().mockResolvedValue(undefined);
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const getContextUsage = vi.fn();
+    const container = renderChatEditor({
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage,
+      onShowContextUsage,
+      contextUsageControls: {
+        sessionId: 'session-1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage,
+      },
+    });
+    await act(async () => ring(container)!.focus());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')).toBeNull();
+    expect(ring(container)!.hasAttribute('aria-describedby')).toBe(false);
+    expect(container.querySelector('[id$="-description"]')).toBeNull();
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const compression = buttons.find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compression.disabled).toBe(false);
+    await act(async () => compression.click());
+    expect(compress).toHaveBeenCalledOnce();
+    await act(async () =>
+      buttons.find((button) => button.textContent === 'View details')!.click(),
+    );
+    expect(onOpenContextUsage).toHaveBeenCalledOnce();
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+  });
+
   it('opens the context breakdown when clicked', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
@@ -938,7 +1049,7 @@ describe('ChatEditor context usage ring', () => {
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
   });
 
-  it('shows the used/total detail in a tooltip on focus', async () => {
+  it('shows the used/total detail in the hover card on focus', async () => {
     const container = renderChatEditor({
       tokenCount: 53_600,
       contextWindow: 1_000_000,
@@ -949,18 +1060,72 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
 
-    expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
-    const arrow = document.querySelector<SVGElement>(
-      '[data-slot="tooltip-arrow"]',
-    );
-    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
-    expect(arrow?.style.transform).toBe(
-      'translateY(var(--floating-arrow-offset))',
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).toContain('5.4%');
+    expect(tooltip.textContent).toContain('53,600 tokens');
+    expect(tooltip.textContent).toContain('1,000,000 tokens');
+    expect(tooltip.textContent).toContain('Remaining946,400 tokens');
+    expect(tooltip.textContent).toContain(
+      'Click to view the breakdown in the conversation.',
     );
     expect(
-      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
-    ).toContain('[--floating-arrow-offset:-1px]');
+      tooltip.querySelector<HTMLElement>('[data-level]')?.style.width,
+    ).toBe('5.36%');
+    expect(
+      document
+        .getElementById(ring(container)!.getAttribute('aria-controls')!)
+        ?.getAttribute('aria-label'),
+    ).toBe('Context Usage');
+    expect(
+      document.getElementById(
+        ring(container)!.getAttribute('aria-describedby')!,
+      )?.textContent,
+    ).toBe('53,600 of 1,000,000 tokens used');
   });
+
+  it('shows zero remaining capacity when usage exceeds the context window', async () => {
+    const container = renderChatEditor({
+      tokenCount: 120_000,
+      contextWindow: 100_000,
+      onShowContextUsage: vi.fn(),
+    });
+    await act(async () => {
+      ring(container)!.focus();
+    });
+    expect(
+      document.querySelector('[data-web-shell-context-popover]')?.textContent,
+    ).toContain('Remaining0 tokens');
+  });
+
+  it.each([
+    [60, 'normal'],
+    [61, 'warning'],
+    [80, 'warning'],
+    [81, 'error'],
+  ] as const)(
+    'uses %s percent severity in the visible label and focused tooltip',
+    async (tokenCount, level) => {
+      const container = renderChatEditor({
+        tokenCount,
+        contextWindow: 100,
+        onShowContextUsage: vi.fn(),
+      });
+      await act(async () => {
+        ring(container)!.focus();
+      });
+      expect(
+        ring(container)!
+          .querySelector('[data-level]')
+          ?.getAttribute('data-level'),
+      ).toBe(level);
+      expect(
+        document
+          .querySelector('[data-web-shell-context-popover] [data-level]')
+          ?.getAttribute('data-level'),
+      ).toBe(level);
+    },
+  );
 
   it('escalates the arc color at the /context panel thresholds', () => {
     const arcClass = (container: HTMLElement) =>
@@ -990,12 +1155,43 @@ describe('ChatEditor context usage ring', () => {
 
     const button = ring(container)!;
     expect(button.getAttribute('aria-label')).toBe('150.0% context used');
+    expect(button.textContent).toBe('150.0%');
+    expect(
+      button.querySelector('[data-level]')?.getAttribute('data-level'),
+    ).toBe('error');
     const arc = button.querySelectorAll('circle')[1];
     expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
   });
 });
 
 describe('ChatEditor attachment reporting', () => {
+  it('renders attachments with a file icon, title, and type', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'report.html',
+          media_type: 'text/html',
+          text: '<h1>Report</h1>',
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(
+      attachments?.querySelector('[data-file-type-icon="html"]'),
+    ).not.toBeNull();
+    expect(
+      attachments?.querySelector('[title="report.html"]')?.textContent,
+    ).toBe('report.html');
+    expect(attachments?.querySelector('[title="HTML"]')?.textContent).toBe(
+      'HTML',
+    );
+    expect(
+      attachments?.querySelector('button[aria-label="Remove report.html"]'),
+    ).not.toBeNull();
+  });
+
   it('reports whether the composer has tags or pasted images', () => {
     const onEmptyAttachmentsChange = vi.fn();
     renderChatEditor({
@@ -1103,7 +1299,10 @@ describe('ChatEditor composer tag icons', () => {
 
     expect(
       container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(kinds.length - 1);
+    expect(
+      container.querySelector('[data-file-type-icon="file"]'),
+    ).not.toBeNull();
   });
 
   it('rejects unsafe custom icon URLs for top composer tags', () => {
@@ -1174,6 +1373,41 @@ describe('ChatEditor git branch toolbar integration', () => {
 });
 
 describe('ChatEditor workspace toolbar integration', () => {
+  it('controls the workspace selector with the workspace action', () => {
+    const props = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/main',
+          label: 'main',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'api',
+          cwd: '/work/api',
+          label: 'api',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      onSelectWorkspace: vi.fn(),
+    };
+
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: ['workspace'],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        ...props,
+        visibleToolbarActions: [],
+      }).querySelector('button[aria-label="Workspace"]'),
+    ).toBeNull();
+  });
+
   it('keeps legacy history fallback for Live but isolates standalone drafts', () => {
     renderChatEditor({
       composerScopeKey: 'live',
@@ -1442,51 +1676,269 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
-describe('ChatEditor Session Workflow mode rename', () => {
-  it('renames only the plan entry in the mode dropdown while enabled', () => {
-    const container = renderChatEditor({
-      visibleToolbarActions: ['approvalMode'],
-      sessionWorkflowEnabled: true,
-    });
+describe('ChatEditor Plan toggle', () => {
+  it('associates the Plan switch with its changing accessible description', () => {
+    const props = {
+      visibleToolbarActions: ['plan'] as const,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    for (const state of [
+      {
+        planMode: false,
+        currentMode: 'yolo',
+        description: 'Plan before executing',
+      },
+      {
+        planMode: true,
+        currentMode: 'yolo',
+        description:
+          'Planning; execute with Full Access after approval. Click to exit planning.',
+      },
+      {
+        planMode: true,
+        currentMode: 'auto-edit',
+        description:
+          'Planning; execute with Auto Edit after approval. Click to exit planning.',
+      },
+      {
+        planMode: false,
+        currentMode: 'auto-edit',
+        description: 'Plan before executing',
+      },
+    ]) {
+      rerenderChatEditor(container, { ...props, ...state });
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-plan-button]',
+      )!;
+      act(() => button.focus());
+      expect(button.getAttribute('aria-label')).toBe('Plan');
+      const descriptionIds = button.getAttribute('aria-describedby');
+      expect(descriptionIds).toBeTruthy();
+      const description = descriptionIds!
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .join(' ');
+      expect(description).toBe(state.description);
+    }
+  });
 
-    act(() => {
+  it('closes an open permission dropdown when mode controls become disabled', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan'] as const,
+      onSelectMode: vi.fn(),
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    act(() =>
       container
         .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
-        ?.click();
-    });
-
-    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
-    expect(popover).not.toBeNull();
-    const labels = Array.from(popover?.querySelectorAll('button') ?? []).map(
-      (button) => button.textContent ?? '',
-    );
-    expect(labels.some((label) => label.includes('Plan & Review (plan)'))).toBe(
-      true,
+        ?.click(),
     );
     expect(
-      labels.some((label) => label.includes('Ask Approval (default)')),
-    ).toBe(true);
-    expect(labels.some((label) => label.includes('Plan (plan)'))).toBe(false);
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: true });
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
   });
 
-  it('renames the active plan mode chip while enabled', () => {
-    const withWorkflow = renderChatEditor({
-      currentMode: 'plan',
-      sessionWorkflowEnabled: true,
+  it('omits Plan from permissions and retains every execution policy', () => {
+    const onSelectMode = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      planMode: true,
+      currentMode: 'yolo',
+      onTogglePlan: vi.fn(),
+      onSelectMode,
     });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const buttons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    );
+    const labels = buttons.map((button) => button.textContent ?? '');
+    expect(labels.some((label) => label.includes('(plan)'))).toBe(false);
+    for (const mode of ['default', 'auto-edit', 'auto', 'yolo']) {
+      expect(labels.some((label) => label.includes(`(${mode})`))).toBe(true);
+    }
+    act(() =>
+      buttons
+        .find((button) => button.textContent?.includes('(auto-edit)'))
+        ?.click(),
+    );
+    expect(onSelectMode).toHaveBeenCalledWith('auto-edit');
     expect(
-      withWorkflow
-        .querySelector('[data-toolbar-measure="mode:expanded"]')
-        ?.textContent?.includes('Plan & Review'),
-    ).toBe(true);
-
-    const withoutWorkflow = renderChatEditor({ currentMode: 'plan' });
-    expect(
-      withoutWorkflow
-        .querySelector('[data-toolbar-measure="mode:expanded"]')
-        ?.textContent?.includes('Plan & Review'),
-    ).toBe(false);
+      container
+        .querySelector('[data-web-shell-plan-button]')
+        ?.getAttribute('aria-checked'),
+    ).toBe('true');
   });
+
+  it('keeps permission and Plan controls operable while approval disables input', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'plan'],
+      disabled: true,
+      planMode: true,
+      currentMode: 'default',
+      onSelectMode,
+      onTogglePlan,
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click(),
+    );
+    const option = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes('(yolo)'));
+    expect(option).toBeDefined();
+    act(() => option!.click());
+    expect(onSelectMode).toHaveBeenCalledWith('yolo');
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-plan-button]')
+        ?.click(),
+    );
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('disables both controls during a plan handoff and restores them afterward', () => {
+    const onSelectMode = vi.fn();
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan'] as const,
+      planMode: true,
+      modeControlsDisabled: true,
+      onSelectMode,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const mode = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const plan = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    )!;
+    expect(mode.disabled).toBe(true);
+    expect(plan.disabled).toBe(true);
+    const planControl = plan.closest('[data-web-shell-plan-control]')!;
+    expect(planControl.hasAttribute('data-disabled')).toBe(true);
+    act(() => {
+      mode.click();
+      plan.click();
+    });
+    expect(onTogglePlan).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: false });
+    expect(mode.disabled).toBe(false);
+    expect(plan.disabled).toBe(false);
+    expect(planControl.hasAttribute('data-disabled')).toBe(false);
+    act(() => plan.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('places the controlled toggle immediately after permission and allows use while running', () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'plan', 'model'] as const,
+      currentMode: 'yolo',
+      onTogglePlan,
+      isRunning: true,
+    };
+    const container = renderChatEditor(props);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-plan-button]',
+    )!;
+    const controls = Array.from(
+      container.querySelectorAll('[data-web-shell-toolbar-leading] button'),
+    );
+    expect(controls.indexOf(button)).toBe(
+      controls.indexOf(
+        container.querySelector('[data-web-shell-mode-button]')!,
+      ) + 1,
+    );
+    expect(button.getAttribute('role')).toBe('switch');
+    expect(button.getAttribute('aria-label')).toBe('Plan');
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    act(() => button.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    rerenderChatEditor(container, { ...props, planMode: true });
+    expect(button.getAttribute('aria-checked')).toBe('true');
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(button.getAttribute('aria-checked')).toBe('false');
+    expect(
+      container.querySelector('[data-toolbar-measure="mode:expanded"]')
+        ?.textContent,
+    ).toContain('Full Access');
+  });
+
+  it.each([
+    { width: 0, label: '' },
+    { width: 300, label: 'Plan' },
+  ])(
+    'fits the Plan label to available toolbar width $width',
+    ({ width, label }) => {
+      const bounds = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+            return { width: 72 } as DOMRect;
+          if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+            return { width: 54 } as DOMRect;
+          if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+            return { width } as DOMRect;
+          return { width: 0 } as DOMRect;
+        });
+      try {
+        const container = renderChatEditor({
+          visibleToolbarActions: ['approvalMode', 'plan'],
+          onTogglePlan: vi.fn(),
+        });
+        const button = container.querySelector('[data-web-shell-plan-button]')!;
+        const control = container.querySelector(
+          '[data-web-shell-plan-control]',
+        )!;
+        expect(control.textContent).toBe(label);
+        expect(control.querySelector('[aria-hidden="true"]') !== null).toBe(
+          label === '',
+        );
+        expect(
+          button.querySelector('[data-slot="switch-thumb"]'),
+        ).not.toBeNull();
+        expect(button.getAttribute('role')).toBe('switch');
+        expect(button.getAttribute('aria-label')).toBe('Plan');
+      } finally {
+        bounds.mockRestore();
+      }
+    },
+  );
+
+  it.each([undefined, [], ['approvalMode']] as const)(
+    'requires an explicit Plan toolbar action: %j',
+    (visibleToolbarActions) => {
+      const container = renderChatEditor({
+        visibleToolbarActions,
+        onTogglePlan: vi.fn(),
+      });
+      expect(
+        container.querySelector('[data-web-shell-plan-button]'),
+      ).toBeNull();
+    },
+  );
 });
 
 describe('ChatEditor toolbar popovers', () => {
@@ -1693,6 +2145,91 @@ describe('ChatEditor toolbar popovers', () => {
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
 
+  it.each([
+    [
+      {
+        enabled: false,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+      },
+      'medium',
+    ],
+    [{ enabled: false, effort: 'default', efforts: [] }, 'default'],
+    [
+      {
+        enabled: false,
+        effort: 'default',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      undefined,
+    ],
+    [
+      { enabled: false, effort: 'default', efforts: [], canEnable: false },
+      undefined,
+    ],
+    [
+      {
+        enabled: true,
+        effort: 'high',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      'none',
+    ],
+    [
+      {
+        enabled: false,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        enableValue: 'default',
+        efforts: ['medium'],
+      },
+      'default',
+    ],
+    [
+      {
+        enabled: true,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['medium'],
+      },
+      'none',
+    ],
+  ] as const)(
+    'toggles thinking only when the requested direction is available for %j',
+    async (reasoning, expected) => {
+      const onSelectReasoningEffort = vi.fn();
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: 'gpt-5.4',
+        availableModels: [{ id: 'gpt-5.4', label: 'GPT-5.4' }],
+        reasoning: { ...reasoning, efforts: [...reasoning.efforts] },
+        onSelectReasoningEffort,
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+          ?.click(),
+      );
+      const toggle = document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-thinking-toggle]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle?.click());
+      expect(toggle?.disabled).toBe(expected === undefined);
+      if (expected === undefined) {
+        expect(onSelectReasoningEffort).not.toHaveBeenCalled();
+      } else {
+        expect(onSelectReasoningEffort).toHaveBeenCalledWith(
+          expected,
+          'toggle',
+        );
+      }
+    },
+  );
+
   it('localizes every fixed effort tier after a runtime language change', () => {
     const props: ChatEditorRenderProps = {
       visibleToolbarActions: ['model'],
@@ -1865,6 +2402,75 @@ describe('ChatEditor toolbar popovers', () => {
 });
 
 describe('ChatEditor slash command popovers', () => {
+  it('keeps Skill status messages out of populated local command menus', () => {
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 3,
+      query: 'th',
+      selectedIndex: 0,
+      items: [{ id: 'theme', label: '/theme', apply: '/theme ' }],
+    };
+    const container = renderChatEditor({ skillsLoading: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('/theme');
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Loading skills...');
+    rerenderChatEditor(container, { skillsLoadError: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Failed to load results');
+  });
+
+  it('requests Skills when slash suggestions open and shows loading and failure states', () => {
+    const onSkillsOpenChange = vi.fn();
+    const props = { onSkillsOpenChange, skillsLoading: true };
+    const container = renderChatEditor(props);
+    expect(onSkillsOpenChange).not.toHaveBeenCalledWith(true);
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 7,
+      query: 'review',
+      selectedIndex: 0,
+      items: [],
+    };
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Loading...');
+    expect(
+      document
+        .querySelector('[data-web-shell-slash-menu]')
+        ?.getAttribute('role'),
+    ).toBeNull();
+    rerenderChatEditor(container, {
+      ...props,
+      skillsLoading: false,
+      skillsLoadError: true,
+    });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Failed to load results');
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: false });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    // A settled catalog renders no status row: the composed app closes an
+    // empty panel via allowEmptySlashMenu, so a "no results" arm would only
+    // ever flash for one frame.
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    composerCoreState.slashMenu = null;
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('uses shadcn popovers for the command panel and hover detail', () => {
     composerCoreState.slashMenu = {
       kind: 'command',
@@ -1958,7 +2564,7 @@ describe('ChatEditor mobile composer quick actions', () => {
       textareaRef: createRef<HTMLTextAreaElement>(),
       value: '',
       onChange: vi.fn(),
-      onPaste: vi.fn(),
+      onBlur: vi.fn(),
       placeholder: '',
     };
   }
@@ -1987,7 +2593,7 @@ describe('ChatEditor mobile composer quick actions', () => {
     });
   });
 
-  it('hides the keyboard shortcut hints grid on the mobile composer', () => {
+  it('shows the keyboard shortcut hints grid on the mobile composer', () => {
     withTouchDevice(() => {
       composerCoreState.mobileComposer = mobileComposerStub();
       const mobileContainer = renderChatEditor({});
@@ -1996,7 +2602,7 @@ describe('ChatEditor mobile composer quick actions', () => {
         Array.from(mobileContainer.querySelectorAll('button')).some(
           (button) => button.textContent === 'Tab',
         ),
-      ).toBe(false);
+      ).toBe(true);
 
       composerCoreState.mobileComposer = null;
       const desktopContainer = renderChatEditor({});
@@ -2006,6 +2612,98 @@ describe('ChatEditor mobile composer quick actions', () => {
           (button) => button.textContent === 'Tab',
         ),
       ).toBe(true);
+    });
+  });
+
+  it('walks prompt history from the hint arrows on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      openQuickActions(container);
+      const pressHint = (label: string) => {
+        const button = Array.from(container.querySelectorAll('button')).find(
+          (candidate) => candidate.textContent === label,
+        );
+        expect(button).not.toBeUndefined();
+        act(() => button!.click());
+      };
+
+      pressHint('↑');
+      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
+      pressHint('↓');
+      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
+
+      // Tab has no completion target on the textarea backend.
+      pressHint('Tab');
+      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
+      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('cancels the running turn from the Esc hint on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const onCancel = vi.fn();
+      const container = renderChatEditor({ isRunning: true, onCancel });
+      openQuickActions(container);
+      const escButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Esc',
+      );
+      expect(escButton).not.toBeUndefined();
+      act(() => escButton!.click());
+      expect(onCancel).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('moves the textarea caret from the cursor hints on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+      expect(textarea).not.toBeNull();
+      openQuickActions(container);
+      // Setting the value after the panel opens keeps React's controlled
+      // state from resetting it on the panel re-render.
+      textarea!.value = 'abcd';
+      textarea!.setSelectionRange(1, 3);
+      const pressHint = (label: string) => {
+        const button = Array.from(container.querySelectorAll('button')).find(
+          (candidate) => candidate.textContent === label,
+        );
+        expect(button).not.toBeUndefined();
+        act(() => button!.click());
+      };
+
+      // An existing selection collapses to its far edge first.
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(3);
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(4);
+      pressHint('←');
+      expect(textarea!.selectionStart).toBe(3);
+
+      // Movement skips whole code points so an emoji is never split.
+      textarea!.value = 'a😀b';
+      textarea!.setSelectionRange(1, 1);
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(3);
+      pressHint('←');
+      expect(textarea!.selectionStart).toBe(1);
+    });
+  });
+
+  it('exits shell mode from the Esc hint on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      composerCoreState.shellMode = true;
+      const container = renderChatEditor({ isRunning: true });
+      openQuickActions(container);
+      const escButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Esc',
+      );
+      expect(escButton).not.toBeUndefined();
+      act(() => escButton!.click());
+      expect(composerCoreState.setShellMode).toHaveBeenCalledWith(false);
     });
   });
 
@@ -2174,10 +2872,28 @@ describe('ChatEditor file upload gating', () => {
     expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
-  it('fileUploadEnabled={false} disables file drag-and-drop in the composer core', () => {
+  it('fileUploadEnabled={false} keeps attachment drag-and-drop enabled', () => {
     uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
     renderChatEditor({ customization: { fileUploadEnabled: false } });
+    expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
+  });
+
+  it('disables attachment drag feedback when attachments are disabled', () => {
+    renderChatEditor({ attachmentsEnabled: false });
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(false);
+  });
+
+  it('does not advertise upload for an attach-only drop preference', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'attach' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'dragenter',
+      ['Files'],
+    );
+    expect(container.querySelector('[data-upload-drag-active]')).toBeNull();
   });
 
   it('enables file drag-and-drop in the composer core by default', () => {
@@ -2186,7 +2902,7 @@ describe('ChatEditor file upload gating', () => {
     expect(latestComposerCoreOptions.current?.fileDragEnabled).toBe(true);
   });
 
-  it('fileUploadEnabled={false} ingests nothing on file drop', () => {
+  it('fileUploadEnabled={false} routes drops to attachments without asking', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
     composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
@@ -2203,13 +2919,131 @@ describe('ChatEditor file upload gating', () => {
       ['Files'],
       [new File(['abc'], 'notes.txt')],
     );
-    // Cancelled so the browser cannot navigate to the dropped file, but no
-    // lane — upload or inline image/text — reacts.
     expect(drop.defaultPrevented).toBe(true);
-    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
     expect(composerCoreState.addTags).not.toHaveBeenCalled();
     expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it.each([
+    ['upload', true],
+    ['attach', true],
+    [undefined, false],
+    ['attach', false],
+  ] as const)(
+    'routes default %s with attachments %s without asking',
+    async (fileDropAction, attachmentsEnabled) => {
+      const workspace = makeWorkspace(['workspace_file_upload']);
+      workspace.client.uploadWorkspaceFile.mockResolvedValue({
+        kind: 'file_upload',
+        path: 'uploads/notes.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({
+        attachmentsEnabled,
+        customization: { fileDropAction, fileUploadDirectory: 'uploads' },
+      });
+      const files = [new File(['abc'], 'notes.txt')];
+      const drop = dispatchDrag(
+        container.querySelector('[data-web-shell-composer-editor]')!,
+        'drop',
+        ['Files'],
+        files,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(drop.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-drop-choice-dialog]'),
+      ).toBeNull();
+      expect(composerCoreState.focus).toHaveBeenCalled();
+      if (fileDropAction === 'attach' && attachmentsEnabled) {
+        expect(composerCoreState.ingestFiles).toHaveBeenCalledWith(files);
+        expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+      } else {
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+        expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledWith(
+          expect.objectContaining({
+            path: 'uploads/notes.txt',
+            data: files[0],
+          }),
+        );
+        expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('falls back to attachments when the preferred upload is unavailable', () => {
+    uploadWorkspaceState.current = makeWorkspace([]);
+    const container = renderChatEditor({
+      customization: { fileDropAction: 'upload' },
+    });
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it('cancels drops when neither destination is available', () => {
+    const workspace = makeWorkspace([]);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({
+      attachmentsEnabled: false,
+      customization: { fileDropAction: 'upload' },
+    });
+    const onDrop = vi.fn();
+    container.addEventListener('drop', onDrop);
+    const drop = dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    { attachmentsEnabled: false },
+    { customization: { fileDropAction: 'attach' as const } },
+  ])('closes a pending choice when routing changes: %j', (props) => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    dispatchDrag(
+      container.querySelector('[data-web-shell-composer-editor]')!,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'notes.txt')],
+    );
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, props);
+    expect(
+      document.querySelector('[data-web-shell-drop-choice-dialog]'),
+    ).toBeNull();
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('asks whether dropped files should be referenced or uploaded', () => {
@@ -2854,6 +3688,9 @@ describe('ChatEditor file upload gating', () => {
       '[data-web-shell-upload-strip] [data-status="done"]',
     );
     expect(row?.textContent).toContain('Saved as report (1).txt');
+    expect(
+      row?.querySelector('[title="Saved as report (1).txt"]'),
+    ).not.toBeNull();
   });
 
   it('shows the plain Uploaded copy when the file kept its name', async () => {

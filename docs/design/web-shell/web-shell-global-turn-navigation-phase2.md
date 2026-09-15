@@ -2,8 +2,15 @@
 
 ## Status
 
-Phase 2A implemented in [#11054](https://github.com/QwenLM/qwen-code/pull/11054)
-(under review); Phase 2B pending. Original proposal: 2026-09-04. Builds on
+Phase 2A merged in [#11054](https://github.com/QwenLM/qwen-code/pull/11054);
+Phase 2B implemented in [#11208](https://github.com/QwenLM/qwen-code/pull/11208),
+following the
+[historical viewport integration design](web-shell-global-turn-navigation-phase2b.md).
+The same open PR also implements the agreed Phase 3 rail and scoped frontend
+verification. See the [parent design](web-shell-global-turn-navigation.md) for
+the current delivery scope and remaining real-daemon acceptance; Phase 3 is no
+longer an unimplemented UI dependency.
+Original proposal: 2026-09-04. Builds on
 `web-shell-global-turn-navigation.md` (Phase 1 merged as #10751) and the
 page-table model of `web-shell-bounded-transcript-and-subagent-details.md`.
 
@@ -21,9 +28,11 @@ same PR so the two documents stop contradicting each other.
 
 The [implementation plan](../../plans/2026-09-04-web-shell-global-turn-navigation-phase2.md)
 supersedes the proposed API names and migration sequence below. Phase 2A adds
-the headless index, isolated historical page table, reconciliation, and hooks;
-Phase 2B migrates legacy sequential pagination. The problem analysis below
-describes `origin/main` at `80497a74d0`, before Phase 2A.
+the headless index, isolated historical page table, reconciliation, and hooks.
+The Phase 2B design supersedes the earlier prepend-compatibility migration and
+assigns only the global rail, not the minimal historical viewport, to Phase 3;
+both are now implemented in #11208.
+The problem analysis below describes `origin/main` at `80497a74d0`, before Phase 2A.
 
 ## Problem
 
@@ -47,8 +56,9 @@ today:
   its completeness is coupled to transcript retention.
 
 Phase 2A builds the two stores and headless random-read API without changing
-the visible transcript. Phase 2B migrates existing sequential pagination;
-Phase 3 wires the visible random-jump UI.
+the visible transcript. Phase 2B adds a historical viewport over the same page
+table while preserving the legacy sequential path. Phase 3 wires the visible
+random-jump rail.
 
 ## Consumed contract (Phase 1, shipped)
 
@@ -194,7 +204,7 @@ as a generic transient index failure.
 ## Non-goals (Phase 3 and later)
 
 - Rail virtualization, rail selection UX, keyboard navigation, jump-to-latest
-  visual integration, and real-browser E2E.
+  visual integration, and real-browser random-jump E2E.
 - Server or SDK protocol changes. (Two known non-blocking Phase 1 follow-ups —
   ACP-path `atRecordId` length parity with the route's 200-char cap, and a
   pinning test for the two-record anchored-expansion case — are tracked
@@ -653,7 +663,9 @@ Provider/store unit tests (vitest + jsdom, extending the existing
 - fallback: capability-absent and ceiling-exceeded paths keep the existing
   rail behavior.
 
-Real-browser random-jump E2E remains Phase 3 with the rail UI.
+Real-browser random-jump checks have since passed with the Phase 3 rail in
+#11208 using the built frontend and deterministic daemon responses. Integrated
+browser-to-real-daemon acceptance remains a separate verification follow-up.
 
 ## Open questions
 

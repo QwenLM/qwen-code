@@ -32,7 +32,7 @@ export const meta = {
 };
 ```
 
-- Use the sandbox globals documented by the `workflow` tool: `phase(title)`, `log(message)`, `agent(prompt, options?)`, `parallel(thunks)`, `pipeline(items, ...stages)`, `workflow(nameOrRef, args?)`, `args`, and `budget`.
+- Use the sandbox globals `phase(title)`, `log(message)`, `agent(prompt, options?)`, `parallel(thunks)`, `pipeline(items, ...stages)`, `workflow(nameOrRef, args?)`, `args`, and `budget`. The `workflow-authoring` skill is the full reference for them — load it before writing anything beyond a trivial script.
 - Scripts cannot import modules or access the filesystem, shell, environment, or network directly. Put required reads and actions in explicit agent prompts.
 - Give every agent a complete, scoped prompt and a concise `label`. State whether it may edit files.
 - Express real concurrency as `parallel([() => agent(...), () => agent(...)])`. Do not pass already-started promises to `parallel`.

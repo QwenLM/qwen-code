@@ -21,6 +21,7 @@ import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
+import { ToolNames } from './tool-names.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -29,6 +30,13 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import {
+  buildExecDeclaration,
+  getToolExposure,
+  planCodeModeBindings,
+  ToolMode,
+  type CodeModeBindingPlan,
+} from './code-mode.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -199,7 +207,8 @@ export class ToolRegistry {
   private factories: Map<string, ToolFactory> = new Map();
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
-  private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
+  private inflight: Map<string, Promise<AnyDeclarativeTool | undefined>> =
+    new Map();
   // Deferred tools that ToolSearch has loaded this session. Once revealed, a
   // tool's schema is included in subsequent function-declaration lists even
   // though it would normally be hidden.
@@ -208,6 +217,7 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops discovered reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
+  private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
   // in `/tools`, discoverable and loadable via ToolSearch, callable through
@@ -252,6 +262,20 @@ export class ToolRegistry {
     const byName = aName.localeCompare(bName);
     if (byName !== 0) return byName;
     return a.displayName.localeCompare(b.displayName);
+  }
+
+  private static compareCodeModeTools(
+    a: AnyDeclarativeTool,
+    b: AnyDeclarativeTool,
+  ): number {
+    const aName = a.schema.name ?? a.name;
+    const bName = b.schema.name ?? b.name;
+    if (aName !== bName) return aName < bName ? -1 : 1;
+    return a.displayName < b.displayName
+      ? -1
+      : a.displayName > b.displayName
+        ? 1
+        : 0;
   }
 
   /**
@@ -394,6 +418,12 @@ export class ToolRegistry {
     return tool.shouldDefer || this.permissionDeferred.has(tool.name);
   }
 
+  private isToolAvailable(name: string): boolean {
+    return (
+      name !== ToolNames.IMAGE_GEN || this.config.isImageGenerationEnabled()
+    );
+  }
+
   /**
    * Ensures a specific tool is loaded. Returns the cached instance if already
    * loaded, otherwise invokes the factory, caches the result, and returns it.
@@ -401,6 +431,7 @@ export class ToolRegistry {
    * factory is never executed more than once.
    */
   async ensureTool(name: string): Promise<AnyDeclarativeTool | undefined> {
+    if (!this.isToolAvailable(name)) return undefined;
     const cached = this.tools.get(name);
     if (cached) {
       // Clean up any stale factory for this name so warmAll() and bulk
@@ -420,7 +451,7 @@ export class ToolRegistry {
         this.tools.set(name, tool);
         this.factories.delete(name);
         this.inflight.delete(name);
-        return tool;
+        return this.isToolAvailable(name) ? tool : undefined;
       })
       .catch((err: unknown) => {
         this.inflight.delete(name);
@@ -818,8 +849,13 @@ export class ToolRegistry {
   getFunctionDeclarations(options?: {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return this.getCodeModeFunctionDeclarations();
+    }
     const includeDeferred = options?.includeDeferred === true;
     return Array.from(this.tools.values())
+      .filter((tool) => this.isToolAvailable(tool.name))
+      .filter((tool) => this.isToolDeclared(tool.name))
       .filter(
         (tool) =>
           includeDeferred ||
@@ -829,6 +865,54 @@ export class ToolRegistry {
       )
       .sort(ToolRegistry.compareToolsByDeclarationName)
       .map((tool) => tool.schema);
+  }
+
+  private getCodeModeFunctionDeclarations(
+    allowedNames?: ReadonlySet<string>,
+  ): FunctionDeclaration[] {
+    const plan = this.getCodeModeBindingPlan(allowedNames);
+    return Array.from(this.tools.values())
+      .filter((tool) => {
+        const exposure = getToolExposure(tool.name);
+        if (exposure === 'exec') return true;
+        return (
+          exposure === 'direct-only' &&
+          (!allowedNames || allowedNames.has(tool.name))
+        );
+      })
+      .sort(ToolRegistry.compareCodeModeTools)
+      .map((tool) =>
+        tool.name === ToolNames.EXEC
+          ? buildExecDeclaration(tool, plan)
+          : tool.schema,
+      );
+  }
+
+  getCodeModeBindingPlan(
+    allowedNames?: ReadonlySet<string>,
+  ): CodeModeBindingPlan {
+    const plan = planCodeModeBindings(
+      Array.from(this.tools.values()).filter(
+        (tool) =>
+          this.isToolAvailable(tool.name) && this.isToolDeclared(tool.name),
+      ),
+      (name) => this.isDeferredAndHidden(name),
+      allowedNames,
+    );
+    this.warnCodeModeCollisions(plan);
+    return plan;
+  }
+
+  private warnCodeModeCollisions(plan: CodeModeBindingPlan): void {
+    for (const collision of plan.collisions) {
+      const key = `${collision.jsName}:${collision.kept}:${collision.omitted}`;
+      if (this.codeModeCollisionWarnings.has(key)) continue;
+      this.codeModeCollisionWarnings.add(key);
+      debugLogger.warn(
+        `Code mode tool "${collision.omitted}" is unavailable because its JavaScript name ` +
+          `tools.${collision.jsName} collides with "${collision.kept}".`,
+      );
+    }
   }
 
   /**
@@ -916,13 +1000,22 @@ export class ToolRegistry {
    * set of on-demand tools in the startup reminder so the model knows what is
    * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
+   *
+   * Always empty in CodeModeOnly: every schema is already bound into the `exec`
+   * description and ToolSearch is hidden, so a reminder built from this summary
+   * would offer a lookup step the model has no way to take.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return [];
+    }
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
       if (
+        this.isToolAvailable(tool.name) &&
         this.isEffectivelyDeferred(tool) &&
         !tool.alwaysLoad &&
+        this.isToolDeclared(tool.name) &&
         !this.config.getVisibleTools().has(tool.name)
       ) {
         summary.push({
@@ -957,6 +1050,7 @@ export class ToolRegistry {
     const candidates: string[] = [];
     let totalChars = 0;
     for (const tool of this.tools.values()) {
+      if (!this.isToolAvailable(tool.name)) continue;
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
       // Permission-deferred tools (#10075) are deliberately excluded: the
       // budget preload exists to stabilise the prompt cache for ordinary
@@ -1016,14 +1110,23 @@ export class ToolRegistry {
           `tool factories. Call warmAll() first to avoid incomplete results.`,
       );
     }
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return this.getCodeModeFunctionDeclarations(new Set(toolNames));
+    }
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
-      const tool = this.tools.get(name);
-      if (tool) {
+      const tool = this.getTool(name);
+      if (tool && this.isToolDeclared(tool.name)) {
         declarations.push(tool.schema);
       }
     }
     return declarations;
+  }
+
+  isToolDeclared(name: string): boolean {
+    return (
+      name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
+    );
   }
 
   /**
@@ -1032,7 +1135,7 @@ export class ToolRegistry {
    */
   getAllToolNames(): string[] {
     const names = new Set([...this.tools.keys(), ...this.factories.keys()]);
-    return Array.from(names);
+    return Array.from(names).filter((name) => this.isToolAvailable(name));
   }
 
   /**
@@ -1048,9 +1151,9 @@ export class ToolRegistry {
           `Call warmAll() first to avoid incomplete results.`,
       );
     }
-    return Array.from(this.tools.values()).sort((a, b) =>
-      a.displayName.localeCompare(b.displayName),
-    );
+    return Array.from(this.tools.values())
+      .filter((tool) => this.isToolAvailable(tool.name))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
   /**
@@ -1070,7 +1173,7 @@ export class ToolRegistry {
    * Get the definition of a specific tool.
    */
   getTool(name: string): AnyDeclarativeTool | undefined {
-    return this.tools.get(name);
+    return this.isToolAvailable(name) ? this.tools.get(name) : undefined;
   }
 
   async readMcpResource(

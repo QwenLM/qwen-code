@@ -47,6 +47,17 @@
   margin-left: auto;
 }
 
+.pendingButton {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning-color);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .addButton {
   appearance: none;
   padding: 4px 12px;
