@@ -931,13 +931,28 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         {/* Everything that flows lives here, and it is the alt-screen stand-in
             for ink's <Static>: the column is bounded by the terminal, so the
             region keeps only the tail of the conversation, pinned to its last
-            row until the user scrolls away from the bottom. */}
+            row until the user scrolls away from the bottom.
+
+            `focusable={false}` because a scroll region is not an input target
+            here. @opentui auto-focuses the first focusable ancestor under a
+            left mouse-down, and its ScrollBox is focusable by default, so
+            clicking the conversation — the most natural gesture on a page of
+            transcript — moved the focus off the composer's editor and nothing
+            moved it back: `focused` is unchanged so the reconciler skips it.
+            The editor then kept the printable keys (the composer's own global
+            handler feeds them) but lost every key only the focused editor
+            handles: the caret stopped moving, and a paste no longer reached
+            the buffer. ink parses mouse reports too, but only into handlers a
+            surface subscribes to and hit-tests against its own rows, and none
+            of them can write the composer's focus — that is a React prop — so
+            a click there changes nothing. */}
         <scrollbox
           flexGrow={1}
           flexShrink={1}
           minHeight={0}
           stickyScroll
           stickyStart="bottom"
+          focusable={false}
         >
           <OpenTuiBanner config={config} settings={settings} />
           {renderMain ? renderMain() : null}

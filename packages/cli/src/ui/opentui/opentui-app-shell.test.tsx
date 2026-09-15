@@ -1993,6 +1993,16 @@ describe('OpenTuiApp transcript scroll region', () => {
     expect(layoutOf(chrome)).toMatchObject({ flexShrink: 0 });
   });
 
+  it('keeps the transcript region out of the focus chain', async () => {
+    // A ScrollBox is focusable by default and the renderer auto-focuses the
+    // first focusable ancestor under a left mouse-down, so one click on the
+    // conversation moved the focus off the composer's editor for the rest of
+    // the session: the caret stopped moving and pastes stopped landing there.
+    await renderWithTranscript();
+    const { region } = readLayout();
+    expect(layoutOf(region)).toMatchObject({ focusable: false });
+  });
+
   it('keeps the dialog out of the scroll region', async () => {
     await renderWithTranscript();
     mocks.state.handleResult = {

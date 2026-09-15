@@ -1344,6 +1344,74 @@ the line it rewrote. Nothing here was reached on a machine, for the reason recor
 Decision 33: the acceptance harness writes one character per write and never pastes into
 these dialogs.
 
+## Decision 38 — the transcript region is not a focus target
+
+One left click anywhere in the conversation used to end the composer's ability
+to edit what it already held. The region that holds the transcript is a
+`scrollbox`, and this renderer's `ScrollBoxRenderable` sets `_focusable = true`
+over its base class's `false` (`@opentui/core`: `index.node.js:13859` against
+`chunk-node-kr27pp2p.js:210`). The renderer walks the ancestors of every left
+mouse-down and focuses the first focusable one, unless the click was handled
+first and prevented the default (`chunk-node-kr27pp2p.js:9091-9104`). So the
+click moved focus onto the scroll region, and `focusRenderable` blurred the
+editor it was on (`:7562-7569`). Blur is not cosmetic: a renderable's key and
+paste handlers exist only while it is focused, and `blur()` detaches both
+(`:325-381`).
+
+Nothing put them back. The composer passes `focused` as a constant, so the prop
+the reconciler compares is unchanged and the write is skipped for the rest of
+the session. Typing still looked fine, which is what nearly got this dismissed:
+printable characters reach the composer through its own global key handler
+rather than the editor's, so the buffer kept growing while the keys only the
+focused editor handles — every caret key, and every paste — went where nothing
+was listening. `Home` with a character after it, and a bracketed paste, are what
+show the difference. ink parses SGR mouse reports as well, but into handlers
+subscribed per surface and hit-tested against that surface's own rows — the
+wheel over a scrollable list, a click inside the prompt input to place its
+caret — and none of them has any route to the composer's focus, which is a
+React prop. A
+click on the conversation changes nothing there, measured rather than inferred.
+
+The region is now `focusable={false}`. Two wider options were rejected. Turning
+`autoFocus` off is a renderer-wide setting, and the dialogs' own fields rely on
+it. Re-focusing the composer when the region steals focus means the transcript
+owns a rule about who should be listening, and the composer's focus is already
+declared by its own prop — two owners for one bit. One prop on the node that has
+no reason to be in the chain is the narrowest statement of the same fact: a
+scroll region is not an input target.
+
+Measured on a real terminal, four arms, one variable — the same bundle and boot
+arguments throughout, and `ink` under node against `opentui` under bun would
+have confounded the runtime with the renderer, so `ink` under bun is its own
+arm. Each arm types four characters, then — except the control — clicks a
+transcript row, then measures whether three left-arrows plus a letter move the
+caret, whether `Home` plus a letter reaches the front, and whether a bracketed
+paste lands in the buffer.
+
+| arm                                   | caret moves | `Home` works | paste lands |
+| ------------------------------------- | ----------- | ------------ | ----------- |
+| `ink`, node, clicked                  | yes         | yes          | yes         |
+| `ink`, bun, clicked                   | yes         | yes          | yes         |
+| `opentui`, bun, clicked — before      | **no**      | **no**       | **no**      |
+| `opentui`, bun, not clicked — control | yes         | yes          | yes         |
+| `opentui`, bun, clicked — after       | yes         | yes          | yes         |
+
+The same click on the composer's own row restored the paste on every arm,
+including the broken one, which is what ties the loss to the editor's focus
+rather than to the keys.
+
+What was checked to survive the fix: the mouse wheel still scrolls the region —
+the dedicated wheel scenario, re-run on this renderer, sticks to the last row,
+shows the rows above the fold after twenty wheel-ups and the last row again
+after wheeling back. That scenario never clicks first, so the wheel
+_after_ a click rests on the routing rather than on a frame: a scroll event is
+routed by hit test, with focus only as the fallback (`:9134-9143`). And one unit
+test pins the prop, killed by a mutation that removes it. What was not: a
+click-drag text selection over the transcript, which the region answers through
+the same hit-test path and which this renderer never advertised, and a click
+while a dialog is open — the dialog lists are still focusable by default,
+recorded under Follow-ups.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -1523,11 +1591,19 @@ What was verified, and how far the verification reaches:
 
 ## Follow-ups
 
-- The scroll region answers the mouse wheel and no key. What scrolls ink's
+- The scroll region answers the mouse wheel and no key — and stays a non-target for
+  keys only because Decision 38 leaves it out of the focus chain, since a focused
+  scroll region does take the keys nothing else was listening for. What scrolls ink's
   conversation is the terminal's own scrollback, and the alternate screen this
   renderer takes over has none, so the page keys that work there reach nothing
   here and a row above the fold comes back only by wheel. Binding those keys to
   the region's own offset is its own change.
+- Every scroll region a dialog draws is still focusable, because that is the class
+  default and only the transcript's was set aside. Whether a click inside a dialog's
+  list can cost the open dialog a caret key the same way Decision 38 describes was
+  not measured; the lists are hit-tested surfaces of their own there, so the exposure
+  may be benign. Worth one arm per dialog before this renderer's mouse handling is
+  called done.
 - The `@` completion here asks only the file index. ink also completes
   sessions, MCP resources and extensions, and draws a category bar to switch
   between them. That is a feature gap rather than a parity defect and belongs
