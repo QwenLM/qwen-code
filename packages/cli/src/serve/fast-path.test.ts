@@ -748,6 +748,7 @@ describe('serve fast path argument parsing', () => {
       ['agent-host-workspace-id', ['--agent-host-workspace-id', 'ws_1']],
       ['agent-host-name', ['--agent-host-name', 'builder']],
       ['agent-host-provider', ['--agent-host-provider', 'codex']],
+      ['agent-host-allow-http', ['--agent-host-allow-http']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
@@ -756,6 +757,7 @@ describe('serve fast path argument parsing', () => {
       // CLI. A managed Agent Host is a different mode — it enrols, polls and
       // launches an executor — so these hand off rather than being taught to
       // the fast path.
+      'agent-host-allow-http',
       'agent-host-name',
       'agent-host-provider',
       'agent-host-server',
