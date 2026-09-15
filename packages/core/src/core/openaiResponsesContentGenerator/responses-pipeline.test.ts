@@ -121,13 +121,22 @@ function gatedByteStream(): {
   };
 }
 
-function makeCliConfig(proxy?: string, sessionId = ''): Config {
+function makeCliConfig(
+  proxy?: string,
+  sessionId = '',
+  allowDynamicHeaderValues = false,
+): Config {
   // Config.getSessionId() is typed `string` and never returns undefined, so
   // the mock must not either -- the reachable "no usable session" state is
   // the empty string.
   return {
     getProxy: () => proxy,
     getSessionId: () => sessionId,
+    // connect() stamps its own User-Agent and resolves customHeaders
+    // placeholders per request; both read Config. The consent gate defaults
+    // to off, matching its production default.
+    getCliVersion: () => '9.9.9-test',
+    getOutboundAllowDynamicHeaderValues: () => allowDynamicHeaderValues,
   } as unknown as Config;
 }
 
@@ -1544,6 +1553,117 @@ describe('ResponsesPipeline', () => {
       expect(headers.get('x-gateway')).toBe('custom');
     },
   );
+
+  // Issue #11936: this wire builds its request headers by hand in
+  // connect(), so it never entered any of the placeholder machinery the
+  // Chat / Anthropic / Gemini wires go through -- a customHeaders value of
+  // `${session_id}` reached the gateway verbatim (with the consent gate on
+  // AND off), no first-party session_id header was added for the allowlisted
+  // gateways, and no QwenCode User-Agent was stamped.
+  describe('outbound correlation headers', () => {
+    const SESSION_HEADER = 'x-opencode-session';
+
+    function mockCompletedResponse() {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+    }
+
+    function outboundHeaders(call = 0): Headers {
+      return new Headers(fetchMock.mock.calls[call]![1].headers);
+    }
+
+    it('stamps a QwenCode User-Agent', async () => {
+      mockCompletedResponse();
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get('user-agent')).toBe(
+        `QwenCode/9.9.9-test (${process.platform}; ${process.arch})`,
+      );
+    });
+
+    it('expands ${session_id} per request when the consent gate is on', async () => {
+      mockCompletedResponse();
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          customHeaders: { [SESSION_HEADER]: 'sess=${session_id}' },
+        }),
+        makeCliConfig(undefined, 'session-abc', true),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get(SESSION_HEADER)).toBe('sess=session-abc');
+    });
+
+    it('drops a placeholder-bearing header instead of sending the literal when the gate is off', async () => {
+      mockCompletedResponse();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          customHeaders: { [SESSION_HEADER]: '${session_id}' },
+        }),
+        makeCliConfig(undefined, 'session-abc', false),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get(SESSION_HEADER)).toBeNull();
+      warn.mockRestore();
+    });
+
+    it('re-expands ${session_id} when the session id rotates between requests', async () => {
+      // A Config whose session id changes under a live pipeline -- what /new
+      // and /resume do. Expansion has to happen per request, not be baked in
+      // once, or the documented rotation silently stops.
+      fetchMock.mockImplementation(async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: sseStream(
+          sseEvent('response.completed', { response: { status: 'completed' } }),
+        ),
+        text: async () => '',
+      }));
+      let sessionId = 'first-session';
+      const cliConfig = {
+        getProxy: () => undefined,
+        getSessionId: () => sessionId,
+        getCliVersion: () => '9.9.9-test',
+        getOutboundAllowDynamicHeaderValues: () => true,
+      } as unknown as Config;
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          customHeaders: { [SESSION_HEADER]: '${session_id}' },
+        }),
+        cliConfig,
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+      sessionId = 'second-session';
+      await pipeline.execute(textRequest('hi'), 'p2');
+
+      expect(outboundHeaders(0).get(SESSION_HEADER)).toBe('first-session');
+      expect(outboundHeaders(1).get(SESSION_HEADER)).toBe('second-session');
+    });
+
+    it('adds the first-party session_id header for an allowlisted gateway host', async () => {
+      mockCompletedResponse();
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ baseUrl: 'https://routify.alibaba-inc.com' }),
+        makeCliConfig(undefined, 'session-abc'),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get('session_id')).toBe('session-abc');
+    });
+  });
 
   it('redacts credentials from the logged request URL', async () => {
     mockResponse(
