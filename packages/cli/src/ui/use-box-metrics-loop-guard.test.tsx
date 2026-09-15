@@ -158,10 +158,14 @@ function OscillatingBox({ onRender }: { onRender?: () => void } = {}) {
 
 // Gates the measured element's own mounting on `hasMeasured`, and the attached
 // box computes to all zeros, so `metrics` never changes value: the only setter
-// scheduling commits is `setHasMeasured`.
-function HasMeasuredGatedBox() {
+// scheduling commits is `setHasMeasured`. `onRender` counts commits the same way
+// `OscillatingBox`'s does, from an effect rather than from the render body.
+function HasMeasuredGatedBox({ onRender }: { onRender?: () => void } = {}) {
   const ref = useRef<DOMElement>(null);
   const { hasMeasured } = useBoxMetrics(ref);
+  useEffect(() => {
+    onRender?.();
+  });
   return hasMeasured ? (
     <Text>fallback</Text>
   ) : (
@@ -186,15 +190,15 @@ function ExternallySizedBox({ size }: { size: number }) {
   );
 }
 
-// Halves its own width on every measurement until it reaches the floor, so it
-// settles only if the guard lets several consecutive self-driven passes run.
-// The width is derived in the render body rather than from state of its own,
-// which keeps the passes on the hook's budget instead of handing the guard a
-// genuine external commit between them.
-function ConvergingBox({ from = 32, floor = 3 }) {
+// Halves its own width on every measurement, from 32 down to 3, so it settles
+// only if five consecutive self-driven passes are allowed to run; a budget of
+// two freezes it on an intermediate width. The width is derived in the render
+// body rather than from state of its own, which keeps the passes on the hook's
+// budget instead of handing the guard a genuine external commit between them.
+function ConvergingBox() {
   const ref = useRef<DOMElement>(null);
   const { width, hasMeasured } = useBoxMetrics(ref);
-  const size = hasMeasured ? Math.max(floor, Math.floor(width / 2)) : from;
+  const size = hasMeasured ? Math.max(3, Math.floor(width / 2)) : 32;
   return (
     <Box flexDirection="row">
       <Box ref={ref}>
@@ -266,7 +270,8 @@ describe('ink useBoxMetrics loop guard', () => {
     // only for commits that re-render this subtree - but a resize is recomputed
     // by ink's own handler with no React commit at all, so `onResize` is the
     // path that reaches a tripped instance while nothing else in the tree
-    // renders.
+    // renders. The commit-path refill of a tripped instance is a separate line
+    // and is pinned by the case below, not by this one.
     // Drop that reset and this case goes red: `updateMetrics` returns before
     // `setMetrics`, so nothing follows the resize and the box renders against a
     // stale width for the rest of the session.
@@ -295,6 +300,56 @@ describe('ink useBoxMetrics loop guard', () => {
     await app.waitUntilRenderFlush();
 
     expect(renders).toBeGreaterThan(afterTrip);
+  });
+
+  it('refills a tripped instance on a later sibling commit, without a resize', async () => {
+    // The case above pins `onResize`; this pins the other refill path, the
+    // `else` branch of `onLayout`, which is the one the comment there calls "any
+    // later commit in the ink root". Nothing pinned it until now: every other
+    // recovery here goes through `stdout.emit('resize')`, and the
+    // external-rerender case never trips - its count oscillates between 0 and 1
+    // across all 39 iterations. Without that refill a box that tripped once
+    // stays frozen until the user happens to resize the terminal, rendering a
+    // stale width for the rest of the session.
+    let renders = 0;
+    let bumpSibling!: () => void;
+    // The sibling owns its state on purpose. With the width in a shared parent
+    // the driver's commit re-renders the oscillator whatever the guard does, so
+    // the assertion stops discriminating. Its width also shifts the oscillator's
+    // `left`, because the guard only re-renders on a changed measurement and a
+    // box that did not move legitimately produces no commit.
+    function Sibling() {
+      const [width, setWidth] = useState(1);
+      bumpSibling = () => setWidth(2);
+      return <Box width={width} />;
+    }
+
+    const { stdout } = createTestStdout(80);
+    const app = await mount(
+      <Box flexDirection="row">
+        <Sibling />
+        <OscillatingBox
+          onRender={() => {
+            renders += 1;
+          }}
+        />
+      </Box>,
+      stdout,
+    );
+    const afterTrip = renders;
+    expect(afterTrip).toBeGreaterThan(1);
+
+    await act(async () => {
+      bumpSibling();
+    });
+    await app.waitUntilRenderFlush();
+
+    // The refill resets the whole budget rather than decrementing it, so the
+    // oscillator runs a second cascade - 16 further commits at this head. Both
+    // mutations of that branch stop short of this bound, so it discriminates the
+    // kind of refill and not merely its presence: a partial refill gets 1, and
+    // one gated on the instance not being tripped gets 0.
+    expect(renders - afterTrip).toBeGreaterThan(2);
   });
 
   it('gives every instance its own measurement budget', async () => {
@@ -376,10 +431,28 @@ describe('ink useBoxMetrics loop guard', () => {
     // `hasMeasured` transition arms the guard too. Without that arming every
     // commit takes the refill branch and the mount runs to React's own cap, so
     // the frame asserted below becomes the #185 error instead of the box.
+    let renders = 0;
     const { stdout, lastFrame } = createTestStdout();
-    await mount(<HasMeasuredGatedBox />, stdout);
+    await mount(
+      <HasMeasuredGatedBox
+        onRender={() => {
+          renders += 1;
+        }}
+      />,
+      stdout,
+    );
 
+    // What the frame pins is the arming's existence, and only that: this fixture
+    // detaches its measured element every other commit, so it is unsubscribed
+    // for those commits and, whichever of its two states the cascade freezes in,
+    // the last non-blank frame is the `fallback` render. The commit count is
+    // what makes this a depth assertion - 32 commits at this head, the
+    // detached-ref doubling of a budget of 16 - and, unlike the frame, it does
+    // not depend on that parity. React's own cap is 50 commits, and a budget
+    // raised to 23 or 26 takes this cascade to 46 or 52 while the suite stays
+    // green without the bound below.
     expect(lastFrame()).toContain('fallback');
+    expect(renders).toBeLessThanOrEqual(34);
   });
 
   it('keeps measuring across far more external re-renders than one budget', async () => {
