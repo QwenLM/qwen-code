@@ -441,10 +441,6 @@ import {
 } from './repeated-tool-failure-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
-const permissionRequestTails = new WeakMap<
-  AgentSideConnection,
-  Promise<void>
->();
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
@@ -2258,6 +2254,14 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  /**
+   * Tail of this session's permission queue. The serialization unit is the
+   * session, not the `AgentSideConnection`: one daemon child owns a single
+   * connection that every session on it multiplexes onto, so a connection-wide
+   * queue makes unrelated sessions inherit the wait behind a question nobody
+   * is going to answer. Mirrors `promptQueue`, which is per session bridge-side.
+   */
+  private permissionRequestTail: Promise<void> = Promise.resolve();
 
   constructor(
     id: string,
@@ -11271,18 +11275,6 @@ export class Session implements SessionContext {
     await this.sendUpdate(update);
   }
 
-  /**
-   * Requests permission from the client for a tool call.
-   * Used by SubAgentTracker for sub-agent approval requests.
-   */
-  async requestPermission(
-    params: RequestPermissionRequest,
-  ): Promise<RequestPermissionResponse> {
-    return this.client.requestPermission(
-      this.#withBackgroundPermission(params),
-    );
-  }
-
   #withBackgroundPermission(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
@@ -11300,7 +11292,7 @@ export class Session implements SessionContext {
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
     params = this.#withBackgroundPermission(params);
-    const prior = permissionRequestTails.get(this.client) ?? Promise.resolve();
+    const prior = this.permissionRequestTail;
     const transportRequest = prior.then(() =>
       signal.aborted
         ? requestPermissionWithAbort(this.client, params, signal)
@@ -11322,7 +11314,7 @@ export class Session implements SessionContext {
     ]).finally(() => {
       if (abortListener) signal.removeEventListener('abort', abortListener);
     });
-    permissionRequestTails.set(this.client, tail);
+    this.permissionRequestTail = tail;
     return requestPermissionWithAbort(
       { requestPermission: () => transportRequest },
       params,
