@@ -734,6 +734,105 @@ describe('createSpawnChannelFactory child-heap observation', () => {
     expect(mockSpawn.mock.calls[1][1]).toEqual(admittedArgs);
   });
 
+  it('cancels the rejected reservation before reclamation and retries only after release', async () => {
+    const registry = new ProcessRegistry();
+    const policy = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+      mode: 'admit',
+    });
+    const occupied = registry.reserve();
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reclaim = vi.fn(async () => {
+      expect(registry.committedProcessCount).toBe(1);
+      await waiting;
+      occupied.cancel();
+    });
+    const factory = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: policy,
+      reclaimIdleChild: reclaim,
+    });
+    const pending = factory('/tmp/new');
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(registry.committedProcessCount).toBe(1);
+    release();
+    await pending;
+    expect(reclaim).toHaveBeenCalledTimes(1);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(registry.committedProcessCount).toBe(1);
+  });
+
+  it.each([
+    'occupied',
+    'failed',
+    'released_then_failed',
+    'competing',
+    'aborted',
+  ] as const)(
+    'does not cascade reclamation or spawn after %s reclamation',
+    async (outcome) => {
+      const registry = new ProcessRegistry();
+      const policy = createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'admit',
+      });
+      const occupied = registry.reserve();
+      const controller = new AbortController();
+      const reclaim = vi.fn(async () => {
+        expect(registry.committedProcessCount).toBe(1);
+        if (outcome === 'failed') throw new Error('teardown failed');
+        if (outcome === 'released_then_failed') {
+          occupied.cancel();
+          throw new Error('teardown failed after root exit');
+        }
+        if (outcome === 'competing') {
+          occupied.cancel();
+          registry.reserve();
+        }
+        if (outcome === 'aborted') {
+          occupied.cancel();
+          controller.abort(new Error('cancelled during reclaim'));
+        }
+      });
+      const factory = createSpawnChannelFactory({
+        processRegistry: registry,
+        childHeapPolicy: policy,
+        reclaimIdleChild: reclaim,
+      });
+      await expect(
+        factory('/tmp/new', undefined, controller.signal),
+      ).rejects.toThrow(
+        outcome === 'aborted'
+          ? 'cancelled during reclaim'
+          : /concurrent process limit/,
+      );
+      expect(reclaim).toHaveBeenCalledTimes(1);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(registry.committedProcessCount).toBe(
+        outcome === 'aborted' || outcome === 'released_then_failed' ? 0 : 1,
+      );
+    },
+  );
+
+  it('never reclaims in observe mode', async () => {
+    const registry = new ProcessRegistry();
+    registry.reserve();
+    const reclaim = vi.fn();
+    await createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'observe',
+      }),
+      reclaimIdleChild: reclaim,
+    })('/tmp/new');
+    expect(reclaim).not.toHaveBeenCalled();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
   it('requires explicit shared registry wiring for admission', () => {
     const policy = createChildHeapPolicy({ budget, mode: 'admit' });
     expect(() =>
