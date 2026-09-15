@@ -15,7 +15,10 @@ import type {
   AcpSessionBridge,
   BridgeWorkspaceRuntimeLifecycleSnapshot,
 } from './acp-session-bridge.js';
-import { WorkspaceDrainingError } from './acp-session-bridge.js';
+import {
+  AcpChildCapacityExceededError,
+  WorkspaceDrainingError,
+} from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const DEFAULT_ENSURE_TIMEOUT_MS = 60_000;
@@ -215,7 +218,11 @@ export class WorkspaceRuntimeCoordinator {
         );
       } catch (error) {
         this.assertAcceptingWork(error);
-        if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
+        if (
+          error instanceof WorkspaceRuntimeStillStartingError ||
+          error instanceof AcpChildCapacityExceededError
+        )
+          throw error;
         throw new WorkspaceRuntimeInitializationError(error);
       }
     }
@@ -435,7 +442,10 @@ export class WorkspaceRuntimeCoordinator {
           try {
             await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
           } catch (error) {
-            if (error instanceof WorkspaceRuntimeStillStartingError)
+            if (
+              error instanceof WorkspaceRuntimeStillStartingError ||
+              error instanceof AcpChildCapacityExceededError
+            )
               throw error;
             throw new WorkspaceRuntimeInitializationError(error);
           }
@@ -583,7 +593,11 @@ export class WorkspaceRuntimeCoordinator {
       try {
         await this.bridge.preheat({ keepAliveMs: ENSURE_KEEP_ALIVE_MS });
       } catch (error) {
-        if (error instanceof WorkspaceRuntimeStillStartingError) throw error;
+        if (
+          error instanceof WorkspaceRuntimeStillStartingError ||
+          error instanceof AcpChildCapacityExceededError
+        )
+          throw error;
         throw new WorkspaceRuntimeInitializationError(error);
       }
       snapshot = this.bridge.getWorkspaceRuntimeLifecycleSnapshot();
