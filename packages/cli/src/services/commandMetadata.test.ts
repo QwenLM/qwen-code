@@ -158,6 +158,17 @@ describe('getCommandSourceBadge', () => {
         }),
       ),
     ).toBe('[Extension: Google Cloud]');
+    const long = getCommandSourceBadge(
+      makeCmd({
+        source: 'workflow-command',
+        sourceLabel: extensionOwnerLabel({
+          displayName: 'Alibaba Cloud Database Suite for Production Workloads',
+        }),
+        sourceDetail: 'extension',
+      }),
+    );
+    expect(long).toBe('[Extension: Alibaba Cloud Database …]');
+    expect(long?.length).toBe(MAX_EXTENSION_OWNER_LABEL_WIDTH + 2);
     expect(
       getCommandSourceBadge(
         makeCmd({

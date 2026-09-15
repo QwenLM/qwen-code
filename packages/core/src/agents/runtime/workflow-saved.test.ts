@@ -963,6 +963,29 @@ describe('workflow-saved — extension tier', () => {
     ).toBeUndefined();
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'matches a script path spelled through a symlinked ancestor in both finders',
+    async () => {
+      await writeWorkflow(
+        path.join(extensionRoot, 'workflows'),
+        'audit',
+        meta('audit'),
+      );
+      const config = configWith(await loadGcp());
+      const alias = path.join(base, 'alias');
+      await fs.symlink(extensionRoot, alias);
+      const aliased = path.join(alias, 'workflows', 'audit.js');
+
+      expect(findActiveExtensionWorkflowByPath(config, aliased)?.name).toBe(
+        'gcp:audit',
+      );
+      expect(
+        (await findActiveExtensionWorkflowByPathCanonical(config, aliased))
+          ?.name,
+      ).toBe('gcp:audit');
+    },
+  );
+
   it('keeps unqualified names on the project/user rules', async () => {
     const config = configWith([]);
     await expect(

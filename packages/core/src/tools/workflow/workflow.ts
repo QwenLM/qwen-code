@@ -63,6 +63,7 @@ import {
   findActiveExtensionWorkflowByPath,
   findActiveExtensionWorkflowByPathCanonical,
   isSymlinkedRoot,
+  parseExtensionWorkflowName,
 } from '../../agents/runtime/workflow-saved.js';
 import type { ExtensionWorkflowDefinition } from '../../agents/runtime/workflow-extension.js';
 import { promises as fs } from 'node:fs';
@@ -707,10 +708,14 @@ function buildRunTrailer(
   if (resume && includeResume) {
     // An extension's file is third-party and an extension update replaces
     // it, so the copy has to land somewhere the user owns.
-    const pathAdvice = findActiveExtensionWorkflowByPath(
-      config,
-      handle.scriptPath!,
-    )
+    // Same test as the registry's recovery advice: a qualified run name, or a
+    // path an active extension ships.
+    const isExtensionWorkflow =
+      (entry?.workflowName !== undefined &&
+        parseExtensionWorkflowName(entry.workflowName) !== null) ||
+      findActiveExtensionWorkflowByPath(config, handle.scriptPath!) !==
+        undefined;
+    const pathAdvice = isExtensionWorkflow
       ? "this reads an extension's workflow file; copy it into .qwen/workflows before making a run-specific change"
       : entry?.workflowName ||
           !isGeneratedWorkflowScriptPath(config, handle.scriptPath!)

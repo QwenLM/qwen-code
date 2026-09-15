@@ -2592,6 +2592,14 @@ describe('WorkflowTool — extension workflow labels', () => {
       expect(tool.build({ scriptPath: aliasedPath }).getDescription()).toBe(
         'Run extension workflow (gcp:audit)',
       );
+      // The approval dialog labels the same call the same way.
+      const details = (await tool
+        .build({ scriptPath: aliasedPath })
+        .getConfirmationDetails(new AbortController().signal)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain('Extension workflow: gcp:audit');
+      expect(details.prompt).not.toContain('Saved workflow');
     },
   );
 

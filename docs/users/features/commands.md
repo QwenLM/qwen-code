@@ -131,7 +131,7 @@ Commands for managing AI tools and models.
 
 > [!warning]
 >
-> Only install extensions (`/extensions install`) from sources you trust. Extensions can bundle MCP servers, skills, and commands that run with the same permissions as Qwen Code itself — they can access your files, API keys, and conversation data. `/extensions install` does not prompt for confirmation.
+> Only install extensions (`/extensions install`) from sources you trust. Extensions can bundle MCP servers, skills, and commands that run with the same permissions as Qwen Code itself — they can access your files, API keys, and conversation data. They can also ship workflow scripts, which run in the workflow sandbox without direct file or shell access, act through the subagents they start, and go through the Workflow tool's approval. `/extensions install` does not prompt for confirmation.
 
 > [!warning]
 >

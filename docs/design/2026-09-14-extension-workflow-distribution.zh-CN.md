@@ -14,7 +14,7 @@ saved workflow 只能放在项目（`.qwen/workflows`）或用户目录（`~/.qw
 
 已启用的扩展为 `workflow-saved.ts` 提供第三个层级，这个模块本来就负责项目和用户 workflow。所有消费方 —— `/<name>` 斜杠命令、脚本内的 `workflow('<name>')`、ACP 的 saved workflow 列表、详情与 run-saved 接口 —— 都只读这一个模块，因此没有任何一方长出单独的扩展路径。
 
-扩展 workflow 始终以 `<扩展名>:<meta.name>` 寻址，与扩展 skill 和 Claude Code 插件 workflow 的形态一致。名字取自脚本静态的 `export const meta`，所以文件名可以不同。项目和用户层的名字是匹配 `^[a-z][a-z0-9-]{0,40}$` 的文件名，不可能含 `:`，因此各层不会互相遮蔽；优先级仍写为项目优先于用户、用户优先于扩展。如果同一个扩展同时提供同名的 skill 和 workflow，workflow 命令会替换 skill 的斜杠命令而不是被改名，因为 `CommandService` 对扩展命令的改名会产生一个新拼写，按文档名写下的 `slashCommands.disabled` 条目就匹配不到它了。
+扩展 workflow 始终以 `<扩展名>:<meta.name>` 寻址，与扩展 skill 和 Claude Code 插件 workflow 的形态一致。名字取自脚本静态的 `export const meta`，所以文件名可以不同。项目和用户层的名字是匹配 `^[a-z][a-z0-9-]{0,40}$` 的文件名，不可能含 `:`，因此各层不会互相遮蔽；优先级仍写为项目优先于用户、用户优先于扩展。如果同一个扩展同时提供同名的 skill 和 workflow，`CommandService` 会像处理任何重名的扩展命令一样，把 workflow 命令改名为 `<扩展名>.<名字>`，同时该命令保留文档中的名字用于 `slashCommands.disabled` 匹配：skill 在所有入口（包括 headless、ACP 和模型可见的命令列表）都保持可用，按文档名写下的一条禁用条目就能同时移除两者。同名的用户或项目自定义命令最后加载，会保留该斜杠命令；此时 workflow 仍可通过 `workflow()`、ACP saved workflow 接口和 web-shell Workflows 页面访问。
 
 ### 发现
 
@@ -26,7 +26,7 @@ workflow 的 `{ scriptPath }` 加载由 `readWorkflowFileSecurely` 检查，它�
 
 ### 同意
 
-安装和更新时的同意提示会列出每个 workflow 的名字和描述，列表变化时更新会重新询问。同意阶段的发现会像加载时一样展开 `workflows` 里的环境变量。复制式安装会把每个符号链接替换为它指向的文件，所以复制式安装的同意阶段会跟随符号链接，并按书写的路径检查包含关系；link 扩展直接加载源目录，所以它的同意阶段沿用运行时规则。只修改脚本代码不会重新询问，按路径授予的"始终允许"在更新后仍然有效；这两点都写进了文档。
+安装和更新时的同意提示会列出每个 workflow 的名字和描述，列表变化时更新会重新询问。同意阶段的发现会像加载时一样展开 `workflows` 里的环境变量。复制式安装会把每个符号链接替换为它指向的文件，所以复制式安装的同意阶段会跟随符号链接，并按书写的路径检查包含关系；link 扩展直接加载源目录，所以它的同意阶段沿用运行时规则。与 skill 和 subagent 的发现一致，同意阶段会跟随目标在包外的符号链接读取内容，因为复制会把该目标实体化；复制时是否应对所有资源类型跳过这类链接，是仓库范围的问题，留给后续跟进。只修改脚本代码不会重新询问，按路径授予的"始终允许"在更新后仍然有效；这两点都写进了文档。
 
 ### 入口与门禁
 
@@ -34,7 +34,7 @@ workflow 的 `{ scriptPath }` 加载由 `readWorkflowFileSecurely` 检查，它�
 
 ### Claude Code 插件转换
 
-转换器会按原相对路径复制声明的 workflow 文件，并把它们列进转换后的清单，所以不同目录下的同名文件互不覆盖。marketplace 条目的 `workflows` 会覆盖插件自身的声明。声明目录里的符号链接，若目标仍在插件内，会被复制成普通文件。Agent Plugins v1 包不提供 workflow，因为该规范没有定义这个字段。
+转换器会按原相对路径复制声明的 workflow 文件，并把它们列进转换后的清单，所以不同目录下的同名文件互不覆盖。只有清单列出的文件会被发现；未声明 `workflows` 的插件保留其 `workflows/` 目录作为默认目录。marketplace 条目的 `workflows` 会覆盖插件自身的声明。声明目录里的符号链接，若目标仍在插件内，会被复制成普通文件。Agent Plugins v1 包不提供 workflow，因为该规范没有定义这个字段。
 
 ### 公开契约
 

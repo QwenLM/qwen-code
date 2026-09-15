@@ -447,6 +447,45 @@ describe('extension tests', () => {
       },
     );
 
+    it.skipIf(process.platform === 'win32')(
+      'keeps runtime symlink rules for a linked extension, in consent and at load',
+      async () => {
+        const sourcePath = path.join(
+          tempWorkspaceDir,
+          'linked-workflow-source',
+        );
+        fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+        fs.mkdirSync(path.join(sourcePath, 'shared'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          workflowSource('audit'),
+        );
+        fs.symlinkSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          path.join(sourcePath, 'workflows', 'audit.js'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'link', source: sourcePath },
+          requestConsent,
+        );
+
+        // A linked extension loads its source as-is, where links are refused,
+        // so consent must not list what will never load.
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({ workflows: [] }),
+        );
+        expect(extension.workflows).toEqual([]);
+      },
+    );
+
     it.each([
       'flows',
       '${extensionPath}${/}flows',

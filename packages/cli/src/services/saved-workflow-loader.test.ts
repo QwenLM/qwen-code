@@ -99,7 +99,7 @@ describe('SavedWorkflowLoader', () => {
 
     expect(extensionCmd).toMatchObject({
       name: 'gcp:audit',
-      description: '[Google Cloud] Audits the project',
+      description: 'Audits the project',
       kind: CommandKind.FILE,
       source: 'workflow-command',
       sourceLabel: extensionOwnerLabel({
@@ -110,8 +110,12 @@ describe('SavedWorkflowLoader', () => {
       supportedModes: ['interactive'],
     });
     expect(extensionCmd.modelInvocable).toBeUndefined();
-    // No extensionName: a rename on collision would escape the denylist.
-    expect('extensionName' in extensionCmd).toBe(false);
+    // An extension command, renamed on a collision, that still answers to its
+    // documented name in the denylist.
+    expect(extensionCmd).toMatchObject({
+      extensionName: 'gcp',
+      workflowName: 'gcp:audit',
+    });
     expect(getCommandSourceBadge(extensionCmd)).toBe(
       `[${extensionOwnerLabel({ name: 'gcp', displayName: 'Google Cloud' })}]`,
     );
@@ -125,11 +129,32 @@ describe('SavedWorkflowLoader', () => {
       'Run the "deep-research" saved workflow (project)',
     );
     expect('extensionName' in projectCmd).toBe(false);
+    expect('workflowName' in projectCmd).toBe(false);
     expect(projectCmd.sourceLabel).toBe('Workflow');
     expect(getCommandSourceBadge(projectCmd)).toBeNull();
   });
 
-  it('tags an extension workflow with its manifest name when it has no display name', async () => {
+  it('names the owner once, in the capped badge, even for a long display name', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        source: 'extension',
+        extensionName: 'gcp',
+        extensionDisplayName:
+          'Alibaba Cloud Database Suite for Production Workloads',
+        description: 'Audits the project',
+      }),
+    ]);
+    const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
+      signal,
+    );
+    expect(cmd.description).toBe('Audits the project');
+    expect(getCommandSourceBadge(cmd)).toBe(
+      '[Extension: Alibaba Cloud Database …]',
+    );
+  });
+
+  it('falls back to the manifest name for the owner badge', async () => {
     listMock.mockResolvedValue([
       entry({
         name: 'gcp:audit',
@@ -141,7 +166,9 @@ describe('SavedWorkflowLoader', () => {
     const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
       signal,
     );
-    expect(cmd.description).toBe('[gcp] Audits the project');
+    expect(getCommandSourceBadge(cmd)).toBe(
+      `[${extensionOwnerLabel({ name: 'gcp' })}]`,
+    );
   });
 
   it('action dispatches the workflow tool with the scriptPath', async () => {

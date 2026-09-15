@@ -327,25 +327,38 @@ describe('CommandService', () => {
     expect(syncExtension?.extensionName).toBe('git-helper');
   });
 
-  it('lets an extension workflow replace a same-named skill without escaping the denylist', async () => {
-    // Shaped like SavedWorkflowLoader's extension commands: no extensionName,
-    // so no rename to a spelling the operator's denylist does not name.
+  // Shaped like SavedWorkflowLoader's extension commands.
+  const extensionWorkflowCommand = (name: string): SlashCommand => ({
+    ...createMockCommand(name, CommandKind.FILE),
+    source: 'workflow-command',
+    supportedModes: ['interactive'],
+    extensionName: 'gcp',
+    workflowName: name,
+  });
+
+  it('renames an extension workflow that collides with its skill, keeping both reachable and disableable', async () => {
     const loaders = () => [
-      new MockCommandLoader([skillCommand('gcp:audit')]),
       new MockCommandLoader([
-        {
-          ...createMockCommand('gcp:audit', CommandKind.FILE),
-          source: 'workflow-command',
-        },
+        { ...skillCommand('gcp:audit'), modelInvocable: true },
       ]),
+      new MockCommandLoader([extensionWorkflowCommand('gcp:audit')]),
     ];
 
     const service = await CommandService.create(
       loaders(),
       new AbortController().signal,
     );
-    expect(commandNamed(service, 'gcp:audit')?.source).toBe('workflow-command');
-    expect(commandNamed(service, 'gcp.gcp:audit')).toBeUndefined();
+    expect(commandNamed(service, 'gcp:audit')?.kind).toBe(CommandKind.SKILL);
+    expect(commandNamed(service, 'gcp.gcp:audit')?.source).toBe(
+      'workflow-command',
+    );
+    // The skill keeps the surfaces an interactive-only workflow cannot serve.
+    expect(service.getCommandsForMode('acp').map((cmd) => cmd.name)).toContain(
+      'gcp:audit',
+    );
+    expect(
+      service.getModelInvocableCommands().map((cmd) => cmd.name),
+    ).toContain('gcp:audit');
 
     const disabled = await CommandService.create(
       loaders(),
@@ -355,6 +368,28 @@ describe('CommandService', () => {
     expect(
       disabled.getCommands().filter((cmd) => cmd.name.includes('audit')),
     ).toEqual([]);
+  });
+
+  it('lets a same-named custom command, which loads last, keep the slash command over an extension workflow', async () => {
+    const service = await CommandService.create(
+      [
+        new MockCommandLoader([extensionWorkflowCommand('gcp:audit')]),
+        new MockCommandLoader([
+          {
+            ...createMockCommand('gcp:audit', CommandKind.FILE),
+            source: 'skill-dir-command',
+          },
+        ]),
+      ],
+      new AbortController().signal,
+    );
+
+    expect(
+      service
+        .getCommands()
+        .filter((cmd) => cmd.name.includes('audit'))
+        .map((cmd) => cmd.source),
+    ).toEqual(['skill-dir-command']);
   });
 
   it('should handle user/project command override correctly', async () => {

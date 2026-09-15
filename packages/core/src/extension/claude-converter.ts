@@ -893,15 +893,10 @@ function isRegularFileWithinPlugin(
   pluginRoot: string,
 ): boolean {
   try {
-    if (!fs.statSync(filePath).isFile()) return false;
-    const relative = path.relative(
-      fs.realpathSync(pluginRoot),
-      fs.realpathSync(filePath),
-    );
+    // The shared containment primitive, so this rule cannot drift from the
+    // other symlink guards; `isFile()` excludes the plugin root itself.
     return (
-      relative !== '' &&
-      relative.split(path.sep)[0] !== '..' &&
-      !path.isAbsolute(relative)
+      fs.statSync(filePath).isFile() && realPathWithin(filePath, pluginRoot)
     );
   } catch {
     return false;

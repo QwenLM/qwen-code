@@ -59,6 +59,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
+import { extensionComponentsSummary } from '../../services/extensionComponentsSummary.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
@@ -1065,32 +1066,6 @@ export function buildExtensionRows(
     origin: extension.installMetadata?.originSource,
     components: extensionComponentsSummary(extension),
   }));
-}
-
-/** Parity of componentSummary in extensions/views/PluginDetailView.tsx. */
-function extensionComponentsSummary(extension: Extension): string {
-  const parts: string[] = [];
-  const mcpCount = extension.mcpServers
-    ? Object.keys(extension.mcpServers).length
-    : 0;
-  if (mcpCount) parts.push(t('{{count}} MCP', { count: String(mcpCount) }));
-  if (extension.skills?.length)
-    parts.push(
-      t('{{count}} Skills', { count: String(extension.skills.length) }),
-    );
-  if (extension.commands?.length)
-    parts.push(
-      t('{{count}} Commands', { count: String(extension.commands.length) }),
-    );
-  if (extension.agents?.length)
-    parts.push(
-      t('{{count}} Agents', { count: String(extension.agents.length) }),
-    );
-  if (extension.workflows?.length)
-    parts.push(
-      t('{{count}} Workflows', { count: String(extension.workflows.length) }),
-    );
-  return parts.length ? parts.join(' · ') : t('None');
 }
 
 export interface ExtensionActionResult {

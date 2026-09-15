@@ -14,7 +14,7 @@ Saved workflows could only live in a project (`.qwen/workflows`) or in the user'
 
 Active extensions contribute a third tier to `workflow-saved.ts`, the module that already owns project and user workflows. Every consumer — the `/<name>` slash commands, `workflow('<name>')` inside a script, and the ACP saved-workflow list, detail and run-saved surfaces — reads that one module, so none of them grew a separate extension path.
 
-An extension workflow is always addressed as `<extension name>:<meta.name>`, the same shape as extension skills and Claude Code plugin workflows. The name comes from the script's static `export const meta`, so a file name may differ. Project and user names are file stems matching `^[a-z][a-z0-9-]{0,40}$`, which cannot contain `:`, so the tiers cannot shadow each other; precedence is still written project over user over extension. If one extension ships a skill and a workflow with the same name, the workflow command replaces the skill's slash command instead of being renamed, because the rename `CommandService` applies to extension commands would produce a spelling that a `slashCommands.disabled` entry written with the documented name no longer matches.
+An extension workflow is always addressed as `<extension name>:<meta.name>`, the same shape as extension skills and Claude Code plugin workflows. The name comes from the script's static `export const meta`, so a file name may differ. Project and user names are file stems matching `^[a-z][a-z0-9-]{0,40}$`, which cannot contain `:`, so the tiers cannot shadow each other; precedence is still written project over user over extension. If one extension ships a skill and a workflow with the same name, `CommandService` renames the workflow command to `<extension>.<name>`, as it does for any colliding extension command, and the command keeps its documented name for `slashCommands.disabled` matching: the skill stays on every surface, including headless, ACP and the model's command list, and one denylist entry written with the documented name removes both. A user or project custom command of the same name loads last and keeps the slash command; the workflow stays reachable through `workflow()`, the ACP saved-workflow surfaces and the web-shell Workflows page.
 
 ### Discovery
 
@@ -26,7 +26,7 @@ A workflow `{ scriptPath }` load is checked by `readWorkflowFileSecurely`, which
 
 ### Consent
 
-The install and update consent prompt lists each workflow's name and description, and an update re-prompts when that list changes. Consent discovery resolves environment variables in `workflows` the way loading does. A copied install replaces each symlink with the file it points to, so consent discovery for a copied install follows symlinks and checks containment on the path as spelled; a linked extension loads its source as-is, so its consent uses the runtime rules. A change to a script's code alone does not re-prompt, and a path-scoped "always allow" survives an update; both are documented.
+The install and update consent prompt lists each workflow's name and description, and an update re-prompts when that list changes. Consent discovery resolves environment variables in `workflows` the way loading does. A copied install replaces each symlink with the file it points to, so consent discovery for a copied install follows symlinks and checks containment on the path as spelled; a linked extension loads its source as-is, so its consent uses the runtime rules. Like skill and subagent discovery, consent reads through a symlink whose target lies outside the package, because the copy materializes that target; whether copying should skip such links for every resource type is a repository-wide question left to a follow-up. A change to a script's code alone does not re-prompt, and a path-scoped "always allow" survives an update; both are documented.
 
 ### Surfaces and gates
 
@@ -34,7 +34,7 @@ Extension workflows reuse the existing gates: the Workflows feature flag, bare m
 
 ### Claude Code plugin conversion
 
-The converter copies declared workflow files at their relative paths and lists them in the converted manifest, so same-named files in different directories stay distinct. A marketplace entry's `workflows` overrides the plugin's own. A symlink inside a declared directory is copied as a regular file when its target stays inside the plugin. Agent Plugins v1 packages contribute no workflows, because that schema defines none.
+The converter copies declared workflow files at their relative paths and lists them in the converted manifest, so same-named files in different directories stay distinct. Only the listed files are discovered; a plugin that declares no `workflows` keeps its `workflows/` directory as the default. A marketplace entry's `workflows` overrides the plugin's own. A symlink inside a declared directory is copied as a regular file when its target stays inside the plugin. Agent Plugins v1 packages contribute no workflows, because that schema defines none.
 
 ### Published contract
 
