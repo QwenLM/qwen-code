@@ -1821,6 +1821,41 @@ describe('SessionCatalogStore live-session snapshots (#9487)', () => {
     vi.useRealTimers();
   });
 
+  it('publishes background execution changes while the session remains busy', () => {
+    const first = {
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+    };
+    store.applyLiveState('/work', [
+      { ...live('session', true), backgroundTurn: first },
+    ]);
+    const observer = vi.fn();
+    const unsubscribe = store.subscribeLiveSessionObservations(
+      '/work',
+      observer,
+    );
+    const second = {
+      ...first,
+      turnId: 'auto-2',
+      taskId: 'task-2',
+      startedAt: 200,
+    };
+    store.applyLiveState('/work', [
+      { ...live('session', true), backgroundTurn: second },
+    ]);
+    expect(store.getLiveSession('/work', 'session')?.backgroundTurn).toEqual(
+      second,
+    );
+    expect(observer).toHaveBeenCalled();
+    store.applyLiveState('/work', [live('session', false)]);
+    expect(
+      store.getLiveSession('/work', 'session')?.backgroundTurn,
+    ).toBeUndefined();
+    unsubscribe();
+  });
+
   it('answers per-session lookups independently of any loaded page', () => {
     expect(store.hasLiveSessions('/work')).toBe(false);
     expect(store.getLiveSession('/work', 'off-page')).toBeUndefined();
@@ -1864,6 +1899,23 @@ describe('SessionCatalogStore live-session snapshots (#9487)', () => {
     store.applyLiveState('/work', [live('s1', true)]);
     expect(listener).toHaveBeenCalledTimes(2);
     expect(observationListener).toHaveBeenCalledTimes(3);
+  });
+
+  it('publishes background activity changes while the main prompt remains idle', () => {
+    store.applyLiveState('/work', [
+      { ...live('s1', false), hasRunningBackgroundTasks: true },
+    ]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+    store.applyLiveState('/work', [
+      { ...live('s1', false), hasRunningBackgroundTasks: false },
+    ]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(store.getLiveSession('/work', 's1')).toMatchObject({
+      hasActivePrompt: false,
+      hasRunningBackgroundTasks: false,
+    });
+    unsubscribe();
   });
 
   it('drops the snapshot when the last live-state retainer releases', async () => {
