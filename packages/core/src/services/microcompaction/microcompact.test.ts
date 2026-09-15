@@ -524,6 +524,22 @@ describe('microcompactHistory', () => {
     ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
   });
 
+  it('uses an explicit keep-recent override ahead of the environment', () => {
+    process.env['QWEN_MC_KEEP_RECENT'] = '3';
+    const history: Content[] = Array.from({ length: 4 }).flatMap((_, i) => [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', `content ${i}`),
+    ]);
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS, {
+      force: true,
+      keepRecentOverride: 1,
+    });
+
+    expect(result.meta?.keepRecent).toBe(1);
+    expect(result.meta?.toolsCleared).toBe(3);
+  });
+
   it.each(['0', '-2'])(
     'floors integer QWEN_MC_KEEP_RECENT=%s to 1',
     (envValue) => {
