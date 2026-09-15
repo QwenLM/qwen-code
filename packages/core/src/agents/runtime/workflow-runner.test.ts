@@ -201,6 +201,34 @@ describe('WorkflowRunner', () => {
     expect(recovery).toContain(hint);
   });
 
+  // The Workflow tool shows the user the file a `scriptPath` or `name` call
+  // loads, then hands that same read to the runner. Reading the path again
+  // here would run whatever the file holds by then, not what was approved.
+  it('runs the script a caller already loaded instead of reading scriptPath again', async () => {
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    resolveSavedWorkflowScriptMock.mockClear();
+
+    const handle = await WorkflowRunner.start({
+      config,
+      scriptPath: '/saved/audit.js',
+      loadScript: async () => ({
+        name: 'audit',
+        scriptPath: '/saved/audit.js',
+        script: "return 'approved';",
+        savedWorkflowName: 'audit',
+      }),
+      args: undefined,
+      signal: new AbortController().signal,
+    });
+    const settlement = await handle.completion;
+
+    expect(settlement.ok && settlement.outcome.result).toBe('approved');
+    expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+    expect(handle.scriptPath).toBe('/saved/audit.js');
+    expect(registry.get(handle.runId)?.workflowName).toBe('audit');
+  });
+
   async function generatedReview(script: string) {
     const { config, registry } = configWithRegistry();
     const root = await makeStorageRoot();

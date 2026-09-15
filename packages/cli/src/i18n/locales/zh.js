@@ -898,6 +898,8 @@ export default {
     '此扩展将安装以下子智能体：',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     '此扩展将安装以下工作流（可启动子智能体的 JavaScript 脚本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流脚本与已安装版本相比有改动：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
