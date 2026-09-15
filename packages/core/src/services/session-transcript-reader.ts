@@ -86,6 +86,20 @@ import {
   resolveBranchPoints,
   type BranchPointRecord,
 } from './branch-points.js';
+import {
+  isAssistantPreviewCandidate,
+  navigationDisplayText,
+  navigationKindForRecord,
+  type SessionTranscriptNavigationTurnKind,
+} from './session-index/nav-hints.js';
+import { getSessionIndexStore } from './session-index/config.js';
+import type {
+  SessionIndexRecordRow,
+  SessionIndexSegment,
+  SessionIndexSessionRow,
+  SessionIndexStore,
+  SessionIndexTurnHint,
+} from './session-index/types.js';
 
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
@@ -178,10 +192,7 @@ export interface SessionTranscriptSnapshotState {
   lastUpdated: string;
 }
 
-export type SessionTranscriptNavigationTurnKind =
-  | 'prompt'
-  | 'realtime'
-  | 'scheduled';
+export type { SessionTranscriptNavigationTurnKind };
 
 export interface SessionTranscriptNavigationTurn {
   ordinal: number;
@@ -1013,87 +1024,6 @@ function normalizeMaxBytes(maxBytes: number | undefined): number | undefined {
     );
   }
   return maxBytes;
-}
-
-function navigationDisplayText(text: string, systemPayload: unknown): string {
-  const stripped = stripGeneratedAttachmentTokens(text, systemPayload);
-  return isUserPromptSubmitContextPartText(stripped) ? '' : stripped;
-}
-
-function navigationKindForRecord(
-  record: ChatRecord,
-): SessionTranscriptNavigationTurnKind | undefined {
-  if (record.type !== 'user') return undefined;
-  if (
-    record.subtype === 'goal_runtime' ||
-    record.subtype === 'notification' ||
-    record.subtype === 'mid_turn_user_message'
-  ) {
-    return undefined;
-  }
-  if (record.subtype === 'cron') {
-    const payload = isObjectRecord(record.systemPayload)
-      ? record.systemPayload
-      : undefined;
-    const displayText =
-      typeof payload?.['displayText'] === 'string'
-        ? navigationDisplayText(payload['displayText'], record.systemPayload)
-        : '';
-    return displayText.trim().length > 0 ? 'scheduled' : undefined;
-  }
-
-  const projection = projectUserTranscriptForDisplay(record);
-  const displayText =
-    projection.displayText === undefined
-      ? undefined
-      : navigationDisplayText(projection.displayText, record.systemPayload);
-  const hasVisibleText =
-    displayText !== undefined
-      ? displayText.trim().length > 0
-      : projection.parts.some(
-          (part) =>
-            isObjectRecord(part) &&
-            typeof part['text'] === 'string' &&
-            part['text'].trim().length > 0 &&
-            !isUserPromptSubmitContextPartText(part['text']),
-        );
-  const hasVisibleAttachment =
-    projection.parts.some((part) => {
-      if (!isObjectRecord(part) || !isObjectRecord(part['inlineData'])) {
-        return false;
-      }
-      const inlineData = part['inlineData'];
-      return (
-        typeof inlineData['data'] === 'string' &&
-        typeof inlineData['mimeType'] === 'string' &&
-        inlineData['mimeType'].startsWith('image/')
-      );
-    }) ||
-    (isObjectRecord(record.systemPayload) &&
-      Array.isArray(record.systemPayload['attachmentReferences']) &&
-      record.systemPayload['attachmentReferences'].some(
-        (reference) =>
-          isObjectRecord(reference) &&
-          (reference['type'] === 'image' || reference['type'] === 'resource') &&
-          typeof reference['attachmentId'] === 'string' &&
-          typeof reference['mimeType'] === 'string' &&
-          typeof reference['size'] === 'number',
-      ));
-  if (!hasVisibleText && !hasVisibleAttachment) return undefined;
-  return record.subtype === 'realtime_message' ? 'realtime' : 'prompt';
-}
-
-function isAssistantPreviewCandidate(record: ChatRecord): boolean {
-  return (
-    record.type === 'assistant' &&
-    (record.message?.parts ?? []).some(
-      (part) =>
-        isObjectRecord(part) &&
-        part['thought'] !== true &&
-        typeof part['text'] === 'string' &&
-        part['text'].trim().length > 0,
-    )
-  );
 }
 
 function compactPreviewText(text: string, maxCodePoints: number): string {
@@ -2513,6 +2443,320 @@ export class SessionTranscriptReader {
     );
   }
 
+  /**
+   * Serves {@link readTurnIndexPage} from the session-index sidecar.
+   * Turn derivation mirrors buildIndex exactly (same leaf-chunk walk, replay
+   * slicing, kind/assistant/promptId rules) over the durable record metadata;
+   * labels/details are projected through the same helpers from the original
+   * JSONL bytes fetched via stored offsets. Returns undefined when the
+   * sidecar cannot serve, leaving the caller's legacy path untouched.
+   */
+  private async readTurnIndexPageFromIndexStore(params: {
+    sessionId: string;
+    filePath: string;
+    snapshot: SessionTranscriptSnapshotState | undefined;
+    options: SessionTranscriptReadTurnIndexOptions;
+    limit: number;
+    fileIdentity: SessionTranscriptFileIdentity;
+    snapshotSize: number;
+    lastUpdated: string;
+  }): Promise<SessionTranscriptTurnIndexPage | undefined> {
+    const {
+      sessionId,
+      filePath,
+      snapshot,
+      options,
+      limit,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+    } = params;
+
+    // The fast path enforces the same snapshot-size ceiling buildIndex does,
+    // so oversized sessions get the identical typed error in both modes.
+    if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      );
+    }
+
+    let store: SessionIndexStore | null;
+    let srow: SessionIndexSessionRow | null;
+    try {
+      store = await getSessionIndexStore(this.storage.getProjectDir());
+      if (!store) return undefined;
+      await store.syncFile(filePath);
+      srow = store.sessionRow(sessionId);
+    } catch (error) {
+      debugLogger.debug(
+        `session index turn page unavailable, falling back: ${String(error)}`,
+      );
+      return undefined;
+    }
+    // Unservable sessions fall back: 'mismatch' reproduces the legacy throw
+    // via buildIndex; an empty index reproduces the EmptySessionTranscript
+    // handling of the legacy catch path.
+    if (!srow || srow.status !== 'ok' || !srow.firstRecordUuid) {
+      return undefined;
+    }
+
+    let navigationTurns: SessionIndexTurnHint[] | undefined;
+    let leafUuid: string;
+    let sessionStartTime: string | null;
+    let rows: SessionIndexRecordRow[] | null = null;
+
+    // The durable turn cache is keyed by the byte checkpoint it was derived
+    // from; appends past that checkpoint invalidate it wholesale.
+    const cached = store.turnIndexCache(sessionId);
+    if (cached && cached.indexedBytes === srow.indexedBytes) {
+      navigationTurns = cached.turns;
+      leafUuid = cached.leafUuid;
+      sessionStartTime = cached.startTime;
+    } else {
+      rows = store.recordRows(sessionId);
+      if (!rows || rows.length === 0) return undefined;
+      leafUuid = '';
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].conversation) {
+          leafUuid = rows[i].uuid;
+          break;
+        }
+      }
+      if (!leafUuid) return undefined;
+      sessionStartTime = srow.startTime;
+    }
+
+    if (snapshot && snapshot.leafUuid !== leafUuid) {
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    const startTime = sessionStartTime ?? snapshot?.startTime ?? lastUpdated;
+
+    try {
+      if (navigationTurns === undefined && rows !== null) {
+        const byUuidMeta = new Map<string, SessionIndexRecordRow>();
+        for (const row of rows) {
+          if (!byUuidMeta.has(row.uuid)) byUuidMeta.set(row.uuid, row);
+        }
+        const chain = walkTranscriptUuidChain(leafUuid, (uuid) => {
+          const row = byUuidMeta.get(uuid);
+          return row && row.conversation
+            ? {
+                uuid: row.uuid,
+                parentUuid: row.parentUuid,
+                sessionId,
+                timestamp: startTime,
+                type: 'system',
+              }
+            : undefined;
+        });
+        const runtimeUuids = [...chain.uuids];
+        const sourceBoundary = runtimeUuids.findIndex(
+          (uuid) => byUuidMeta.get(uuid)?.sideTaskSource === true,
+        );
+        const replayUuids =
+          sourceBoundary >= 0
+            ? runtimeUuids
+                .slice(sourceBoundary)
+                .filter((uuid) => byUuidMeta.get(uuid)?.inherited !== true)
+            : [...runtimeUuids];
+
+        const derivedTurns: SessionIndexTurnHint[] = [];
+        let currentPromptTurn: SessionIndexTurnHint | undefined;
+        let currentRealtimeTurn: SessionIndexTurnHint | undefined;
+        for (let position = 0; position < replayUuids.length; position++) {
+          const uuid = replayUuids[position]!;
+          const entry = byUuidMeta.get(uuid);
+          const navigationKind = entry?.navKind ?? undefined;
+          if (navigationKind) {
+            const turn = {
+              turnId: uuid,
+              replayPosition: position,
+              kind: navigationKind,
+            } satisfies SessionIndexTurnHint;
+            derivedTurns.push(turn);
+            if (navigationKind === 'realtime') {
+              currentRealtimeTurn = turn;
+            } else {
+              currentPromptTurn = turn;
+              currentRealtimeTurn = undefined;
+            }
+            continue;
+          }
+          if (entry?.assistantPreview) {
+            const targetTurn =
+              entry.subtype === 'realtime_message'
+                ? currentRealtimeTurn
+                : currentPromptTurn;
+            if (targetTurn) targetTurn.finalAssistantRecordId = uuid;
+          }
+          if (entry?.turnResultPromptId && currentPromptTurn) {
+            currentPromptTurn.promptId = entry.turnResultPromptId;
+            currentPromptTurn = undefined;
+          }
+        }
+        navigationTurns = derivedTurns;
+        try {
+          store.putTurnIndexCache(sessionId, {
+            indexedBytes: srow.indexedBytes,
+            leafUuid,
+            startTime: sessionStartTime,
+            totalTurns: derivedTurns.length,
+            turns: derivedTurns,
+          });
+        } catch {
+          // Cache persistence is an optimization; a failed write only costs
+          // re-derivation on the next read.
+        }
+      }
+      if (!navigationTurns) return undefined;
+
+      const totalTurns = navigationTurns.length;
+      const start =
+        options.start ?? Math.max(0, totalTurns - Math.min(limit, totalTurns));
+      if (start > totalTurns) {
+        throw new InvalidSessionTranscriptCursorError();
+      }
+      const selectedTurns = navigationTurns.slice(start, start + limit);
+      const selectedUuids = selectedTurns.flatMap((turn) => [
+        turn.turnId,
+        ...(turn.finalAssistantRecordId ? [turn.finalAssistantRecordId] : []),
+      ]);
+      const selectedKinds = new Map(
+        selectedTurns.map((turn) => [turn.turnId, turn.kind]),
+      );
+      const selectedAssistantUuids = new Set(
+        selectedTurns.flatMap((turn) =>
+          turn.finalAssistantRecordId ? [turn.finalAssistantRecordId] : [],
+        ),
+      );
+
+      const labels = new Map<string, { label: string; timestamp?: string }>();
+      const details = new Map<string, string>();
+      for (const record of await this.readAggregatedIndexRecords(
+        filePath,
+        sessionId,
+        store.recordSegmentsForUuids(sessionId, new Set(selectedUuids)),
+      )) {
+        const kind = selectedKinds.get(record.uuid);
+        if (kind) {
+          labels.set(record.uuid, {
+            label: projectNavigationLabel(record, kind),
+            ...(record.timestamp ? { timestamp: record.timestamp } : {}),
+          });
+        }
+        if (selectedAssistantUuids.has(record.uuid)) {
+          const detail = projectNavigationDetail(record);
+          if (detail) details.set(record.uuid, detail);
+        }
+      }
+
+      const turns = selectedTurns.map((turn, offset) => {
+        const preview = labels.get(turn.turnId);
+        const detail = turn.finalAssistantRecordId
+          ? details.get(turn.finalAssistantRecordId)
+          : undefined;
+        return {
+          ordinal: start + offset,
+          turnId: turn.turnId,
+          kind: turn.kind,
+          ...(turn.promptId ? { promptId: turn.promptId } : {}),
+          ...(preview?.timestamp ? { timestamp: preview.timestamp } : {}),
+          label: preview
+            ? preview.label
+            : turn.kind === 'scheduled'
+              ? 'Scheduled prompt'
+              : turn.kind === 'realtime'
+                ? 'Realtime message'
+                : 'Prompt',
+          ...(detail ? { detail } : {}),
+        } satisfies SessionTranscriptNavigationTurn;
+      });
+
+      const snapshotState: SessionTranscriptSnapshotState = {
+        v: SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
+        kind: 'turn_index',
+        sessionId,
+        fileIdentity,
+        snapshotSize,
+        leafUuid,
+        startTime,
+        lastUpdated,
+      };
+      return {
+        v: SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
+        sessionId,
+        snapshot: this.encodeSnapshot(snapshotState),
+        totalTurns,
+        start,
+        turns,
+        startTime,
+        lastUpdated,
+      };
+    } catch (error) {
+      // Deliberate cursor errors propagate for parity; everything else about
+      // the sidecar is invisible by design.
+      if (
+        error instanceof InvalidSessionTranscriptCursorError ||
+        error instanceof SessionTranscriptSnapshotUnavailableError
+      ) {
+        throw error;
+      }
+      debugLogger.debug(
+        `session index turn page failed, falling back: ${String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Re-materializes the aggregated records behind one page of turn starts
+   * and final assistant previews by reading the stored JSONL segments. Only
+   * the page's own uuids are touched — never the rest of the file.
+   */
+  private async readAggregatedIndexRecords(
+    filePath: string,
+    sessionId: string,
+    segmentsByUuid: Map<string, SessionIndexSegment[]>,
+  ): Promise<ChatRecord[]> {
+    const fh = await fsp.open(filePath, 'r');
+    try {
+      const records: ChatRecord[] = [];
+      for (const [uuid, segments] of segmentsByUuid) {
+        // Mirror readSegmentRecords' integrity contract: only fragments
+        // carrying this entry's uuid may be aggregated; bytes that point at
+        // a different record invalidate the snapshot instead of projecting
+        // wrong labels/details.
+        const fragments: TranscriptRecordInput[] = [];
+        let foreignSessionId = false;
+        for (const segment of segments) {
+          const buffer = Buffer.alloc(segment.length);
+          await fh.read(buffer, 0, segment.length, segment.offset);
+          const text = buffer.toString('utf8').trim();
+          if (text.length === 0) continue;
+          for (const value of jsonl.parseLineTolerant<unknown>(
+            text,
+            filePath,
+          )) {
+            const fragment = validateTranscriptRecord(value).record;
+            if (!fragment) continue;
+            if (fragment.sessionId !== sessionId) foreignSessionId = true;
+            if (fragment.uuid === uuid) fragments.push(fragment);
+          }
+        }
+        if (fragments.length === 0 || foreignSessionId) {
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        const aggregated = aggregateTranscriptRecordFragments(fragments);
+        if (aggregated) records.push(aggregated as unknown as ChatRecord);
+      }
+      return records;
+    } finally {
+      await fh.close();
+    }
+  }
+
   async readTurnIndexPage(
     sessionId: string,
     options: SessionTranscriptReadTurnIndexOptions = {},
@@ -2548,6 +2792,23 @@ export class SessionTranscriptReader {
     }
     const lastUpdated =
       snapshot?.lastUpdated ?? new Date(stats.mtimeMs).toISOString();
+
+    // Fast path: the session-index sidecar serves the same page from its
+    // durable record offsets instead of a full-file scan. Deliberate
+    // continuity failures (snapshot cursor mismatch) propagate so callers
+    // see identical errors; any other provider problem falls back to the
+    // index build below.
+    const indexPage = await this.readTurnIndexPageFromIndexStore({
+      sessionId,
+      filePath,
+      snapshot,
+      options,
+      limit,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+    });
+    if (indexPage !== undefined) return indexPage;
 
     let index: TranscriptIndex | undefined;
     try {
