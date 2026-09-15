@@ -336,6 +336,18 @@ describe('line-edit', () => {
       at: '',
       after: '',
     });
+    // A bracketed paste is the only way a newline reaches these values, and the
+    // rows they feed hold one line: the caret's line is what the spans cover.
+    expect(caretSpans({ text: 'a\nbc', cursor: 3 })).toEqual({
+      before: 'b',
+      at: 'c',
+      after: '',
+    });
+    expect(caretSpans({ text: 'a\nbc', cursor: 1 })).toEqual({
+      before: 'a',
+      at: '',
+      after: '',
+    });
   });
 
   describe('applyLineKey', () => {

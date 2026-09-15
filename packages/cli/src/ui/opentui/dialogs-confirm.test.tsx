@@ -611,6 +611,24 @@ describe('OpenTuiToolConfirmation', () => {
       );
     });
 
+    it('keeps a pasted newline out of the row and inside the answer', () => {
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      paste('alpha\nbeta');
+      press({ name: 'left' });
+      // ink's single-line field draws the row the caret sits in, so the split
+      // value neither grows this dialog nor detaches its cursor from the caret.
+      expect(container.textContent ?? '').not.toContain('alpha');
+      expect(container.textContent ?? '').toContain('beta');
+      expect(cursorCell(container)).toBe('a');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'alpha\nbeta' } },
+      );
+    });
+
     it('keeps every character of a burst that shares one batch', () => {
       const onConfirm = vi.fn(async () => {});
       const container = mount(askDetails(twoOptions, onConfirm));

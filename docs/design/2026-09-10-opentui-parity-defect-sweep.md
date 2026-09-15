@@ -1115,18 +1115,25 @@ byte and leaves the ctrl+W arm of the same case green, which is what makes that
 case say the byte travels on its own rather than merely that word deletion
 works.
 
-Three rendering differences stand. ink windows a field to a fixed column count
-and shows only the line the caret is on, so a pasted multi-line value hides
-everything off that line, while these rows render the whole value. ink paints its
-cell a gray read off the terminal background, falling back to an underline where
-a block would corrupt IME composition, while this cell carries the theme accent
-as the composer's cursor does. And ink runs a 530 ms interval that toggles the
-cell's visibility for as long as a field holds focus, where a steady cell keeps
-the dialog off a repaint timer. That interval shows up in a measurement, not just
-in the source: over a scenario that parks the caret in the free-text row, the ink
-leg wrote 270 KB in each sixty-second window it sat there, four of the scenario's
-seven settling waits burned their full timeout, and the leg took 251 s where this
-renderer's took 13 s.
+Three rendering differences stand, one of them narrower than it was. ink
+windows a field to a fixed column count and shows only the line the caret is
+on, so a pasted multi-line value hides everything off that line. These rows
+hide the same lines now, because a review round found what rendering the whole
+value cost: this cursor is a frame beside the text it marks, so a newline a
+paste carried in grew the row past the dialog's height budget and left the
+highlighted cell on another line than the caret. The value keeps the break, as
+ink's buffer does, so what reaches the model is the same text. The column
+count is still not windowed, which is the limit the bare End caveat above
+already ran into from the other side. ink paints its cell a gray read off the
+terminal background, falling back to an underline where a block would corrupt
+IME composition, while this cell carries the theme accent as the composer's
+cursor does. And ink runs a 530 ms interval that toggles the cell's visibility
+for as long as a field holds focus, where a steady cell keeps the dialog off a
+repaint timer. That interval shows up in a measurement, not just in the
+source: over a scenario that parks the caret in the free-text row, the ink leg
+wrote 270 KB in each sixty-second window it sat there, four of the scenario's
+seven settling waits burned their full timeout, and the leg took 251 s where
+this renderer's took 13 s.
 
 Mount semantics differ per field, because ink's do. The question dialog's row is
 mounted by that dialog only while its own option is the selected one, and mounted
@@ -1144,18 +1151,19 @@ The caret lands in the same column both ways, and what is displayed took this
 shape before the caret existed at all — ink showing a value its flow has already
 discarded is recorded as a follow-up rather than reproduced here.
 
-Coverage is twenty-two new unit tests in three suites — thirteen of them the
-model compared against ink, the rest the fields that use it — plus nine
+Coverage is twenty-three new unit tests in three suites — thirteen of them the
+model compared against ink, the rest the fields that use it — plus eleven
 mutations, each failing the tests that own the behaviour taken away: a left
 arrow that moves nothing, the context-window field's typing branch, the two
 end-of-line jumps, forward delete, a modified Delete that erases a character
 instead of passing through, ctrl+W, a row that stops re-mounting, a bare End
-folded back into the ctrl+E jump, and the legacy word-erase byte handed back to
-the dialog. On a machine, a new scenario answers one
-question from its free-text row on both legs, with a single question so that
-neither the tab clamp nor the double-fire recorded under Decision 21 can be what
-produced the frame: six characters typed, the caret taken back two cells, one
-character inserted. Both legs show
+folded back into the ctrl+E jump, the legacy word-erase byte handed back to the
+dialog, a row that paints the line break a paste carried in, and a caret parked
+on that break highlighting the break itself. On a machine, a new scenario
+answers one question from its free-text row on both legs, with a single
+question so that neither the tab clamp nor the double-fire recorded under
+Decision 21 can be what produced the frame: six characters typed, the caret
+taken back two cells, one character inserted. Both legs show
 `> abcdXef` at the same column of the same row and both record `abcdXef` as
 the answer. The styled capture pins the cell itself. At the two checkpoints
 where ink draws it, the cell sits over the same character in the same column on
@@ -1813,6 +1821,11 @@ What was verified, and how far the verification reaches:
   (ctrl+k/ctrl+u) and undo/redo (ctrl+z). Every operation they need already exists
   in this model, so it is one change over the line editor and its tests rather
   than a per-dialog one.
+- A dialog field's row windows its lines and not its columns. ink's field shows
+  the line under the caret and, along it, the columns around the caret, so a
+  value wider than the row scrolls sideways. This row hides the lines off the
+  caret's and still draws all of its own columns, so a value longer than the row
+  wraps it — whether the characters arrived typed or in one paste.
 - A resumed session shows fewer rows than its log holds. This renderer's
   transcript adapter replays a slash command's invocation phase and nothing
   else, so a result-phase row — the model dialog's kept-model line of Decision

@@ -98,20 +98,6 @@ export function caretForAcceptedValue(
   return { text: accepted, cursor };
 }
 
-/** The three pieces a caret splits the value into, for cursor rendering. */
-export function caretSpans(state: LineState): {
-  before: string;
-  at: string;
-  after: string;
-} {
-  const clamped = clampCaret(state);
-  return {
-    before: cpSlice(clamped.text, 0, clamped.cursor),
-    at: cpSlice(clamped.text, clamped.cursor, clamped.cursor + 1),
-    after: cpSlice(clamped.text, clamped.cursor + 1),
-  };
-}
-
 /** `[start, end)` code-point bounds of the line the caret sits on. */
 function lineBounds(
   text: string,
@@ -123,6 +109,27 @@ function lineBounds(
   let end = cursor;
   while (end < codePoints.length && codePoints[end] !== '\n') end++;
   return { start, end, line: codePoints.slice(start, end).join('') };
+}
+
+/** The three pieces a caret splits the value into, for cursor rendering. */
+export function caretSpans(state: LineState): {
+  before: string;
+  at: string;
+  after: string;
+} {
+  const clamped = clampCaret(state);
+  // Only the line under the caret: these spans feed rows that hold one line,
+  // and a bracketed paste can carry a newline into a value no keystroke can.
+  const { start, end } = lineBounds(clamped.text, clamped.cursor);
+  return {
+    before: cpSlice(clamped.text, start, clamped.cursor),
+    at: cpSlice(
+      clamped.text,
+      clamped.cursor,
+      Math.min(clamped.cursor + 1, end),
+    ),
+    after: cpSlice(clamped.text, clamped.cursor + 1, end),
+  };
 }
 
 export function insertAtCaret(state: LineState, inserted: string): LineState {

@@ -656,15 +656,18 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
   });
 
-  it('normalizes CRLF pastes onto LF before inserting', async () => {
+  it('keeps a pasted line break out of the field row', async () => {
     await runToApiKeyStep();
+    // Line-ending normalization itself is pinned in line-edit's own tests; this
+    // one covers what the wizard draws: only the line the caret sits on, so the
+    // other line reaches the screen when the caret crosses the break.
     await pasteText('key-1\r\nkey-2');
-    // testing-library collapses whitespace in getByText, so match on the raw
-    // textContent where the \r must be gone
-    const match = screen.getByText(
-      (_, element) => element?.textContent === 'key-1\nkey-2',
-    );
-    expect(match).toBeTruthy();
+    expect(document.body.textContent).toContain('key-2');
+    expect(document.body.textContent).not.toContain('key-1');
+    await press('a', { ctrl: true, sequence: '\x01' });
+    await press('left');
+    expect(document.body.textContent).toContain('key-1');
+    expect(document.body.textContent).not.toContain('key-2');
   });
 
   it('appends a paste after typed text in the models custom-ID input', async () => {
@@ -800,11 +803,9 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(focusedField().cell).toBe('h');
     await press('e', { ctrl: true, sequence: '\x05' });
     await typeText('s');
-    // ink's ctrl+E binding is the end of the value, not of the caret's line
-    expect(focusedField()).toEqual({
-      text: 'https://one.test\nhttps://two.tests ',
-      cell: ' ',
-    });
+    // ink's ctrl+E binding is the end of the value, not of the caret's line.
+    // The jump lands on the second line, so that is the line the row draws.
+    expect(focusedField()).toEqual({ text: 'https://two.tests ', cell: ' ' });
     // The bare key is ink's reducer move, which stops at the line the caret is
     // on. Park the caret inside the first line — ctrl+A after the ctrl+E jump
     // lands on the second line's start — and End takes it to that line's end,
@@ -814,9 +815,15 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('left');
     await press('end');
     await typeText('X');
+    // The row holds the caret's line and nothing else, so a caret parked on the
+    // break shows a blank cell where ink's own row would.
+    expect(focusedField()).toEqual({ text: 'https://one.testX ', cell: ' ' });
+    // Crossing the break proves the value kept it: the row switches lines, and
+    // the second line was never on screen until the caret reached it.
+    await press('right');
     expect(focusedField()).toEqual({
-      text: 'https://one.testX\nhttps://two.tests',
-      cell: '\n',
+      text: 'https://two.tests',
+      cell: 'h',
     });
   });
 
