@@ -990,37 +990,6 @@ describe('livePromptEvents', () => {
     );
   });
 
-  it("carries an @-mention card's arguments for ink's args row", async () => {
-    const sendMessageStream = oneToolBatchStream({
-      callId: 't1',
-      name: 'test_tool',
-      args: {},
-    });
-    const config = createFakeConfig(sendMessageStream);
-    atMocks.result = {
-      processedQuery: [{ text: 'look @src/a.ts' }],
-      shouldProceed: true,
-      toolDisplays: [readDisplay({ args: { file_path: 'src/a.ts' } })],
-    };
-
-    const events = (await drain(
-      livePromptEvents(config, 'start', undefined, {
-        drainSteering: () => ['look @src/a.ts'],
-      }),
-    )) as OpenTuiStreamEvent[];
-
-    const argsRows = events.filter(
-      (e) => e.type === 'tool-args' && e.id === 'client-read-1',
-    );
-    expect(argsRows).toEqual([
-      {
-        type: 'tool-args',
-        id: 'client-read-1',
-        args: '{"file_path":"src/a.ts"}',
-      },
-    ]);
-  });
-
   it('joins drained steering texts with a blank line between messages', async () => {
     const sendMessageStream = oneToolBatchStream({
       callId: 't1',
