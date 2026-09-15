@@ -2,6 +2,7 @@ import type {
   ClaudeMarketplaceConfig,
   ExtensionConfig,
   ExtensionRequestOptions,
+  ExtensionWorkflowDefinition,
   SkillConfig,
   SubagentConfig,
 } from '@qwen-code/qwen-code-core';
@@ -151,6 +152,7 @@ export function extensionConsentString(
   skills: SkillConfig[] = [],
   subagents: SubagentConfig[] = [],
   originSource: string = 'QwenCode',
+  workflows: ExtensionWorkflowDefinition[] = [],
 ): string {
   const output: string[] = [];
   if (originSource !== 'QwenCode' && originSource !== 'AgentPlugins') {
@@ -218,6 +220,18 @@ export function extensionConsentString(
       output.push(`  * ${chalk.bold(subagent.name)}: ${subagent.description}`);
     }
   }
+  if (workflows.length > 0) {
+    output.push(
+      t(
+        'This extension will install the following workflows (JavaScript scripts that can start subagents):',
+      ),
+    );
+    for (const workflow of workflows) {
+      // The description comes from a third-party script's meta block.
+      const description = stripAnsi(workflow.description).replace(/\s+/g, ' ');
+      output.push(`  * ${chalk.bold(workflow.name)}: ${description}`);
+    }
+  }
   return output.join('\n');
 }
 
@@ -241,10 +255,12 @@ export const requestConsentOrFail = async (
     commands = [],
     skills = [],
     subagents = [],
+    workflows = [],
     previousExtensionConfig,
     previousCommands = [],
     previousSkills = [],
     previousSubagents = [],
+    previousWorkflows = [],
   } = options;
   const extensionConsent = extensionConsentString(
     extensionConfig,
@@ -252,6 +268,7 @@ export const requestConsentOrFail = async (
     skills,
     subagents,
     originSource,
+    workflows,
   );
   if (previousExtensionConfig) {
     const previousExtensionConsent = extensionConsentString(
@@ -260,6 +277,7 @@ export const requestConsentOrFail = async (
       previousSkills,
       previousSubagents,
       originSource,
+      previousWorkflows,
     );
     if (previousExtensionConsent === extensionConsent) {
       return;

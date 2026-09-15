@@ -545,6 +545,15 @@ export interface WorkflowBudget {
   total: number | null;
   spent(): number;
   remaining(): number;
+  /**
+   * Host-only, never bridged into the script: this run's own agents' output
+   * tokens, and the cap that applies to this run alone. The run registry
+   * mirrors these, so a run's numbers never include tokens spent outside it
+   * when `spent()` measures the whole turn. A budget without them (test
+   * doubles) reports `spent()` / `total` instead.
+   */
+  runSpent?(): number;
+  runCap?(): number | null;
 }
 
 /**

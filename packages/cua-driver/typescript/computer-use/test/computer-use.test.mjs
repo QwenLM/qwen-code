@@ -450,7 +450,6 @@ for (const [readComplete, details] of [
   [undefined, ["AXTitle: ax_error -25204", "walk: max_elements truncated"]],
   [false, ["walk: max_elements truncated"]],
   [undefined, ["provider_unresponsive", "max_elements_reached"]],
-  [undefined, ["walk_deadline_reached", "max_depth_reached"]],
 ]) {
   test(`mixed read failure and truncation retries once (read flag ${readComplete})`, async () => {
     let reads = 0;
@@ -485,6 +484,49 @@ for (const [readComplete, details] of [
     assert.equal(observation.diagnostics.captureComplete, false);
     assert.equal(observation.elements[0].element_token, "rv1:bounded:0");
   });
+}
+
+for (const reason of ["walk_deadline_reached", "element_bounds_timeout"]) {
+  for (const nested of [false, true]) {
+    test(`deadline capture returns its prefix without another walk (${reason}, nested ${nested})`, async () => {
+      const complete = (id) => toolResult({ structured: {
+        tree_markdown: "Ready",
+        elements: [{ element_token: `rv1:${id}:0` }],
+        capture_complete: true,
+        observation_revision: {
+          mode: "full", lineage_id: id, revision_id: `${id}:r1`, stable_element_ids: true,
+        },
+      } });
+      const capture = {
+        capture_complete: false,
+        capture_truncated: true,
+        capture_incomplete_details: [reason, "max_depth_reached"],
+      };
+      const results = [complete("old"), toolResult({ structured: {
+        ...(nested ? {} : capture),
+        tree_markdown: "Completed prefix",
+        elements: [{ element_index: 0, element_token: "s00000001:0" }],
+        observation_revision: {
+          ...(nested ? capture : {}),
+          mode: "full", revision_id: "transient:r0", stable_element_ids: false,
+          resync_reason: "capture_incomplete",
+        },
+      } }), complete("recovered")];
+      const driver = fakeDriver({ results: { getWindowState: () => results.shift() } });
+      const computer = new ComputerUse(driver, { sdk: fakeSdk });
+      await computer.observeWindow({ pid: 42, windowId: 7 });
+      const partial = await computer.observeWindow({ pid: 42, windowId: 7 });
+      assert.equal(driver.calls.length, 2);
+      assert.match(partial.text, /Completed prefix/);
+      assert.equal(partial.elements[0].element_token, "s00000001:0");
+      assert.equal(partial.diagnostics.captureReadComplete, false);
+      assert.equal(partial.diagnostics.stableElementIds, false);
+      const recovered = await computer.observeWindow({ pid: 42, windowId: 7 });
+      assert.equal(driver.calls.length, 3);
+      assert.equal(driver.calls[2].input.observationRevision.baseRevisionId, undefined);
+      assert.equal(recovered.diagnostics.stableElementIds, true);
+    });
+  }
 }
 
 for (const detail of ["max_elements_reached", "max_depth_reached"]) {
