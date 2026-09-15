@@ -580,6 +580,8 @@ export default {
     'Это расширение установит следующие подагенты:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     'Это расширение установит следующие рабочие процессы (скрипты JavaScript, которые могут запускать подагентов):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Эти скрипты рабочих процессов изменились по сравнению с установленной версией: {{names}}.',
   'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',

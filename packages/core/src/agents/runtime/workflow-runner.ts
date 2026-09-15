@@ -41,6 +41,7 @@ import {
   deleteInlineWorkflowScript,
   persistInlineWorkflowScript,
   resolveSavedWorkflowScript,
+  type ResolvedSavedWorkflow,
 } from './workflow-saved.js';
 import {
   compileWorkflowScript,
@@ -59,6 +60,12 @@ export interface WorkflowRunnerOptions {
   sourceRef?: WorkflowSourceRef;
   script?: string;
   scriptPath?: string;
+  /**
+   * Loads the script a `scriptPath` or saved-workflow `name` call runs, in
+   * place of reading `scriptPath` here. The Workflow tool passes the load it
+   * showed for approval, so the content that runs is the content approved.
+   */
+  loadScript?: () => Promise<ResolvedSavedWorkflow>;
   args: unknown;
   resumeFromRunId?: string;
   dispatch?: WorkflowAgentDispatch;
@@ -227,8 +234,9 @@ export class WorkflowRunner {
     let orchestrator: WorkflowOrchestrator;
     let reviewLimits: ReviewWorkflowLimits | undefined;
     try {
-      const loaded =
-        options.scriptPath && options.script === undefined
+      const loaded = options.loadScript
+        ? await options.loadScript()
+        : options.scriptPath && options.script === undefined
           ? await resolveSavedWorkflowScript(
               { scriptPath: options.scriptPath },
               config,
