@@ -793,7 +793,7 @@ export default {
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
   'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.':
-    'Torneu a obrir aquest menú per recarregar les definicions dels hooks. Els controls dels hooks i la configuració de seguretat HTTP requereixen un reinici.',
+    'Torneu a obrir aquest menú per recarregar les definicions dels hooks.\nEls controls dels hooks i la configuració de seguretat HTTP\nrequereixen un reinici.',
   'Failed to reload hook definitions: {{error}}':
     'No s’han pogut recarregar les definicions dels hooks: {{error}}',
   'Enter to select · Esc to cancel':

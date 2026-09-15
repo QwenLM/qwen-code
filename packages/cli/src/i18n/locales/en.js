@@ -1092,7 +1092,7 @@ export default {
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
   'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.':
-    'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.',
+    'Reopen this menu to reload hook definitions.\nHook controls and HTTP security settings require a restart.',
   'Failed to reload hook definitions: {{error}}':
     'Failed to reload hook definitions: {{error}}',
   'Enter to select · Esc to cancel': 'Enter to select · Esc to cancel',

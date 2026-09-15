@@ -746,7 +746,7 @@ export default {
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
   'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.':
-    'Откройте это меню повторно, чтобы перезагрузить определения хуков. Изменения параметров управления хуками и настроек безопасности HTTP требуют перезапуска.',
+    'Откройте это меню повторно, чтобы перезагрузить определения хуков.\nИзменения параметров управления хуками и настроек безопасности HTTP\nтребуют перезапуска.',
   'Failed to reload hook definitions: {{error}}':
     'Не удалось перезагрузить определения хуков: {{error}}',
   'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',

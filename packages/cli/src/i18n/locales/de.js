@@ -729,7 +729,7 @@ export default {
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Dieses Menü ist schreibgeschützt. Um Hooks hinzuzufügen oder zu ändern, bearbeiten Sie settings.json direkt oder fragen Sie Qwen Code.',
   'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.':
-    'Öffnen Sie dieses Menü erneut, um Hook-Definitionen neu zu laden. Hook-Steuerungsoptionen und HTTP-Sicherheitseinstellungen erfordern einen Neustart.',
+    'Öffnen Sie dieses Menü erneut, um Hook-Definitionen neu zu laden.\nHook-Steuerungsoptionen und HTTP-Sicherheitseinstellungen\nerfordern einen Neustart.',
   'Failed to reload hook definitions: {{error}}':
     'Hook-Definitionen konnten nicht neu geladen werden: {{error}}',
   'Enter to select · Esc to cancel': 'Enter zum Auswählen · Esc zum Abbrechen',
