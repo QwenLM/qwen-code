@@ -836,6 +836,276 @@ describe('standalone release packaging', () => {
     expect(checksums.get('node-v22.0.0-win-x64.zip')).toBe('b'.repeat(64));
   });
 
+  it('retries a failed standalone runtime download', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('fetch failed'), {
+          cause: new Error('socket hang up'),
+        }),
+      )
+      .mockResolvedValueOnce(new Response('runtime-bytes'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, sleepImpl },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(sleepImpl).toHaveBeenCalledTimes(1);
+      expect(sleepImpl).toHaveBeenCalledWith(5_000);
+      expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+      // A real undici failure reads only "fetch failed"; the retry warning
+      // has to surface error.cause or the log carries no actionable detail.
+      expect(warnSpy.mock.calls[0][0]).toContain('socket hang up');
+      expect(readFileSync(destination, 'utf8')).toBe('runtime-bytes');
+    } finally {
+      warnSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-downloads a runtime archive that fails verification', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const fetchImpl = vi.fn(async () => new Response('runtime-bytes'));
+    const verify = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Checksum verification failed'))
+      .mockResolvedValueOnce(undefined);
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, verify, sleepImpl: async () => {} },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the download after the final attempt', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('boom', {
+          status: 500,
+          statusText: 'Internal Server Error',
+        }),
+    );
+
+    try {
+      await expect(
+        downloadWithRetry(
+          'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+          destination,
+          { fetchImpl, sleepImpl },
+        ),
+      ).rejects.toThrow(/Failed to download/);
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([5_000, 10_000]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-downloads a checksum list that omits the runtime archives', async () => {
+    const { downloadRuntimeChecksums } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const checksumsPath = path.join(tmpDir, 'node-SHASUMS256.txt');
+    const shasumsUrl = 'https://nodejs.org/dist/v22.0.0/SHASUMS256.txt';
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('<html>gateway interstitial</html>'))
+      .mockResolvedValueOnce(
+        new Response(`${'a'.repeat(64)}  node-v22.0.0-linux-x64.tar.xz\n`),
+      );
+
+    try {
+      const checksums = await downloadRuntimeChecksums({
+        runtime: 'node',
+        distUrl: 'https://nodejs.org/dist/v22.0.0',
+        checksumsPath,
+        expectedArchives: ['node-v22.0.0-linux-x64.tar.xz'],
+        fetchImpl,
+        sleepImpl: async () => {},
+      });
+
+      expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+        shasumsUrl,
+        shasumsUrl,
+      ]);
+      expect(checksums.get('node-v22.0.0-linux-x64.tar.xz')).toBe(
+        'a'.repeat(64),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      runtime: 'node',
+      label: 'Node.js',
+      distUrl: 'https://nodejs.org/dist/v22.0.0',
+      listedArchive: 'node-v22.0.0-mac-arm64.tar.gz',
+      missingArchives: [
+        'node-v22.0.0-linux-x64.tar.xz',
+        'node-v22.0.0-win-x64.zip',
+      ],
+    },
+    {
+      runtime: 'bun',
+      label: 'Bun',
+      distUrl: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14',
+      listedArchive: 'bun-darwin-aarch64.zip',
+      missingArchives: ['bun-linux-aarch64.zip', 'bun-linux-x64.zip'],
+    },
+  ])(
+    'reports every missing archive under the $label display label',
+    async ({ runtime, label, distUrl, listedArchive, missingArchives }) => {
+      const { downloadRuntimeChecksums } = await import(
+        standaloneReleaseScriptUrl
+      );
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+      const checksumsPath = path.join(tmpDir, `${runtime}-SHASUMS256.txt`);
+      const fetchImpl = vi.fn(
+        async () => new Response(`${'a'.repeat(64)}  ${listedArchive}\n`),
+      );
+
+      try {
+        await expect(
+          downloadRuntimeChecksums({
+            runtime,
+            distUrl,
+            checksumsPath,
+            expectedArchives: missingArchives,
+            fetchImpl,
+            sleepImpl: async () => {},
+          }),
+        ).rejects.toThrow(
+          `ERROR: ${label} SHASUMS256.txt does not list ${missingArchives.join(', ')}`,
+        );
+        expect(fetchImpl).toHaveBeenCalledTimes(3);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('verifies the runtime archive checksum after every download attempt', async () => {
+    const { downloadRuntimeArchive } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const archivePath = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const archiveBytes = 'runtime-bytes';
+    const checksums = new Map([
+      [
+        'node-v22.0.0-linux-x64.tar.xz',
+        crypto.createHash('sha256').update(archiveBytes).digest('hex'),
+      ],
+    ]);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('truncated-bytes'))
+      .mockResolvedValueOnce(new Response(archiveBytes));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await downloadRuntimeArchive({
+        archiveUrl:
+          'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        archivePath,
+        archiveName: 'node-v22.0.0-linux-x64.tar.xz',
+        checksums,
+        label: 'Node.js',
+        fetchImpl,
+        sleepImpl: async () => {},
+      });
+
+      // The truncated first download fails the checksum verify, so the retry
+      // re-fetches: dropping the verify wiring would accept the corrupt
+      // bytes after a single fetch and leave them on disk.
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[0][0]).toContain(
+        'Checksum verification failed for node-v22.0.0-linux-x64.tar.xz',
+      );
+      expect(readFileSync(archivePath, 'utf8')).toBe(archiveBytes);
+    } finally {
+      warnSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('derives the runtime archive name per flavor', async () => {
+    const { runtimeArchiveName } = await import(standaloneReleaseScriptUrl);
+    const target = {
+      nodeTarget: 'linux-x64',
+      nodeArchiveExtension: 'tar.xz',
+      bunAsset: 'bun-linux-x64',
+    };
+
+    expect(
+      runtimeArchiveName({ ...target, runtime: 'node', nodeVersion: '22.0.0' }),
+    ).toBe('node-v22.0.0-linux-x64.tar.xz');
+    expect(
+      runtimeArchiveName({ ...target, runtime: 'bun', nodeVersion: '22.0.0' }),
+    ).toBe('bun-linux-x64.zip');
+  });
+
+  it('routes every standalone runtime download through the retry wrapper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    // Pin the wiring, not its spelling: strip comments and collapse
+    // whitespace so a reflow or an added comment cannot turn a source-text
+    // pin red while the wiring is intact. The archive leg's verify wiring is
+    // pinned behaviourally by the downloadRuntimeArchive test above.
+    const normalised = releaseScript
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/\s+/g, ' ');
+
+    // The helpers' own tests stay green even when the release path stops
+    // calling them, so pin the call sites and the retry constants by source.
+    // Every needle avoids `//` and newlines, so all can match against
+    // `normalised`; that transform truncates string literals containing
+    // `//`, so a URL-bearing needle here would silently never match.
+    expect(normalised.match(/await downloadWithRetry\(/g)).toHaveLength(2);
+    expect(normalised.match(/await downloadFile\(/g)).toHaveLength(1);
+    // The archive leg: packageTarget must route through the verifying helper
+    // with the shared checksum map and label: dropping the call or either
+    // argument leaves the helper exercised but the release path unverified.
+    expect(normalised.match(/await downloadRuntimeArchive\(/g)).toHaveLength(1);
+    expect(normalised).toMatch(
+      /await downloadRuntimeArchive\(\{[^;]*checksums,[^;]*label: runtimeLabel\(runtime\)/,
+    );
+    // The checksum leg: emptying this derivation (expectedArchives: [])
+    // leaves the whole suite green while a truncated SHASUMS256.txt is
+    // accepted instead of re-downloaded.
+    expect(normalised).toMatch(
+      /downloadRuntimeChecksums\(\{[^;]*expectedArchives: RELEASE_TARGETS\.map/,
+    );
+    expect(normalised).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
+    expect(normalised).toContain('const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;');
+    expect(normalised).toContain('const DOWNLOAD_TIMEOUT_MS = 120_000;');
+    expect(normalised).toContain('AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)');
+  });
+
   it('stages the locked clipboard packages for every release target', async () => {
     const { readClipboardPackageSpecs } = await import(
       standaloneReleaseScriptUrl
