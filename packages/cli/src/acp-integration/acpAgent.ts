@@ -5,6 +5,7 @@
  */
 
 import {
+  buildHooksListing,
   type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
@@ -206,6 +207,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
@@ -6424,6 +6426,7 @@ class QwenAgent implements Agent {
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
@@ -6436,6 +6439,7 @@ class QwenAgent implements Agent {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
     delete meta['qwen.goalProposalApproval'];
     if (
       this.privateParentState === 'trusted' &&
@@ -6463,6 +6467,9 @@ class QwenAgent implements Agent {
       suppliedChannelPrompt === true
     ) {
       meta[CHANNEL_PROMPT_META_KEY] = true;
+      if (suppliedChannelOutputMode === 'per_task') {
+        meta[CHANNEL_OUTPUT_MODE_META_KEY] = suppliedChannelOutputMode;
+      }
     }
     // Channel delivery is a daemon-managed side effect (the prompt route
     // injects it from the trusted context); an untrusted direct-ACP caller
@@ -8787,37 +8794,29 @@ class QwenAgent implements Agent {
   private buildWorkspaceHooksStatus(config: Config): ServeWorkspaceHooksStatus {
     try {
       const workspaceCwd = this.workspaceCwd(config);
-      const disabled = config.getDisableAllHooks();
-      const hookSystem = config.getHookSystem();
-      if (!hookSystem) {
-        return {
-          v: STATUS_SCHEMA_VERSION,
-          workspaceCwd,
-          initialized: true,
-          disabled,
-          hooks: [],
-          events: IDLE_HOOK_EVENTS,
-        };
-      }
-      const registryEntries = hookSystem.getAllHooks();
-      const hooks: ServeHookEntry[] = registryEntries.map(
-        (entry): ServeHookEntry => ({
-          kind: 'hook',
-          eventName: entry.eventName,
-          config: this.serializeHookConfig(entry.config),
-          source: entry.source as ServeHookSource,
-          ...(entry.matcher ? { matcher: entry.matcher } : {}),
-          ...(entry.sequential !== undefined
-            ? { sequential: entry.sequential }
-            : {}),
-          enabled: entry.enabled,
-        }),
-      );
+      const listing = buildHooksListing(config);
+      // The workspace view lists the registry only; session hooks have their
+      // own per-session status method.
+      const hooks: ServeHookEntry[] = listing.rows
+        .filter((row) => row.origin === 'registry')
+        .map(
+          (row): ServeHookEntry => ({
+            kind: 'hook',
+            eventName: row.eventName,
+            config: this.serializeHookConfig(row.config),
+            source: row.source as ServeHookSource,
+            ...(row.matcher ? { matcher: row.matcher } : {}),
+            ...(row.sequential !== undefined
+              ? { sequential: row.sequential }
+              : {}),
+            enabled: row.enabled,
+          }),
+        );
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
         initialized: true,
-        disabled,
+        disabled: listing.allDisabled,
         hooks,
         events: IDLE_HOOK_EVENTS,
       };

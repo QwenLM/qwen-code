@@ -34,6 +34,15 @@ const mocks = vi.hoisted(() => ({
   statSync: vi.fn((_path: string): { mtimeMs: number } => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
+  // realpathSync is redirectedAncestor's canonicalisation probe. Unmocked it
+  // hit the REAL filesystem, and on Windows each call on the '/repo/…'
+  // fixture spellings — drive-relative there — re-read the spied
+  // process.cwd() through win32 drive resolution, so the cwd-once witness
+  // counted 9 such reads against the expected 1 (#11890). The default is the
+  // same fail-open throw statSync carries: every fixture path is nonexistent.
+  realpathSync: vi.fn((_path: string): string => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
   rmSync: vi.fn(),
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
@@ -106,6 +115,7 @@ vi.mock('node:fs', async (importOriginal) => {
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
       statSync: mocks.statSync,
+      realpathSync: mocks.realpathSync,
       rmSync: mocks.rmSync,
     },
     existsSync: mocks.existsSync,
@@ -113,6 +123,7 @@ vi.mock('node:fs', async (importOriginal) => {
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
     statSync: mocks.statSync,
+    realpathSync: mocks.realpathSync,
     rmSync: mocks.rmSync,
   };
 });
@@ -222,6 +233,9 @@ describe('runCleanup', () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     mocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.realpathSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     // Same leak class for the listing (#9272): the retention tests install
@@ -351,6 +365,15 @@ describe('runCleanup', () => {
     // uses win32 semantics on Windows and has exactly one live `process.cwd()`
     // (`cleanup.ts:754`) with no platform branch. A posix-absolute cwd makes
     // the count platform-independent, so the witness runs on every lane.
+    //
+    // The second leg of the same artifact (#11890): `redirectedAncestor`'s
+    // canonicalisation probes go through the real `realpathSync`, and on
+    // Windows each one re-resolves the drive-relative '/repo/…' spellings
+    // through win32 path resolution, which reads `process.cwd()` for the
+    // drive — 9 reads across the run's three ancestor walks, counted against
+    // the expected 1. `realpathSync` is mocked above with the same
+    // fail-open ENOENT those probes always met here, so no fs internal
+    // reaches the spy.
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/repo');
     try {
       runCleanup('pr-123');

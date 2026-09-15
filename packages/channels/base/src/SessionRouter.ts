@@ -729,6 +729,7 @@ export class SessionRouter {
     target: SessionTarget,
     workspaceCwd: string,
     expectedCwd: string,
+    beforeForget?: () => void,
   ): Promise<string> {
     const bridge = this.bridge;
     if (!bridge.resetWorktreeSession) {
@@ -771,6 +772,7 @@ export class SessionRouter {
       this.toTarget.set(replacementId, target);
       this.toCwd.set(replacementId, actualCwd);
       this.liveSessionIds.add(replacementId);
+      beforeForget?.();
       this.forgetManagedSession(sessionId);
       return replacementId;
     } catch (error) {
@@ -885,7 +887,10 @@ export class SessionRouter {
     if (changed) this.persist();
   }
 
-  async detachManagedSession(sessionId: string): Promise<void> {
+  async detachManagedSession(
+    sessionId: string,
+    beforeForget?: () => void,
+  ): Promise<void> {
     try {
       if (this.bridge.discardSession) {
         // Release regardless of the live flag: a failed worktree reset drops it
@@ -896,6 +901,7 @@ export class SessionRouter {
       } else if (this.liveSessionIds.has(sessionId)) {
         throw new Error('Managed session detach is not supported');
       }
+      beforeForget?.();
     } finally {
       this.forgetManagedSession(sessionId);
     }
