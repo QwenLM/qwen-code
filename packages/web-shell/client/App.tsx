@@ -299,6 +299,7 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from './i18n';
+import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
@@ -10012,11 +10013,13 @@ export function App({
       if (isAlreadyDispatched(error)) {
         return;
       }
-      const message = formatError(error, fallback);
+      const message = isAcpChildCapacityError(error)
+        ? t('daemon.capacity.exhausted')
+        : formatError(error, fallback);
       console.error('[web-shell]', message, error);
       pushToast('error', message);
     },
-    [pushToast],
+    [pushToast, t],
   );
   const sendPrompt = useCallback(
     async (
@@ -10954,13 +10957,18 @@ export function App({
         );
       }
       if (shouldToastNotice(notice)) {
-        pushToast(toastToneFromNotice(notice), notice.message);
+        pushToast(
+          toastToneFromNotice(notice),
+          notice.code === 'acp_child_capacity_exhausted'
+            ? t('daemon.capacity.exhausted')
+            : notice.message,
+        );
       } else if (notice.category !== 'lifecycle') {
         console.warn('[web-shell] daemon notice', notice);
       }
       dismissNotice(notice.id);
     }
-  }, [dismissNotice, notices, pushToast]);
+  }, [dismissNotice, notices, pushToast, t]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -14686,8 +14694,13 @@ export function App({
     [pushToast, t],
   );
 
+  const goalSessionCreationInFlightRef = useRef(false);
   const handleGoalSlashCommand = useCallback(
-    (text: string, hasAttachments: boolean) => {
+    (
+      text: string,
+      hasAttachments: boolean,
+      commitComposerAccepted?: () => void,
+    ) => {
       if (hasAttachments) {
         pushToast('error', t('goals.error.attachmentsUnsupported'));
         return false;
@@ -14715,11 +14728,16 @@ export function App({
       // composer has no disabled state, so it has to refuse here. Two controls
       // read the same snapshot and stamp the same `expectedGoalId`/
       // `expectedRevision`, and the daemon rejects the loser with a 409.
-      if (goalControlOwnerRef.current) {
+      if (
+        goalControlOwnerRef.current ||
+        goalSessionCreationInFlightRef.current
+      ) {
         pushToast('error', t('goals.error.controlBusy'));
         return false;
       }
 
+      const needsSession = !connectionRef.current.sessionId;
+      goalSessionCreationInFlightRef.current = needsSession;
       void (async () => {
         const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
@@ -14748,6 +14766,10 @@ export function App({
         if (!connectionRef.current.sessionId && !allocatedSessionId) {
           throw new Error(t('localCommand.noSession'));
         }
+        if (needsSession) {
+          if (commitComposerAccepted) commitComposerAccepted();
+          else editorRef.current?.clear();
+        }
         store.appendLocalUserMessage(text);
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
@@ -14762,10 +14784,14 @@ export function App({
         } else {
           await controlCurrentGoal(action, objective);
         }
-      })().catch((error: unknown) => {
-        reportError(error, `Failed to ${operation.kind} /goal`);
-      });
-      return true;
+      })()
+        .catch((error: unknown) => {
+          reportError(error, `Failed to ${operation.kind} /goal`);
+        })
+        .finally(() => {
+          goalSessionCreationInFlightRef.current = false;
+        });
+      return !needsSession;
     },
     [
       controlCurrentGoal,
@@ -15107,6 +15133,7 @@ export function App({
               (images?.length ?? 0) > 0 ||
                 (files?.length ?? 0) > 0 ||
                 (metadata?.inputAnnotations?.length ?? 0) > 0,
+              commitComposerAccepted,
             );
           }
           if (cmd === 'theme') {
