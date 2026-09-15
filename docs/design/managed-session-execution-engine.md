@@ -2,7 +2,7 @@
 
 ## 目标与当前缺口
 
-本项完整范围见[默认替换总方案](managed-agent-daemon-default.md)，优先级遵循[首阶段计划](../plans/2026-09-09-managed-daemon-default.md)。用户要求先完成[Session / Harness / Runtime 全局设计](managed-agent-session-harness-runtime.md)；后续先实现 Session 独立权威、完整 Harness 接入与持久恢复，再完成配置兼容选择与普通 factory。四处普通 factory 已于 R2.3 接通，R3.1 已用普通 REST 入口验收 create/prompt/events/cancel。固定引擎和共享 Bridge 成果保留，完整媒体展示、Skills、后台任务和历史迁移延期实施，详细设计已在文末全量专项中补齐。
+本项完整范围见[默认替换总方案](managed-agent-daemon-default.md)，优先级遵循[首阶段计划](../plans/2026-09-09-managed-daemon-default.md)。用户要求先完成[Session / Harness / Runtime 全局设计](managed-agent-session-harness-runtime.md)；后续先实现 Session 独立权威、完整 Harness 接入与持久恢复，再完成配置兼容选择与普通 factory。四处普通 factory 已于 R2.3 接通，R3.1 已用普通 REST 入口验收 create/prompt/events/cancel，R3.2 已让活会话 HTTP transcript/turn-index 走 owner 通道。固定引擎和共享 Bridge 成果保留，完整媒体展示、Skills、后台任务和历史迁移延期实施，详细设计已在文末全量专项中补齐。
 
 本文件已验收的物理 writer 当前位于 ACP host，未来移交 Session 服务是单独的 R2.S2 切片，须排空、封存、校验再接管，不能把现有 writer 保护描述为已经完成三层拆分。下文第 3 片仍定义配置和路由的局部顺序，不覆盖新增 R2.S1～R2.S3 的全局前置。
 
@@ -176,7 +176,7 @@ workspace reload 当前只发送 legacy 控制命令，Managed factory 当前冻
 3. **崩溃半径。** in-process Agent host 可带走 daemon 进程；不声称与 legacy ACP child 同等的进程隔离。工具 worker 仍是子进程。
 4. **并发预算。** 双 slot 共用 Bridge 的 `maxSessions` / `freshSessionAdmission` / session owner index，不因两个 factory 翻倍。`activeAcpChildren` 只数 live spawn channel，不含 in-process host。
 
-选择器正向路径：普通 `default`/缺省/`api`、trusted、无 MCP/Hooks、已证明空扩展 → `managed`。Channel / cron / `managed-gateway` / standalone / 子会话 / worktree / 未知来源 / 未信任工作区 / 未证明空扩展（含扩展目录或 store 中的额外文件） → `legacy`。冷恢复读严格 owner；Managed 不兼容（含工作区已不再信任）则失败，不改选 legacy。R3.1 已用普通 REST `POST /session` 证明该正向路径能落盘 managed owner 并完成 prompt/events/cancel；本记录仍不是 R3 全部或 R4 完成证据。
+选择器正向路径：普通 `default`/缺省/`api`、trusted、无 MCP/Hooks、已证明空扩展 → `managed`。Channel / cron / `managed-gateway` / standalone / 子会话 / worktree / 未知来源 / 未信任工作区 / 未证明空扩展（含扩展目录或 store 中的额外文件） → `legacy`。冷恢复读严格 owner；Managed 不兼容（含工作区已不再信任）则失败，不改选 legacy。R3.1 已用普通 REST `POST /session` 证明该正向路径能落盘 managed owner 并完成 prompt/events/cancel；R3.2 已让活会话 HTTP transcript/turn-index 打 owner channel，未知会话分页仍走 legacy 控制通道。冷 Managed 读 transcript 仍可能 spawn 控制子进程。本记录仍不是 R3 全部或 R4 完成证据。
 
 ## 实施与验收顺序
 

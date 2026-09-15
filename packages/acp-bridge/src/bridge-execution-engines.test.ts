@@ -21,6 +21,7 @@ import {
 } from './bridgeErrors.js';
 import {
   SERVE_CONTROL_EXT_METHODS,
+  SERVE_STATUS_EXT_METHODS,
   SessionRestoreTimeoutError,
 } from './status.js';
 import {
@@ -911,4 +912,132 @@ describe('paired execution engine channels', () => {
       }
     }
   });
+
+  it('pages a live Managed transcript on the owner channel', async () => {
+    const select = vi.fn<Selector>().mockReturnValue('managed');
+    const handles = {
+      legacy: engineChannel('legacy', {
+        extMethodImpl: pagingExtMethod('legacy'),
+      }),
+      managed: engineChannel('managed', {
+        extMethodImpl: pagingExtMethod('managed'),
+      }),
+    };
+    const { bridge, legacy, managed } = pairedBridge(select, {}, handles);
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(legacy).not.toHaveBeenCalled();
+      const page = await bridge.getSessionTranscriptPage({
+        sessionId: session.sessionId,
+        limit: 2,
+      });
+      expect(page).toMatchObject({
+        v: 1,
+        sessionId: session.sessionId,
+        engine: 'managed',
+      });
+      expect(legacy).not.toHaveBeenCalled();
+      expect(managed).toHaveBeenCalledOnce();
+      expect(handles.legacy.agent.extMethodCalls).toEqual([]);
+      expect(handles.managed.agent.extMethodCalls).toContainEqual({
+        method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        params: {
+          cwd: WS_A,
+          sessionId: session.sessionId,
+          limit: 2,
+        },
+      });
+      const index = await bridge.getSessionTurnIndexPage({
+        sessionId: session.sessionId,
+        start: 0,
+        limit: 2,
+      });
+      expect(index).toMatchObject({
+        v: 1,
+        sessionId: session.sessionId,
+        snapshot: 'managed',
+      });
+      expect(legacy).not.toHaveBeenCalled();
+      expect(handles.legacy.agent.extMethodCalls).toEqual([]);
+      expect(handles.managed.agent.extMethodCalls).toContainEqual({
+        method: SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        params: {
+          cwd: WS_A,
+          sessionId: session.sessionId,
+          start: 0,
+          limit: 2,
+        },
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('pages an unknown session transcript through the legacy control channel', async () => {
+    const select = vi.fn<Selector>().mockReturnValue('managed');
+    const handles = {
+      legacy: engineChannel('legacy', {
+        extMethodImpl: pagingExtMethod('legacy'),
+      }),
+      managed: engineChannel('managed', {
+        extMethodImpl: pagingExtMethod('managed'),
+      }),
+    };
+    const { bridge, legacy, managed } = pairedBridge(select, {}, handles);
+    try {
+      const page = await bridge.getSessionTranscriptPage({
+        sessionId: SESSION_ID,
+        beforeRecordId: 'record-3',
+      });
+      expect(page).toMatchObject({
+        v: 1,
+        sessionId: SESSION_ID,
+        engine: 'legacy',
+      });
+      expect(select).not.toHaveBeenCalled();
+      expect(managed).not.toHaveBeenCalled();
+      expect(legacy).toHaveBeenCalledOnce();
+      expect(handles.managed.agent.extMethodCalls).toEqual([]);
+      expect(handles.legacy.agent.extMethodCalls).toEqual([
+        {
+          method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          params: {
+            cwd: WS_A,
+            sessionId: SESSION_ID,
+            beforeRecordId: 'record-3',
+          },
+        },
+      ]);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
 });
+
+function pagingExtMethod(engine: Engine) {
+  return (method: string, params: Record<string, unknown>) => {
+    if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+      return { closed: true };
+    }
+    if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+      return {
+        v: 1,
+        sessionId: params['sessionId'],
+        events: [],
+        hasMore: false,
+        engine,
+      };
+    }
+    if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+      return {
+        v: 1,
+        sessionId: params['sessionId'],
+        snapshot: engine,
+        totalTurns: 0,
+        start: 0,
+        turns: [],
+      };
+    }
+    throw new Error(`unexpected extMethod ${method}`);
+  };
+}

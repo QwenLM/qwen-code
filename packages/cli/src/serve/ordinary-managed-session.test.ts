@@ -361,6 +361,30 @@ describe('ordinary REST session Managed owner', () => {
     }
   });
 
+  it('pages GET /session/:id/transcript on the live Managed owner', async () => {
+    await startModelServer();
+    await writeSettings();
+    app = bootApp();
+    const sessionId = await createManagedSession();
+
+    const admitted = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'say ping' }] });
+    expect(admitted.status).toBe(202);
+    expect(admitted.body.promptId).toEqual(expect.any(String));
+    const turn = await waitForTurn(sessionId, admitted.body.promptId as string);
+    expect(turn.state).toBe('completed');
+
+    spawnHarness.blockLegacySpawn = true;
+    const res = await request(app!)
+      .get(`/session/${sessionId}/transcript`)
+      .set('Host', host());
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe(sessionId);
+    expect(JSON.stringify(res.body)).toContain(ASSISTANT_TEXT);
+  });
+
   it('keeps MCP settings on the legacy factory at the same REST entry', async () => {
     vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
     await writeSettings({

@@ -7831,10 +7831,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return publicState;
   };
 
+  function liveOwnerChannel(sessionId: string): ChannelInfo | undefined {
+    const entry = byId.get(sessionId);
+    const owner = entry ? channelInfoForEntry(entry) : undefined;
+    return owner && !owner.isDying ? owner : undefined;
+  }
+
   async function requestSessionTranscriptPage(
     req: BridgeSessionTranscriptPageRequest,
   ): Promise<BridgeSessionTranscriptPage> {
-    const info = await ensureChannel(controlSlot);
+    // Live sessions already have an owner executor. Paging their transcript
+    // through the workspace control slot would spawn a second (legacy) child.
+    const info =
+      liveOwnerChannel(req.sessionId) ?? (await ensureChannel(controlSlot));
     try {
       const response = await withWorkspaceControl(info, () =>
         withTimeout(
@@ -7861,20 +7870,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function requestSessionTurnIndexPage(
     req: BridgeSessionTurnIndexPageRequest,
   ): Promise<BridgeSessionTurnIndexPage> {
-    try {
-      const response = await withEnsuredWorkspaceControl((info) =>
-        withTimeout(
-          Promise.race([
-            info.connection.extMethod(
-              SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
-              { ...req, cwd: boundWorkspace },
-            ),
-            getChannelClosedReject(info),
-          ]),
-          Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
-          SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
-        ),
+    const owner = liveOwnerChannel(req.sessionId);
+    const call = (info: ChannelInfo) =>
+      withTimeout(
+        Promise.race([
+          info.connection.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+            ...req,
+            cwd: boundWorkspace,
+          }),
+          getChannelClosedReject(info),
+        ]),
+        Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+        SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
       );
+    try {
+      const response = owner
+        ? await withWorkspaceControl(owner, () => call(owner))
+        : await withEnsuredWorkspaceControl((info) => call(info));
       return response as unknown as BridgeSessionTurnIndexPage;
     } catch (err) {
       if (isAcpSessionResourceNotFound(err, req.sessionId)) {
