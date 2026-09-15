@@ -30,6 +30,7 @@ import {
   isShellProgressData,
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
+import type { ResolvedGeneratorForModel } from '@qwen-code/qwen-code-core/core/baseLlmClient.js';
 import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
 import type {
@@ -237,14 +238,8 @@ export function useReactToolScheduler(
         return;
       }
       void (async () => {
-        try {
-          const runtimeView = await config
-            .getBaseLlmClient()
-            .resolveForModel(modelOverride.slice(0, -1), {
-              failClosed: true,
-            });
-          await scheduler.schedule(request, signal, runtimeView);
-        } catch (error) {
+        const requests = Array.isArray(request) ? request : [request];
+        const completeAsSchedulingError = async (error: unknown) => {
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)
@@ -252,7 +247,6 @@ export function useReactToolScheduler(
           );
           const message =
             'Full-turn tool scheduling failed. The tool was not executed.';
-          const requests = Array.isArray(request) ? request : [request];
           const completedCalls: CompletedToolCall[] = requests.map(
             (toolRequest) => {
               const toolError = new Error(message);
@@ -279,7 +273,62 @@ export function useReactToolScheduler(
           );
           setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
           await allToolCallsCompleteHandler(completedCalls);
+        };
+
+        // A fail-closed runtime-model resolution is a scheduling failure,
+        // never a user cancellation, so it gets its own `try`: even when the
+        // signal aborts in the same window it must still land on the error
+        // path (and its log line) rather than vanish into the cancellation
+        // branch below.
+        let runtimeView: ResolvedGeneratorForModel;
+        try {
+          runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(modelOverride.slice(0, -1), {
+              failClosed: true,
+            });
+        } catch (error) {
+          await completeAsSchedulingError(error);
           return;
+        }
+
+        try {
+          await scheduler.schedule(request, signal, runtimeView);
+        } catch (error) {
+          if (signal.aborted) {
+            // The busy scheduler rejects a queued request once its signal
+            // aborts, which is a cancellation rather than a scheduling
+            // failure. Completing it as `cancelled` — instead of returning
+            // early — still runs the caller's completion path, the only place
+            // that releases the batch and continuation ownership registered
+            // for these callIds.
+            const reason =
+              '[Operation Cancelled] Reason: Tool call cancelled before execution.';
+            const cancelledCalls: CompletedToolCall[] = requests.map(
+              (toolRequest) => ({
+                status: 'cancelled',
+                request: toolRequest,
+                response: {
+                  callId: toolRequest.callId,
+                  responseParts: convertToFunctionErrorResponse(
+                    toolRequest.name,
+                    toolRequest.callId,
+                    reason,
+                    reason,
+                  ),
+                  resultDisplay: undefined,
+                  error: undefined,
+                  errorType: undefined,
+                  executionStatus: 'not_started',
+                  contentLength: reason.length,
+                },
+                durationMs: 0,
+              }),
+            );
+            await allToolCallsCompleteHandler(cancelledCalls);
+            return;
+          }
+          await completeAsSchedulingError(error);
         }
       })();
     },
