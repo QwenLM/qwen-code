@@ -35,6 +35,7 @@ import {
   NetworkIcon,
 } from 'lucide-react';
 import { Skeleton } from '../ui/skeleton';
+import { ThreadsRoute } from '../workspace-agents/ThreadsRoute';
 import { Button } from '../ui/button';
 import {
   useCallback,
@@ -312,6 +313,13 @@ export type ArtifactPanelTab =
       kind: 'workflow';
       title: string;
       sessionId?: string;
+    }
+  | {
+      id: string;
+      kind: 'agent_activity';
+      title: string;
+      threadId: string;
+      workspaceCwd: string;
     };
 
 type WorkspaceScopedArtifactPanelTab = Extract<
@@ -410,6 +418,10 @@ interface ArtifactPanelProps {
   agentTraceLoading?: boolean;
   agentTraceError?: string;
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
+  onOpenCollaborationSession?: (
+    sessionId: string,
+    workspaceCwd: string,
+  ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   workflow?: {
@@ -468,6 +480,7 @@ export function ArtifactPanel({
   agentTraceLoading = false,
   agentTraceError,
   onOpenWorkflowAgent,
+  onOpenCollaborationSession,
   onError,
   sessionWorkflowEnabled,
   workflow,
@@ -608,7 +621,8 @@ export function ArtifactPanel({
                   >
                     {getArtifactPanelTabKind(tab) === 'review' ? (
                       <TabReviewIcon />
-                    ) : tab.kind === 'workflow' ? (
+                    ) : tab.kind === 'workflow' ||
+                      tab.kind === 'agent_activity' ? (
                       <NetworkIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
@@ -1227,6 +1241,23 @@ export function ArtifactPanel({
               {activeTab.loadError ?? t('common.loading')}
             </div>
           )
+        ) : activeTab.kind === 'agent_activity' ? (
+          <ThreadsRoute
+            key={activeTab.id}
+            chat
+            activityOnly
+            initialThreadId={activeTab.threadId}
+            workspaceCwd={activeTab.workspaceCwd}
+            onOpenAgentSession={
+              onOpenCollaborationSession
+                ? (sessionId) =>
+                    onOpenCollaborationSession(
+                      sessionId,
+                      activeTab.workspaceCwd,
+                    )
+                : undefined
+            }
+          />
         ) : activeTab.kind === 'context_usage' ? (
           <ContextUsagePanel
             key={activeTab.id}

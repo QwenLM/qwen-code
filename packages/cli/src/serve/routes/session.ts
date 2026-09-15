@@ -155,6 +155,7 @@ import {
   withPromptTerminals,
 } from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
@@ -751,6 +752,13 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
+  if (body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE) {
+    res.status(400).json({
+      error: 'The requested session source is reserved for agent hosts.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
   if (
     isReservedStandaloneSessionSource({
       sourceType:
@@ -1462,6 +1470,7 @@ export function registerSessionRoutes(
         archiveState: 'active',
         size: 1,
         signal,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
       });
       signal.throwIfAborted();
       return page.items.length > 0;
@@ -2993,7 +3002,12 @@ export function registerSessionRoutes(
         // by a "new chat" does not block a fresh branch session.
         const sharedCheckoutSession = runtime.bridge
           .listWorkspaceSessions(workspaceCwd)
-          .find((session) => !session.worktree && session.clientCount > 0);
+          .find(
+            (session) =>
+              session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+              !session.worktree &&
+              session.clientCount > 0,
+          );
         if (sharedCheckoutSession) {
           res.status(409).json({
             error:
@@ -8610,6 +8624,9 @@ export function registerSessionRoutes(
       }
       const sessions = bridge
         .listWorkspaceSessions(runtime.workspaceCwd)
+        .filter(
+          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+        )
         .map((session) => ({
           sessionId: session.sessionId,
           clientCount: session.clientCount,

@@ -7198,6 +7198,32 @@ describe('workspace session live-state route', () => {
     ]);
   });
 
+  it('omits the hidden agent host without changing the catalog version', async () => {
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD),
+        makeSummary('22222222-2222-4222-a222-222222222222', PRIMARY_CWD, {
+          sourceType: 'agent-host',
+        }),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.catalogVersion).toEqual({
+      generation: expect.any(String),
+      revision: expect.any(Number),
+    });
+    expect(
+      res.body.sessions.map(
+        (session: { sessionId: string }) => session.sessionId,
+      ),
+    ).toEqual(['11111111-1111-4111-a111-111111111111']);
+  });
+
   it.each([true, false, undefined])(
     'preserves running background task state %s while the main prompt is idle',
     async (hasRunningBackgroundTasks) => {
