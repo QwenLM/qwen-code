@@ -8171,6 +8171,11 @@ describe('Feishu inbound media delivery (#11554)', () => {
     // the group path's delivered form — cannot slip a second close past.
     expect(prompt.match(/\[\/引用内容\]/g)).toHaveLength(1);
     expect(prompt.match(/\/引用内容/g)).toHaveLength(1);
+    // The genuine banner + close hold the only two 引用内容 occurrences; a
+    // surviving open-tag forgery adds a third. And no loss-marker head may
+    // survive — folded across lines or not.
+    expect(prompt.match(/引用内容/g)).toHaveLength(2);
+    expect(prompt).not.toContain('Attachments unavailable');
   });
 
   it('neutralizes a field separator inside a legacy image key', async () => {
