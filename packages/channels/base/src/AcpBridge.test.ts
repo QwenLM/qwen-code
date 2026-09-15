@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import {
+  RequestError,
+  type RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
@@ -12,6 +15,11 @@ import {
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  ChannelPromptCancelledError,
   type ChannelLoopToolHandler,
   type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
@@ -90,7 +98,10 @@ vi.mock('node:stream', () => ({
   Writable: { toWeb: vi.fn(() => ({})) },
 }));
 
-vi.mock('@agentclientprotocol/sdk', () => ({
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
+  RequestError: (
+    await importOriginal<typeof import('@agentclientprotocol/sdk')>()
+  ).RequestError,
   PROTOCOL_VERSION: 1,
   ndJsonStream: vi.fn(() => ({})),
   ClientSideConnection: vi.fn().mockImplementation((createClient) => {
@@ -313,6 +324,21 @@ describe('AcpBridge', () => {
       payload: { jsonrpc: '2.0', id: 0, result: {} },
     });
   });
+
+  it.each(['_qwencode/start_turn', '_probe/unknown'])(
+    'preserves method-not-found for %s',
+    async (method) => {
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      }) as unknown as TestableAcpBridge;
+      const error = await bridge
+        .handleExtMethod(method, { sessionId: 's-1' })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(RequestError);
+      expect(error).toMatchObject({ code: -32601 });
+    },
+  );
 
   it('handles mid-turn queue drain requests from the ACP child', async () => {
     const bridge = new AcpBridge({
@@ -699,6 +725,134 @@ describe('AcpBridge', () => {
       prompt: [{ type: 'text', text: 'question' }],
       _meta: { [CHANNEL_PROMPT_META_KEY]: true },
     });
+  });
+
+  it.each([undefined, 'per_task'] as const)(
+    'consumes a task result only for %s',
+    async (outputMode) => {
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      }) as unknown as TestableAcpBridge;
+      const backgroundResponse = vi.fn();
+      bridge.on('backgroundResponse', backgroundResponse);
+      bridge.child = { killed: false, exitCode: null };
+      const prompt = vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Main result');
+        for (const claimed of [true, false]) {
+          bridge.handleSessionUpdate({
+            sessionId: 's-1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: claimed ? 'Task result' : 'Unrelated result',
+              },
+              _meta: {
+                qwenDiscreteMessage: true,
+                source: 'background_notification_response',
+                [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
+                backgroundTask: {
+                  taskId: 'task-1',
+                  kind: 'agent',
+                  status: 'completed',
+                  turnComplete: true,
+                },
+              },
+            },
+          });
+        }
+        return { _meta: { [CHANNEL_TASK_RESULT_META_KEY]: 'Task result' } };
+      });
+      bridge.connection = { extMethod: vi.fn(), prompt };
+      await expect(
+        bridge.prompt('s-1', 'question', { outputMode }),
+      ).resolves.toBe(outputMode ? 'Task result' : 'Main result');
+      expect(prompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            ...(outputMode
+              ? { [CHANNEL_OUTPUT_MODE_META_KEY]: outputMode }
+              : {}),
+          },
+        }),
+      );
+      expect(backgroundResponse).toHaveBeenCalledOnce();
+      expect(backgroundResponse).toHaveBeenCalledWith(
+        's-1',
+        'Unrelated result',
+        expect.any(Object),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'reports task result partiality %s',
+    async (partial) => {
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      }) as unknown as TestableAcpBridge;
+      bridge.child = { killed: false, exitCode: null };
+      bridge.connection = {
+        extMethod: vi.fn(),
+        prompt: vi.fn().mockResolvedValue({
+          stopReason: 'end_turn',
+          _meta: {
+            [CHANNEL_TASK_RESULT_META_KEY]: 'Retained result',
+            [CHANNEL_TASK_RESULT_PARTIAL_META_KEY]: partial,
+          },
+        }),
+      };
+      const onTaskResult = vi.fn();
+      await expect(
+        bridge.prompt('s-1', 'question', {
+          outputMode: 'per_task',
+          onTaskResult,
+        }),
+      ).resolves.toBe('Retained result');
+      expect(onTaskResult).toHaveBeenCalledExactlyOnceWith({ partial });
+      onTaskResult.mockClear();
+      await bridge.prompt('s-1', 'question', { onTaskResult });
+      expect(onTaskResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not return retained main text when a task is cancelled remotely', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Stale main result');
+        return { stopReason: 'cancelled' };
+      }),
+    };
+    await expect(
+      bridge.prompt('s-1', 'question', { outputMode: 'per_task' }),
+    ).rejects.toBeInstanceOf(ChannelPromptCancelledError);
+  });
+
+  it('preserves streamed text on remote cancellation in the default mode', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Partial main result');
+        return { stopReason: 'cancelled' };
+      }),
+    };
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Partial main result',
+    );
   });
 
   it('forwards the user-facing prompt projection to the daemon', async () => {

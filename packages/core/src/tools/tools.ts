@@ -514,6 +514,19 @@ export interface ToolResult {
   persistedOutputFiles?: string[];
 
   /**
+   * Internal runtime marker: the producer already sized `llmContent` against
+   * its own declared character budget, whether or not anything was cut. Records
+   * the size decision, where `persistedOutputFiles` records the persistence
+   * one. Set it only on paths that ran that check, never by tool identity: the
+   * scheduler's generic single-result gate stands down for a marked body. On
+   * the success path the per-tool budget still applies, and a timed-out call's
+   * detail is re-bounded at the producer's declared budget; the ordinary
+   * failure path has no per-tool pass, so a producer that marks a body there
+   * is bounding it alone. The aggregate batch budget applies on every path.
+   */
+  outputBudgetApplied?: boolean;
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be

@@ -35,6 +35,7 @@ import {
   NativeLspService,
   isBareMode,
   isTruthy,
+  parsePositiveIntegerEnv,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
@@ -91,6 +92,7 @@ import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
+import { sandboxCommand } from '../commands/sandbox.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -871,7 +873,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register update command
-    .command(updateCommand);
+    .command(updateCommand)
+    // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
+    .command(sandboxCommand);
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -904,7 +908,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
-      result._[0] === 'update')
+      result._[0] === 'update' ||
+      result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
@@ -1028,7 +1033,8 @@ function resolveModelFallbacks(
  * Resolve the built-in WebSearch tool settings, with env overrides taking
  * precedence over `tools.webSearch` (mirroring the QWEN_SANDBOX_IMAGE
  * pattern): ENABLE_WEB_SEARCH for the flag, WEB_SEARCH_MODEL for the model
- * selector, WEB_SEARCH_EXTRACTOR for page reading.
+ * selector, WEB_SEARCH_EXTRACTOR for page reading, WEB_SEARCH_TIMEOUT_MS for
+ * the per-search budget, WEB_SEARCH_MAX_PER_SESSION for the per-session cap.
  *
  * Env-only backend: WEB_SEARCH_BASE_URL mirrors a modelProviders entry's
  * baseUrl for environments that cannot write settings.json; the API key
@@ -1051,6 +1057,19 @@ function resolveWebSearchSettings(
     envExtractor !== undefined
       ? isTruthy(envExtractor)
       : webSearch?.webExtractor;
+  // A non-numeric or non-positive override is ignored rather than zeroing the
+  // budget; the core resolver applies the default and the cap.
+  const envTimeoutMs = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_TIMEOUT_MS'],
+    0,
+  );
+  const timeoutMs = envTimeoutMs > 0 ? envTimeoutMs : webSearch?.timeoutMs;
+  const envMaxPerSession = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_MAX_PER_SESSION'],
+    0,
+  );
+  const maxPerSession =
+    envMaxPerSession > 0 ? envMaxPerSession : webSearch?.maxPerSession;
   const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
     ? process.env['WEB_SEARCH_API_KEY']?.trim()
@@ -1061,11 +1080,21 @@ function resolveWebSearchSettings(
     enabled === undefined &&
     model === undefined &&
     webExtractor === undefined &&
-    baseUrl === undefined
+    baseUrl === undefined &&
+    timeoutMs === undefined &&
+    maxPerSession === undefined
   ) {
     return undefined;
   }
-  return { enabled, model, webExtractor, baseUrl, apiKeyEnv };
+  return {
+    enabled,
+    model,
+    webExtractor,
+    baseUrl,
+    apiKeyEnv,
+    timeoutMs,
+    maxPerSession,
+  };
 }
 
 /**
