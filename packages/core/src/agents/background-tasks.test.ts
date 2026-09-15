@@ -343,7 +343,62 @@ describe('BackgroundTaskRegistry', () => {
     expect(displayText).toContain('failed');
   });
 
-  it('retains the physical slot when the watchdog escalates a cancelled agent', () => {
+  it('preserves an explicit cancellation that lands inside the escalation window', () => {
+    const patchSpy = vi
+      .spyOn(transcript, 'patchAgentMeta')
+      .mockImplementation(() => undefined);
+    try {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        metaPath: '/tmp/test-1.meta.json',
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+
+      // task_stop wins the abort-grace race: the watchdog aborted first, but
+      // the user cancels before the five-second escalation fires. The
+      // escalation must NOT overwrite the explicit cancellation as an
+      // unresponsive failure — the parent model would never be told the task
+      // it stopped was stopped (a recordOnly notification suppresses the
+      // model turn).
+      registry.cancel('test-1');
+      expect(registry.get('test-1')!.status).toBe('cancelled');
+
+      registry.failUnresponsive(
+        'test-1',
+        'Background agent made no model/control progress for 900000ms.',
+      );
+
+      const entry = registry.get('test-1')!;
+      expect(entry.status).toBe('cancelled');
+      expect(entry.retainsPhysicalSlot).toBeUndefined();
+      // No recordOnly failure notification was emitted for the stopped task.
+      expect(callback).not.toHaveBeenCalled();
+      // The sidecar was patched to 'cancelled' by cancel() and never
+      // re-patched to 'failed' by the escalation.
+      expect(patchSpy).toHaveBeenCalledTimes(1);
+      expect(patchSpy).toHaveBeenCalledWith(
+        '/tmp/test-1.meta.json',
+        expect.objectContaining({ status: 'cancelled' }),
+      );
+      // The cancelled-but-unfinalized entry still occupies its slot, so the
+      // slot accounting stays continuous across the race.
+      expect(registry.listUnfinalizedBackgroundAgentIds()).toContain(
+        'test-1',
+      );
+    } finally {
+      patchSpy.mockRestore();
+    }
+  });
+
+  it('settles a still-running agent as failed and retains its physical slot', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
 
@@ -357,14 +412,6 @@ describe('BackgroundTaskRegistry', () => {
       outputFile: '/tmp/test.jsonl',
     });
 
-    // task_stop wins the abort-grace race: the watchdog aborted first, but
-    // the user cancels before the five-second escalation fires. The
-    // abort-ignoring execution is still holding its physical slot, so the
-    // escalation must retain it and request runtime recycle even though the
-    // visible status became `cancelled`.
-    registry.cancel('test-1');
-    expect(registry.get('test-1')!.status).toBe('cancelled');
-
     registry.failUnresponsive(
       'test-1',
       'Background agent made no model/control progress for 900000ms.',
@@ -372,7 +419,9 @@ describe('BackgroundTaskRegistry', () => {
 
     const entry = registry.get('test-1')!;
     expect(entry.status).toBe('failed');
+    expect(entry.error).toContain('no model/control progress');
     expect(entry.retainsPhysicalSlot).toBe(true);
+    expect(registry.hasRunningTasks()).toBe(true);
     expect(callback).toHaveBeenCalledOnce();
     const [, , meta] = callback.mock.calls[0] as [
       string,
@@ -382,7 +431,7 @@ describe('BackgroundTaskRegistry', () => {
     expect(meta.recordOnly).toBe(true);
   });
 
-  it('retains the physical slot when the cancel grace timer finalizes before the escalation', () => {
+  it('keeps a finalized cancellation settled when the escalation lands late', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
 
@@ -401,8 +450,8 @@ describe('BackgroundTaskRegistry', () => {
     // event loop runs more than a second past its due time, while
     // `CANCEL_GRACE_MS` is a bare setTimeout — so the cancellation is already
     // finalized (terminal notification delivered, `notified` set) by the time
-    // the escalation callback lands. `onUnresponsive` can only fire while the
-    // execution is provably still alive, so the slot must still be retained.
+    // the escalation callback lands. The escalation must not re-settle the
+    // entry as an unresponsive failure.
     registry.cancel('test-1');
     registry.finalizeCancellationIfPending('test-1');
     expect(registry.get('test-1')!.status).toBe('cancelled');
@@ -415,11 +464,16 @@ describe('BackgroundTaskRegistry', () => {
     );
 
     const entry = registry.get('test-1')!;
-    expect(entry.retainsPhysicalSlot).toBe(true);
-    // The occupied slot stays visible to the reset / session-switch guards.
-    expect(registry.hasRunningTasks()).toBe(true);
+    expect(entry.status).toBe('cancelled');
+    expect(entry.retainsPhysicalSlot).toBeUndefined();
     // ...and the already-delivered terminal notification is not re-fired.
     expect(callback).toHaveBeenCalledOnce();
+    const [, , meta] = callback.mock.calls[0] as [
+      string,
+      string,
+      NotificationMeta,
+    ];
+    expect(meta.recordOnly).toBeUndefined();
   });
 
   describe('resident background agents', () => {

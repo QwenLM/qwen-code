@@ -927,25 +927,21 @@ export class BackgroundTaskRegistry {
     this.drainWaitQueue();
   }
 
-  // Deliberately NOT gated on `entry.notified`. The cancel-grace timer
-  // (`CANCEL_GRACE_MS`) can finalize the cancellation — and emit the terminal
-  // "was cancelled" notification, setting `notified` — *before* this
-  // escalation lands: the escalation timer is drift-guarded and re-arms
-  // instead of firing when the event loop runs more than a second past its
-  // due time, while the cancel grace timer is a bare `setTimeout`, so a single
-  // stall is enough for the cancel side to win. Reaching this method at all
-  // proves the execution is still alive (the watchdog is detached once it
-  // settles), so the physical slot must still be retained and the entry
-  // settled — otherwise `getRunningBackgroundCount` and `hasRunningTasks()`
-  // free a concurrency slot that is still occupied, and `/clear`, `/resume`,
-  // `/branch` and session switches all proceed over live work. Only the
-  // notification is suppressed, and `emitNotification` is itself idempotent
-  // (`if (entry.notified) return`), so the already-delivered terminal
-  // notification is never re-fired.
+  // Admits only a still-running entry. A `task_stop` that lands inside the
+  // escalation window (`UNRESPONSIVE_ABORT_GRACE_MS`) has already marked the
+  // entry `cancelled` and patched the sidecar to match; overwriting that as
+  // an unresponsive failure would re-persist the sidecar as `failed` and emit
+  // a `recordOnly` notification the parent model never sees, so the user (and
+  // the model) would be told the stopped task "failed" instead of "was
+  // stopped". The cancellation owns the settlement instead: the natural
+  // unwind routes through `finalizeCancelled`, and the cancel-grace fallback
+  // (`finalizeCancellationIfPending`) covers an abort-ignoring execution.
+  // Slot accounting stays continuous without re-settling the entry —
+  // `getRunningBackgroundCount` counts `cancelled && !notified` until that
+  // settlement lands.
   failUnresponsive(agentId: string, error: string): void {
     const entry = this.agents.get(agentId);
-    if (!entry) return;
-    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
+    if (!entry || entry.status !== 'running' || entry.notified) return;
 
     entry.status = 'failed';
     entry.endTime = Date.now();
