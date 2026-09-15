@@ -1600,6 +1600,11 @@ export default {
   'No tasks currently running': 'No hi ha cap tasca en execució',
   'No entry to show.': 'No hi ha cap entrada per mostrar.',
   'needs approval': 'necessita aprovació',
+  'Large workflow': 'Workflow gran',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow gran: {{agents}} agents programats (llindar d’avís {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow gran: ~{{tokens}} tokens de sortida previstos (llindar d’avís {{cap}}).',
   'rejected — edit config to re-approve':
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
@@ -2740,8 +2745,6 @@ export default {
   // ============================================================================
   // Ordres diverses
   // ============================================================================
-  'Set a goal — keep working until the condition is met':
-    'Estableix un objectiu — continua treballant fins que es compleixi la condició',
   'Show current process memory diagnostics':
     'Mostra els diagnòstics de memòria del procés actual',
   'Record a CPU profile for Chrome DevTools analysis':

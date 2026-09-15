@@ -218,6 +218,7 @@ export {
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionWorkflowTaskStatus,
   type DaemonWorkflowApprovalStatusEntry,
+  type DaemonWorkflowSizeWarning,
   type DaemonWorkflowDispatchStatus,
   type DaemonWorkflowDispatchStatusEntry,
   type DaemonWorkflowEvent,

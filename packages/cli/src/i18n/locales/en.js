@@ -2077,6 +2077,11 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'Large workflow': 'Large workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
   'rejected — edit config to re-approve':
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
@@ -2528,8 +2533,6 @@ export default {
     'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
   'It is saved but does not apply while this workspace is untrusted.':
     'It is saved but does not apply while this workspace is untrusted.',
-  'Set a goal — keep working until the condition is met':
-    'Set a goal — keep working until the condition is met',
   'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',

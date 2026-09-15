@@ -1609,6 +1609,11 @@ export default {
   'No tasks currently running': 'Aucune tâche en cours',
   'No entry to show.': 'Aucune entrée à afficher.',
   'needs approval': 'nécessite une approbation',
+  'Large workflow': 'Workflow volumineux',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow volumineux : {{agents}} agents planifiés (seuil d’alerte {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow volumineux : ~{{tokens}} jetons de sortie prévus (seuil d’alerte {{cap}}).',
   'rejected — edit config to re-approve':
     'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':

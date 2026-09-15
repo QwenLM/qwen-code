@@ -580,6 +580,7 @@ describe('REST integration documentation contract', () => {
     const loadPost = openApi.paths?.['/session/{id}/load']?.post;
     expect(requestFields(loadPost)).toEqual([
       'approvalMode',
+      'compactedReplayMode',
       'cwd',
       'historyPageSize',
       'liveReplayMode',
@@ -594,6 +595,36 @@ describe('REST integration documentation contract', () => {
           | undefined
       )?.content?.['application/json']?.schema?.$ref as string,
     ) as { properties?: Record<string, { maximum?: number }> };
+    const schemas = openApi.components?.schemas ?? {};
+    for (const [schemaName, field] of [
+      ['RestoreSessionRequest', 'compactedReplayMode'],
+      ['PromptRequest', 'eventDetailMode'],
+    ]) {
+      expect(schemas[schemaName!]).toMatchObject({
+        properties: {
+          [field!]: {
+            type: 'string',
+            enum: ['full', 'summary'],
+            default: 'full',
+          },
+        },
+      });
+    }
+    expect(
+      openApi.paths?.['/session/{id}/transcript']?.get?.parameters,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          in: 'query',
+          name: 'compactedReplayMode',
+          schema: {
+            type: 'string',
+            enum: ['full', 'summary'],
+            default: 'full',
+          },
+        }),
+      ]),
+    );
     expect(loadSchema.properties?.['historyPageSize']?.maximum).toBe(
       SESSION_TRANSCRIPT_MAX_LIMIT,
     );

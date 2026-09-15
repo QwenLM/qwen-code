@@ -8502,8 +8502,8 @@ class QwenAgent implements Agent {
       workflowsEnabled,
       workflowToolFeatures: {
         sourceRef: true,
-        agentStepId: false,
-        workflowStepId: false,
+        agentStepId: true,
+        workflowStepId: true,
       },
       savedWorkflows,
     };

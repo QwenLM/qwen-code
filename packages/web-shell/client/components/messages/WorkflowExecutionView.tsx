@@ -238,9 +238,20 @@ function downloadWorkflowHistory(
       exportedAt: new Date().toISOString(),
       runs: runs.map((run) => ({
         id: run.id,
-        sourceRunId: run.sourceRunId,
         toolUseId: run.toolUseId,
+        sourceRunId: run.sourceRunId,
         sourceRef: run.sourceRef,
+        workflowCallsTruncated: run.workflowCallsTruncated,
+        workflowCalls: run.workflowCalls?.map(
+          ({ id, stepId, workflowName, status, startedAt, endedAt }) => ({
+            id,
+            stepId,
+            workflowName,
+            status,
+            startedAt,
+            endedAt,
+          }),
+        ),
         startMode: run.startMode,
         status: run.status,
         startTime: run.startTime,
@@ -258,6 +269,8 @@ function downloadWorkflowHistory(
           ({
             id,
             phaseVisitId,
+            stepId,
+            workflowCallId,
             status,
             dependsOn,
             queuedAt,
@@ -266,6 +279,8 @@ function downloadWorkflowHistory(
           }) => ({
             id,
             phaseVisitId,
+            stepId,
+            workflowCallId,
             status,
             dependsOn,
             queuedAt,

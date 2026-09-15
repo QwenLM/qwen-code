@@ -2054,8 +2054,6 @@ export default {
     '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已儲存，但此工作區不受信任時不會生效。',
-  'Set a goal — keep working until the condition is met':
-    '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
@@ -2161,6 +2159,11 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'Large workflow': '大型工作流程',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流程：已排定 {{agents}} 個 agent（警示門檻 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流程：預計輸出 ~{{tokens}} 個 token（警示門檻 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',

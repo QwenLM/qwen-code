@@ -510,6 +510,8 @@ export {
   extractAndStripMeta,
   type WorkflowMeta,
 } from './agents/runtime/workflow-sandbox.js';
+export * from './agents/runtime/workflow-size.js';
+export * from './agents/runtime/workflow-script-shape.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
@@ -619,6 +621,7 @@ export {
   logSpeculation,
   logWorkflowKeyword,
   logWorkflowRun,
+  logWorkflowSizeWarning,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -636,6 +639,7 @@ export {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
 
 // ============================================================================

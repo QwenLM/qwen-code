@@ -220,10 +220,10 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
-   * Read a live session's `/goal` state. The active goal lives only in the
-   * child's in-memory store, so this is the sole authoritative source for the
-   * condition, its running turn count and the judge's last verdict. Params:
-   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   * Read a live session's `/goal` state from the child's Goal runtime. Params:
+   * `{ sessionId }`; result: `BridgeSessionGoal` — the runtime's
+   * `GoalSnapshotV2` plus `active`, a projection of it for clients that still
+   * read the older shape.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
   sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
@@ -871,6 +871,8 @@ export type ServeWorkflowDispatchStatus =
   | 'cached';
 
 export interface ServeWorkflowDispatchStatusEntry {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -935,8 +937,37 @@ export type ServeWorkflowEvent =
       error: string;
     });
 
+/**
+ * A workflow run's large-run flag: the first threshold it crossed. Mirrors
+ * core's `WorkflowSizeWarning`.
+ */
+export interface ServeWorkflowSizeWarning {
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduledAgents: number;
+  totalTokens: number;
+  projectedTokens: number;
+  agentCap: number;
+  tokenCap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  capFromGuideline: boolean;
+  at: number;
+}
+
+export interface ServeWorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
 export interface ServeSessionWorkflowTaskStatus {
   sourceRef?: { id: string; revision: string };
+  workflowCalls?: ServeWorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */
@@ -966,6 +997,11 @@ export interface ServeSessionWorkflowTaskStatus {
    * created before respawns were counted; treat as 0.
    */
   agentsRespawned?: number;
+  /**
+   * Present once the run crossed a large-run threshold; absent while it stays
+   * within bounds and on snapshots created before the flag existed.
+   */
+  sizeWarning?: ServeWorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];

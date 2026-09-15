@@ -1488,6 +1488,11 @@ export default {
   'No tasks currently running': 'Нет запущенных задач',
   'No entry to show.': 'Нет записи для отображения.',
   'needs approval': 'требует подтверждения',
+  'Large workflow': 'Большой workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Большой workflow: запланировано агентов: {{agents}} (порог предупреждения {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Большой workflow: ожидается ~{{tokens}} выходных токенов (порог предупреждения {{cap}}).',
   'rejected — edit config to re-approve':
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',

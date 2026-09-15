@@ -33,6 +33,21 @@ vi.mock('openai', () => ({
   })),
 }));
 
+// embedContent's client is built with buildRuntimeFetchOptions' pinned
+// fetch. Handing back a spy keeps the base fetch the session-aware wrapper
+// delegates to observable without a live network call.
+const { embedBaseFetchMock } = vi.hoisted(() => ({
+  embedBaseFetchMock: vi.fn(),
+}));
+vi.mock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/runtimeFetchOptions.js')>();
+  return {
+    ...actual,
+    buildRuntimeFetchOptions: () => ({ fetch: embedBaseFetchMock }),
+  };
+});
+
 import {
   OpenAIResponsesContentGenerator,
   createOpenAIResponsesContentGenerator,
@@ -47,8 +62,18 @@ import {
   DISABLED_REQUEST_TIMEOUT_MS,
 } from '../openaiContentGenerator/constants.js';
 
-function makeCliConfig(): Config {
-  return { getProxy: () => undefined } as unknown as Config;
+function makeCliConfig(
+  sessionId = '',
+  allowDynamicHeaderValues = false,
+): Config {
+  return {
+    getProxy: () => undefined,
+    // The session-aware fetch this generator installs resolves
+    // customHeaders placeholders and the first-party session_id header from
+    // live Config state; the consent gate defaults to off, as in production.
+    getSessionId: () => sessionId,
+    getOutboundAllowDynamicHeaderValues: () => allowDynamicHeaderValues,
+  } as unknown as Config;
 }
 
 function makeGeneratorConfig(): ContentGeneratorConfig {
@@ -421,6 +446,42 @@ describe('OpenAIResponsesContentGenerator', () => {
           defaultHeaders: { 'X-Proxy-Auth': 'token' },
         }),
       );
+    });
+
+    it('expands a ${session_id} customHeader per request instead of sending the baked-in literal', async () => {
+      // Issue #11936: defaultHeaders is fixed once at client construction, so
+      // a placeholder in it can only be corrected by a per-request fetch
+      // wrapper -- the same one the Chat wire installs on its client.
+      mockEmbeddingsCreate.mockResolvedValue({
+        data: [{ embedding: [0.1] }],
+      });
+      const generatorWithPlaceholder = new OpenAIResponsesContentGenerator(
+        {
+          ...makeGeneratorConfig(),
+          customHeaders: { 'x-opencode-session': '${session_id}' },
+        },
+        makeCliConfig('session-embed', true),
+      );
+
+      await generatorWithPlaceholder.embedContent({
+        model: 'text-embedding-ada-002',
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      const clientOptions = mockOpenAIConstructor.mock.calls.at(-1)![0] as {
+        fetch?: (input: string, init?: RequestInit) => Promise<Response>;
+      };
+      expect(typeof clientOptions.fetch).toBe('function');
+
+      // What the SDK does with defaultHeaders on every request: hand them to
+      // fetch as request headers.
+      embedBaseFetchMock.mockResolvedValue(new Response('{}'));
+      await clientOptions.fetch!('https://api.openai.com/v1/embeddings', {
+        headers: { 'x-opencode-session': '${session_id}' },
+      });
+
+      const sent = new Headers(embedBaseFetchMock.mock.calls[0]![1].headers);
+      expect(sent.get('x-opencode-session')).toBe('session-embed');
     });
 
     it.each(['https://api.openai.com/v1', 'https://api.openai.com/v1/'])(
