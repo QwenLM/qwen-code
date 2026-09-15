@@ -497,7 +497,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(refreshRuntime).not.toHaveBeenCalled();
   });
 
-  it('keeps project and extension skills with the same authored name distinct', async () => {
+  it('keeps project and extension Skills with the same authored name distinct', async () => {
     await writeExtension('active', ['shared']);
     await writeExtension('inactive', ['shared']);
     await fsp.writeFile(
@@ -512,9 +512,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     );
     const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
     expect(
-      status.skills.filter((s) =>
-        ['shared', 'active:shared', 'inactive:shared'].includes(s.name),
-      ),
+      status.skills.filter((s) => s.name.endsWith('shared')),
     ).toMatchObject([
       { name: 'active:shared', level: 'extension', status: 'ok' },
       {
@@ -586,6 +584,35 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     ).toBe(true);
   });
 
+  it.each([
+    { enabled: ['audit:detail'], disabled: [], first: 'disabled' },
+    { enabled: ['first:audit:detail'], disabled: [], first: 'ok' },
+    {
+      enabled: ['first:audit:detail'],
+      disabled: ['audit:detail'],
+      first: 'disabled',
+    },
+  ])(
+    'scopes grants to the owning extension and preserves authored restrictions: %j',
+    async ({ enabled, disabled, first }) => {
+      for (const name of ['first', 'second']) {
+        await writeExtension(name, ['audit:detail'], { 'audit:detail': false });
+      }
+      await fsp.mkdir(path.join(qwenHome, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(qwenHome, '.qwen', 'settings.json'),
+        JSON.stringify({ skills: { enabled, disabled } }),
+      );
+      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+      expect(
+        status.skills.filter((skill) => skill.level === 'extension'),
+      ).toMatchObject([
+        { name: 'first:audit:detail', status: first },
+        { name: 'second:audit:detail', status: 'disabled' },
+      ]);
+    },
+  );
+
   it('maps manifest defaults, reloads settings, and rebuilds after invalidation', async () => {
     await writeExtension('suite', ['default-off'], { 'default-off': false });
     const workspace = path.join(qwenHome, 'workspace');
@@ -595,14 +622,6 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       (await provider(workspace)).skills.find(
         (s) => s.name === 'suite:default-off',
       );
-    expect(await readSkill()).toMatchObject({
-      status: 'disabled',
-      disabledReason: 'default',
-    });
-    await fsp.writeFile(
-      path.join(workspace, '.qwen', 'settings.json'),
-      JSON.stringify({ skills: { enabled: ['default-off'] } }),
-    );
     expect(await readSkill()).toMatchObject({
       status: 'disabled',
       disabledReason: 'default',
