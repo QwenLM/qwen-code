@@ -297,6 +297,46 @@ describe('execution environment ownership', () => {
     });
   });
 
+  it('shares timed-out startup recovery until cleanup actually finishes', async () => {
+    vi.useFakeTimers();
+    const warning = vi
+      .spyOn(console, 'warn')
+      .mockImplementation(() => undefined);
+    let finish!: () => void;
+    const retryCleanup = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const config = new Config(params);
+    config.registerExecutionEnvironment(
+      Promise.reject(
+        new ExecutionCleanupError('startup cleanup failed', { retryCleanup }),
+      ),
+    );
+    try {
+      const first = config.shutdownExecutionEnvironments();
+      const rejected = first.catch((error: unknown) => error);
+      expect(config.shutdownExecutionEnvironments()).toBe(first);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await rejected).toMatchObject({
+        message: expect.stringContaining('cleanup is still pending'),
+      });
+      expect(config.shutdownExecutionEnvironments()).toBe(first);
+      expect(retryCleanup).toHaveBeenCalledOnce();
+      finish();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        config.shutdownExecutionEnvironments(),
+      ).resolves.toBeUndefined();
+      expect(retryCleanup).toHaveBeenCalledOnce();
+    } finally {
+      warning.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves workspace runtimes when container cleanup fails', async () => {
     const config = new Config(params);
     (config as unknown as { initialized: boolean }).initialized = true;

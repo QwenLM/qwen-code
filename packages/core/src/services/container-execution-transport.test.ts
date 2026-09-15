@@ -58,14 +58,15 @@ describe.skipIf(process.platform === 'win32')(
     const reply = (id: string, value: unknown, target = child) =>
       target.stdout.write(`${JSON.stringify({ id, result: value })}\n`);
 
-    const createEnvironment = () =>
+    const createEnvironment = (owner?: Config) =>
       ContainerExecutionEnvironment.create(
-        new Config({
-          targetDir: join(root, 'workspace'),
-          cwd: join(root, 'workspace'),
-          debugMode: false,
-          deferTelemetryInitialization: true,
-        }),
+        owner ??
+          new Config({
+            targetDir: join(root, 'workspace'),
+            cwd: join(root, 'workspace'),
+            debugMode: false,
+            deferTelemetryInitialization: true,
+          }),
         {
           runtime: 'docker',
           image: 'fixture',
@@ -175,6 +176,85 @@ describe.skipIf(process.platform === 'win32')(
       expect(volume).toBeDefined();
       return volume!.slice(0, -suffix.length);
     };
+
+    it.each([false, true])(
+      'reclaims failed startup after runtime recovery (shutdown also fails=%s)',
+      async (failShutdown) => {
+        await environment.dispose();
+        const workspace = join(root, 'workspace');
+        const entry = join(workspace, '.git');
+        const owner = new Config({
+          targetDir: workspace,
+          cwd: workspace,
+          debugMode: false,
+          deferTelemetryInitialization: true,
+        });
+        const originalRuntime = runtime.execFile.getMockImplementation()!;
+        let unavailable = true;
+        let failedName = '';
+        let temporary = '';
+        let removals = 0;
+        runtime.execFile.mockImplementation(
+          (program, args, options, callback) => {
+            if (args[0] === 'create') {
+              failedName = args[args.indexOf('--name') + 1];
+              temporary = dirname(gitMask(args));
+              callback(new Error('startup failed'), '', 'startup failed');
+            } else if (args[0] === 'rm' && args[2] === failedName) {
+              removals++;
+              callback(
+                unavailable ? new Error('runtime unavailable') : null,
+                '',
+                '',
+              );
+            } else originalRuntime(program, args, options, callback);
+          },
+        );
+        try {
+          const pending = createEnvironment(owner);
+          owner.registerExecutionEnvironment(pending);
+          await expect(pending).rejects.toThrow(
+            /startup failed.*runtime unavailable/,
+          );
+          expect(removals).toBe(1);
+          expect(await readdir(entry)).toEqual([]);
+          expect(await readdir(join(temporary, 'git-mask'))).toEqual([]);
+          if (failShutdown) {
+            const attempt = owner.shutdownExecutionEnvironments();
+            expect(owner.shutdownExecutionEnvironments()).toBe(attempt);
+            await expect(attempt).rejects.toThrow('runtime unavailable');
+            expect(removals).toBe(2);
+            expect(await readdir(entry)).toEqual([]);
+            expect(await readdir(join(temporary, 'git-mask'))).toEqual([]);
+          }
+          unavailable = false;
+          await expect(
+            owner.shutdown({
+              shutdownTelemetry: false,
+              skipSessionWriter: true,
+              strictResourceCleanup: true,
+            }),
+          ).resolves.toBeUndefined();
+          expect(removals).toBe(failShutdown ? 3 : 2);
+          await expect(lstat(entry)).rejects.toMatchObject({ code: 'ENOENT' });
+          await expect(lstat(temporary)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await owner.shutdownExecutionEnvironments();
+          expect(removals).toBe(failShutdown ? 3 : 2);
+          expect(runtime.spawn).toHaveBeenCalledOnce();
+          expect(
+            runtime.execFile.mock.calls.filter(
+              (call) => call[1][0] === 'create',
+            ),
+          ).toHaveLength(2);
+        } finally {
+          runtime.execFile.mockImplementation(originalRuntime);
+          await owner.shutdownExecutionEnvironments().catch(() => undefined);
+          if (temporary) await rm(temporary, { recursive: true, force: true });
+        }
+      },
+    );
 
     it.each(['primary', 'installation'])(
       'retries failed %s removal at session shutdown without reopening execution',

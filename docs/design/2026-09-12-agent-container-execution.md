@@ -316,7 +316,12 @@ image and possible pull before waiting for creation. Nonempty `ServerErrors`
 from runtime metadata abort startup before temporary directories or containers
 are allocated, even when the command exits successfully. A failed create still
 requires cleanup because its runtime-side outcome may be unknown. Runtime metadata
-and removal commands retain their 30-second limit. Session shutdown aborts
+and removal commands retain their 30-second limit. If startup cleanup fails,
+its error retains a disposal callback for the root session; the failed factory
+promise remains owned until that cleanup succeeds. Completed cleanup attempts
+may be retried after failure. A timed-out attempt stays shared until its actual
+work settles, so another shutdown cannot start concurrent recovery.
+Session shutdown aborts
 pending startup and begins container disposal before other exit cleanups. Its
 wait is bounded at one second, within the CLI's unchanged two-second per-step
 and five-second overall exit limits. A timeout or removal failure remains

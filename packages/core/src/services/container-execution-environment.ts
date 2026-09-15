@@ -575,7 +575,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       await environment.dispose().catch((cleanupError: unknown) => {
         throw new ExecutionCleanupError(
           `${String(error)}; cleanup failed: ${String(cleanupError)}`,
-          { cause: error },
+          { cause: error, retryCleanup: () => environment.dispose() },
         );
       });
       throw error;

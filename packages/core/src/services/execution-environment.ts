@@ -28,7 +28,17 @@ export const EXECUTION_TOOL_NAMES = new Set<string>([
   ToolNames.TASK_STOP,
 ]);
 
-export class ExecutionCleanupError extends Error {}
+export class ExecutionCleanupError extends Error {
+  readonly retryCleanup?: () => Promise<void>;
+
+  constructor(
+    message?: string,
+    options?: ErrorOptions & { retryCleanup?: () => Promise<void> },
+  ) {
+    super(message, options);
+    this.retryCleanup = options?.retryCleanup;
+  }
+}
 
 export interface ExecutionModification {
   oldContent: string;

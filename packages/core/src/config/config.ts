@@ -8801,7 +8801,10 @@ export class Config {
         try {
           environment = await pending;
         } catch (error) {
-          if (error instanceof ExecutionCleanupError) throw error;
+          if (error instanceof ExecutionCleanupError) {
+            if (!error.retryCleanup) throw error;
+            await error.retryCleanup();
+          }
           this.executionEnvironments?.delete(pending);
           return;
         }
@@ -8837,6 +8840,11 @@ export class Config {
         throw error;
       })
       .finally(() => clearTimeout(timer));
+    // Keep a timed-out attempt shared until its underlying work settles.
+    const clear = () => {
+      this.executionCleanupPromise = undefined;
+    };
+    void cleanup.then(clear, clear);
     return this.executionCleanupPromise;
   }
 
