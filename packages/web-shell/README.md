@@ -360,34 +360,18 @@ Workspace 创建由 SDK 分别约束能力查询和创建请求，WebShell 另�
 并发能力刷新可能取代原预检并延长请求链；即使每个请求都未超过自身截止时间，
 创建动作仍可能先触及 75 秒上限。
 
-| 配置／机制                                                       | 默认值     | 作用与边界                                                                                                                                                                                                  |
-| ---------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| SDK `DaemonClientOptions.fetchTimeoutMs`                         | `30000` ms | 每个短请求独立计时，包含响应体读取；`0` 或 `Infinity` 禁用 SDK 请求超时。                                                                                                                                   |
-| WebShell workspace 创建动作                                      | `75000` ms | 兜底限制不响应 SDK 取消信号的传输；超时后成功返回的会话会被 detach。现有 `StandaloneWebShell`、`DaemonSessionProvider` 和 `DaemonWorkspaceProvider` 没有 `fetchTimeoutMs` 透传属性，使用 SDK 默认请求超时。 |
-| daemon `--initialize-timeout-ms`／`initializeTimeoutMs`          | `10000` ms | ACP 启动握手及创建等阶段的超时，不是整个 HTTP 请求的总预算。                                                                                                                                                |
-| daemon `--session-restore-timeout-ms`／`sessionRestoreTimeoutMs` | `60000` ms | 用于 load/resume。显式 restore 值优先；否则取默认值与显式 initialize 值的较大值。                                                                                                                           |
-| 能力预检缓存                                                     | `60000` ms | 内部固定有效期；冷缓存或缓存过期仍需查询，不是创建截止时间。                                                                                                                                                |
-| `onSessionCreated` 回调                                          | `30000` ms | 创建完成后才开始计时的独立宿主回调限制；没有公开的超时配置属性。                                                                                                                                            |
+| 配置／机制                  | 默认值     | 作用与边界                                                           |
+| --------------------------- | ---------- | -------------------------------------------------------------------- |
+| WebShell workspace 创建动作 | `75000` ms | 兜底限制不响应 SDK 取消信号的传输；超时后成功返回的会话会被 detach。 |
+| `onSessionCreated` 回调     | `30000` ms | 创建完成后才开始计时的独立宿主回调限制；没有公开的超时配置属性。     |
 
-直接使用 SDK 的宿主可以在构造客户端时设置请求超时：
-
-```typescript
-import { DaemonClient } from '@qwen-code/sdk/daemon';
-
-const client = new DaemonClient({
-  baseUrl: 'http://127.0.0.1:4170',
-  fetchTimeoutMs: 60_000,
-});
-```
-
-这个参数作用于该 SDK 客户端的短请求，不会配置 WebShell Provider 内部的客户端。
-嵌入式 WebShell 的能力预检和创建请求仍受默认 30 秒限制；提高 daemon 的初始化超时
-不会自动提高这两类请求的 SDK 超时。load/resume 则使用不同的预算：显式
-`--session-restore-timeout-ms` 优先，否则 daemon 取初始化预算与默认 60 秒的较大值，
-通过 `limits.sessionRestoreTimeoutMs` 通告。调低初始化预算不会降低默认 restore 预算。
-未显式覆盖请求超时时，SDK 根据通告值增加 10 秒余量；WebShell 的 load/resume 也使用通告预算。
-显式设置 `fetchTimeoutMs` 会覆盖 SDK 自动推导的 restore 请求预算，可能缩短超时：
-例如通告 120 秒时原请求预算为 130 秒，设置 `fetchTimeoutMs: 60_000` 后将降至 60 秒。
+WebShell Provider 不透传 SDK 的
+[`fetchTimeoutMs`](../../docs/developers/daemon/13-sdk-daemon-client.md#configuration)，
+能力预检和创建请求使用 SDK 默认请求预算；提高 daemon 的初始化超时不会提高这两类请求的 SDK 超时。
+load/resume 使用独立预算；服务端优先级、客户端覆盖顺序、能力缓存前提和缺失时的回退值见
+[restore 超时契约](../../docs/design/2026-08-07-safe-session-restore-timeout.md#timeout-contract)，
+SDK 和 WebShell 的 restore 余量见
+[serve 协议文档](../../docs/developers/qwen-serve-protocol.md#capabilities)。
 
 SDK `query()` 的 `timeout.controlRequest` 等参数属于
 子进程接口，不控制 daemon HTTP 请求。兜底超时限制 WebShell 的等待时间，不保证

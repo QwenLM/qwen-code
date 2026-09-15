@@ -174,21 +174,19 @@ SDK standalone creation, other actions, and post-creation callbacks retain their
 existing deadlines.
 
 Increasing `--initialize-timeout-ms` does not raise the SDK request timeout for
-the capability preflight or the create request. Load/resume is different: an
-explicit `--session-restore-timeout-ms` takes precedence; otherwise, the daemon
-advertises the greater of the initialize budget and the 60-second restore default
-as `limits.sessionRestoreTimeoutMs`. Lowering the initialize budget cannot lower
-that default. The SDK derives its load/resume request timeout from this advertised
-budget plus 10 seconds unless the caller explicitly overrides the request timeout.
+the capability preflight or the create request. Load/resume follows the separate
+[restore timeout contract](../../design/2026-08-07-safe-session-restore-timeout.md#timeout-contract):
+automatic SDK derivation requires a cached server restore budget; without one it
+falls back to 70 seconds. Explicit request or client timeouts override that
+derivation and can shorten the budget. See the
+[serve protocol reference](../qwen-serve-protocol.md#capabilities) for the SDK and
+Web Shell restore headroom.
 
-Direct SDK consumers can configure `DaemonClientOptions.fetchTimeoutMs`. This
-overrides the automatic restore budget and can shorten it: an advertised 120-second
-restore budget normally gives a 130-second request timeout, but explicitly setting
-`fetchTimeoutMs: 60_000` reduces it to 60 seconds. Web Shell providers do not expose
-this option; capability preflight and creation use the default request budget,
-while load/resume uses the advertised restore budget.
-See the [Web Shell timeout reference](../../../packages/web-shell/README.md#workspace-会话创建超时)
-for the related SDK, daemon, cache, and callback limits.
+Direct SDK consumers can configure
+[`fetchTimeoutMs`](./13-sdk-daemon-client.md#configuration); Web Shell providers
+do not expose this option. See the
+[Web Shell timeout reference](../../../packages/web-shell/README.md#workspace-会话创建超时)
+for creation and callback limits.
 
 The following controlled HTTP test shows the previous 30-second action deadline
 and the 75-second deadline with identical response delays. It exercises the
