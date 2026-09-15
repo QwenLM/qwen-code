@@ -157,12 +157,14 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 ## Web Shell workspace creation deadlines
 
-Workspace creation can make two sequential SDK requests: a capability preflight
-on a cold or expired cache, followed by session creation. Each request has its
-own default 30-second timeout, including response-body consumption. Web Shell
-allows 75 seconds for the combined creation action, covering both request budgets
+In the common case, workspace creation makes a capability preflight on a cold or
+expired cache, followed by session creation. Each request has its own default
+30-second timeout, including response-body consumption. Web Shell allows 75
+seconds for the combined creation action, covering these two request budgets
 plus 15 seconds of headroom. A 20-second preflight followed by a 15-second create
-therefore succeeds without configuration changes.
+therefore succeeds without configuration changes. A concurrent capability refresh
+can supersede the preflight and extend the chain; the action may then time out
+before creation settles even when each request stays within its own deadline.
 
 The 75-second limit also bounds transports that do not settle after SDK
 cancellation. It limits the action's wait rather than guaranteeing transport
@@ -171,9 +173,20 @@ initial workspace creation and creation with an existing session use this limit.
 SDK standalone creation, other actions, and post-creation callbacks retain their
 existing deadlines.
 
-Increasing `--initialize-timeout-ms` does not raise the SDK request timeout.
-Direct SDK consumers can configure `DaemonClientOptions.fetchTimeoutMs`, but the
-Web Shell providers do not expose that option and use the default request budget.
+Increasing `--initialize-timeout-ms` does not raise the SDK request timeout for
+the capability preflight or the create request. Load/resume is different: an
+explicit `--session-restore-timeout-ms` takes precedence; otherwise, the daemon
+advertises the greater of the initialize budget and the 60-second restore default
+as `limits.sessionRestoreTimeoutMs`. Lowering the initialize budget cannot lower
+that default. The SDK derives its load/resume request timeout from this advertised
+budget plus 10 seconds unless the caller explicitly overrides the request timeout.
+
+Direct SDK consumers can configure `DaemonClientOptions.fetchTimeoutMs`. This
+overrides the automatic restore budget and can shorten it: an advertised 120-second
+restore budget normally gives a 130-second request timeout, but explicitly setting
+`fetchTimeoutMs: 60_000` reduces it to 60 seconds. Web Shell providers do not expose
+this option; capability preflight and creation use the default request budget,
+while load/resume uses the advertised restore budget.
 See the [Web Shell timeout reference](../../../packages/web-shell/README.md#workspace-会话创建超时)
 for the related SDK, daemon, cache, and callback limits.
 

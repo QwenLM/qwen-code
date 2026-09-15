@@ -1669,7 +1669,7 @@ describe('createDaemonSessionActions', () => {
     expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
   });
 
-  it('does not apply the generic create timeout to standalone create', async () => {
+  it('does not apply the workspace create watchdog to standalone create', async () => {
     vi.useFakeTimers();
     try {
       const deferred = createDeferred<DaemonSessionClient>();
@@ -1693,13 +1693,19 @@ describe('createDaemonSessionActions', () => {
 
       const pending = actions.createSession();
       let settled = false;
-      void pending.finally(() => {
-        settled = true;
-      });
-      await vi.advanceTimersByTimeAsync(30_001);
+      void pending.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(75_001);
       expect(settled).toBe(false);
       deferred.resolve(nextSession as unknown as DaemonSessionClient);
       await expect(pending).resolves.toBe(nextSession);
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -1722,24 +1728,10 @@ describe('createDaemonSessionActions', () => {
             token: '',
             transport,
           });
-          const existing = createMockSession('session-a');
-          existing.client.createOrAttachSession.mockImplementation((request) =>
-            client.createOrAttachSession(request),
+          const { actions, sessionRef } = createWorkspaceCreateHarness(
+            path,
+            client,
           );
-          const { actions, sessionRef } = createActionsHarness({
-            connection: {
-              status: 'connected',
-              sessionContext: { kind: 'workspace', cwd: '/workspace' },
-              ...(path === 'active' ? { sessionId: 'session-a' } : {}),
-            },
-            ...(path === 'active' ? { session: existing } : {}),
-            createDetachedSession: vi.fn((workspaceCwd, overrides) =>
-              DaemonSessionClient.createOrAttach(client, {
-                workspaceCwd,
-                ...overrides,
-              }),
-            ),
-          });
           const rejected = vi.fn();
           const pending = actions
             .createSession({ sourceType: 'default' })
@@ -1770,19 +1762,15 @@ describe('createDaemonSessionActions', () => {
         try {
           const created = createMockSession('session-b');
           const deferred = createDeferred<DaemonSessionClient>();
-          const existing = createMockSession('session-a');
+          const client = new DaemonClient({
+            baseUrl: 'http://localhost',
+            token: '',
+          });
+          const { actions, sessionRef, existing } =
+            createWorkspaceCreateHarness(path, client, () => deferred.promise);
           existing.client.createOrAttachSession.mockReturnValue(
             deferred.promise,
           );
-          const { actions, sessionRef } = createActionsHarness({
-            connection: {
-              status: 'connected',
-              sessionContext: { kind: 'workspace', cwd: '/workspace' },
-              ...(path === 'active' ? { sessionId: 'session-a' } : {}),
-            },
-            ...(path === 'active' ? { session: existing } : {}),
-            createDetachedSession: vi.fn(() => deferred.promise),
-          });
           const rejected = vi.fn();
           const pending = actions.createSession().catch(rejected);
           await vi.advanceTimersByTimeAsync(75_000);
@@ -1842,24 +1830,8 @@ describe('createDaemonSessionActions', () => {
               fetch.mockClear();
             }
             const detach = vi.spyOn(client, 'detachSession');
-            const existing = createMockSession('session-a');
-            existing.client.createOrAttachSession.mockImplementation(
-              (request) => client.createOrAttachSession(request),
-            );
-            const { actions, sessionRef } = createActionsHarness({
-              connection: {
-                status: 'connected',
-                sessionContext: { kind: 'workspace', cwd: '/workspace' },
-                ...(path === 'active' ? { sessionId: 'session-a' } : {}),
-              },
-              ...(path === 'active' ? { session: existing } : {}),
-              createDetachedSession: vi.fn((workspaceCwd, overrides) =>
-                DaemonSessionClient.createOrAttach(client, {
-                  workspaceCwd,
-                  ...overrides,
-                }),
-              ),
-            });
+            const { actions, sessionRef, existing } =
+              createWorkspaceCreateHarness(path, client);
             const completed = vi.fn();
             const pending = actions
               .createSession({ sourceType: 'default' })
@@ -1905,28 +1877,21 @@ describe('createDaemonSessionActions', () => {
               sessionDelayMs:
                 failure === 'request timeout' ? 35_000 : undefined,
             });
-            const existing = createMockSession('session-a');
-            existing.client.createOrAttachSession.mockImplementation(
-              (request) => client.createOrAttachSession(request),
-            );
-            const { actions } = createActionsHarness({
-              connection: {
-                status: 'connected',
-                sessionContext: { kind: 'workspace', cwd: '/workspace' },
-                ...(path === 'active' ? { sessionId: 'session-a' } : {}),
-              },
-              ...(path === 'active' ? { session: existing } : {}),
-              createDetachedSession: vi.fn((workspaceCwd, overrides) =>
-                DaemonSessionClient.createOrAttach(client, {
-                  workspaceCwd,
-                  ...overrides,
-                }),
-              ),
-            });
+            const { actions } = createWorkspaceCreateHarness(path, client);
+            const rejected = vi.fn((error: unknown) => error);
             const outcome = actions
               .createSession({ sourceType: 'default' })
-              .catch((error: unknown) => error);
-            await vi.advanceTimersByTimeAsync(50_000);
+              .catch(rejected);
+            await vi.advanceTimersByTimeAsync(20_000);
+            if (failure === 'request timeout') {
+              await vi.advanceTimersByTimeAsync(29_999);
+              expect(rejected).not.toHaveBeenCalled();
+              expect(signals.at(-1)?.aborted).toBe(false);
+              await vi.advanceTimersByTimeAsync(1);
+              expect(rejected).toHaveBeenCalledExactlyOnceWith(
+                expect.objectContaining({ name: 'TimeoutError' }),
+              );
+            }
             expect(await outcome).toMatchObject({
               name:
                 failure === 'request timeout'
@@ -5977,6 +5942,32 @@ function createActionsHarness(
     settleRestoredActivePrompt,
     setPromptStatus,
     store,
+  };
+}
+
+function createWorkspaceCreateHarness(
+  path: 'active' | 'detached',
+  client: DaemonClient,
+  createDetachedSession: Parameters<
+    typeof createDaemonSessionActions
+  >[0]['createDetachedSession'] = (workspaceCwd, overrides) =>
+    DaemonSessionClient.createOrAttach(client, { workspaceCwd, ...overrides }),
+) {
+  const existing = createMockSession('session-a');
+  existing.client.createOrAttachSession.mockImplementation((request) =>
+    client.createOrAttachSession(request),
+  );
+  return {
+    existing,
+    ...createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        ...(path === 'active' ? { sessionId: 'session-a' } : {}),
+      },
+      ...(path === 'active' ? { session: existing } : {}),
+      createDetachedSession: vi.fn(createDetachedSession),
+    }),
   };
 }
 
