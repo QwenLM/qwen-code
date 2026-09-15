@@ -219,11 +219,20 @@ async function render(raw, opts) {
   const titleRows = opts.title ? 1 : 0;
   const width = Math.round(PAD * 2 + opts.cols * CELL_W);
   const height = PAD * 2 + (rows.length + titleRows) * CELL_H;
+  // font-weight="bold" alone rasterises as a no-op on a host without a
+  // bold face for the matched family (the release fleet has no fonts at
+  // all), silently dropping the weight this renderer exists to show.
+  // Stroke the glyph in its own fill so bold survives any host font stack.
+  // One recipe shared by every bold emitter — the title and the body
+  // cells — so a later label cannot copy a bare font-weight and drift.
+  const boldAttrs = (colour) =>
+    ` font-weight="bold" stroke="${colour}" stroke-width="0.6"` +
+    ' paint-order="stroke" stroke-linejoin="round"';
   let body = '';
   if (opts.title) {
     body +=
-      `<text x="${PAD}" y="${PAD + CELL_H - 5}" fill="#9cdcfe" ` +
-      `font-weight="bold">${escapeXml(opts.title)}</text>`;
+      `<text x="${PAD}" y="${PAD + CELL_H - 5}" fill="#9cdcfe"` +
+      `${boldAttrs('#9cdcfe')}>${escapeXml(opts.title)}</text>`;
   }
   rows.forEach((cells, y) => {
     const baseline = PAD + (y + titleRows + 1) * CELL_H - 5;
@@ -235,17 +244,9 @@ async function render(raw, opts) {
       // text (the normal way to label a coloured badge, e.g. vitest's project
       // badge) would vanish as black-on-black; lift it to the default grey.
       const colour = mapped === BG ? FG_DEFAULT : mapped;
-      // font-weight="bold" alone rasterises as a no-op on a host without a
-      // bold face for the matched family (the release fleet has no fonts at
-      // all), silently dropping the weight this renderer exists to show.
-      // Stroke the glyph in its own fill so bold survives any host font stack.
-      const boldAttrs = cell.bold
-        ? ` font-weight="bold" stroke="${colour}" stroke-width="0.6"` +
-          ' paint-order="stroke" stroke-linejoin="round"'
-        : '';
       body +=
         `<text x="${(PAD + cell.x * CELL_W).toFixed(1)}" y="${baseline}" ` +
-        `fill="${colour}"${boldAttrs}>` +
+        `fill="${colour}"${cell.bold ? boldAttrs(colour) : ''}>` +
         `${escapeXml(cell.chars)}</text>`;
     }
   });

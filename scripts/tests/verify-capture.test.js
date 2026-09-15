@@ -5,7 +5,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -193,6 +199,65 @@ describe('verify-capture helper', () => {
       // ...and the two attributes must not collapse onto the same rendering.
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
+
+  // font-weight="bold" rasterises as a no-op where the matched family has no
+  // bold face — the release fleet has no fonts at all — so the stroke is the
+  // only thing keeping bold visible there. The test above cannot see a
+  // dropped stroke where CI runs: a bold face resolves and satisfies it
+  // through font-weight alone (measured: the stroke-less mutant passes 23/23
+  // on a font-equipped host). Point fontconfig at an empty font list so the
+  // host's fonts cannot mask a missing stroke; with no fonts librsvg draws
+  // .notdef boxes, so this pins the stroke mechanism, not legibility.
+  // Decoded pixels are compared, not PNG bytes — see the black-on-black test.
+  it('keeps bold visible on a host with no fonts at all', async () => {
+    let plain;
+    let bold;
+    withDir((dir) => {
+      const fontsDir = path.join(dir, 'fonts');
+      mkdirSync(fontsDir);
+      const conf = path.join(dir, 'fonts.conf');
+      writeFileSync(
+        conf,
+        '<?xml version="1.0"?>\n' +
+          '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n' +
+          `<fontconfig><dir>${fontsDir}</dir><cachedir>${fontsDir}</cachedir></fontconfig>\n`,
+      );
+      const env = { ...process.env, FONTCONFIG_FILE: conf };
+      const render = (name, input) => {
+        const out = path.join(dir, `${name}.png`);
+        const res = run(['--out', out, '--cols', '30'], { input, env });
+        expect(res.status).toBe(0);
+        expect(isPng(out)).toBe(true);
+        return readFileSync(out);
+      };
+      plain = render('plain', 'FAIL PASS\n');
+      bold = render('bold', `${ESC}[1mFAIL PASS${ESC}[0m\n`);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const [p, b] = await Promise.all([
+      sharp(plain).raw().toBuffer({ resolveWithObject: true }),
+      sharp(bold).raw().toBuffer({ resolveWithObject: true }),
+    ]);
+    expect(
+      b.data.equals(p.data),
+      'bold was dropped: the stroke is gone and no host bold face remains',
+    ).toBe(false);
+  });
+
+  // The title and a bold body cell are the renderer's two bold emitters; when
+  // each carried its own attribute string the title kept a bare
+  // font-weight="bold" — a no-op where no bold face resolves — while the body
+  // cells gained the stroke, so the caption rendered LIGHTER than the cells
+  // it heads in the A/B evidence images this helper exists to publish. Pin
+  // the shared recipe: a source assertion reds on every host, with or without
+  // fonts. The definition `const boldAttrs = (colour) =>` does not match this
+  // pattern; the two call sites — boldAttrs('#9cdcfe') for the title and
+  // boldAttrs(colour) for a bold cell — do, so a site rewritten to a
+  // hand-rolled attribute string drops the count.
+  it('emits the title and bold body cells through one bold helper', () => {
+    const src = readFileSync(HELPER, 'utf8');
+    expect(src.match(/boldAttrs\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
 
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
   // which the bounds guard maps to FG_DEFAULT (#d4d4d4). Decode pixels and
