@@ -3157,6 +3157,87 @@ describe('ExtensionStore', () => {
       );
     });
 
+    it.runIf(process.platform !== 'win32')(
+      'keeps a relative symlink target across a copy swap',
+      async () => {
+        // The copy path is win32-gated; the real filesystem stays POSIX here, so
+        // a relative symlink needs no Windows privilege.
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        const store = makeStore();
+        const identity = { id: 'f4'.repeat(32), name: 'demo' };
+        const destination = path.join(extensionsDir, 'demo');
+        await store.ensureInitialized([identity]);
+        await installDemo(store, identity, destination);
+        const staging = await stageUpdate(store);
+        // Present in both trees, so the prune keeps it and the copy replaces it.
+        await fsp.symlink(
+          'keep.md',
+          path.join(destination, 'skills', 'link.md'),
+        );
+        await fsp.symlink('keep.md', path.join(staging, 'skills', 'link.md'));
+        renameFault.inspect = (src) =>
+          src === destination ? lockError(src) : undefined;
+
+        await store.commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: staging,
+          destinationDirectory: destination,
+        });
+
+        // A rewritten target would be an absolute path into the staging
+        // directory, which the commit removes.
+        expect(
+          await fsp.readlink(path.join(destination, 'skills', 'link.md')),
+        ).toBe('keep.md');
+        expect(
+          await fsp.readFile(
+            path.join(destination, 'skills', 'link.md'),
+            'utf8',
+          ),
+        ).toBe('two');
+      },
+    );
+
+    it('keeps the store usable when a copy-mode rollback cannot complete', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'f5'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      const staging = await stageUpdate(store);
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+      const internals = store as unknown as {
+        copyTree: (source: string, target: string) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string) => {
+          // Only the backup copy reads; the apply copy and the rollback that
+          // repeats it both write over the file the holder keeps.
+          if (source === destination) return await copyTree(source, target);
+          throw lockError(source);
+        },
+      );
+
+      const failure: unknown = await store
+        .commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: staging,
+          destinationDirectory: destination,
+        })
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      // The journal survives, so a later operation retries it instead of every
+      // operation failing until the holder releases.
+      expect(await leftoverJournals()).toHaveLength(1);
+      await expect(store.readSnapshot()).resolves.toBeDefined();
+    });
+
     it('updates by copy when an entry changes kind', async () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
       const store = makeStore();

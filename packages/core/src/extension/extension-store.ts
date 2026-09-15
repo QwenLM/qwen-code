@@ -907,11 +907,7 @@ export class ExtensionStore {
             const partialBackup = partialBackupPath(backupDirectory);
             await this.withLockHint(destinationDirectory, async () => {
               await fsp.rm(partialBackup, { recursive: true, force: true });
-              await fsp.cp(destinationDirectory, partialBackup, {
-                recursive: true,
-                force: true,
-                preserveTimestamps: true,
-              });
+              await this.copyTree(destinationDirectory, partialBackup);
               await renameWithRetry(partialBackup, backupDirectory, 3, 50);
             });
           }
@@ -928,11 +924,7 @@ export class ExtensionStore {
               );
               // Copy first, then prune: deleting ahead of the copy would widen the
               // window in which a crash leaves the extension missing content.
-              await fsp.cp(stagingDirectory, destinationDirectory, {
-                recursive: true,
-                force: true,
-                preserveTimestamps: true,
-              });
+              await this.copyTree(stagingDirectory, destinationDirectory);
               await this.pruneStalePaths(
                 stagingDirectory,
                 destinationDirectory,
@@ -1677,8 +1669,14 @@ export class ExtensionStore {
           // or unrelated mutations.
         }
       } else {
-        await this.rollbackJournal(journal);
-        await fsp.rm(journalPath, { force: true });
+        try {
+          await this.rollbackJournal(journal);
+          await fsp.rm(journalPath, { force: true });
+        } catch {
+          // A holder can defeat the rollback for as long as it lives. Keep the
+          // journal so a later operation retries it, without failing reads or
+          // unrelated mutations in the meantime.
+        }
       }
     }
   }
@@ -1918,6 +1916,30 @@ export class ExtensionStore {
     }
   }
 
+  /**
+   * Copies a tree, retrying the transient lock errors the rename path absorbs,
+   * and keeping symlink targets verbatim so they survive the staging removal.
+   */
+  private async copyTree(
+    sourceDirectory: string,
+    destinationDirectory: string,
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fsp.cp(sourceDirectory, destinationDirectory, {
+          recursive: true,
+          force: true,
+          preserveTimestamps: true,
+          verbatimSymlinks: true,
+        });
+        return;
+      } catch (error: unknown) {
+        if (!isDirectoryLockError(error) || attempt >= 3) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+      }
+    }
+  }
+
   private async removeDirectoryInPlace(directory: string): Promise<void> {
     await this.withLockHint(directory, async () => {
       await this.emptyDirectory(directory);
@@ -1977,11 +1999,10 @@ export class ExtensionStore {
           journal.backupDirectory,
           journal.destinationDirectory,
         );
-        await fsp.cp(journal.backupDirectory, journal.destinationDirectory, {
-          recursive: true,
-          force: true,
-          preserveTimestamps: true,
-        });
+        await this.copyTree(
+          journal.backupDirectory,
+          journal.destinationDirectory,
+        );
         await this.pruneStalePaths(
           journal.backupDirectory,
           journal.destinationDirectory,

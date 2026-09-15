@@ -67,19 +67,20 @@ acting session itself.
 Probes on Windows (Node 24, chokidar 4 - the version this repo depends on),
 renaming an extension directory that contains a nested subdirectory:
 
-| Handle holder                                | rename of ancestor        |
-| -------------------------------------------- | ------------------------- |
-| none                                         | OK                        |
-| `fs.watch` on the directory itself           | OK                        |
-| `fs.watchFile` (stat polling)                | OK                        |
-| chokidar recursive, repo configuration       | **EPERM**, all 4 attempts |
-| chokidar recursive, watcher closed first     | OK                        |
-| chokidar `depth: 1` / `depth: 0`             | OK                        |
-| open file handle on a file inside the tree   | **EPERM**                 |
-| child process with cwd in a subdirectory     | **EPERM**                 |
-| child process with cwd on the directory      | **EBUSY**                 |
-| `rm -rf` while a descendant handle is open   | OK                        |
-| `cp -r` over a tree with a descendant handle | OK                        |
+| Handle holder                                   | rename of ancestor        |
+| ----------------------------------------------- | ------------------------- |
+| none                                            | OK                        |
+| `fs.watch` on the directory itself              | OK                        |
+| `fs.watchFile` (stat polling)                   | OK                        |
+| chokidar recursive, repo configuration          | **EPERM**, all 4 attempts |
+| chokidar recursive, watcher closed first        | OK                        |
+| chokidar `depth: 1` / `depth: 0`                | OK                        |
+| open file handle, delete sharing (Node default) | OK                        |
+| open file handle, delete sharing withheld       | **EPERM**                 |
+| child process with cwd in a subdirectory        | **EPERM**                 |
+| child process with cwd on the directory         | **EBUSY**                 |
+| `rm -rf` while a descendant handle is open      | OK                        |
+| `cp -r` over a tree with a descendant handle    | OK                        |
 
 Confirmed against the live machine: a throwaway directory created under the real
 `~/.qwen/extensions` could not be renamed while other Qwen Code sessions were
@@ -87,6 +88,13 @@ running, and the probe was removed afterwards. The last two rows are what make
 the fix possible: these handles block directory rename and directory removal, not
 deletion or copying, so a swap can avoid the lock without any cross-process
 protocol.
+
+Handle rows are split by sharing, which a single row conflated: a holder that
+grants delete - what `libuv` opens with, so every Qwen Code child counts - blocks
+neither a rename nor a copy, while a holder that withholds it, such as a scanner or
+an editor holding one file exclusively, refuses the rename with `EPERM` and makes a
+copy over that file fail with `EBUSY`. That last value is the one a lock classifier
+sees on the copy path, and it is why the copy retries.
 
 ## Scope
 
@@ -140,9 +148,13 @@ destination. The copy path is:
    whose type differs from the staged entry at the same relative path - `fsp.cp`
    refuses to replace those, and refuses before a prune could reach them - then
    `fsp.cp(stagingDirectory, destinationDirectory, { recursive: true,
-force: true })`, preserving symlinks and timestamps (`dereference` stays false,
-   `preserveTimestamps` on). Relative symlink targets remain valid because the
-   tree shape is identical.
+force: true })` with `preserveTimestamps` and `verbatimSymlinks` on and
+   `dereference` left false. The copy retries a lock error the way the rename path
+   does - four attempts inside about 350 ms - because a scanner or an indexer can
+   hold one file transiently, which is the case the rename path used to absorb.
+   `verbatimSymlinks` is what keeps a relative target relative: without it `fsp.cp`
+   rewrites the target to an absolute path under the staging directory, which the
+   commit then removes.
 3. **Prune.** Walk the destination against the staging tree and remove every path
    staging does not carry, recursing into directories present on both sides.
    Running the walk after the apply is what keeps freshly copied content from
@@ -171,7 +183,10 @@ consumed it. Restoring over the live tree is what keeps a manifest-less husk out
 of reach when an entry cannot be deleted: the swap fails, but the tree it failed
 over is the installed one. Recovery needs no new concept -
 `recoverTransactionsUnlocked()` keeps its existing phase comparison and simply
-calls the strategy-aware rollback.
+calls the strategy-aware rollback. A rollback that cannot complete keeps its
+journal instead of failing the operation that triggered recovery, so a holder that
+refuses the restoring copy costs one operation rather than every extension read and
+mutation until it releases.
 
 **B - actionable failure text.** Alongside the existing store errors:
 
@@ -279,7 +294,9 @@ the backup back, including removing content the partial apply added; a blocked c
 step surfacing the locked-directory error with the tree restored and the rollback
 area empty; the rollback restoring over the live tree rather than emptying it; a
 destination that resolves outside the extensions root, and a linked root inside it,
-each being refused with the relocated tree left intact; an entry whose type changes
+each being refused with the relocated tree left intact; a relative symlink target
+surviving a copy swap; a rollback that cannot complete leaving the store usable;
+an entry whose type changes
 between versions being reconciled so the copy runs; an interrupted backup's `.partial` tree being removed by
 recovery; quarantining a journal whose strategy is unrecognised; and the pre-existing
 journals without the field keeping their current behaviour. The one branch that is
