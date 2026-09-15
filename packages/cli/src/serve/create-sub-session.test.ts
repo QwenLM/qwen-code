@@ -1137,6 +1137,42 @@ describe('sub-session launcher', () => {
     expect(fake.subscribeCalls()).toBe(1);
   });
 
+  it.each([
+    'background_task_completed',
+    'background_notification',
+    'background_notification_turn_started',
+  ])('excludes %s display prose from first-turn output', async (source) => {
+    const fake = makeFakeBridge({
+      events: (pid) => [
+        chunk('answer'),
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'Background task completed: npm test' },
+              _meta: { source },
+            },
+          },
+        },
+        chunk(' tail'),
+        turnComplete(pid),
+      ],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    const result = await launcher.launch({
+      prompt: 'greet',
+      completion: 'first-turn',
+      callerSessionId: 'caller-1',
+    });
+    expect(result.result).toBe('answer tail');
+    launcher.stop();
+  });
+
   it('first-turn: reports turn_error with the partial text and error stopReason', async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('partial'), turnError(pid, 'model exploded')],

@@ -143,6 +143,7 @@ export default {
   'from {{marketplace}}': '来自 {{marketplace}}',
   installed: '已安装',
   '{{count}} Agents': '{{count}} 个智能体',
+  '{{count}} Workflows': '{{count}} 个工作流',
   '{{count}} Commands': '{{count}} 个命令',
   '{{count}} MCP': '{{count}} 个 MCP',
   '{{count}} Skills': '{{count}} 个技能',
@@ -895,6 +896,10 @@ export default {
   'This extension will install the following skills:': '此扩展将安装以下技能：',
   'This extension will install the following subagents:':
     '此扩展将安装以下子智能体：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此扩展将安装以下工作流（可启动子智能体的 JavaScript 脚本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流脚本与已安装版本相比有改动：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
@@ -966,6 +971,7 @@ export default {
   'Context files:': '上下文文件：',
   'Skills:': '技能：',
   'Agents:': '智能体：',
+  'Workflows:': '工作流：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '链接扩展安装失败。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1076,6 +1082,20 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已开启，本会话不会运行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精简模式已开启，本会话不会运行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 设置禁用。',
+  'Timeout:': '超时：',
+  'Status message:': '状态消息：',
+  'Condition:': '条件：',
+  'Options:': '选项：',
+  'Skill:': '技能：',
+  'runs in background': '后台运行',
+  'runs once': '只运行一次',
+  sequential: '顺序执行',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
@@ -2551,6 +2571,8 @@ export default {
   '{{count}} skills': '{{count}} 个技能',
   '{{count}} agent': '{{count}} 个代理',
   '{{count}} agents': '{{count}} 个代理',
+  '{{count}} workflow': '{{count}} 个工作流',
+  '{{count}} workflows': '{{count}} 个工作流',
   '{{count}} hook': '{{count}} 个钩子',
   '{{count}} hooks': '{{count}} 个钩子',
   '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',

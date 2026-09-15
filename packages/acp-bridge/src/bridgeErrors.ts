@@ -28,6 +28,29 @@ import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
   'Not currently generating' as const;
 
+export interface AcpChildCapacity {
+  code: 'acp_child_capacity_exhausted';
+  maxConcurrentChildren: number;
+  committedAcpChildren: number;
+}
+
+export class AcpChildCapacityExceededError
+  extends Error
+  implements AcpChildCapacity
+{
+  override readonly name = 'AcpChildCapacityExceededError';
+  readonly code = 'acp_child_capacity_exhausted' as const;
+
+  constructor(
+    readonly maxConcurrentChildren: number,
+    readonly committedAcpChildren: number,
+  ) {
+    super(
+      'The service has reached its concurrent process limit. Try again later or cancel this operation.',
+    );
+  }
+}
+
 export class StandaloneSessionSpawnError extends Error {
   override readonly name = 'StandaloneSessionSpawnError';
 
