@@ -33,7 +33,7 @@ async function horizontalBox(locator: Locator) {
 }
 
 test.describe('session source switch sliding indicator', () => {
-  test('pill overlays the active trigger and slides on switch', async ({
+  test('pill overlays the active trigger and slides on switch @smoke', async ({
     page,
   }, testInfo) => {
     await openSidebarWithSourceSwitch(
@@ -93,7 +93,7 @@ test.describe('session source switch sliding indicator', () => {
     expect(intermediate.length).toBeGreaterThan(0);
   });
 
-  test('no transition under prefers-reduced-motion', async ({
+  test('snaps without a transition under prefers-reduced-motion @smoke', async ({
     page,
   }, testInfo) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -104,6 +104,43 @@ test.describe('session source switch sliding indicator', () => {
 
     const indicator = page.locator('[data-slot="tabs-list-indicator"]');
     await expect(indicator).toBeVisible();
-    await expect(indicator).toHaveCSS('transition-property', 'none');
+
+    const tasksLeft = (
+      await horizontalBox(page.getByRole('tab', { name: 'Tasks' }))
+    ).left;
+    const channelsLeft = (
+      await horizontalBox(page.getByRole('tab', { name: 'Channels' }))
+    ).left;
+
+    const tracePromise = page.evaluate(async () => {
+      const pill = document.querySelector('[data-slot="tabs-list-indicator"]');
+      if (!pill) {
+        return [];
+      }
+      const samples: number[] = [];
+      const start = performance.now();
+      await new Promise<void>((resolve) => {
+        const tick = () => {
+          samples.push(pill.getBoundingClientRect().left);
+          if (performance.now() - start < 400) {
+            requestAnimationFrame(tick);
+          } else {
+            resolve();
+          }
+        };
+        requestAnimationFrame(tick);
+      });
+      return samples;
+    });
+    await page.getByRole('tab', { name: 'Channels' }).click();
+    const trace = await tracePromise;
+
+    // The pill jumps: every sampled position is one of the two endpoints.
+    const endpoints = [tasksLeft, channelsLeft];
+    const offEndpoint = trace.filter((left) =>
+      endpoints.every((end) => Math.abs(left - end) > 1),
+    );
+    expect(offEndpoint).toEqual([]);
+    expect(trace.some((left) => Math.abs(left - channelsLeft) <= 1)).toBe(true);
   });
 });
