@@ -664,6 +664,15 @@ export class ChatCompressionService {
         getColdInput().slimmedHistory,
         slimmingConfig.imageTokenEstimate,
       ));
+    // A provider count bounds the history heuristic; compression-only prompt
+    // text is still added below. Estimated baselines keep the conservative walk.
+    const getColdHistoryAdmissionEstimate = () => {
+      const localEstimate = getColdHistoryEstimate();
+      return originalTokenCount > 0 &&
+        opts.originalTokenCountIsEstimated === false
+        ? Math.min(localEstimate, originalTokenCount)
+        : localEstimate;
+    };
     const compressionDirectiveTokenCount = estimateUtf8AdjustedTextTokens(
       COMPRESSION_REQUEST_DIRECTIVE,
     );
@@ -698,7 +707,7 @@ export class ChatCompressionService {
       return true;
     };
     const estimateColdRequestInput = (systemPrompt: string) =>
-      getColdHistoryEstimate() +
+      getColdHistoryAdmissionEstimate() +
       estimateUtf8AdjustedTextTokens(systemPrompt) +
       compressionDirectiveTokenCount;
     const coldRequestCannotFit = (
@@ -893,7 +902,7 @@ export class ChatCompressionService {
     // usable output reserve. Keeping the shared terms here prevents the checks
     // from drifting.
     const getColdInputEstimate = () =>
-      getColdHistoryEstimate() +
+      getColdHistoryAdmissionEstimate() +
       estimateUtf8AdjustedTextTokens(systemInstruction);
     // Window the output budget clamps against: the window of the model that
     // actually receives the side-query. Defaults to the main model's window;
