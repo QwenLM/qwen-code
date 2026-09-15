@@ -3153,6 +3153,12 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
+  it('rejects unwired admission before creating the app', () => {
+    expect(() =>
+      createServeAppImpl({ ...baseOpts, childHeapMode: 'admit' }),
+    ).toThrow('managed child process wiring');
+  });
+
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {

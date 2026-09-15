@@ -347,7 +347,7 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   events: WorkflowEvent[];
   /**
    * P5: cumulative output tokens spent by this run's `agent()` dispatches.
-   * Mirrored from `budget.spent()` after each successful completion via
+   * Mirrored from the budget's per-run spend (`runSpent()`) after each successful completion via
    * the `budgetUpdated` emitter event. Stays at `0` for runs without a
    * budget (legacy callers) and for the period between register and the
    * first dispatch settling.
