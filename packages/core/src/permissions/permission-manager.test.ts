@@ -940,6 +940,45 @@ describe('splitCompoundCommand', () => {
     },
   );
 
+  // A process substitution is NOT a third substituted body here, because
+  // bash's own `${ … }` close-scan does not treat `<( … )` / `>( … )` as one:
+  // a `}` inside it still closes the inner expansion, the expansion closes at
+  // the `}` right after the `)`, and a space-preceded `#` after that is a
+  // real top-level comment. `bash -xc 'a=1; echo ${a:-${b:-<(x })} # note} ;
+  // touch m'` traces only `+ echo 1` and never creates the marker, and
+  // `bash -c 'echo ${a:-${b:-<(x })}'` with `a` unset dies with
+  // `bad substitution: no closing ')' in <(x` — the inner expansion's word is
+  // the literal `<(x`, proving it closed at the inner `}`. Charging `<( … )`
+  // to `commandSubDepth` would split these lines where bash runs one command
+  // plus a comment — the over-splitting #11815 removed — so these rows pin
+  // the agreement.
+  it.each([
+    [
+      'a process substitution reading',
+      'echo ${a:-${b:-<(x })} # note} ; rm -rf /tmp/x',
+      ['echo ${a:-${b:-<(x })} # note} ; rm -rf /tmp/x'],
+    ],
+    [
+      'a process substitution writing',
+      'echo ${a:-${b:->(x })} # note} ; rm -rf /tmp/x',
+      ['echo ${a:-${b:->(x })} # note} ; rm -rf /tmp/x'],
+    ],
+    // bash closes the expansion at the `}` after the `)`, so the stray `}` is
+    // an argument and the `;` a real boundary: `bash -xc 'a=1; echo
+    // ${a:-${b:-<(x })} } ; echo SECOND'` traces `+ echo 1 '}'` and
+    // `+ echo SECOND`.
+    [
+      'a real boundary after the expansion closes',
+      'echo ${a:-${b:-<(x })} } ; echo SECOND',
+      ['echo ${a:-${b:-<(x })} }', 'echo SECOND'],
+    ],
+  ])(
+    'does not let %s hold the expansion open past bash',
+    async (_where, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
   // bash performs no comment recognition inside `(( … ))` / `$(( … ))`, so the
   // `#` stays literal and `))` still closes the expansion. Swallowing the `))`
   // additionally stranded the arithmetic depth at 1, after which no later bare
