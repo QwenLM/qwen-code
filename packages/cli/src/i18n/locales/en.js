@@ -1101,6 +1101,20 @@ export default {
   'No hook config selected': 'No hook config selected',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+  'Safe mode is on, so no hooks run in this session.':
+    'Safe mode is on, so no hooks run in this session.',
+  'Bare mode is on, so no hooks run in this session.':
+    'Bare mode is on, so no hooks run in this session.',
+  'All hooks are disabled by the disableAllHooks setting.':
+    'All hooks are disabled by the disableAllHooks setting.',
+  'Timeout:': 'Timeout:',
+  'Status message:': 'Status message:',
+  'Condition:': 'Condition:',
+  'Options:': 'Options:',
+  'Skill:': 'Skill:',
+  'runs in background': 'runs in background',
+  'runs once': 'runs once',
+  sequential: 'sequential',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook Configuration - Disabled',
   'All hooks are currently disabled. You have {{count}} that are not running.':
