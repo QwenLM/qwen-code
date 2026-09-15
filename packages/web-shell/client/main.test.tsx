@@ -240,9 +240,7 @@ describe('StandaloneApp', () => {
     // prop and never written to localStorage, or the next settings.json
     // edit would be shadowed by the stale copy.
     expect(testState.props?.webShellProps.theme).toBeUndefined();
-    expect(
-      window.localStorage.getItem('qwen-code-web-shell-theme'),
-    ).toBeNull();
+    expect(window.localStorage.getItem('qwen-code-web-shell-theme')).toBeNull();
 
     act(() => {
       testState.props?.webShellProps.onLanguageResolved?.('zh-CN');
