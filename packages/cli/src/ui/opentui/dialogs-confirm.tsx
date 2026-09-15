@@ -101,8 +101,10 @@ const MAX_BODY_ROWS = 20;
  * that keeps its place above it. The expanded tail window is budgeted as
  * terminal height minus this reserve, so the end of the content — where the
  * options still are — stays on screen (ink reaches the same visible outcome
- * through terminal scrollback). Deliberately generous: erring low hides a few
- * payload rows, erring high pushes the options off screen.
+ * through terminal scrollback). Deliberately generous: erring low makes the
+ * window taller than the chrome allows and pushes the options off screen,
+ * erring high only hides a few payload rows, which the expanded window's own
+ * hidden-rows label reports.
  */
 const EXPANDED_BODY_RESERVE_ROWS = 20;
 

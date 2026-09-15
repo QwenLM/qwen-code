@@ -23,15 +23,16 @@
  * Not ported, and recorded as follow-ups: word jumps (ctrl/alt+←/→, alt+b/f),
  * delete-word-right (alt+d, ctrl/alt+Delete), kill-line (ctrl+k/ctrl+u) and
  * undo/redo (ctrl+z) — all of which ink's TextInput does bind. ctrl+D is
- * deliberately absent: the app's global EXIT binding takes that key before any
- * text field sees it. Three rendering differences remain as well: ink windows
- * the field at `inputWidth` columns, and its one-line viewport shows only the
- * line the caret is on, so a pasted multi-line value hides everything off that
- * line, while these rows render the whole value; ink blinks the cursor cell
- * every 530 ms, where a steady cell keeps the dialog from repainting on a
- * timer; and the cell carries the theme accent, as the composer's cursor does,
- * where ink paints a gray read from the terminal background (and falls back to
- * an underline where a block would corrupt IME composition).
+ * deliberately absent: the app's global EXIT binding acts on it, and this
+ * reducer hands it back unhandled, so no field ever edits on that key. Three
+ * rendering differences remain as well: ink windows the field at `inputWidth`
+ * columns, and its one-line viewport shows only the line the caret is on, so a
+ * pasted multi-line value hides everything off that line, while these rows
+ * render the whole value; ink blinks the cursor cell every 530 ms, where a
+ * steady cell keeps the dialog from repainting on a timer; and the cell carries
+ * the theme accent, as the composer's cursor does, where ink paints a gray read
+ * from the terminal background (and falls back to an underline where a block
+ * would corrupt IME composition).
  */
 
 import { useRef, useState } from 'react';
