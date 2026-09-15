@@ -719,6 +719,28 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["kind", "text", "answers"],
+          "properties": {
+            "kind": { "const": "question_answers" },
+            "text": { "type": "string", "maxLength": 409600 },
+            "answers": {
+              "type": "array",
+              "maxItems": 1000,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["question", "answer"],
+                "properties": {
+                  "question": { "type": "string", "maxLength": 409600 },
+                  "answer": { "type": "string", "maxLength": 409600 }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["kind", "text"],
           "properties": {
             "kind": { "const": "text" },

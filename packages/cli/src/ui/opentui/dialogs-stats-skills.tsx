@@ -16,8 +16,8 @@
 
 import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import {

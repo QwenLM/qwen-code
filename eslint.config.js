@@ -13,10 +13,13 @@ import importPlugin from 'eslint-plugin-import';
 import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
 import checkFile from 'eslint-plugin-check-file';
-import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
+import noCoreRootBarrelImport, {
+  CORE_BARREL_SPECIFIERS,
+} from './eslint-rules/no-core-root-barrel-import.js';
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
 import noCoreUtilsUpwardImport from './eslint-rules/no-core-utils-upward-import.js';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
+import { legacyCoreBarrelImports } from './eslint.legacy-core-barrel-imports.mjs';
 import noConfigObjectCreate from './eslint-rules/no-config-object-create.js';
 
 // General syntax restrictions applied to every TS/TSX source file. Hoisted so
@@ -33,6 +36,21 @@ const generalRestrictedSyntaxSelectors = [
       'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
   },
 ];
+
+// Undeclared imports are checked in shipped sources only: tests resolve
+// shared tooling such as vitest from the root manifest by design.
+const extraneousDependencyTestFiles = [
+  '**/*.test.{ts,tsx}',
+  '**/*.spec.{ts,tsx}',
+  '**/__tests__/**',
+  '**/test/**',
+  '**/tests/**',
+];
+const extraneousDependencyOptions = {
+  devDependencies: true,
+  optionalDependencies: true,
+  peerDependencies: true,
+};
 
 export default tseslint.config(
   {
@@ -222,6 +240,42 @@ export default tseslint.config(
     },
   },
   {
+    // A package must declare what its own sources import. npm and the hoisted
+    // pnpm layout both resolve a sibling's or the root's dependency, so a
+    // missing declaration stays invisible until the package is installed on
+    // its own — the check an isolated node_modules layout would add. Type-only
+    // imports are exempt because they disappear at build time.
+    files: [
+      'packages/**/src/**/*.{ts,tsx}',
+      'integrations/**/src/**/*.{ts,tsx}',
+      // web-shell is published and keeps its shipped sources in client/, not
+      // src/, so the globs above reach none of it.
+      'packages/web-shell/client/**/*.{ts,tsx}',
+    ],
+    ignores: extraneousDependencyTestFiles,
+    rules: {
+      'import/no-extraneous-dependencies': [
+        'error',
+        extraneousDependencyOptions,
+      ],
+    },
+  },
+  {
+    // export-html and insight carry a package.json only for "type" and their
+    // build script; web-templates declares what they import.
+    files: ['packages/web-templates/src/**/*.{ts,tsx}'],
+    ignores: extraneousDependencyTestFiles,
+    rules: {
+      'import/no-extraneous-dependencies': [
+        'error',
+        {
+          ...extraneousDependencyOptions,
+          packageDir: `${import.meta.dirname}/packages/web-templates`,
+        },
+      ],
+    },
+  },
+  {
     // The rule itself exempts tests, __tests__, and fixtures; repeating that
     // here would give the exemption two sources of truth. The utils-upward
     // rule self-scopes to packages/core/src/utils production files, so it can
@@ -238,6 +292,33 @@ export default tseslint.config(
     rules: {
       'architecture/no-core-root-barrel-import': 'error',
       'architecture/no-core-utils-upward-import': 'error',
+    },
+  },
+  {
+    // Importing a value from core's package root evaluates all of core in
+    // every test whose import graph reaches the importing file, which is
+    // where most cli test time goes (#10908). Type-only imports are erased
+    // and stay allowed. Files that predate this rule are listed in
+    // eslint.legacy-core-barrel-imports.mjs; drop an entry when migrating it.
+    files: ['packages/cli/src/**/*.{ts,tsx}'],
+    ignores: [
+      '**/*.{test,spec}.{ts,tsx}',
+      '**/__tests__/**',
+      '**/fixtures/**',
+      ...legacyCoreBarrelImports,
+    ],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [...CORE_BARREL_SPECIFIERS].map((name) => ({
+            name,
+            allowTypeImports: true,
+            message:
+              "Import from the core module that defines the symbol, e.g. '@qwen-code/qwen-code-core/utils/debugLogger.js'. The package root evaluates all of core in every test that reaches this file (#10908).",
+          })),
+        },
+      ],
     },
   },
   {
@@ -419,6 +500,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
+      // web-templates' export-html template build scripts also run with `node`.
+      'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.

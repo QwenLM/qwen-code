@@ -79,7 +79,10 @@ describe('prepareNodeReplCell', () => {
     expect(prepared.bindingExports.map((entry) => entry.bindingName)).toEqual([
       'a',
     ]);
-    expect(prepared.source).toContain('["a"] = a;');
+    expect(prepared.source).toContain('get value(){return a;}');
+    expect(prepared.source).toMatch(
+      /\["a"\] = \{binding:.*value:.*\["a"\]\.value\}/,
+    );
 
     const redeclared = await prepareNodeReplCell(
       String.raw`const \u0061 = 2;`,
@@ -189,9 +192,9 @@ describe('prepareNodeReplCell', () => {
     );
     expect(prepared.source).toContain('const 变量 = "你好",');
     expect(prepared.source).toContain('throw new Error("停止");');
-    const firstCommit = prepared.source.indexOf('["变量"] = 变量;');
+    const firstCommit = prepared.source.indexOf('["变量"] = {binding:');
     const thrown = prepared.source.indexOf('throw new Error');
-    const ghostCommit = prepared.source.indexOf('["ghost"] = ghost;');
+    const ghostCommit = prepared.source.indexOf('["ghost"] = {binding:');
     expect(firstCommit).toBeGreaterThan(0);
     expect(firstCommit).toBeLessThan(thrown);
     expect(ghostCommit).toBeGreaterThan(thrown);
@@ -216,10 +219,10 @@ describe('prepareNodeReplCell', () => {
       { previousBindings: [], cellId: 'async-guards' },
     );
     expect(prepared.source).toContain(
-      'await nodeRepl.signal.guardAwait(load())',
+      'await  nodeRepl.signal.guardAwait(load())',
     );
     expect(prepared.source).toContain(
-      'return await nodeRepl.signal.guardAwait(loadAgain())',
+      'return await  nodeRepl.signal.guardAwait(loadAgain())',
     );
     expect(prepared.source).toContain(
       'for await (const item of nodeRepl.signal.guardAsyncIterable(stream))',

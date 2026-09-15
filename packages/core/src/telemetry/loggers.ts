@@ -53,6 +53,7 @@ import {
   EVENT_SPECULATION,
   EVENT_WORKFLOW_KEYWORD,
   EVENT_WORKFLOW_RUN,
+  EVENT_WORKFLOW_SIZE_WARNING,
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
@@ -130,6 +131,7 @@ import type {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
@@ -1462,12 +1464,39 @@ export function logWorkflowRun(config: Config, event: WorkflowRunEvent): void {
     status: event.status,
     agents_dispatched: event.agents_dispatched,
     agents_completed: event.agents_completed,
+    agents_failed: event.agents_failed,
+    agents_cached: event.agents_cached,
+    agents_respawned: event.agents_respawned,
     phase_count: event.phase_count,
     tokens_spent: event.tokens_spent,
     duration_ms: event.duration_ms,
   };
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({ body: `Workflow run ${event.status}.`, attributes });
+}
+
+export function logWorkflowSizeWarning(
+  config: Config,
+  event: WorkflowSizeWarningEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_SIZE_WARNING,
+    'event.timestamp': event['event.timestamp'],
+    axis: event.axis,
+    scheduled_agents: event.scheduled_agents,
+    total_tokens: event.total_tokens,
+    projected_tokens: event.projected_tokens,
+    agent_cap: event.agent_cap,
+    token_cap: event.token_cap,
+    cap_from_guideline: event.cap_from_guideline,
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Workflow run flagged as large (${event.axis}).`,
+    attributes,
+  });
 }
 
 // ─── Auto-Memory Log Functions ───────────────────────────────────────────────

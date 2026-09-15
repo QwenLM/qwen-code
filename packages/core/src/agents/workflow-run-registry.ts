@@ -22,6 +22,11 @@
  * consumer replacing the other.
  */
 
+import {
+  MAX_WORKFLOW_CALL_TRACES,
+  type WorkflowCallTrace,
+  type WorkflowSourceRef,
+} from './workflow-correlation.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Config } from '../config/config.js';
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
@@ -40,13 +45,25 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
-import { escapeXml } from '../utils/xml.js';
+import { buildFailureLines } from './workflow-failure-lines.js';
+import {
+  formatWorkflowSizeWarningLog,
+  type WorkflowSizeWarning,
+} from './runtime/workflow-size.js';
+import { parseExtensionWorkflowName } from './runtime/workflow-saved.js';
+import {
+  buildResumeCall,
+  hasUninlinableResumeArgs,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from './workflow-resume-call.js';
+import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
 
 const mutatingWorkflowTasks = new Map<string, symbol>();
+const activeWorkflowRunKeys = new Map<string, number>();
 const workflowTaskMutationContext = new AsyncLocalStorage<
   ReadonlyMap<string, symbol>
 >();
@@ -107,6 +124,30 @@ export async function tryWithWorkflowTaskMutation<T>(
       mutatingWorkflowTasks.delete(mutationKey);
     }
   }
+}
+
+export function markWorkflowRunPersistenceActive(
+  config: Config,
+  runId: string,
+): () => void {
+  const key = getWorkflowTaskMutationKey(config, runId);
+  activeWorkflowRunKeys.set(key, (activeWorkflowRunKeys.get(key) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const count = activeWorkflowRunKeys.get(key) ?? 0;
+    if (count <= 1) activeWorkflowRunKeys.delete(key);
+    else activeWorkflowRunKeys.set(key, count - 1);
+  };
+}
+
+export function isWorkflowRunPersistenceActive(
+  config: Config,
+  runId: string,
+): boolean {
+  const key = getWorkflowTaskMutationKey(config, runId);
+  return activeWorkflowRunKeys.has(key) || mutatingWorkflowTasks.has(key);
 }
 
 /**
@@ -175,6 +216,8 @@ export interface WorkflowPhaseVisit {
 }
 
 export interface WorkflowDispatchTrace {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -189,6 +232,8 @@ export interface WorkflowDispatchTrace {
 }
 
 export interface WorkflowDispatchQueued {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   label?: string;
   prompt: string;
@@ -254,6 +299,9 @@ export type WorkflowEvent = WorkflowEventPayload & { id: string };
  * the most recent `phase()` call.
  */
 export interface WorkflowTask extends TaskBase<WorkflowStatus> {
+  sourceRef?: WorkflowSourceRef;
+  workflowCalls?: WorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   /** Run identifier (e.g. `wf_<8hex>`); aliased to `TaskBase.id`. */
   runId: string;
@@ -274,6 +322,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   status: WorkflowStatus;
   /** Whether the tool returned before this run reached a terminal state. */
   isBackgrounded?: boolean;
+  /** Whether a model-visible resume may preserve background execution. */
+  resumeInBackground?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
   currentPhase: string | null;
   /**
@@ -292,13 +342,30 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   agentsDispatched: number;
   /** Cumulative `agent()` dispatches that have resolved (success or thrown). */
   agentsCompleted: number;
+  /**
+   * Journaled `agent()` calls this resume ran live again — because the
+   * previous run failed them, or was interrupted with them in flight. `0` for
+   * a fresh run. Reported so a resume that looks like it re-did everything
+   * can be told apart from one that genuinely had nothing to replay.
+   *
+   * Optional on read: a snapshot written before this field existed has no
+   * value for it, and an old run's history is worth more than a uniform
+   * shape. Treat `undefined` as `0`.
+   */
+  agentsRespawned?: number;
+  /**
+   * The large-run flag, recorded the first time this run scheduled more agents
+   * or projected more output tokens than its thresholds. At most one per run;
+   * absent while the run stays within bounds.
+   */
+  sizeWarning?: WorkflowSizeWarning;
   /** Most recent log lines from the sandbox's `getLogs()`. Capped at 100 for the UI. */
   recentLogs: string[];
   /** Ordered runtime facts used to replay this run after it settles. */
   events: WorkflowEvent[];
   /**
    * P5: cumulative output tokens spent by this run's `agent()` dispatches.
-   * Mirrored from `budget.spent()` after each successful completion via
+   * Mirrored from the budget's per-run spend (`runSpent()`) after each successful completion via
    * the `budgetUpdated` emitter event. Stays at `0` for runs without a
    * budget (legacy callers) and for the period between register and the
    * first dispatch settling.
@@ -332,12 +399,24 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   /** Original structured arguments, retained so a failed run can resume the same journal prefix. */
   args?: unknown;
   /**
-   * P7b: the path the script was loaded from, when the run was launched
-   * from a saved workflow (`Workflow({scriptPath})` or a `/workflow-name`
-   * slash command). `undefined` for inline scripts. Recorded as run
-   * provenance (e.g. for the snapshot).
+   * The loaded saved-workflow path or the persisted copy of an inline script.
+   * `undefined` only when an inline script could not be persisted.
    */
   scriptPath?: string;
+  /**
+   * This run's resume journal (`<projectDir>/workflows/<runId>/journal.jsonl`),
+   * when the config had a `storage` to hold one. Recorded so the terminal
+   * notification can point the model at the per-agent results without
+   * reconstructing the path from a storage handle it does not have.
+   */
+  journalPath?: string;
+  /**
+   * Failure hint naming where the authoring reference is in this session, for
+   * a script the model authored. The foreground tool result carries it in the
+   * run trailer; a backgrounded run has only its completion notification, so
+   * it rides here. Process-local, like the notification it feeds.
+   */
+  authoringHint?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -364,6 +443,8 @@ export type WorkflowTaskRegistration = Omit<
   | 'dispatches'
   | 'agentsDispatched'
   | 'agentsCompleted'
+  | 'agentsRespawned'
+  | 'sizeWarning'
   | 'recentLogs'
   | 'events'
   | 'tokensSpent'
@@ -577,6 +658,36 @@ export class WorkflowRunRegistry {
         `<result>Error: ${escapeXml(entry.error ?? '')}</result>`,
       );
     }
+    // What the run cost, so the model can size the next fan-out against a
+    // number instead of a guess. `agents_cached` is the resume-relevant half:
+    // a resumed run whose agents all replayed spent nothing and proves it here.
+    modelParts.push(`<usage>${escapeXml(buildUsageLine(entry))}</usage>`);
+    // Which agents were lost, not just how many. A run can complete with a
+    // third of its fan-out missing — the script simply saw `null` for those
+    // slots — and the count alone gives the reader no way to judge whether
+    // the result is thin because the work was thin or because the agents
+    // failed. These are the errors the registry already recorded.
+    const failures = buildFailureLines(entry);
+    if (failures.length > 0) {
+      modelParts.push(
+        `<failures>${escapeXmlElementText(failures.join('\n'))}</failures>`,
+      );
+    }
+    // The two recovery routes a backgrounded run needs and cannot reconstruct:
+    // a failure needs the resume call (the script is on disk, editable before
+    // the retry); a success needs the journal, because an empty-looking result
+    // is far more often a script that dropped its values than a fan-out that
+    // produced none.
+    const recovery =
+      entry.status === 'failed'
+        ? buildRecoveryLines(entry)
+        : buildDiagnosticsLines(entry);
+    if (recovery.length > 0) {
+      const tag = entry.status === 'failed' ? 'recovery' : 'diagnostics';
+      modelParts.push(
+        `<${tag}>${escapeXmlElementText(recovery.join('\n'))}</${tag}>`,
+      );
+    }
     modelParts.push('</task-notification>');
 
     const meta: WorkflowRunCompletionMeta = {
@@ -689,8 +800,12 @@ export class WorkflowRunRegistry {
     entry.phaseVisits = [];
     entry.currentPhaseVisitId = null;
     entry.dispatches = [];
+    entry.workflowCalls = [];
+    entry.workflowCallsTruncated = false;
     entry.agentsDispatched = 0;
     entry.agentsCompleted = 0;
+    entry.agentsRespawned = 0;
+    delete entry.sizeWarning;
     entry.recentLogs = [];
     entry.events = [];
     entry.tokensSpent = 0;
@@ -1056,6 +1171,8 @@ export class WorkflowRunRegistry {
     if (entry.dispatches.some((dispatch) => dispatch.id === event.id)) return;
     const fallbackLabel = `Agent ${entry.dispatches.length + 1}`;
     entry.dispatches.push({
+      ...(event.stepId !== undefined ? { stepId: event.stepId } : {}),
+      ...(event.workflowCallId ? { workflowCallId: event.workflowCallId } : {}),
       id: event.id,
       phaseVisitId: entry.currentPhaseVisitId,
       label:
@@ -1080,6 +1197,37 @@ export class WorkflowRunRegistry {
         dispatchId: event.id,
       });
     }
+    this.emitStatusChange(entry);
+  }
+
+  onWorkflowCallUpdated(runId: string, call: WorkflowCallTrace): void {
+    const entry = this.entries.get(runId);
+    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
+    const calls = (entry.workflowCalls ??= []);
+    const existing = calls.find(({ id }) => id === call.id);
+    if (existing && existing.status !== 'running') return;
+    if (!existing && calls.length >= MAX_WORKFLOW_CALL_TRACES) {
+      this.onWorkflowCallsTruncated(runId);
+      return;
+    }
+    const record = {
+      ...call,
+      ...(call.workflowName
+        ? { workflowName: stripAnsiAndControl(call.workflowName).slice(0, 256) }
+        : {}),
+      ...(call.error
+        ? { error: stripAnsiAndControl(call.error).slice(0, 4_096) }
+        : {}),
+    };
+    if (existing) Object.assign(existing, record);
+    else calls.push(record);
+    this.emitStatusChange(entry);
+  }
+
+  onWorkflowCallsTruncated(runId: string): void {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.workflowCallsTruncated) return;
+    entry.workflowCallsTruncated = true;
     this.emitStatusChange(entry);
   }
 
@@ -1190,6 +1338,47 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * A resume re-ran a call the journal already knew about. Counted for the
+   * usage line and written to the log the user reads in `/workflows`, because
+   * "why is it running that agent again?" is the first question a resume
+   * raises and the journal alone cannot answer it out loud.
+   */
+  onResumeRespawn(runId: string, line: string): void {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
+    )
+      return;
+    entry.agentsRespawned = (entry.agentsRespawned ?? 0) + 1;
+    this.onLogAppended(runId, line);
+  }
+
+  /**
+   * Record the large-run flag. Returns whether it was recorded: a run is
+   * flagged at most once, and only while it is still active — a warning for a
+   * run that already settled would ask the user to stop something stopped.
+   */
+  onSizeWarning(runId: string, warning: WorkflowSizeWarning): boolean {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      entry.sizeWarning !== undefined ||
+      !isActiveWorkflowStatus(entry.status)
+    ) {
+      return false;
+    }
+    entry.sizeWarning = warning;
+    this.onLogAppended(
+      runId,
+      formatWorkflowSizeWarningLog(warning),
+      warning.at,
+    );
+    this.emitStatusChange(entry);
+    return true;
+  }
+
+  /**
    * P5: mirror a `budgetUpdated` emitter event into the entry. Attributes
    * the cumulative delta (`spent - entry.tokensSpent`) to the entry's
    * `currentPhase`. Per-phase attribution is best-effort: agents in
@@ -1277,6 +1466,7 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
     this.cancelLiveDispatches(entry, endTime);
+    this.cancelLiveWorkflowCalls(entry, endTime);
     entry.result = result;
     this.appendEvent(entry, { type: 'workflow-completed', at: endTime });
     entry.notified = true;
@@ -1294,6 +1484,7 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
     this.cancelLiveDispatches(entry, endTime);
+    this.cancelLiveWorkflowCalls(entry, endTime);
     // Script-derived failure text rides into the snapshot, the /workflows
     // render, and the completion-notification XML: normalize it once at
     // this boundary and persist the same string in both projections.
@@ -1323,6 +1514,7 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
     this.cancelLiveDispatches(entry, endTime);
+    this.cancelLiveWorkflowCalls(entry, endTime);
     this.appendEvent(entry, { type: 'workflow-cancelled', at: endTime });
     entry.notified = true;
     try {
@@ -1452,6 +1644,7 @@ export class WorkflowRunRegistry {
       entry.endTime = endTime;
       this.closeCurrentPhase(entry, endTime);
       this.cancelLiveDispatches(entry, endTime);
+      this.cancelLiveWorkflowCalls(entry, endTime);
       this.appendEvent(entry, { type: 'workflow-cancelled', at: endTime });
       entry.notified = true;
       try {
@@ -1477,6 +1670,14 @@ export class WorkflowRunRegistry {
         at: endTime,
         phaseVisitId: current.id,
       });
+    }
+  }
+
+  private cancelLiveWorkflowCalls(entry: WorkflowTask, endTime: number): void {
+    for (const call of entry.workflowCalls ?? []) {
+      if (call.status !== 'running') continue;
+      call.status = 'cancelled';
+      call.endedAt = endTime;
     }
   }
 
@@ -1693,4 +1894,83 @@ function restrictWorkflowConfirmationDetails(
       return _exhaustive;
     }
   }
+}
+
+/** Flat `key=value` usage line for the terminal notification. */
+function buildUsageLine(entry: WorkflowTask): string {
+  const countByStatus = (status: WorkflowDispatchTraceStatus): number =>
+    entry.dispatches.reduce((n, d) => (d.status === status ? n + 1 : n), 0);
+  // A run that never settled its end time reads as zero elapsed rather than
+  // as a negative duration computed against `Date.now()`.
+  const durationMs = Math.max(
+    0,
+    (entry.endTime ?? entry.startTime) - entry.startTime,
+  );
+  return [
+    `agents_dispatched=${entry.dispatches.length}`,
+    `agents_succeeded=${countByStatus('completed')}`,
+    `agents_cached=${countByStatus('cached')}`,
+    `agents_failed=${countByStatus('failed')}`,
+    `agents_cancelled=${countByStatus('cancelled')}`,
+    `agents_respawned=${entry.agentsRespawned ?? 0}`,
+    `tokens_spent=${entry.tokensSpent}`,
+    `duration_ms=${durationMs}`,
+  ].join(' ');
+}
+
+/** `<recovery>` body for a failed run. */
+function buildRecoveryLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    // Only an extension workflow's name carries `<extension>:`. Its file is
+    // third-party and an extension update replaces it, so the copy has to
+    // land somewhere the user owns.
+    const extension = entry.workflowName
+      ? parseExtensionWorkflowName(entry.workflowName)
+      : null;
+    const pathAdvice = extension
+      ? `This reads the /${entry.workflowName} workflow the ${extension.extensionName} extension ships; copy it into .qwen/workflows before making a run-specific change.`
+      : entry.workflowName
+        ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
+        : 'Edit the generated script copy first if the script needs to change.';
+    const journalAdvice = entry.journalPath
+      ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
+      : 'No journal was written for this run, so every agent() call runs live.';
+    lines.push(`Resume: ${resume} — ${pathAdvice} ${journalAdvice}`);
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  if (entry.journalPath) {
+    lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
+  }
+  if (entry.authoringHint) {
+    lines.push(stripAnsiAndControl(entry.authoringHint));
+  }
+  return lines;
+}
+
+/** `<diagnostics>` body for a completed run. */
+function buildDiagnosticsLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  if (entry.journalPath) {
+    lines.push(
+      `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
+    );
+  }
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    lines.push(
+      entry.workflowName
+        ? parseExtensionWorkflowName(entry.workflowName)
+          ? `Re-run the /${entry.workflowName} extension workflow: ${resume}`
+          : `Re-run the saved /${entry.workflowName} workflow: ${resume}`
+        : `Re-run after editing the generated script: ${resume}`,
+    );
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  return lines;
 }
