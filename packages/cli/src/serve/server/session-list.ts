@@ -524,6 +524,8 @@ function mergeLiveSessionSummary(
     updatedAt: laterActivityTimestamp(live.updatedAt, existing.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
   // The live entry only knows PR bindings from this daemon lifetime while the
@@ -638,6 +640,8 @@ async function liveOnlySummary(
     createdAt: live.createdAt,
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
   let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;

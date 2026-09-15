@@ -578,6 +578,8 @@ export default {
     'Esta extensão instalará as seguintes habilidades:',
   'This extension will install the following subagents:':
     'Esta extensão instalará os seguintes subagentes:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Esta extensão instalará os seguintes fluxos de trabalho (scripts JavaScript que podem iniciar subagentes):',
   'Installation cancelled for "{{name}}".':
     'Instalação cancelada para "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -2077,6 +2079,7 @@ export default {
   'Context files:': 'Arquivos de contexto:',
   'Skills:': 'Habilidades:',
   'Agents:': 'Agentes:',
+  'Workflows:': 'Fluxos de trabalho:',
   'MCP servers:': 'MCP servers:',
   'Press c to copy the authorization URL to your clipboard.':
     'Pressione c para copiar a URL de autorização para a área de transferência.',
@@ -2239,6 +2242,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

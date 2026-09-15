@@ -73,6 +73,7 @@ export interface ComputerUseApp {
 }
 
 export interface DeliveryOptions {
+  /** Legacy override. Omit on Linux to let native input prepare exact-window focus. */
   deliveryMode?: "background" | "foreground";
 }
 
