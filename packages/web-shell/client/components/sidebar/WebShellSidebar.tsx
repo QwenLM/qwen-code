@@ -1772,8 +1772,11 @@ export function WebShellSidebar({
       .filter((ws) => ws.primary || ws.trusted)
       .map((ws) => ws.cwd),
   );
-  const collaborationSessions =
-    selectedSessionSource === 'channel' ? [] : projectConversations.sessions;
+  const collaborationSessions = useMemo(
+    () =>
+      selectedSessionSource === 'channel' ? [] : projectConversations.sessions,
+    [selectedSessionSource, projectConversations.sessions],
+  );
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
       const explicitCwd = session.workspaceCwd;

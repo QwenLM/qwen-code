@@ -25,51 +25,16 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
-import {
-  assignThread,
-  createAssignedThread,
-  createThread,
-  THREAD_PRIORITY_ORDER,
-  DEFAULT_THREAD_PRIORITY,
-  LOCAL_AGENT_RUNTIME_ID,
-  type ThreadPriority,
-  decideDispatch,
-  finishRunInTransaction,
-  generateAgentId,
-  generateEventId,
-  isValidAgentName,
-  listThreads,
-  parseMentions,
-  postMessage,
-  issueAgentHostEnrollment,
-  readAgentHosts,
-  readWorkspaceAgents,
-  readAgentWorkspace,
-  readThread,
-  releaseAgentHostSession,
-  retireWorkspaceAgent,
-  isAgentAddressable,
-  isAgentLocal,
-  maxConcurrentRunsFor,
-  THREAD_TOOL_NAMES,
-  AGENT_TOOL_CLASSIFICATION,
-  resolveThreadStatus,
-  setWorkspaceAgentEnabled,
-  setWorkspaceAgentExecution,
-  updateWorkspaceAgents,
-  withAgentStoreTransaction,
-  resolveTargets,
-  hasLiveDescendant,
-  HUMAN_AUTHOR_ID,
-  DEFAULT_THREAD_AUTO_TURN_BUDGET,
-  DEFAULT_THREAD_TOKEN_BUDGET,
-  type WorkspaceAgent,
-  type WorkspaceAgentExecution,
-  type Thread,
-  type ThreadRun,
-  deliverNotifications,
-  isThreadTerminal,
-} from '@qwen-code/qwen-code-core';
+import type { ThreadPriority, WorkspaceAgent, WorkspaceAgentExecution, Thread, ThreadRun } from '@qwen-code/qwen-code-core';
+import { assignThread, createAssignedThread, postMessage } from '@qwen-code/qwen-code-core/agents/workspace-agents/thread-actions.js';
+import { createThread, generateAgentId, generateEventId, isValidAgentName, listThreads, issueAgentHostEnrollment, readAgentHosts, readWorkspaceAgents, readAgentWorkspace, readThread, releaseAgentHostSession, retireWorkspaceAgent, isAgentAddressable, isAgentLocal, maxConcurrentRunsFor, setWorkspaceAgentEnabled, setWorkspaceAgentExecution, updateWorkspaceAgents, withAgentStoreTransaction } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import { THREAD_PRIORITY_ORDER, DEFAULT_THREAD_PRIORITY, LOCAL_AGENT_RUNTIME_ID, HUMAN_AUTHOR_ID, DEFAULT_THREAD_AUTO_TURN_BUDGET, DEFAULT_THREAD_TOKEN_BUDGET, isThreadTerminal } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
+import { decideDispatch, resolveTargets } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatch-policy.js';
+import { finishRunInTransaction, hasLiveDescendant } from '@qwen-code/qwen-code-core/agents/workspace-agents/run-lifecycle.js';
+import { parseMentions } from '@qwen-code/qwen-code-core/agents/workspace-agents/mentions.js';
+import { THREAD_TOOL_NAMES, AGENT_TOOL_CLASSIFICATION } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
+import { resolveThreadStatus } from '@qwen-code/qwen-code-core/agents/workspace-agents/thread-status.js';
+import { deliverNotifications } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';

@@ -19,12 +19,10 @@
  * returns is one of the outcomes the dispatcher already knows.
  */
 
-import {
-  getErrorMessage,
-  LOCAL_AGENT_RUNTIME_ID,
-  SessionService,
-  withAgentStoreTransaction,
-} from '@qwen-code/qwen-code-core';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { LOCAL_AGENT_RUNTIME_ID } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { withAgentStoreTransaction } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import type {
   AgentBodyState,

@@ -4,13 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  claimAgentHostSession,
-  readAgentWorkspace,
-  releaseAgentHostSession,
-  dispatchOnce,
-  type DispatchRecord,
-} from '@qwen-code/qwen-code-core';
+import type { DispatchRecord } from '@qwen-code/qwen-code-core';
+import { claimAgentHostSession, readAgentWorkspace, releaseAgentHostSession } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import { dispatchOnce } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { beginKeepaliveSessionResume } from '../scheduled-task-keepalive.js';
 import type { WorkspaceGenerationGuard } from '../workspace-registry.js';

@@ -7,16 +7,9 @@
 import express from 'express';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Application, Request, Response } from 'express';
-import {
-  applyHostRunResult,
-  reportHostRunProgress,
-  authenticateAgentHost,
-  enrollAgentHost,
-  heartbeatAgentHost,
-  pickupRunForHost,
-  renewRunLease,
-  type HostRunResult,
-} from '@qwen-code/qwen-code-core';
+import type { HostRunResult } from '@qwen-code/qwen-code-core';
+import { applyHostRunResult, reportHostRunProgress, pickupRunForHost, renewRunLease } from '@qwen-code/qwen-code-core/agents/workspace-agents/host-lease.js';
+import { authenticateAgentHost, enrollAgentHost, heartbeatAgentHost } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 function body(req: Request): Record<string, unknown> {

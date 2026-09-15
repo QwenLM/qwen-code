@@ -25,23 +25,10 @@ import {
   type User,
 } from '@a2a-js/sdk/server';
 import { jsonRpcHandler } from '@a2a-js/sdk/server/express';
-import {
-  A2A_AGENT_CARD_PATH,
-  A2A_CONTENT_TYPE,
-  A2A_PROTOCOL_VERSION,
-  A2A_TRANSPORT_BINDING,
-  QWEN_A2A_EXTENSION_URI,
-  a2aAgentCardForCaller,
-  a2aCancelTask,
-  a2aGetTask,
-  a2aListTasks,
-  a2aSendMessage,
-  checkA2AGrant,
-  type A2AAgentCard,
-  type A2ACaller,
-  type A2AFailure,
-  type A2ATaskView,
-} from '@qwen-code/qwen-code-core';
+import type { A2AAgentCard, A2ACaller, A2AFailure, A2ATaskView } from '@qwen-code/qwen-code-core';
+import { A2A_AGENT_CARD_PATH, A2A_CONTENT_TYPE, A2A_PROTOCOL_VERSION, A2A_TRANSPORT_BINDING, QWEN_A2A_EXTENSION_URI } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-contract.js';
+import { a2aAgentCardForCaller, a2aCancelTask, a2aGetTask, a2aListTasks, a2aSendMessage } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-server.js';
+import { checkA2AGrant } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
 import type { Application, NextFunction, Request, Response } from 'express';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 

@@ -1,7 +1,7 @@
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { issueAgentHostEnrollment } from '@qwen-code/qwen-code-core';
+import { issueAgentHostEnrollment } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { startAgentHostConnection } from '../agent-host-client.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
