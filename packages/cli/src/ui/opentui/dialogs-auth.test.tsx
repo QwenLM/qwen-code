@@ -105,6 +105,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 import { AuthType } from '@qwen-code/qwen-code-core';
+import * as coreRuntime from '@qwen-code/qwen-code-core';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
@@ -310,6 +311,36 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('keeps authentication open when only service models were saved', async () => {
+    const servicePlan = coreRuntime.buildInstallPlan(
+      coreRuntime.minimaxProvider,
+      {
+        baseUrl: coreRuntime.resolveBaseUrl(coreRuntime.minimaxProvider),
+        apiKey: 'test-image',
+        modelIds: ['image-01'],
+      },
+    );
+    const build = vi
+      .spyOn(coreRuntime, 'buildInstallPlan')
+      .mockReturnValue(servicePlan);
+    try {
+      const { onClose, notify } = await runCustomProviderFlow();
+      await press('return');
+      await vi.waitFor(() =>
+        expect(
+          screen.getByText(
+            'Service models saved. Configure a conversation model to start chatting.',
+          ),
+        ).toBeTruthy(),
+      );
+      expect(onClose).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      expect(core.logAuth).not.toHaveBeenCalled();
+    } finally {
+      build.mockRestore();
+    }
+  });
+
   it('walks the custom-provider wizard and submits the install plan', async () => {
     const { onClose, notify } = await runCustomProviderFlow();
     // review: step title reflects the last step before saving
@@ -325,6 +356,36 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     );
     expect(notify).toHaveBeenCalledWith(
       expect.stringContaining('Successfully configured'),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers and saves OpenAI Responses through the custom-provider protocol filter', async () => {
+    const { onClose } = renderDialog();
+    await press('down');
+    await press('down');
+    await press('return');
+    expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
+    expect(screen.getByText('OpenAI Responses')).toBeTruthy();
+    expect(screen.getByText('Anthropic-compatible')).toBeTruthy();
+    expect(screen.getByText('Gemini-compatible')).toBeTruthy();
+    await press('down');
+    await press('return');
+    await typeText('https://api.example.com/v1');
+    await press('return');
+    await typeText('sk-test');
+    await press('return');
+    await typeText('responses-model');
+    await press('return');
+    await press('return');
+    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    await press('return');
+    await vi.waitFor(() => {
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
+    });
+    expect(core.applyProviderInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+      expect.anything(),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
   });

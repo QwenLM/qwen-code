@@ -63,6 +63,7 @@ import {
   WorkflowIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
+import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
@@ -441,9 +442,11 @@ interface WebShellSidebarProps {
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /**
    * Open the working-tree Changes dialog for a workspace. Forwarded to each
-   * trusted workspace's folder header, where a live git chip fires it on click.
+   * trusted workspace's hover details, where the branch row fires it from the
+   * workspace's Git picker. Omit it and the row stays a plain-text summary.
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
   onOpenCommit?: (workspaceCwd: string) => void;
   /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
@@ -648,6 +651,32 @@ function IconQwenLogo() {
         d="m140.93 85-16.35-28.33-1.93-3.34 8.66-15a3.323 3.323 0 0 0 0-3.34l-9.62-16.67c-.3-.51-.72-.93-1.22-1.22s-1.07-.45-1.67-.45H82.23l-8.66-15a3.33 3.33 0 0 0-2.89-1.67H51.43c-.59 0-1.17.16-1.66.45-.5.29-.92.71-1.22 1.22L32.19 29.98l-1.92 3.33H12.96c-.59 0-1.17.16-1.66.45-.5.29-.93.71-1.22 1.22L.45 51.66a3.323 3.323 0 0 0 0 3.34l18.28 31.67-8.66 15a3.32 3.32 0 0 0 0 3.34l9.62 16.67c.3.51.72.93 1.22 1.22s1.07.45 1.67.45h36.56l8.66 15a3.35 3.35 0 0 0 2.89 1.67h19.25a3.34 3.34 0 0 0 2.89-1.67l18.28-31.67h17.32c.6 0 1.17-.16 1.67-.45s.92-.71 1.22-1.22l9.62-16.67a3.323 3.323 0 0 0 0-3.34ZM51.44 3.33 61.07 20l-9.63 16.66h76.98l-9.62 16.66H45.67l-11.54-20zM57.21 120H22.58l9.63-16.67h19.25l-38.5-66.67h19.25l9.62 16.67L68.78 100l-11.55 20Zm61.59-33.34-9.62-16.67-38.49 66.67-9.63-16.67 9.63-16.66 26.94-46.67h23.1l17.32 30z"
       />
     </svg>
+  );
+}
+
+function BrandLogoImage({ dataUri }: { dataUri: string }) {
+  // A data URI the browser cannot decode (malformed XML, an xmlns-less root)
+  // fires `error` and otherwise leaves a blank 28x28 box where the product mark
+  // was. Fall back to the built-in mark — the same outcome a daemon-rejected
+  // logo produces — instead of rendering nothing. But warn first: this is the
+  // one failure the daemon's checks cannot see (it validates the root tag
+  // only, never parses the body), so without a signal the white-labeled shell
+  // silently shows the built-in mark beside the operator's own name forever.
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return <IconQwenLogo />;
+  }
+  return (
+    <img
+      src={dataUri}
+      alt=""
+      onError={() => {
+        console.warn(
+          '[web-shell] brand logo could not be rendered; falling back to the built-in mark',
+        );
+        setFailed(true);
+      }}
+    />
   );
 }
 
@@ -949,6 +978,8 @@ export function WebShellSidebar({
   onStandaloneNotice,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
+  const brand = useBrand();
+  const brandName = useBrandName();
   const connection = useConnection();
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
@@ -4180,8 +4211,13 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
-      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
-        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+      const scheduledTaskMarker = isScheduledTaskSession(session) ? (
+        <span
+          className={styles.sessionSourceIcon}
+          data-web-shell-scheduled-task-session
+        >
+          <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+        </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
@@ -4236,17 +4272,6 @@ export function WebShellSidebar({
               measureSessionTitleScroll(event.currentTarget)
             }
           >
-            {scheduledTaskIcon && (
-              <span className={styles.sessionStatusSlot}>
-                <span
-                  className={styles.sessionSourceIcon}
-                  data-web-shell-scheduled-task-session
-                  title={t('sidebar.scheduledTasks')}
-                >
-                  {scheduledTaskIcon}
-                </span>
-              </span>
-            )}
             {isEditing ? (
               <form
                 className={styles.renameForm}
@@ -4284,6 +4309,7 @@ export function WebShellSidebar({
                   : undefined
               }
             >
+              {scheduledTaskMarker}
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
@@ -4374,11 +4400,11 @@ export function WebShellSidebar({
       const isCurrent = standalone?.active ?? isCurrentSession(session);
       const sessionWorkActive =
         !session.hasActivePrompt && session.activeWorkState === 'active';
-      const activityUnknown =
-        !session.hasActivePrompt && session.activeWorkState === 'unknown';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const backgroundRunning =
+        !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -4426,7 +4452,7 @@ export function WebShellSidebar({
             styles.sessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
-            running && styles.runningSession,
+            running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
           )}
           onMouseEnter={(event) =>
@@ -4454,28 +4480,26 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {scheduledTaskIcon ? (
+            {completedUnread && !backgroundRunning ? (
               <span
-                className={styles.sessionSourceIcon}
-                data-web-shell-scheduled-task-session
-                title={t('sidebar.scheduledTasks')}
-              >
-                {scheduledTaskIcon}
-              </span>
-            ) : null}
-            {completedUnread ? (
-              <span
-                className={cx(
-                  styles.sessionStatusDot,
-                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
-                )}
+                className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
-            {session.hasActivePrompt &&
-            !scheduledTaskIcon &&
-            !completedUnread ? (
+            {backgroundRunning && (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionBackgroundRunning,
+                )}
+                data-web-shell-session-background-running
+                role="img"
+                aria-label={t('background.running')}
+                title={t('background.running')}
+              />
+            )}
+            {session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4484,19 +4508,12 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !scheduledTaskIcon && !completedUnread ? (
+            ) : sessionWorkActive && !completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />
-            ) : activityUnknown && !scheduledTaskIcon && !completedUnread ? (
-              <span
-                className={styles.sessionStatusUnknown}
-                aria-label={t('sidebar.activityUnknown')}
-              >
-                ?
-              </span>
             ) : null}
           </span>
           {isEditing && showRename ? (
@@ -4547,6 +4564,7 @@ export function WebShellSidebar({
                     : undefined
                 }
               >
+                {scheduledTaskMarker}
                 {attention && (
                   <span
                     className={cx(
@@ -4558,7 +4576,7 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {session.hasActivePrompt || sessionWorkActive ? (
+                {running && !backgroundRunning ? (
                   <span
                     className={styles.sessionLoading}
                     aria-label={
@@ -5512,10 +5530,20 @@ export function WebShellSidebar({
             ) : (
               <>
                 <span className={styles.brandLogo} aria-hidden="true">
-                  <IconQwenLogo />
+                  {brand.logo ||
+                    (brand.logoDataUri ? (
+                      // `key` remounts on a new URI: after one decode failure,
+                      // the failed state must not stick to the next logo.
+                      <BrandLogoImage
+                        key={brand.logoDataUri}
+                        dataUri={brand.logoDataUri}
+                      />
+                    ) : (
+                      <IconQwenLogo />
+                    ))}
                 </span>
                 {!collapsed && (
-                  <span className={styles.brandName}>Qwen Code</span>
+                  <span className={styles.brandName}>{brandName}</span>
                 )}
               </>
             )}
@@ -5654,13 +5682,17 @@ export function WebShellSidebar({
                   className="w-full"
                   aria-label={t('sidebar.sessionSource')}
                 >
-                  <TabsTrigger value="default">
+                  <TabsTrigger value="default" className="min-w-0">
                     <ListTodoIcon />
-                    {t('sidebar.sessionSource.tasks')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.tasks')}
+                    </span>
                   </TabsTrigger>
-                  <TabsTrigger value="channel">
+                  <TabsTrigger value="channel" className="min-w-0">
                     <MessageCircleIcon />
-                    {t('sidebar.sessionSource.channels')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.channels')}
+                    </span>
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
@@ -6002,6 +6034,7 @@ export function WebShellSidebar({
                         }
                         showSessionDetails={sessionActionItems.has('details')}
                         overviewEnabled={workspaceOverviewEnabled}
+                        overviewMenuOpen={openWorkspaceMenuId === ws.id}
                         overviewItems={workspaceOverviewItems}
                         onOpenPathLocally={
                           localOpenEnabled
@@ -6125,20 +6158,9 @@ export function WebShellSidebar({
                                       }
                                     : {}),
                                 };
-                                // The section caps the folder name so the
-                                // git chip never slides under this overlay;
-                                // the count drives the cap's width. The
-                                // menu trigger is absent under a lock.
-                                const headerActionCount =
-                                  (ws.trusted
-                                    ? 1 + Number(canOrganizeWorkspace(ws.cwd))
-                                    : 0) + (lockedWorkspaceCwd ? 0 : 1);
                                 return (
                                   <div
                                     className={styles.workspaceHeaderActions}
-                                    data-workspace-action-count={
-                                      headerActionCount
-                                    }
                                     style={{
                                       visibility:
                                         visible || openWorkspaceMenuId === ws.id
@@ -6290,7 +6312,7 @@ export function WebShellSidebar({
                 footerItems.has('version') && (
                   <span
                     className={styles.version}
-                    title={`Qwen Code ${versionLabel}`}
+                    title={`${brandName} ${versionLabel}`}
                   >
                     {versionLabel}
                   </span>

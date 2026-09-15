@@ -331,6 +331,14 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
   },
 }));
 
+const conversationStoreMocks = vi.hoisted(() => ({
+  getAllConversations: vi.fn(
+    async (): Promise<
+      Array<{ id: string; title: string; messages: unknown[] }>
+    > => [],
+  ),
+}));
+
 vi.mock('../../services/conversationStore.js', () => ({
   ConversationStore: class {
     constructor(_context: unknown) {}
@@ -340,6 +348,7 @@ vi.mock('../../services/conversationStore.js', () => ({
     });
     addMessage = vi.fn().mockResolvedValue(undefined);
     getCurrentConversationId = vi.fn(() => null);
+    getAllConversations = conversationStoreMocks.getAllConversations;
   },
 }));
 
@@ -2093,6 +2102,71 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     return provider;
   }
 
+  it('keeps a first-time service save without claiming authentication or rolling it back', async () => {
+    const { minimaxProvider, resolveBaseUrl } = await import(
+      '@qwen-code/qwen-code-core'
+    );
+    const provider = makeProvider();
+    const initialize = vi.fn();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = initialize;
+    await provider['handleAuthInteractive'](minimaxProvider, {
+      baseUrl: resolveBaseUrl(minimaxProvider),
+      apiKey: 'test-image',
+      modelIds: ['image-01'],
+    });
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+    expect(
+      (
+        provider as unknown as {
+          sendMessageToWebView: ReturnType<typeof vi.fn>;
+        }
+      ).sendMessageToWebView,
+    ).toHaveBeenCalledExactlyOnceWith({
+      type: 'authState',
+      data: { authenticated: false },
+    });
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Service models saved. Configure a conversation model to start chatting.',
+    );
+  });
+
+  it('retains saved model fields when reconnecting through the extension', async () => {
+    const model = {
+      id: inputs.modelIds[0],
+      baseUrl: inputs.baseUrl,
+      envKey: 'DEEPSEEK_API_KEY',
+      name: '[DeepSeek] My tuned model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        customHeaders: { 'X-Route': '${ROUTE}' },
+      },
+    };
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: [model] },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](providerConfig, inputs);
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(
+      mockApplyProviderInstallPlanToFile.mock.calls[0][0].modelProviders[0]
+        .models,
+    ).toEqual([model]);
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
+
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
     mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
@@ -2295,12 +2369,12 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
    * A view-host context whose Memento only answers the keys it is seeded with,
    * and writes through — so a migration that retires an entry is observable.
    */
-  function createSessionStateContext(entries: Record<string, string>) {
+  function createSessionStateContext(entries: Record<string, unknown>) {
     return {
       subscriptions: [],
       workspaceState: {
         get: vi.fn((key: string) => entries[key]),
-        update: vi.fn((key: string, value: string | undefined) => {
+        update: vi.fn((key: string, value: unknown) => {
           if (value === undefined) {
             delete entries[key];
           } else {
@@ -2340,6 +2414,8 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
+    conversationStoreMocks.getAllConversations.mockReset();
+    conversationStoreMocks.getAllConversations.mockResolvedValue([]);
     mockConfigGet.mockImplementation(
       (_key: string, defaultValue: unknown) => defaultValue,
     );
@@ -2385,6 +2461,40 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         }),
       );
     });
+  });
+
+  it('persists and restores a terminal session without source sidecar state', async () => {
+    const context = createSessionStateContext({});
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    await setup.messageHandler?.({
+      type: 'webShellSessionChanged',
+      data: { sessionId: 'terminal-session', workspaceCwd: '/workspace-a' },
+    });
+    expect(
+      context.workspaceState.get(WEB_SHELL_SESSION_KEY_PREFIX + '/workspace-a'),
+    ).toBe('terminal-session');
+
+    const reloaded = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context,
+    });
+    await reloaded.messageHandler?.({ type: 'webShellReady' });
+    const bootstrap = reloaded.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: Record<string, unknown> },
+      )
+      .find((message) => message.type === 'webShellBootstrap');
+    expect(bootstrap?.data?.sessionId).toBe('terminal-session');
+    expect(bootstrap?.data).not.toHaveProperty('sessionHistorySource');
+    expect(
+      context.workspaceState.update.mock.calls.map(([key]) => key),
+    ).not.toContain(
+      'qwenCode.webShellSessionSource:/workspace-a:terminal-session',
+    );
   });
 
   it('restores a session id persisted under the pre-canonicalization key', async () => {
@@ -2757,6 +2867,20 @@ describe('WebViewProvider web-shell permission bridge', () => {
     provider.respondToPendingPermission('allow');
 
     expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('relays a permission diff dismissal to the webview under requestId', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.notifyPermissionDiffClosed('req-1');
+
+    // The receiver in the webview reads data.requestId only and treats any
+    // other key as "not a dismissal", so the rename this wire invites has to
+    // be pinned here.
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'permissionDiffClosed',
+      data: { requestId: 'req-1' },
+    });
   });
 
   it('does not vote before permission ownership state arrives', async () => {

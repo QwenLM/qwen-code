@@ -4,36 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type {
-  GoalTerminalEvent,
-  GoalTerminalKind,
-  GoalTerminalObserver,
-} from './activeGoalStore.js';
-export {
-  activeGoalEquals,
-  getActiveGoal,
-  setActiveGoal,
-  clearActiveGoal,
-  recordGoalIteration,
-  setGoalTerminalObserver,
-  clearGoalTerminalObserver,
-  notifyGoalTerminal,
-  getLastGoalTerminal,
-  setLastGoalTerminal,
-  __resetActiveGoalStoreForTests,
-} from './activeGoalStore.js';
-export {
-  MAX_GOAL_ITERATIONS,
-  GOAL_HOOK_TIMEOUT_MS,
-  GOAL_HOOK_TIMEOUT_SECONDS,
-  getStopHookContinuationReason,
-  createGoalStopHookCallback,
-  abortGoalForStopHookCap,
-  registerGoalHook,
-  unregisterGoalHook,
-} from './goalHook.js';
-export { judgeGoal } from './goalJudge.js';
-export type { GoalJudgeOutcome, JudgeResult } from './goalJudge.js';
 export * from './goal-protocol.js';
 export {
   GoalConflictError,
@@ -69,6 +39,13 @@ export * from './goal-checkpoint.js';
 export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
+export {
+  applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
+  ProposeGoalTool,
+} from './goal-tools.js';
+export type { PendingGoalProposal } from './goal-tools.js';
 export { goalTurnContext } from './goal-turn-context.js';
 export {
   buildGoalContinuationParts,

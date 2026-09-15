@@ -177,7 +177,6 @@ const EN: Messages = {
   'about.noSandbox': 'no sandbox',
   'about.platform': 'OS',
   'about.proxy': 'Proxy',
-  'about.qwenCode': 'Qwen Code',
   'about.runtime': 'Runtime',
   'about.sandbox': 'Sandbox',
   'about.sessionId': 'Session ID',
@@ -540,6 +539,21 @@ const EN: Messages = {
       : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
   'visionBridge.ok': (v) =>
     `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
+  'approval.goal.title': 'Confirm session goal',
+  'approval.goal.overview': 'Goal overview',
+  'approval.goal.full': 'Full content',
+  'approval.goal.outcome': 'Outcome',
+  'approval.goal.doneWhen': 'Completion criteria',
+  'approval.goal.mustNot': 'Constraints',
+  'approval.goal.budget': 'Budget',
+  'approval.goal.onBlock': 'When blocked',
+  'approval.goal.context': 'Context',
+  'approval.goal.confirm': 'Set goal and continue',
+  'approval.goal.reject': 'Not now',
+  'approval.goal.hint':
+    'Setting this goal continues execution and checks progress after each turn. Blockers will be reported.',
+  'approval.goal.pending': 'Submitting…',
+  'approval.goal.failed': 'Could not submit your choice. Please try again.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -623,6 +637,15 @@ const EN: Messages = {
   'common.invalid': 'invalid',
   'common.loading': 'Loading...',
   'common.retry': 'Try again',
+  'session.recovery.interrupted_prompt':
+    'The previous request was interrupted before the response completed.',
+  'session.recovery.interrupted_turn':
+    'The previous task was interrupted. Some tool results were not saved.',
+  'session.recovery.degraded_history':
+    'Conversation history is incomplete. The interrupted task cannot be continued.',
+  'session.recovery.continue': 'Continue execution',
+  'session.recovery.continuing': 'Continuing…',
+  'session.recovery.failed': 'Could not continue the conversation.',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -848,7 +871,7 @@ const EN: Messages = {
   'contextUsage.builtinTools': 'Built-in tools',
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
-  'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedOverhead': 'Estimated base overhead',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -858,16 +881,20 @@ const EN: Messages = {
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
     'No active session yet. Send your first message before viewing context usage.',
-  'contextUsage.noApiResponse':
-    'No API response yet. Send a message to see actual usage.',
+  'contextUsage.usageUnavailable':
+    'Current context usage is unavailable. The estimates below cover base overhead only, excluding conversation messages.',
   'contextUsage.overLimit':
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': 'System prompt',
   'contextUsage.title': 'Context Usage',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
+  'contextUsage.accessibleUsage': (v) =>
+    `${v?.used} of ${v?.total} tokens used`,
+  'contextUsage.viewDetails': 'View details',
+  'contextUsage.viewInConversation':
+    'Click to view the breakdown in the conversation.',
   'daemon.title': 'Daemon Status',
   'daemon.details.loading': 'Loading diagnostics...',
   'daemon.details.failed': 'Failed to load diagnostics.',
@@ -1247,6 +1274,8 @@ const EN: Messages = {
   'workflowRuns.user': 'User',
   'workflowRuns.projectDescription': 'Available in this project',
   'workflowRuns.userDescription': 'Available across projects',
+  'workflowRuns.extension': 'Extension',
+  'workflowRuns.extensionDescription': 'Provided by an installed extension',
   'workflowRuns.detail.toggle': (v) => `Show details for ${v?.name ?? ''}`,
   'workflowRuns.detail.loading': 'Loading workflow definition…',
   'workflowRuns.detail.unavailable':
@@ -1314,6 +1343,8 @@ const EN: Messages = {
   'scheduledTasks.creating': 'Creating…',
   'scheduledTasks.cancel': 'Cancel',
   'scheduledTasks.error.invalidSchedule': 'Invalid schedule',
+  'scheduledTasks.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted',
   'scheduledTasks.error.emptyPrompt': 'Prompt is required',
   'scheduledTasks.error.promptTooLong': (v) =>
     `Prompt exceeds ${v?.max ?? 100_000}-character limit`,
@@ -1359,6 +1390,18 @@ const EN: Messages = {
     'Each run gets a clean context and its own conversation.',
   'scheduledTasks.sessionMode.persistent.hint':
     'All runs continue in the same task conversation.',
+  'scheduledTasks.model': 'Model',
+  'scheduledTasks.model.workspaceDefault': 'Workspace default',
+  'scheduledTasks.model.hint':
+    'The selected model is applied when each new run session is created.',
+  'scheduledTasks.group': 'Session group',
+  'scheduledTasks.group.none': 'No group',
+  'scheduledTasks.group.create': 'Create a new group…',
+  'scheduledTasks.group.name': 'New group name',
+  'scheduledTasks.group.color': 'Group color',
+  'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
+  'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
+  'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.condition': 'Precondition (optional)',
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
@@ -1410,6 +1453,31 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'webPreview.title': 'Web preview',
+  'webPreview.openHint': 'Preview a running web app',
+  'webPreview.address': 'Development URL',
+  'webPreview.open': 'Open',
+  'webPreview.refresh': 'Refresh preview',
+  'webPreview.desktop': 'Desktop width',
+  'webPreview.mobile': 'Mobile width (390 px)',
+  'webPreview.external': 'Open externally',
+  'webPreview.frame': 'Web preview frame',
+  'webPreview.saved': 'Saved version',
+  'webPreview.savedFrame': 'Saved webpage version',
+  'webPreview.savedUnavailable':
+    'This saved version is missing or has changed. It cannot be opened.',
+  'webPreview.savedLoadFailed': 'Could not load this saved version. Try again.',
+  'webPreview.page': 'Application preview',
+  'webPreview.empty':
+    'Start your development server, then enter its URL above.',
+  'webPreview.reachable':
+    'Use an address this browser can reach. For a remote server, use its accessible URL or an existing port forward.',
+  'webPreview.fallback':
+    'Blank page? Check the server or open externally. The address and refresh use the entry URL.',
+  'webPreview.live':
+    'Live page. Opening a link from an earlier message shows its current content, not a saved version.',
+  'webPreview.invalidUrl':
+    'Use a separate HTTP/HTTPS development address with a hostname or IPv4 address, without login credentials. Web Shell and daemon addresses cannot be previewed.',
   'terminal.title': 'Terminal',
   'terminal.open': 'Open a terminal',
   'terminal.notice.exited': (v) =>
@@ -1417,6 +1485,8 @@ const EN: Messages = {
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.protocolMismatch':
+    'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
   'localFiles.trigger': 'Local files',
   'localFiles.hint':
@@ -1437,6 +1507,7 @@ const EN: Messages = {
   'localFiles.status.needsGesture': 'Reconnect to continue',
   'localFiles.status.failed': 'Failed',
   'localFiles.status.unavailable': 'Unavailable here',
+  'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
   'localFiles.blocker.insecureContext':
@@ -1447,6 +1518,10 @@ const EN: Messages = {
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
     "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+  'localFiles.blocker.workspaceResolving':
+    'Which workspace this conversation belongs to is not known yet.',
+  'localFiles.blocker.unsupportedDaemon':
+    'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -1780,6 +1855,14 @@ const EN: Messages = {
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
+  'background.result': 'Background result',
+  'background.agent': 'Background agent',
+  'background.running': 'Background tasks running',
+  'background.task': 'Background task',
+  'background.details': 'View details',
+  'background.processing': (v) => `Processing ${v?.label ?? ''} results`,
+  'background.source': 'Source',
+  'background.pending': 'Awaiting processing',
   'system.taskCompleted': 'Background task completed',
   'system.taskFailed': 'Background task failed',
   'system.taskCancelled': 'Background task cancelled',
@@ -1947,7 +2030,7 @@ const EN: Messages = {
   'auth.documentation': 'Documentation',
   'auth.modelsRequired': 'Model IDs cannot be empty.',
   'auth.review': 'Review',
-  'auth.reviewText': 'The following JSON will be saved to settings.json:',
+  'auth.reviewText': 'Review the connection and model settings before saving.',
   'auth.save': 'Save',
   'auth.saving': 'Saving...',
   'auth.termsTitle': 'Terms of Services and Privacy Notice',
@@ -1957,7 +2040,7 @@ const EN: Messages = {
   'auth.advanced.prompt': 'Optional: configure advanced generation settings.',
   'auth.advanced.thinking': 'Enable thinking',
   'auth.advanced.thinkingDesc':
-    'Allows the model to perform extended reasoning before responding.',
+    'Enable extended reasoning. Leave off to use the model default.',
   'auth.advanced.modality': 'Enable modality',
   'auth.advanced.modalityDesc':
     'Enables multimodal input capabilities (image, video, etc.).',
@@ -1967,8 +2050,17 @@ const EN: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': 'Context window',
   'auth.advanced.contextDesc':
-    'Max input tokens (leave empty to auto-detect from model name).',
+    'Context window capacity in tokens. Leave empty to infer the limit from the model ID.',
   'auth.advanced.contextPlaceholder': 'Context window (optional)',
+  'auth.advanced.maxTokens': 'Maximum output tokens',
+  'auth.advanced.maxTokensDesc':
+    'Maximum tokens per response. Leave empty to infer the limit from the model ID.',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token limit'} must be a whole number between 1 and 10,000,000.`,
+  'auth.advanced.modalitiesRequired':
+    'Select at least one input type or turn off modality.',
+  'auth.advanced.defaults': 'Use model defaults',
+  'auth.apiKeySet': 'Set (hidden)',
   'local.btw':
     'Ask a quick side question without affecting the main conversation. Usage: /btw <your question>',
   'btw.empty': 'Please provide a question. Usage: /btw <your question>',
@@ -2342,6 +2434,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.blocked': 'Goal blocked',
   'goal.usageLimited': 'Goal usage limited',
   'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
@@ -2351,6 +2444,10 @@ const EN: Messages = {
   'goal.judge': 'Judge',
   'goal.label': 'Goal',
   'goal.lastCheck': 'Last check',
+  'goal.checkpoint': 'Checkpoint',
+  'goal.checkpointStalled': (v) =>
+    `${v?.count ?? 0}/${v?.limit ?? 0} checks stalled`,
+  'goal.checkpointFailed': 'last evidence checkpoint failed',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
@@ -2380,10 +2477,10 @@ const EN: Messages = {
   'goals.refresh': 'Refresh',
   'goals.new': 'New goal',
   'goals.newHint':
-    'The goal starts in a new session and runs until its condition holds.',
+    'The goal starts in a new session and runs until its condition holds. For an enforced turn or time ceiling, run /config model.goalMaxTurns=20 or /config model.goalMaxActiveMinutes=30 in the chat; it applies after the daemon restarts, to Goals created afterwards.',
   'goals.condition': 'Condition',
   'goals.conditionPlaceholder':
-    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; stop as blocked after 20 turns',
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; as model guidance, stop as blocked after 20 turns',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
@@ -2554,6 +2651,36 @@ const EN: Messages = {
   'reasoning.updateFailed': 'Failed to update reasoning options',
   'model.setFast': 'Set Fast Model',
   'model.setVoice': 'Set Voice Model',
+  'auth.purpose.label': 'Model purpose',
+  'auth.purpose.chat': 'Conversation',
+  'auth.purpose.chatHint':
+    'Use this provider for conversation. The current model is retained when it is included in the configuration.',
+  'auth.purpose.image': 'Image generation',
+  'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.imageHint':
+    'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
+  'auth.purpose.voiceHint':
+    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+  'settings.models.editWindow': 'Edit context window',
+  'settings.models.windowHint':
+    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
+  'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
+  'settings.models.saved': 'Saved',
+  'model.setAdvisor': 'Set Advisor Model',
+  'settings.label.advisorModel': 'Advisor Model',
+  'settings.label.imageModel': 'Image Model',
+  'settings.label.voiceModel': 'Voice Model',
+  'settings.description.advisorModel':
+    'Model used to review recent conversation progress. Leave empty to use the main model.',
+  'settings.description.imageModel':
+    'Model used for image generation. Add a custom model with Image generation purpose, then select it here.',
+  'settings.description.voiceModel':
+    'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
+
+  'model.setImage': 'Set Image Model',
+  'model.useMain': 'Use main model',
+  'model.disabled': 'Disabled',
+
   'model.setVision': 'Set Vision Model',
   'model.switch': 'Switch Model',
   'model.unknown': 'unknown',
@@ -2720,8 +2847,26 @@ const EN: Messages = {
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
   'contextUsage.refresh': 'Refresh',
+  'contextUsage.remaining': 'Remaining',
+  'contextUsage.advanced': 'Advanced · usage by category',
+  'contextUsage.snapshot': 'Snapshot',
+  'contextUsage.viewCurrent': 'View current context',
+  'contextUsage.compress': 'Compress context',
+  'contextUsage.compressing': 'Compressing…',
+  'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressCancelled':
+    'Cancellation requested. Refresh to check current usage.',
+  'contextUsage.compressInterrupted':
+    'Connection changed during compression. Refresh to check current usage.',
+  'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.compressRefreshFailed':
+    'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
+  'contextUsage.compressUnavailable':
+    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.previousReading':
+    'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
@@ -2801,6 +2946,8 @@ const EN: Messages = {
   'planExecution.unblocks': 'Unblocks:',
   'planExecution.unassigned': 'Unassigned executions',
   'planExecution.attention': 'Needs attention',
+  'planExecution.agentCount': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count ?? 0) === 1 ? 'agent' : 'agents'}`,
   'planExecution.status.running': 'Running',
   'planExecution.status.paused': 'Paused',
   'planExecution.status.completed': 'Completed',
@@ -2840,6 +2987,7 @@ const EN: Messages = {
   'workflow.dependencies.unblocks': 'Unblocks',
   'workflow.dependencies.noDownstream': 'No downstream steps',
   'workflow.activity.empty': 'No Agent runs are linked to a Todo yet.',
+  'workflow.activity.showAll': (v) => `Show all ${v?.count ?? 0} runs`,
   'workflow.deliverables.title': 'Session deliverables',
   'workflow.deliverables.none': 'No artifacts have been published yet',
   'workflow.status.running': 'Running',
@@ -2870,6 +3018,27 @@ const EN: Messages = {
   'workflow.empty': 'No subagents in this workflow',
   'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
+  'sources.title': 'Sources',
+  'sources.add': 'Add source',
+  'sources.empty': 'Add files or links for reference.',
+  'sources.explanation':
+    'Adding a reference does not send its contents to the assistant.',
+  'sources.remove': 'Remove source',
+  'sources.open': 'Open source',
+  'sources.viewAll': 'View all',
+  'sources.type': 'Reference type',
+  'sources.workspaceFile': 'Workspace file',
+  'sources.link': 'Link',
+  'sources.location': 'Path or link',
+  'sources.name': 'Title (optional)',
+  'sources.description': 'Description (optional)',
+  'sources.registrationFailed':
+    'Message sent; some source details could not be saved',
+  'sources.attachmentsLoadFailed': (v) =>
+    `Failed to load uploaded files: ${v?.error ?? 'Unknown error'}`,
+  'sources.openOriginal': 'Open original',
+  'sources.unavailable':
+    'This reference is no longer available in this workspace.',
   'environment.attachments': 'Attachments',
   'environment.artifacts': 'Artifacts',
   'environment.artifactsEmpty':
@@ -2883,6 +3052,18 @@ const EN: Messages = {
   'userMessage.showLess': 'Collapse',
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
+  'userMessage.edit': 'Edit message',
+  'userMessage.editSubmit': 'Send',
+  'userMessage.editSending': 'Sending…',
+  'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
+  'userMessage.editStale':
+    'The message changed. Reopen the editor and try again.',
+  'userMessage.editAttachmentUnavailable':
+    'An attachment is unavailable. The message was not rewound.',
+  'userMessage.editSyncFailed':
+    'Could not confirm the rewind. Your edit is retained while waiting for synchronization.',
+  'userMessage.editFailed': (v) =>
+    `Could not resend the edited message: ${v?.reason ?? ''}`,
   'turn.processed': 'Processed',
   'turn.processing': 'Processing',
   'turn.collapse': 'Collapse steps',
@@ -2901,6 +3082,10 @@ const EN: Messages = {
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
   'turn.stopped': 'You cancelled this request',
+  'turn.stoppedAfter': (v) => {
+    const seconds = v?.seconds ?? 0;
+    return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
+  },
   'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -3376,7 +3561,22 @@ const EN: Messages = {
   'channels.editor.secret.placeholder': (v) => `Enter ${v?.label ?? 'secret'}`,
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
+  'channels.editor.field.shared.outputMode': 'Output Mode',
+  'channels.editor.field.shared.outputMode.description':
+    'Choose one final result for the complete task, each complete assistant response, or the last reply in each turn. Defaults to per turn: the main response finishes independently of background follow-ups. Applies to cards and ordinary messages.',
+  'channels.editor.field.shared.outputMode.option.per_task': 'Per task',
+  'channels.editor.field.shared.outputMode.option.per_response': 'Per response',
+  'channels.editor.field.shared.outputMode.option.per_turn':
+    'Per turn (default)',
   'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.dws.senderPolicy': 'Sender policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
+  'channels.editor.field.dws.dmPolicy': 'Direct message access',
+  'channels.editor.field.dws.dmPolicy.description':
+    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
+  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
+  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
   'channels.editor.field.shared.senderPolicy.description':
     'Choose who can start a direct conversation with this Channel.',
   'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
@@ -3531,10 +3731,15 @@ const EN: Messages = {
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
+  'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
+  'settings.models.credentialEnv': 'Key environment variable',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
   'settings.models.current': 'Current',
   'settings.models.runtime': 'Runtime',
+  'settings.models.savedConfiguration': 'Saved configuration',
+  'settings.models.ambiguousWindow':
+    'Multiple configurations share this route. Its context window cannot be edited here.',
   'settings.models.delete': 'Delete',
   'settings.models.confirmDelete': 'Confirm',
   'settings.models.cancel': 'Cancel',
@@ -3555,7 +3760,9 @@ const EN: Messages = {
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'browserNotifications.label': 'Browser task notifications',
   'browserNotifications.description':
-    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Saved for this browser site only; the page must remain open.',
+    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
+  'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
   'browserNotifications.completed': 'This turn has completed.',
   'browserNotifications.failed':
     'This turn failed. Return to view the details.',
@@ -3744,6 +3951,7 @@ const ZH: Messages = {
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
+  'toolName.exec': '执行代码',
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
@@ -3793,6 +4001,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.record_source': '记录来源',
   'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
@@ -3817,7 +4026,6 @@ const ZH: Messages = {
   'about.noSandbox': 'no sandbox',
   'about.platform': '操作系统',
   'about.proxy': '代理',
-  'about.qwenCode': 'Qwen Code',
   'about.runtime': '运行环境',
   'about.sandbox': '沙箱',
   'about.sessionId': '会话 ID',
@@ -4165,6 +4373,21 @@ const ZH: Messages = {
       : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
   'visionBridge.ok': (v) =>
     `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
+  'approval.goal.title': '确认会话目标',
+  'approval.goal.overview': '目标概览',
+  'approval.goal.full': '完整内容',
+  'approval.goal.outcome': '目标',
+  'approval.goal.doneWhen': '完成条件',
+  'approval.goal.mustNot': '执行边界',
+  'approval.goal.budget': '预算',
+  'approval.goal.onBlock': '遇到阻塞时',
+  'approval.goal.context': '上下文',
+  'approval.goal.confirm': '设置并继续',
+  'approval.goal.reject': '暂不设置',
+  'approval.goal.hint':
+    '设置后将继续执行，并在每轮结束时检查目标进展；遇到阻塞会说明原因。',
+  'approval.goal.pending': '正在提交…',
+  'approval.goal.failed': '提交失败，请重试。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -4244,6 +4467,12 @@ const ZH: Messages = {
   'common.invalid': '无效',
   'common.loading': '加载中...',
   'common.retry': '重试',
+  'session.recovery.interrupted_prompt': '上次请求在回答完成前中断。',
+  'session.recovery.interrupted_turn': '上次任务已中断，部分工具结果未保存。',
+  'session.recovery.degraded_history': '会话历史不完整，无法继续中断的任务。',
+  'session.recovery.continue': '继续执行',
+  'session.recovery.continuing': '正在继续…',
+  'session.recovery.failed': '无法继续此会话。',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -4441,7 +4670,7 @@ const ZH: Messages = {
   'contextUsage.builtinTools': '内置工具',
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
-  'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedOverhead': '基础开销估算',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -4451,16 +4680,18 @@ const ZH: Messages = {
   'contextUsage.model': '模型',
   'contextUsage.noSession':
     '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
-  'contextUsage.noApiResponse':
-    '尚无 API 响应。发送一条消息后可查看实际使用量。',
+  'contextUsage.usageUnavailable':
+    '当前上下文用量暂不可用。下方仅为基础开销估算，不含对话消息。',
   'contextUsage.overLimit':
     '上下文已超过限制！请使用 /compress 或 /clear 减少占用。',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': '系统提示词',
   'contextUsage.title': '上下文使用情况',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
+  'contextUsage.accessibleUsage': (v) => `已用 ${v?.used} / ${v?.total} tokens`,
+  'contextUsage.viewDetails': '查看明细',
+  'contextUsage.viewInConversation': '点击在对话中查看上下文组成。',
   'daemon.title': 'Daemon 状态',
   'daemon.details.loading': '正在加载诊断信息...',
   'daemon.details.failed': '诊断信息加载失败。',
@@ -4814,6 +5045,8 @@ const ZH: Messages = {
   'workflowRuns.user': '用户',
   'workflowRuns.projectDescription': '仅在当前项目中可用',
   'workflowRuns.userDescription': '在所有项目中可用',
+  'workflowRuns.extension': '扩展',
+  'workflowRuns.extensionDescription': '由已安装的扩展提供',
   'workflowRuns.detail.toggle': (v) => `查看 ${v?.name ?? ''} 的详情`,
   'workflowRuns.detail.loading': '正在加载工作流定义…',
   'workflowRuns.detail.unavailable': '这个工作流定义已不可用。',
@@ -4876,6 +5109,7 @@ const ZH: Messages = {
   'scheduledTasks.creating': '创建中…',
   'scheduledTasks.cancel': '取消',
   'scheduledTasks.error.invalidSchedule': '计划无效',
+  'scheduledTasks.error.workspaceUnavailable': '所选工作区不可用或不受信任',
   'scheduledTasks.error.emptyPrompt': '提示词不能为空',
   'scheduledTasks.error.promptTooLong': (v) =>
     `提示词超过 ${v?.max ?? 100_000} 字符限制`,
@@ -4919,6 +5153,17 @@ const ZH: Messages = {
     '每次运行都创建独立会话，使用干净的上下文。',
   'scheduledTasks.sessionMode.persistent.hint':
     '所有运行都继续使用同一个任务会话。',
+  'scheduledTasks.model': '模型',
+  'scheduledTasks.model.workspaceDefault': '工作区默认模型',
+  'scheduledTasks.model.hint': '创建每次运行的新会话时应用所选模型。',
+  'scheduledTasks.group': '会话分组',
+  'scheduledTasks.group.none': '不分组',
+  'scheduledTasks.group.create': '新建分组…',
+  'scheduledTasks.group.name': '新分组名称',
+  'scheduledTasks.group.color': '分组颜色',
+  'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
+  'scheduledTasks.group.nameRequired': '请输入新分组名称。',
+  'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.condition': '前置条件（可选）',
   'scheduledTasks.conditionPlaceholder':
     '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
@@ -4968,12 +5213,37 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'webPreview.title': '网页预览',
+  'webPreview.openHint': '预览正在运行的网页应用',
+  'webPreview.address': '开发地址',
+  'webPreview.open': '打开',
+  'webPreview.refresh': '刷新预览',
+  'webPreview.desktop': '桌面宽度',
+  'webPreview.mobile': '手机宽度（390 px）',
+  'webPreview.external': '外部打开',
+  'webPreview.frame': '网页预览容器',
+  'webPreview.saved': '当时保存的版本',
+  'webPreview.savedFrame': '历史网页版本',
+  'webPreview.savedUnavailable': '这份历史版本已丢失或被修改，无法打开。',
+  'webPreview.savedLoadFailed': '暂时无法加载这份历史版本，请重试。',
+  'webPreview.page': '应用预览',
+  'webPreview.empty': '启动开发服务器，然后在上方输入地址。',
+  'webPreview.reachable':
+    '使用当前浏览器可访问的地址。远程服务器请使用可访问的 URL 或已有的端口转发。',
+  'webPreview.fallback':
+    '页面空白？请检查服务器或外部打开。地址栏和刷新使用最初打开的地址。',
+  'webPreview.live':
+    '实时页面：从历史消息打开链接，也会显示当前内容，不是当时保存的版本。',
+  'webPreview.invalidUrl':
+    '请使用独立开发服务器的 HTTP/HTTPS 地址，主机名或 IPv4 均可，且不含登录凭据。不能预览 Web Shell 或 daemon 地址。',
   'terminal.title': '终端',
   'terminal.open': '打开终端',
   'terminal.notice.exited': (v) => `进程已退出，退出码 ${v?.exitCode ?? '?'}`,
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.protocolMismatch':
+    '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
   'localFiles.trigger': '本地文件',
   'localFiles.hint':
@@ -4994,6 +5264,7 @@ const ZH: Messages = {
   'localFiles.status.needsGesture': '需要重新连接',
   'localFiles.status.failed': '连接失败',
   'localFiles.status.unavailable': '当前环境不可用',
+  'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
   'localFiles.blocker.insecureContext':
@@ -5004,6 +5275,9 @@ const ZH: Messages = {
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
     '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+  'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
+  'localFiles.blocker.unsupportedDaemon':
+    '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -5311,6 +5585,14 @@ const ZH: Messages = {
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
+  'background.result': '后台结果',
+  'background.agent': '后台智能体',
+  'background.running': '后台任务执行中',
+  'background.task': '后台任务',
+  'background.details': '查看详情',
+  'background.processing': (v) => `正在处理 ${v?.label ?? ''} 结果`,
+  'background.source': '来源',
+  'background.pending': '等待处理',
   'system.taskCompleted': '后台任务执行完成',
   'system.taskFailed': '后台任务执行失败',
   'system.taskCancelled': '后台任务已取消',
@@ -5457,7 +5739,7 @@ const ZH: Messages = {
   'auth.documentation': '文档',
   'auth.modelsRequired': '模型 ID 不能为空。',
   'auth.review': '确认',
-  'auth.reviewText': '以下 JSON 将保存到 settings.json：',
+  'auth.reviewText': '保存前请确认连接信息和模型参数。',
   'auth.save': '保存',
   'auth.saving': '正在保存...',
   'auth.termsTitle': '服务条款和隐私声明',
@@ -5466,7 +5748,7 @@ const ZH: Messages = {
     `输入以逗号分隔的模型 ID。例如：${v?.modelIds ?? ''}`,
   'auth.advanced.prompt': '可选：配置高级生成设置。',
   'auth.advanced.thinking': '启用 thinking',
-  'auth.advanced.thinkingDesc': '允许模型在回复前进行扩展推理。',
+  'auth.advanced.thinkingDesc': '启用扩展推理；不勾选时保留模型默认行为。',
   'auth.advanced.modality': '启用多模态',
   'auth.advanced.modalityDesc': '启用图片、视频等多模态输入能力。',
   'auth.advanced.modalityImage': '图片',
@@ -5475,8 +5757,17 @@ const ZH: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': '上下文窗口',
   'auth.advanced.contextDesc':
-    '最大输入 token 数（留空则根据模型名称自动检测）。',
+    '模型的上下文窗口 Token 容量，留空根据模型 ID 自动推断。',
   'auth.advanced.contextPlaceholder': '上下文窗口（可选）',
+  'auth.advanced.maxTokens': '最大输出 Token',
+  'auth.advanced.maxTokensDesc':
+    '每次回复的最大 Token 数，留空根据模型 ID 自动推断。',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token 上限'}必须是 1 到 10,000,000 之间的整数。`,
+  'auth.advanced.modalitiesRequired':
+    '请至少选择一种输入类型，或关闭多模态选项。',
+  'auth.advanced.defaults': '使用模型默认值',
+  'auth.apiKeySet': '已设置（隐藏）',
   'local.btw': '快速问一个不影响主对话的侧边问题。用法：/btw <your question>',
   'btw.empty': '请提供一个问题。用法：/btw <你的问题>',
   'btw.side.empty': '请提供一个问题。用法：/btw side <你的问题>',
@@ -5818,6 +6109,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.blocked': '目标已阻塞',
   'goal.usageLimited': '目标用量受限',
   'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
@@ -5827,6 +6119,10 @@ const ZH: Messages = {
   'goal.judge': '判断',
   'goal.label': '目标',
   'goal.lastCheck': '上次检查',
+  'goal.checkpoint': '检查点',
+  'goal.checkpointStalled': (v) =>
+    `连续 ${v?.count ?? 0}/${v?.limit ?? 0} 次检查停滞`,
+  'goal.checkpointFailed': '最近一次证据检查点失败',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',
@@ -5855,10 +6151,11 @@ const ZH: Messages = {
   'goals.empty': '没有进行中的目标。用 /goal <条件> 设置一个。',
   'goals.refresh': '刷新',
   'goals.new': '新建目标',
-  'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
+  'goals.newHint':
+    '目标会在一个新会话中启动，并持续运行直到条件满足。如需强制的轮数或时长上限，请在对话中运行 /config model.goalMaxTurns=20 或 /config model.goalMaxActiveMinutes=30，daemon 重启后生效，且只对之后新建的 Goal 生效。',
   'goals.condition': '条件',
   'goals.conditionPlaceholder':
-    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；20 轮内未达成则以 blocked 结束',
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；模型参考 20 轮内未达成则以 blocked 结束',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
@@ -6016,6 +6313,35 @@ const ZH: Messages = {
   'reasoning.updateFailed': '更新思考选项失败',
   'model.setFast': '设置 Fast Model',
   'model.setVoice': '设置语音模型',
+  'auth.purpose.label': '模型用途',
+  'auth.purpose.chat': '对话',
+  'auth.purpose.chatHint':
+    '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
+  'auth.purpose.image': '生图',
+  'auth.purpose.voice': '语音转写',
+  'auth.purpose.imageHint':
+    '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
+  'auth.purpose.voiceHint':
+    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+  'settings.models.editWindow': '配置窗口大小',
+  'settings.models.windowHint':
+    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
+  'settings.models.windowSaved': '已保存，重启已有会话后生效。',
+  'settings.models.saved': '已保存',
+  'model.setAdvisor': '设置顾问模型',
+  'settings.label.advisorModel': '顾问模型',
+  'settings.label.imageModel': '生图模型',
+  'settings.label.voiceModel': '语音转写模型',
+  'settings.description.advisorModel': '用于复查近期对话进展，默认使用主模型。',
+  'settings.description.imageModel':
+    '用于生成图片。添加自定义模型时选择“生图”用途，再在这里选择。',
+  'settings.description.voiceModel':
+    '用于将语音转成文字。添加自定义模型时选择“语音转写”用途，再在这里选择。',
+
+  'model.setImage': '设置生图模型',
+  'model.useMain': '使用主模型',
+  'model.disabled': '不启用',
+
   'model.setVision': '设置视觉模型',
   'model.switch': '切换模型',
   'model.unknown': '未知',
@@ -6171,8 +6497,24 @@ const ZH: Messages = {
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
   'contextUsage.refresh': '刷新',
+  'contextUsage.remaining': '剩余',
+  'contextUsage.advanced': '高级 · 用量分类',
+  'contextUsage.snapshot': '历史快照',
+  'contextUsage.viewCurrent': '查看当前上下文',
+  'contextUsage.compress': '手动压缩',
+  'contextUsage.compressing': '正在压缩…',
+  'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
+  'contextUsage.compressInterrupted':
+    '压缩期间连接发生变化，请刷新查看当前使用量。',
+  'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.compressRefreshFailed':
+    '压缩已完成，但用量刷新失败。请点击刷新重试。',
+  'contextUsage.compressUnavailable':
+    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
@@ -6251,6 +6593,7 @@ const ZH: Messages = {
   'planExecution.unblocks': '解锁：',
   'planExecution.unassigned': '未关联的执行',
   'planExecution.attention': '需要关注',
+  'planExecution.agentCount': (v) => `${v?.count ?? 0} 个 Agent`,
   'planExecution.status.running': '运行中',
   'planExecution.status.paused': '已暂停',
   'planExecution.status.completed': '已完成',
@@ -6289,6 +6632,7 @@ const ZH: Messages = {
   'workflow.dependencies.unblocks': '解除阻塞',
   'workflow.dependencies.noDownstream': '没有下游步骤',
   'workflow.activity.empty': '还没有关联到待办的 Agent 执行。',
+  'workflow.activity.showAll': (v) => `查看全部 ${v?.count ?? 0} 条执行`,
   'workflow.deliverables.title': '会话交付物',
   'workflow.deliverables.none': '尚未发布产物',
   'workflow.status.running': '运行中',
@@ -6319,6 +6663,24 @@ const ZH: Messages = {
   'workflow.empty': '此工作流中暂无子智能体',
   'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
+  'sources.title': '来源',
+  'sources.add': '添加来源',
+  'sources.empty': '添加文件或链接作为参考。',
+  'sources.explanation': '添加引用不会将内容发送给助手。',
+  'sources.remove': '移除来源',
+  'sources.open': '打开来源',
+  'sources.viewAll': '查看全部',
+  'sources.type': '引用类型',
+  'sources.workspaceFile': '工作区文件',
+  'sources.link': '链接',
+  'sources.location': '路径或链接',
+  'sources.name': '标题（可选）',
+  'sources.description': '描述（可选）',
+  'sources.registrationFailed': '消息已发送；部分来源信息未能保存',
+  'sources.attachmentsLoadFailed': (v) =>
+    `上传文件加载失败：${v?.error ?? '未知错误'}`,
+  'sources.openOriginal': '打开原链接',
+  'sources.unavailable': '此引用在当前工作区中不可用。',
   'environment.attachments': '附件',
   'environment.artifacts': '产物',
   'environment.artifactsEmpty': '此会话生成的产物会显示在这里。',
@@ -6330,6 +6692,15 @@ const ZH: Messages = {
   'userMessage.showLess': '收起',
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
+  'userMessage.edit': '编辑消息',
+  'userMessage.editSubmit': '发送',
+  'userMessage.editSending': '发送中…',
+  'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
+  'userMessage.editStale': '消息已发生变化，请重新打开编辑器后再试。',
+  'userMessage.editAttachmentUnavailable': '附件内容不可用，消息尚未回退。',
+  'userMessage.editSyncFailed':
+    '无法确认回退已同步。编辑内容已暂存，正在等待同步。',
+  'userMessage.editFailed': (v) => `无法重发编辑的消息：${v?.reason ?? ''}`,
   'turn.processed': '已处理',
   'turn.processing': '处理中',
   'turn.collapse': '折叠步骤',
@@ -6339,6 +6710,7 @@ const ZH: Messages = {
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
+  'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
@@ -6787,7 +7159,21 @@ const ZH: Messages = {
   'channels.editor.secret.clear': '清除',
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
+  'channels.editor.field.shared.outputMode': '输出模式',
+  'channels.editor.field.shared.outputMode.description':
+    '选择在整个任务完成后、每次完整回复后，或每轮结束时发送最后一条回复。默认按轮输出：主回复独立结束，后台后续回复单独发送。适用于卡片和普通消息。',
+  'channels.editor.field.shared.outputMode.option.per_task': '按任务',
+  'channels.editor.field.shared.outputMode.option.per_response': '按回复',
+  'channels.editor.field.shared.outputMode.option.per_turn': '按轮（默认）',
   'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
+  'channels.editor.field.dws.dmPolicy': '私聊访问',
+  'channels.editor.field.dws.dmPolicy.description':
+    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
+  'channels.editor.field.dws.dmPolicy.option.open': '开放',
+  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
   'channels.editor.field.shared.senderPolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
   'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
@@ -6937,10 +7323,15 @@ const ZH: Messages = {
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
+  'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
+  'settings.models.credentialEnv': '密钥环境变量',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
   'settings.models.current': '当前',
   'settings.models.runtime': '运行时',
+  'settings.models.savedConfiguration': '已保存配置',
+  'settings.models.ambiguousWindow':
+    '多个配置共用此模型端点，无法在此修改窗口大小。',
   'settings.models.delete': '删除',
   'settings.models.confirmDelete': '确认删除',
   'settings.models.cancel': '取消',
@@ -6961,7 +7352,9 @@ const ZH: Messages = {
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
   'browserNotifications.label': '浏览器任务通知',
   'browserNotifications.description':
-    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。仅保存在此浏览器站点；网页需保持打开。',
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+  'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
   'browserNotifications.completed': '本轮已完成。',
   'browserNotifications.failed': '本轮执行失败，请返回查看。',
   'browserNotifications.ended': '本轮已结束，请返回查看结果。',

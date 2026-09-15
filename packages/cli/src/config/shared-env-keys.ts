@@ -28,6 +28,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // These two select which file becomes the System / SystemDefaults settings
+  // layer. A project `.env` must never redirect them: the System layer
+  // outranks the operator's own User settings, so a repository could promote
+  // its own file into the highest-precedence layer — renaming the product in
+  // every connected browser via `ui.brand`, among other operator-only
+  // settings that read only the operator scopes.
+  'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+  'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   // Downloaded updates execute as the user; a project must not select them.
   'QWEN_UPDATE_BASE_URL',
   // This points to a host temp file that carries build warnings. A project
@@ -58,6 +66,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // from repository content at all. prebuild.test.ts pins the membership
   // with both real symbols.
   'QWEN_REVIEW_PREBUILD',
+  // The automatic-review marker (commands/review/lib/docs-nav-profile.ts
+  // `automaticReviewRequested`) is an operator decision in the same class:
+  // it selects the reduced docs-nav profile, so a repository must not
+  // declare its own — possibly manual — review automatic and shrink the
+  // review of its own change to one reviewer with no reverse audit. CI
+  // welds it as a real step env, never a file.
+  'QWEN_REVIEW_AUTOMATIC',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -207,6 +222,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (documented as a per-daemon opt-in), so only the daemon's launch
   // environment or a home `.env` may set it.
   'QWEN_SERVE_NEW_FILE_MODE',
+  'QWEN_SERVE_MAX_WORKSPACES',
   // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT decides where the daemon stores
   // every workspace's session attachments. A project `.env` redirecting it
   // would capture uploads for ALL workspaces the daemon serves — and reads

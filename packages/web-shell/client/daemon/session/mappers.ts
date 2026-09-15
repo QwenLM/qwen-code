@@ -5,6 +5,7 @@
  */
 
 import type { Dispatch, SetStateAction } from 'react';
+import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
 import type {
   DaemonAvailableCommand,
   DaemonEvent,
@@ -322,6 +323,22 @@ export function updateConnectionFromDaemonEvent(
 ): void {
   if (event.type === 'session_update') {
     const update = getRecord(getRecord(event.data)?.['update']);
+    const meta = getRecord(update?.['_meta']);
+    const backgroundTurn = parseDaemonBackgroundTurn(meta?.['backgroundTurn']);
+    if (
+      backgroundTurn &&
+      meta?.['source'] === 'background_notification_turn_started'
+    ) {
+      setConnection((current) =>
+        current.finishedBackgroundTurnId === backgroundTurn.turnId
+          ? current
+          : {
+              ...current,
+              backgroundTurn,
+              backgroundTurnObservedAt: performance.now(),
+            },
+      );
+    }
     const tokenUsage = getUsageTokenUsage(update);
     if (tokenUsage) {
       setConnection((current) => ({
@@ -354,6 +371,22 @@ export function updateConnectionFromDaemonEvent(
   }
 
   switch (event.type) {
+    case 'turn_complete':
+    case 'turn_error': {
+      const promptId =
+        getString(getRecord(event.data), 'promptId') ?? event.promptId;
+      setConnection((current) =>
+        current.backgroundTurn?.turnId === promptId
+          ? {
+              ...current,
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: promptId,
+              backgroundTurnObservedAt: performance.now(),
+            }
+          : current,
+      );
+      break;
+    }
     case 'git_branch_changed': {
       const data = getRecord(event.data);
       const workspaceCwd = getString(data, 'workspaceCwd');
@@ -669,6 +702,8 @@ function getGoalState(
   const activeTimeMs = getNumber(source, 'activeTimeMs');
   const tokensUsed = getNumber(source, 'tokensUsed');
   const tokenBudget = getNumber(source, 'tokenBudget');
+  const turnBudget = getNumber(source, 'turnBudget');
+  const activeTimeBudgetMs = getNumber(source, 'activeTimeBudgetMs');
   const createdAt = getNumber(source, 'createdAt');
   const updatedAt = getNumber(source, 'updatedAt');
   if (
@@ -688,12 +723,16 @@ function getGoalState(
   ) {
     return undefined;
   }
+  const checkpointStalls = getNumber(source, 'checkpointStalls');
+  const lastCheckpointFailure = getString(source, 'lastCheckpointFailure');
   const lastReason = getString(source, 'lastReason');
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
     limitKindRaw === 'evidence_catalog' ||
     limitKindRaw === 'checkpoint_request' ||
-    limitKindRaw === 'token_budget'
+    limitKindRaw === 'token_budget' ||
+    limitKindRaw === 'turn_budget' ||
+    limitKindRaw === 'time_budget'
       ? limitKindRaw
       : undefined;
   return {
@@ -709,8 +748,14 @@ function getGoalState(
       activeTimeMs,
       ...(tokensUsed !== undefined ? { tokensUsed } : {}),
       ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      ...(turnBudget !== undefined ? { turnBudget } : {}),
+      ...(activeTimeBudgetMs !== undefined ? { activeTimeBudgetMs } : {}),
       createdAt,
       updatedAt,
+      ...(checkpointStalls !== undefined && checkpointStalls > 0
+        ? { checkpointStalls }
+        : {}),
+      ...(lastCheckpointFailure ? { lastCheckpointFailure } : {}),
       ...(lastReason ? { lastReason } : {}),
       ...(limitKind ? { limitKind } : {}),
     },

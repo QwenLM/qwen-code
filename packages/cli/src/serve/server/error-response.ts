@@ -15,6 +15,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionWriterError,
+  SessionSourceError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
@@ -270,6 +271,34 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  const sourceErrorKind =
+    err instanceof SessionSourceError
+      ? err.code
+      : (err as { data?: { errorKind?: unknown } } | null)?.data?.errorKind;
+  const sourceErrorStatus =
+    sourceErrorKind === 'invalid_source'
+      ? 400
+      : sourceErrorKind === 'source_limit_reached'
+        ? 409
+        : sourceErrorKind === 'source_persistence_unavailable'
+          ? 503
+          : sourceErrorKind === 'source_attachment_not_found'
+            ? 404
+            : undefined;
+  if (sourceErrorStatus !== undefined) {
+    const sourceError =
+      err instanceof Error ? err : new Error('Source operation failed');
+    if (sourceErrorStatus >= 500) {
+      reportBridgeError(sourceError, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(sourceError, ctx, daemonLog);
+    }
+    res.status(sourceErrorStatus).json({
+      error: err instanceof Error ? err.message : 'Source operation failed',
+      code: sourceErrorKind,
+    });
+    return;
+  }
   if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
     recordExpectedBridgeError(err, ctx, daemonLog);
     if (ctx?.initPrecedesMutations === true) {

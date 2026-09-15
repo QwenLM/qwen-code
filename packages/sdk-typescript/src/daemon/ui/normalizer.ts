@@ -11,7 +11,7 @@ import type {
   DaemonEvent,
   DaemonSessionArtifactChange,
 } from '../types.js';
-import { DAEMON_ERROR_KINDS } from '../types.js';
+import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
 import { isSettingsChangedData } from '../events.js';
 import type {
   DaemonUiEvent,
@@ -47,6 +47,7 @@ type NormalizedEventBase = Pick<
   | 'sourceRecordIds'
   | 'segmentId'
   | 'promptId'
+  | 'backgroundTurn'
   | 'branchRecordId'
   | 'originatorClientId'
   | 'rawEvent'
@@ -256,6 +257,14 @@ export function normalizeDaemonEvent(
       ];
     }
 
+    case 'turn_complete':
+      return getString(event.data, 'stopReason') === 'cancelled'
+        ? normalizePromptCancellation(
+            isRecord(event.data) ? event.data['promptCancelled'] : undefined,
+            base,
+          )
+        : [];
+
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
 
@@ -371,6 +380,19 @@ export function normalizeDaemonEvent(
 
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
+
+    case 'source_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      const revision = isRecord(event.data)
+        ? event.data['revision']
+        : undefined;
+      return sessionId &&
+        typeof revision === 'number' &&
+        Number.isInteger(revision) &&
+        revision >= 0
+        ? [{ ...base, type: 'session.source.changed', sessionId, revision }]
+        : [];
+    }
 
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
@@ -659,12 +681,21 @@ function createBase(
   const sourceRecordIds = extractSourceRecordIds(event);
   const segmentId = extractTranscriptSegmentId(event);
   const branchRecordId = extractBranchRecordId(event);
+  const update = getSessionUpdatePayload(event.data);
+  const backgroundTurn = parseDaemonBackgroundTurn(
+    (update && isRecord(update['_meta'])
+      ? update['_meta']['backgroundTurn']
+      : undefined) ??
+      (isRecord(event.data) ? event.data['backgroundTurn'] : undefined),
+  );
+  const promptId = event.promptId ?? backgroundTurn?.turnId;
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
     ...(sourceRecordIds ? { sourceRecordIds } : {}),
     ...(segmentId ? { segmentId } : {}),
-    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(promptId ? { promptId } : {}),
+    ...(backgroundTurn ? { backgroundTurn } : {}),
     ...(branchRecordId ? { branchRecordId } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
@@ -903,7 +934,27 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       const parentToolCallId = extractParentToolCallId(update);
       const meta = extractUpdateMeta(update);
+      if (
+        meta?.['source'] === 'background_task_completed' ||
+        meta?.['source'] === 'background_notification_turn_started'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'status',
+            source: meta['source'],
+            text: text ?? '',
+            data:
+              meta['source'] === 'background_task_completed'
+                ? meta['backgroundTask']
+                : meta['backgroundTurn'],
+          },
+        ];
+      }
       const events: DaemonUiEvent[] = [];
+      if (!parentToolCallId && meta?.['promptCancelled'] !== undefined) {
+        return normalizePromptCancellation(meta['promptCancelled'], base);
+      }
       if (text) {
         events.push({
           ...base,
@@ -2153,6 +2204,31 @@ function normalizeAuthDeviceFlowCancelled(
     );
   }
   return [{ ...base, type: 'auth.device_flow.cancelled', deviceFlowId }];
+}
+
+function normalizePromptCancellation(
+  value: unknown,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const elapsedMs = numberField(value, 'elapsedMs');
+  const cancelledAt = numberField(value, 'cancelledAt');
+  const promptId = stringField(value, 'promptId') ?? base.promptId;
+  if (
+    !promptId ||
+    elapsedMs === undefined ||
+    elapsedMs < 0 ||
+    cancelledAt === undefined
+  )
+    return [];
+  return [
+    {
+      ...base,
+      type: 'prompt.cancelled',
+      promptId,
+      elapsedMs,
+      serverTimestamp: cancelledAt,
+    },
+  ];
 }
 
 function numberField(value: unknown, key: string): number | undefined {

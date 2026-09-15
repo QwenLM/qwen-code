@@ -5,7 +5,11 @@
  */
 
 import { devices, expect, test } from '@playwright/test';
-import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonEvent,
+  DaemonSessionSummary,
+  DaemonSessionContextUsageStatus,
+} from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -51,8 +55,123 @@ function createTerminalTurnErrorScenario(sessionId: string) {
   });
 }
 
+function createTerminalGoalStatusEvent(
+  status: 'blocked' | 'usage_limited',
+  objective: string,
+  lastReason: string,
+): DaemonEvent {
+  return {
+    id: 2,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalState: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: `goal-visual-${status.replace('_', '-')}`,
+              revision: 2,
+              objective,
+              status,
+              ...(status === 'usage_limited'
+                ? { limitKind: 'token_budget' }
+                : {}),
+              evidenceCursor: { recordId: 'goal-visual-record' },
+              turnCount: 4,
+              activeTimeMs: 5000,
+              tokensUsed: 1000,
+              createdAt: 1234,
+              updatedAt: 2345,
+              lastReason,
+            },
+          },
+          goalStatus: {
+            kind: 'aborted',
+            condition: objective,
+            iterations: 4,
+            durationMs: 5000,
+            lastReason,
+          },
+        },
+      },
+    },
+  };
+}
+
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('context usage', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        supportedCommands: {
+          availableCommands: [
+            {
+              name: 'compress',
+              description: 'Compress context',
+              input: null,
+              _meta: { source: 'builtin-command' },
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 5_000,
+                memoryFiles: 5_000,
+                skills: 10_000,
+                messages: 20_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [{ name: 'read_file', tokens: 10_000 }],
+              mcpTools: [{ name: 'mcp__github__create_issue', tokens: 5_000 }],
+              memoryFiles: [{ path: '/workspace/QWEN.md', tokens: 5_000 }],
+              skills: [
+                {
+                  name: 'review',
+                  tokens: 5_000,
+                  loaded: true,
+                  bodyTokens: 5_000,
+                },
+              ],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await expect(
+        panel.getByRole('button', { name: 'Compress context', exact: true }),
+      ).toBeEnabled();
+      await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
     test('session overview', async ({ page }, testInfo) => {
       const workspaceCwd = '/workspace/session-overview';
       const scenario = createWebShellDaemonScenario({
@@ -144,44 +263,11 @@ for (const theme of THEMES) {
     test(`usage-limited goal status`, async ({ page }, testInfo) => {
       // Seed the compatibility card together with its canonical V2 state, as
       // emitted by both live goal updates and transcript replay.
-      const usageLimitedGoalEvent: DaemonEvent = {
-        id: 2,
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: '' },
-            _meta: {
-              goalState: {
-                v: 2,
-                activity: 'idle',
-                goal: {
-                  goalId: 'goal-visual-usage-limited',
-                  revision: 2,
-                  objective: 'Finish the evaluation suite',
-                  status: 'usage_limited',
-                  limitKind: 'token_budget',
-                  evidenceCursor: { recordId: 'goal-visual-record' },
-                  turnCount: 4,
-                  activeTimeMs: 5000,
-                  tokensUsed: 1000,
-                  createdAt: 1234,
-                  updatedAt: 2345,
-                  lastReason: 'Token budget reached',
-                },
-              },
-              goalStatus: {
-                kind: 'aborted',
-                condition: 'Finish the evaluation suite',
-                iterations: 4,
-                durationMs: 5000,
-                lastReason: 'Token budget reached',
-              },
-            },
-          },
-        },
-      };
+      const usageLimitedGoalEvent = createTerminalGoalStatusEvent(
+        'usage_limited',
+        'Finish the evaluation suite',
+        'Token budget reached',
+      );
       const scenario = createWebShellDaemonScenario({
         events: [
           userTextEvent('Finish the evaluation suite.', { id: 1 }),
@@ -200,6 +286,33 @@ for (const theme of THEMES) {
       await expect(messageList).toContainText('Goal usage limited');
       await expect(messageList).toContainText('Token budget reached');
       await captureScreenshot(page, `goal-usage-limited-${theme}`);
+    });
+
+    test(`blocked goal status`, async ({ page }, testInfo) => {
+      const blockedGoalEvent = createTerminalGoalStatusEvent(
+        'blocked',
+        'Wait for deployment approval',
+        'User authority is required',
+      );
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Wait for deployment approval.', { id: 1 }),
+          blockedGoalEvent,
+          turnCompleteEvent('prompt-goal-blocked', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal blocked');
+      await expect(messageList).toContainText('User authority is required');
+      await expect(messageList).not.toContainText('Goal aborted');
+      await captureScreenshot(page, `goal-blocked-${theme}`);
     });
 
     // Assertions only, no captures. This scenario injects a fake turn_error so

@@ -483,6 +483,7 @@ function applyDaemonTranscriptEvent(
       break;
     case 'session.metadata.changed':
     case 'session.artifact.changed':
+    case 'session.source.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
@@ -1159,6 +1160,12 @@ function upsertToolBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1376,6 +1383,12 @@ function appendShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1422,6 +1435,12 @@ function appendUserShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1469,6 +1488,12 @@ function upsertPermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1525,6 +1550,12 @@ function resolvePermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1593,6 +1624,12 @@ function appendUnrecognizedDiagnostic(
       ? { originatorClientId: event.originatorClientId }
       : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1620,6 +1657,12 @@ function appendStatusBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event?.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1668,14 +1711,46 @@ function appendPromptCancelledBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'prompt.cancelled' }>,
 ): void {
+  const existing = event.promptId
+    ? state.blocks.find(
+        (block) =>
+          block.kind === 'prompt_cancelled' &&
+          block.promptId === event.promptId,
+      )
+    : undefined;
+  if (existing) {
+    if (event.elapsedMs === undefined) return;
+    const block = getWritableBlockById(state, existing.id);
+    if (block?.kind !== 'prompt_cancelled') return;
+    const bytesBefore = estimateBlockBytes(block);
+    block.elapsedMs = event.elapsedMs;
+    if (event.serverTimestamp !== undefined) {
+      block.serverTimestamp = event.serverTimestamp;
+    }
+    if (event.sourceRecordIds) block.sourceRecordIds = event.sourceRecordIds;
+    block.updatedAt = state.now;
+    state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+    return;
+  }
   const block: DaemonPromptCancelledTranscriptBlock = {
     id: allocateBlockId(state, 'prompt_cancelled'),
     kind: 'prompt_cancelled',
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
+    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(event.elapsedMs !== undefined ? { elapsedMs: event.elapsedMs } : {}),
+    ...(event.sourceRecordIds
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
     ...(event.reason ? { reason: event.reason } : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -2025,7 +2100,13 @@ function rewindTranscriptToUserTurn(
   let lastUserIndex = -1;
 
   for (let index = 0; index < state.blocks.length; index += 1) {
-    if (state.blocks[index]?.kind !== 'user') continue;
+    const block = state.blocks[index];
+    if (
+      block?.kind !== 'user' ||
+      block.meta?.['source'] === 'background_notification'
+    ) {
+      continue;
+    }
     lastUserIndex = index;
     if (userTurnIndex === targetTurnIndex) {
       truncateTranscriptBeforeBlock(state, index);

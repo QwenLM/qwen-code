@@ -42,6 +42,7 @@ import {
 import {
   buildInstallPlan,
   parseInsightMessage,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { isLogLevel, logger } from '../../utils/logger.js';
 import {
@@ -1486,8 +1487,26 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const plan = buildInstallPlan(providerConfig, inputs);
+      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+        | ModelProvidersConfig
+        | undefined;
+      const plan = buildInstallPlan(
+        providerConfig,
+        inputs,
+        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+      );
       await applyProviderInstallPlanToFile(plan);
+
+      if (!plan.modelSelection && !this.authState) {
+        this.sendMessageToWebView({
+          type: 'authState',
+          data: { authenticated: false },
+        });
+        void vscode.window.showInformationMessage(
+          'Service models saved. Configure a conversation model to start chatting.',
+        );
+        return;
+      }
 
       // Disconnect + reconnect
       if (this.agentInitialized) {
@@ -1953,7 +1972,10 @@ export class WebViewProvider {
     if (message.type === 'webShellSessionChanged') {
       this.webShellPermissionOwners.delete(webview);
       const data = message.data as
-        | { sessionId?: unknown; workspaceCwd?: unknown }
+        | {
+            sessionId?: unknown;
+            workspaceCwd?: unknown;
+          }
         | undefined;
       const sessionId = getRestorableDaemonSessionId(data?.sessionId) ?? null;
       this.messageHandler.setCurrentConversationId(sessionId);
@@ -2454,6 +2476,26 @@ export class WebViewProvider {
     return (
       this.webShellPermissionOwners.size > 0 || !!this.pendingPermissionResolve
     );
+  }
+
+  /**
+   * Tell the web shell that a diff it asked the host to open was closed
+   * without a vote, so it can take the edit preview back (#10557).
+   */
+  notifyPermissionDiffClosed(permissionRequestId: string): void {
+    if (!this.getActiveWebview()) {
+      // A dismissal with no attached webview is the drop point a field report
+      // ("closed the tab, row stayed locked") cannot otherwise be triaged
+      // from; the open direction logs at this level, so mirror it here (#10557).
+      logger.log(
+        '[Extension] Permission diff closed, no active webview to notify',
+      );
+      return;
+    }
+    this.sendMessageToWebView({
+      type: 'permissionDiffClosed',
+      data: { requestId: permissionRequestId },
+    });
   }
 
   /** Get current ACP mode id (if known). */

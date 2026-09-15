@@ -22,7 +22,12 @@ interface DiscoverProviderModelsOptions {
   signal?: AbortSignal;
 }
 
-function readModelIds(value: unknown): string[] | null {
+interface DiscoveredModel {
+  id: string;
+  created?: number;
+}
+
+function readModels(value: unknown): DiscoveredModel[] | null {
   if (!value || typeof value !== 'object' || !('data' in value)) {
     return null;
   }
@@ -31,7 +36,7 @@ function readModelIds(value: unknown): string[] | null {
     return null;
   }
 
-  const ids: string[] = [];
+  const models: DiscoveredModel[] = [];
   const seen = new Set<string>();
   for (const item of data) {
     if (!item || typeof item !== 'object' || !('id' in item)) {
@@ -49,25 +54,34 @@ function readModelIds(value: unknown): string[] | null {
       !seen.has(trimmedId)
     ) {
       seen.add(trimmedId);
-      ids.push(trimmedId);
+      const created = (item as { created?: unknown }).created;
+      const creationTime =
+        typeof created === 'number' && Number.isFinite(created) && created >= 0
+          ? created
+          : undefined;
+      models.push({
+        id: trimmedId,
+        ...(creationTime === undefined ? {} : { created: creationTime }),
+      });
     }
   }
-  return ids.length > 0 ? ids : null;
+  return models.length > 0 ? models : null;
 }
 
 function mergeModelSpecs(
-  ids: string[],
+  discoveredModels: DiscoveredModel[],
   staticModels: readonly ModelSpec[],
 ): ModelSpec[] {
-  const discoveredIds = new Set(ids);
-  const knownModels = staticModels.filter((model) =>
-    discoveredIds.has(model.id),
+  const staticModelsById = new Map(
+    staticModels.map((model) => [model.id, model]),
   );
-  const knownIds = new Set(knownModels.map((model) => model.id));
-  return [
-    ...knownModels,
-    ...ids.filter((id) => !knownIds.has(id)).map((id) => ({ id })),
-  ];
+  const orderedModels = [...discoveredModels];
+  if (orderedModels.every((model) => model.created !== undefined)) {
+    orderedModels.sort(
+      (left, right) => (right.created ?? 0) - (left.created ?? 0),
+    );
+  }
+  return orderedModels.map(({ id }) => staticModelsById.get(id) ?? { id });
 }
 
 export async function discoverProviderModels({
@@ -102,8 +116,8 @@ export async function discoverProviderModels({
       return null;
     }
 
-    const ids = readModelIds(JSON.parse(result.body.toString('utf8')));
-    return ids ? mergeModelSpecs(ids, staticModels) : null;
+    const models = readModels(JSON.parse(result.body.toString('utf8')));
+    return models ? mergeModelSpecs(models, staticModels) : null;
   } catch {
     return null;
   }

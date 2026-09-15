@@ -26,6 +26,7 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonBrand,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
   DaemonArchiveSessionsResult,
@@ -37,6 +38,7 @@ import type {
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
@@ -200,6 +202,10 @@ import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
   ForkSessionRequest,
@@ -229,6 +235,8 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonVoiceAudioInput,
@@ -406,6 +414,7 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const CAPABILITY_PREFLIGHT_TTL_MS = 60_000;
 // Provider mutations persist before their bounded runtime sync. A default
 // client deadline could report failure while the daemon still completes it.
 const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
@@ -487,6 +496,20 @@ function stripTrailingSlashes(url: string): string {
   let end = url.length;
   while (end > 0 && url.charCodeAt(end - 1) === 0x2f /* '/' */) end--;
   return end === url.length ? url : url.slice(0, end);
+}
+
+function createStandaloneSessionId(): string {
+  if (typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  // HTTP origins can expose getRandomValues without the secure-context-only randomUUID.
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
@@ -783,6 +806,10 @@ export class DaemonClient {
   private readonly fetchTimeoutMs: number;
   private readonly hasExplicitFetchTimeout: boolean;
   private cachedSessionRestoreTimeoutMs: number | undefined;
+  private capabilityFeatures?: { features: Set<string>; expiresAt: number };
+  private capabilitiesRequest?: Promise<DaemonCapabilities>;
+  private capabilitiesGeneration = 0;
+  private restoreBudgetGeneration = 0;
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
@@ -1189,7 +1216,9 @@ export class DaemonClient {
   }
 
   async capabilities(): Promise<DaemonCapabilities> {
-    const capabilities = await this.fetchWithTimeout(
+    const generation = ++this.capabilitiesGeneration;
+    this.capabilityFeatures = undefined;
+    const request = this.fetchWithTimeout(
       `${this.baseUrl}/capabilities`,
       { headers: this.headers() },
       async (res) => {
@@ -1197,15 +1226,57 @@ export class DaemonClient {
         return (await res.json()) as DaemonCapabilities;
       },
     );
-    const restoreTimeoutMs = capabilities.limits?.sessionRestoreTimeoutMs;
-    this.cachedSessionRestoreTimeoutMs =
-      typeof restoreTimeoutMs === 'number' &&
-      Number.isInteger(restoreTimeoutMs) &&
-      restoreTimeoutMs > 0 &&
-      restoreTimeoutMs <= MAX_TIMER_DELAY_MS
-        ? restoreTimeoutMs
-        : undefined;
-    return capabilities;
+    this.capabilitiesRequest = request;
+    try {
+      const capabilities = await request;
+      if (generation === this.capabilitiesGeneration) {
+        this.capabilityFeatures = {
+          features: new Set(
+            Array.isArray(capabilities.features) ? capabilities.features : [],
+          ),
+          expiresAt: Date.now() + CAPABILITY_PREFLIGHT_TTL_MS,
+        };
+      }
+      if (generation > this.restoreBudgetGeneration) {
+        this.restoreBudgetGeneration = generation;
+        const restoreTimeoutMs = capabilities.limits?.sessionRestoreTimeoutMs;
+        this.cachedSessionRestoreTimeoutMs =
+          typeof restoreTimeoutMs === 'number' &&
+          Number.isInteger(restoreTimeoutMs) &&
+          restoreTimeoutMs > 0 &&
+          restoreTimeoutMs <= MAX_TIMER_DELAY_MS
+            ? restoreTimeoutMs
+            : undefined;
+      }
+      return capabilities;
+    } finally {
+      if (generation === this.capabilitiesGeneration) {
+        this.capabilitiesRequest = undefined;
+      }
+    }
+  }
+
+  /**
+   * The Web Shell's product name and logo, resolved by the daemon from the
+   * operator settings scopes (system defaults, user, system). Workspace
+   * settings never contribute. An empty object means the client should use its
+   * built-in brand.
+   *
+   * Separate from `capabilities()` because that envelope's contract is that
+   * clients probe by connecting rather than reading ambient settings into it.
+   * A daemon that supports it advertises the `web_shell_brand` feature tag, so
+   * callers can preflight instead of relying on the 404 an older daemon returns;
+   * either way, treat branding as optional and fall back rather than fail.
+   */
+  async brand(): Promise<DaemonBrand> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/brand`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /brand');
+        return (await res.json()) as DaemonBrand;
+      },
+    );
   }
 
   /**
@@ -1232,8 +1303,30 @@ export class DaemonClient {
   }
 
   async requireCapability(capability: string): Promise<void> {
-    const caps = await this.capabilities();
-    if (!Array.isArray(caps.features) || !caps.features.includes(capability)) {
+    let supported: boolean;
+    if (capability === 'session_source_metadata') {
+      while (
+        this.capabilitiesRequest ||
+        !this.capabilityFeatures ||
+        this.capabilityFeatures.expiresAt <= Date.now()
+      ) {
+        const request = this.capabilitiesRequest ?? this.capabilities();
+        const generation = this.capabilitiesGeneration;
+        try {
+          await request;
+        } catch (error) {
+          if (generation === this.capabilitiesGeneration) throw error;
+        }
+      }
+      supported = this.capabilityFeatures.features.has(capability);
+    } else {
+      // Scope-sensitive writes rely on a fresh check to reject older daemons
+      // that silently ignore unsupported options (for example memory scope).
+      const caps = await this.capabilities();
+      supported =
+        Array.isArray(caps.features) && caps.features.includes(capability);
+    }
+    if (!supported) {
       throw new DaemonCapabilityMissingError(
         capability,
         `daemon does not advertise the ${capability} feature`,
@@ -2758,7 +2851,7 @@ export class DaemonClient {
     await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
     const { sessionId: requestedSessionId, ...request } = options;
     const sessionId = (
-      requestedSessionId ?? globalThis.crypto.randomUUID()
+      requestedSessionId ?? createStandaloneSessionId()
     ).toLowerCase();
     try {
       const response = await this.jsonRequest<unknown>(
@@ -3312,6 +3405,24 @@ export class DaemonClient {
       `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/cancel`,
       'POST /session/:id/subagents/:subagentRef/cancel',
       { clientId, mode: 'rest', method: 'POST' },
+    );
+  }
+
+  /** Admit an interrupted turn without adding a user message. */
+  async continueSession(
+    sessionId: string,
+    opts: { clientId?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonContinueSessionResult> {
+    opts.signal?.throwIfAborted();
+    return await this.jsonRequest<DaemonContinueSessionResult>(
+      `/session/${urlEncode(sessionId)}/continue`,
+      'POST /session/:id/continue',
+      {
+        method: 'POST',
+        clientId: opts.clientId,
+        signal: opts.signal,
+        mode: 'rest',
+      },
     );
   }
 
@@ -4054,6 +4165,30 @@ export class DaemonClient {
     );
   }
 
+  async readSessionArtifactContent(
+    sessionId: string,
+    artifactId: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<string> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}/content`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/artifacts/:artifactId/content',
+          );
+        }
+        return await res.text();
+      },
+    );
+  }
+
   async readSessionAttachment(
     sessionId: string,
     attachmentId: string,
@@ -4526,6 +4661,32 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSettingUpdateResult;
       },
+    );
+  }
+
+  async modelConfigurations(): Promise<{ models: DaemonModelConfiguration[] }> {
+    return this.jsonRequest('/workspace/models', 'GET /workspace/models');
+  }
+
+  async updateModelContextWindow(
+    key: string,
+    contextWindowSize: number | null,
+  ): Promise<DaemonModelConfigurationUpdateResult> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/models`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ key, contextWindowSize }),
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'PATCH /workspace/models');
+        return (await res.json()) as DaemonModelConfigurationUpdateResult;
+      },
+      this.hasExplicitFetchTimeout
+        ? undefined
+        : DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 
@@ -6118,7 +6279,45 @@ export class DaemonClient {
    * on the underlying transport throw `DaemonTransportClosedError`.
    */
   dispose(): void {
+    this.restoreBudgetGeneration = ++this.capabilitiesGeneration;
+    this.capabilitiesRequest = undefined;
+    this.capabilityFeatures = undefined;
     this.transport.dispose();
+  }
+
+  listSessionSources(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<SessionSourcesResult> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/sources`,
+      'GET /session/:id/sources',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  upsertSessionSource(
+    sessionId: string,
+    source: SessionSourceInput,
+    clientId?: string,
+  ): Promise<SessionSourceUpsertResult> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/sources`,
+      'POST /session/:id/sources',
+      { method: 'POST', body: source, clientId, mode: 'rest' },
+    );
+  }
+
+  removeSessionSource(
+    sessionId: string,
+    sourceId: string,
+    clientId?: string,
+  ): Promise<SessionSourceRemoveResult> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/sources/${urlEncode(sourceId)}`,
+      'DELETE /session/:id/sources/:sourceId',
+      { method: 'DELETE', clientId, mode: 'rest' },
+    );
   }
 
   // -- Session artifacts ---------------------------------------------------

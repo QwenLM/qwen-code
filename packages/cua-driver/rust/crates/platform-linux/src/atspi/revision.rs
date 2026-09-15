@@ -18,6 +18,7 @@ struct RevisionKey {
     xid: u64,
     max_elements: usize,
     max_depth: usize,
+    bounded: bool,
     serializer_version: String,
     projection_version: String,
 }
@@ -98,15 +99,21 @@ impl LinuxObservationRevisions {
             xid,
             max_elements,
             max_depth,
+            bounded: tree.truncated,
             serializer_version: request.serializer_version.clone(),
             projection_version: request.projection_version.clone(),
         };
+        let mut store = self.store.lock().unwrap();
+        store.remove(&RevisionKey {
+            bounded: !key.bounded,
+            ..key.clone()
+        });
         if tree.backend == AtspiBackend::X11 {
-            self.store.lock().unwrap().remove(&key);
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::UnsupportedBackend);
         }
-        if !tree.complete {
-            self.store.lock().unwrap().remove(&key);
+        if !tree.read_complete() {
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::CaptureIncomplete);
         }
         let identities = tree
@@ -115,11 +122,11 @@ impl LinuxObservationRevisions {
             .map(|node| node.identity.clone())
             .collect::<Option<Vec<_>>>();
         let Some(identities) = identities else {
-            self.store.lock().unwrap().remove(&key);
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
         };
         if identities.iter().collect::<HashSet<_>>().len() != identities.len() {
-            self.store.lock().unwrap().remove(&key);
+            store.remove(&key);
             return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
         }
         let owners = identities
@@ -127,7 +134,6 @@ impl LinuxObservationRevisions {
             .map(|identity| identity.unique_owner.clone())
             .collect::<HashSet<_>>();
 
-        let mut store = self.store.lock().unwrap();
         if store
             .lineages
             .get(&key)
@@ -156,10 +162,20 @@ impl LinuxObservationRevisions {
         let forced_reason =
             cua_driver_core::observation_revision::requested_format_resync_reason(request)
                 .or_else(|| request.force_full.then_some(FullResyncReason::Requested));
-        let result = lineage
-            .revision
-            .observe_with_reason(captured, request.base_revision_id.as_deref(), forced_reason)
-            .map_err(|error: ObservationRevisionError| error.to_string())?;
+        let result = if tree.truncated {
+            lineage.revision.observe_bounded(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        } else {
+            lineage.revision.observe_with_reason(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        }
+        .map_err(|error: ObservationRevisionError| error.to_string())?;
         lineage.owners = owners;
         Ok(result)
     }
@@ -255,6 +271,7 @@ mod tests {
             checked: None,
             enabled: Some(true),
             selected: None,
+            focused: None,
             description: None,
             actions: vec!["click".into()],
             element_key: 0,
@@ -284,8 +301,85 @@ mod tests {
     }
 
     #[test]
+    fn budget_captures_retain_lineage_but_failures_and_coverage_changes_invalidate_it() {
+        for reason in [
+            "max_elements_reached",
+            "max_depth_reached",
+            "managed_descendants_omitted",
+            "hidden_menu_subtrees_omitted",
+        ] {
+            let revisions = LinuxObservationRevisions::new();
+            let mut bounded = tree(vec![node("/button", "Before")]);
+            bounded.complete = false;
+            bounded.truncated = true;
+            bounded.incomplete_notes = vec![reason.into()];
+            let observe = |tree: &AtspiTreeResult, base| {
+                revisions
+                    .observe(session(), 10, 20, 1, 3, tree, &request(base))
+                    .unwrap()
+            };
+            let first = observe(&bounded, None);
+            assert!(bounded.read_complete());
+            assert!(first.stable_element_ids);
+            let unchanged = observe(&bounded, Some(first.revision_id.clone()));
+            assert_eq!(unchanged.mode, ObservationMode::NoChange);
+            assert_eq!(unchanged.lineage_id, first.lineage_id);
+            bounded.nodes[0].name = Some("After".into());
+            let changed = observe(&bounded, Some(unchanged.revision_id));
+            assert_eq!(changed.mode, ObservationMode::Full);
+            assert!(changed.stable_element_ids);
+            assert_eq!(changed.lineage_id, first.lineage_id);
+            assert_eq!(changed.nodes[0].element_id, first.nodes[0].element_id);
+            for failure in [
+                "provider_unresponsive",
+                "walk_deadline_reached",
+                "read_failed",
+            ] {
+                bounded.incomplete_notes.push(failure.into());
+                assert!(!bounded.read_complete());
+                let failed = observe(&bounded, Some(changed.revision_id.clone()));
+                assert!(!failed.stable_element_ids);
+                assert_eq!(
+                    failed.full_resync_reason,
+                    Some(FullResyncReason::CaptureIncomplete)
+                );
+                bounded.incomplete_notes.pop();
+            }
+            bounded.window_scoped = false;
+            assert!(!bounded.read_complete());
+            assert!(!observe(&bounded, None).stable_element_ids);
+            bounded.window_scoped = true;
+            let recovered = observe(&bounded, Some(changed.revision_id));
+            assert_ne!(recovered.lineage_id, first.lineage_id);
+            let full = observe(
+                &tree(vec![node("/button", "After")]),
+                Some(recovered.revision_id),
+            );
+            assert_eq!(full.mode, ObservationMode::Full);
+            assert_ne!(full.lineage_id, recovered.lineage_id);
+            let bounded_again = observe(&bounded, Some(full.revision_id));
+            assert_eq!(bounded_again.mode, ObservationMode::Full);
+            assert_ne!(bounded_again.lineage_id, recovered.lineage_id);
+        }
+    }
+
+    #[test]
     fn stable_owner_and_path_retain_no_change_and_diff_lineage() {
         let revisions = LinuxObservationRevisions::new();
+        let capture = |name| {
+            tree(
+                (0..8)
+                    .map(|index| {
+                        let mut captured = node(
+                            &format!("/button/{index}"),
+                            if index == 0 { name } else { "Unchanged" },
+                        );
+                        captured.element_index = Some(index);
+                        captured
+                    })
+                    .collect(),
+            )
+        };
         let initial = revisions
             .observe(
                 session(),
@@ -293,7 +387,7 @@ mod tests {
                 20,
                 5000,
                 usize::MAX,
-                &tree(vec![node("/button", "Before")]),
+                &capture("Before"),
                 &request(None),
             )
             .unwrap();
@@ -307,7 +401,7 @@ mod tests {
                 20,
                 5000,
                 usize::MAX,
-                &tree(vec![node("/button", "Before")]),
+                &capture("Before"),
                 &request(Some(initial.revision_id.clone())),
             )
             .unwrap();
@@ -320,13 +414,146 @@ mod tests {
                 20,
                 5000,
                 usize::MAX,
-                &tree(vec![node("/button", "After")]),
+                &capture("After"),
                 &request(Some(unchanged.revision_id)),
             )
             .unwrap();
         assert_eq!(changed.mode, ObservationMode::Diff);
         assert_eq!(changed.lineage_id, initial.lineage_id);
         assert_eq!(changed.nodes[0].element_id, initial.nodes[0].element_id);
+    }
+
+    #[test]
+    fn named_editable_changes_and_clearing_remain_visible() {
+        let revisions = LinuxObservationRevisions::new();
+        let mut captured = tree(
+            (0..8)
+                .map(|index| {
+                    let mut item = node(&format!("/field/{index}"), "Name");
+                    item.element_index = Some(index);
+                    item.role = "entry".into();
+                    item.value = Some(String::new());
+                    item
+                })
+                .collect(),
+        );
+        let mut base = None;
+        let mut element_id = None;
+        for (value, mode) in [
+            ("", ObservationMode::Full),
+            ("prefix|X", ObservationMode::Diff),
+            ("prefix|X", ObservationMode::NoChange),
+            ("", ObservationMode::Diff),
+        ] {
+            captured.nodes[0].value = Some(value.into());
+            let observation = revisions
+                .observe(
+                    session(),
+                    10,
+                    20,
+                    5000,
+                    usize::MAX,
+                    &captured,
+                    &request(base),
+                )
+                .unwrap();
+            assert_eq!(observation.mode, mode);
+            assert!(observation.nodes[0]
+                .body
+                .contains(&format!("value={value:?}")));
+            if let Some(id) = &element_id {
+                assert_eq!(&observation.nodes[0].element_id, id);
+            }
+            element_id = Some(observation.nodes[0].element_id.clone());
+            base = Some(observation.revision_id);
+        }
+    }
+
+    #[test]
+    fn compact_rows_preserve_text_state_and_secondary_actions() {
+        let mut control = node("/entry", "Line 1\n\"Line 2\"");
+        control.role = "entry".into();
+        control.value = control.name.clone();
+        control.enabled = Some(false);
+        control.selected = Some(true);
+        control.actions = vec!["activate".into(), "showContextMenu".into()];
+        let body = format_revision_body(&control);
+        assert_eq!(
+            body,
+            "<entry> \"Line 1\\n\\\"Line 2\\\"\" disabled selected actions=[\"showContextMenu\"]"
+        );
+        let disabled = body.clone();
+        control.enabled = Some(true);
+        assert_ne!(format_revision_body(&control), disabled);
+        let selected = format_revision_body(&control);
+        control.selected = Some(false);
+        assert_ne!(format_revision_body(&control), selected);
+        let secondary = format_revision_body(&control);
+        control.actions.pop();
+        assert_ne!(format_revision_body(&control), secondary);
+        assert_eq!(control.actions, ["activate"]);
+    }
+
+    #[test]
+    fn compact_static_text_changes_are_visible_without_remapping_controls() {
+        let revisions = LinuxObservationRevisions::new();
+        let capture = |message: &str| {
+            let mut root = node("/window", "Dialog");
+            root.role = "dialog".into();
+            root.element_index = None;
+            root.actions.clear();
+            let mut text = node("/message", message);
+            text.role = "label".into();
+            text.element_index = None;
+            text.actions.clear();
+            text.depth = 1;
+            let mut button = node("/ok", "OK");
+            button.element_index = Some(17);
+            button.depth = 1;
+            tree(super::super::projection::compact(vec![root, text, button]))
+        };
+        let first = revisions
+            .observe(session(), 10, 20, 50, 5, &capture("Saved"), &request(None))
+            .unwrap();
+        let unchanged = revisions
+            .observe(
+                session(),
+                10,
+                20,
+                50,
+                5,
+                &capture("Saved"),
+                &request(Some(first.revision_id.clone())),
+            )
+            .unwrap();
+        assert_eq!(unchanged.mode, ObservationMode::NoChange);
+        let changed = revisions
+            .observe(
+                session(),
+                10,
+                20,
+                50,
+                5,
+                &capture("Failed to save"),
+                &request(Some(unchanged.revision_id)),
+            )
+            .unwrap();
+        assert!(changed.text.contains("Failed to save"));
+        let control =
+            |result: &cua_driver_core::observation_revision::ObservationRevisionResult| {
+                result
+                    .nodes
+                    .iter()
+                    .find(|node| node.actionable_index == Some(17))
+                    .unwrap()
+                    .element_id
+            };
+        assert_eq!(control(&first), control(&changed));
+        assert!(changed
+            .nodes
+            .iter()
+            .filter(|node| node.actionable_index.is_some())
+            .all(|node| node.actionable_index == Some(17)));
     }
 
     #[test]

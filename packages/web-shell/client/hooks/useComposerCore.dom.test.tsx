@@ -35,6 +35,10 @@ function Harness({
   composerScopeKey,
   disableLegacyHistoryFallback,
   commands,
+  allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
@@ -56,6 +60,10 @@ function Harness({
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
@@ -64,6 +72,10 @@ function Harness({
   const composer = useComposerCore({
     onSubmit,
     commands: commands ?? [],
+    allowEmptySlashMenu,
+    cycleModeOnTab,
+    onCycleMode,
+    onFocusFooter,
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
@@ -103,6 +115,10 @@ async function mount({
   composerScopeKey,
   disableLegacyHistoryFallback,
   commands,
+  allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
@@ -124,6 +140,10 @@ async function mount({
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
   commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
@@ -135,6 +155,8 @@ async function mount({
 
   let currentPortalRoot: HTMLElement | null = null;
   let currentSessionId = sessionId;
+  let currentCommands = commands;
+  let currentAllowEmptySlashMenu = allowEmptySlashMenu;
   let currentWorkspaceCwd = atWorkspaceCwd;
   let currentAttachmentsEnabled = attachmentsEnabled;
   const render = () => {
@@ -153,7 +175,11 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={composerScopeKey}
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
-            commands={commands}
+            commands={currentCommands}
+            allowEmptySlashMenu={currentAllowEmptySlashMenu}
+            cycleModeOnTab={cycleModeOnTab}
+            onCycleMode={onCycleMode}
+            onFocusFooter={onFocusFooter}
             onImageIngestionNotice={onImageIngestionNotice}
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
@@ -169,6 +195,14 @@ async function mount({
   });
   return {
     onSubmit,
+    setCommands(next: UseComposerCoreOptions['commands']) {
+      currentCommands = next;
+      act(() => render());
+    },
+    setAllowEmptySlashMenu(next: boolean) {
+      currentAllowEmptySlashMenu = next;
+      act(() => render());
+    },
     setPortalRoot(portalRoot: HTMLElement | null) {
       currentPortalRoot = portalRoot;
       act(() => render());
@@ -289,6 +323,136 @@ describe('useComposerCore history and drafts', () => {
     act(() => view.dispatch({ selection: { anchor: 3 } }));
     mounted.rerender();
     expect(view.state.selection.main.head).toBe(3);
+  });
+
+  it('keeps a pasted unknown slash query open until its catalog arrives', async () => {
+    const commands: UseComposerCoreOptions['commands'] = [];
+    const mounted = await mount({ commands, allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu).toMatchObject({ query: 'review', items: [] });
+    mounted.setCommands([
+      { name: 'review', description: 'Review', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu?.items[0]?.label).toBe('/review');
+    act(() => latest!.closeSlashMenu());
+    mounted.setCommands([
+      { name: 'review-all', description: 'Review all', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it.each(['/skills ', '/skills rev'])(
+    'opens an unloaded skill catalog for pasted %s',
+    async (text) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText(text));
+      expect(latest!.slashMenu).toMatchObject({
+        kind: 'subcommand',
+        items: [],
+      });
+    },
+  );
+
+  it.each([
+    ['Escape', false],
+    ['Tab', true],
+  ] as const)(
+    'empty menu retains prior %s default behavior',
+    async (key, prevented) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(prevented);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'empty menu owns %s instead of recalling history',
+    async (key) => {
+      const workspaceCwd = '/workspace/empty-menu-arrows';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(workspaceCwd),
+        JSON.stringify(['previous prompt']),
+      );
+      // ArrowDown's no-menu fall-through is the footer focus handoff.
+      const onFocusFooter = vi.fn(() => true);
+      await mount({
+        allowEmptySlashMenu: true,
+        atWorkspaceCwd: workspaceCwd,
+        onFocusFooter,
+      });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+      expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it('empty menu owns Tab on a cycle-mode host', async () => {
+    const onCycleMode = vi.fn();
+    await mount({
+      allowEmptySlashMenu: true,
+      cycleModeOnTab: true,
+      onCycleMode,
+    });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(onCycleMode).not.toHaveBeenCalled();
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+  });
+
+  it('closes an unmatched menu when catalog loading completes without new commands', async () => {
+    const mounted = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    mounted.setAllowEmptySlashMenu(false);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('submits a typed command even when its lazy catalog has no matches', async () => {
+    const { onSubmit } = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    await act(async () => {
+      container!.querySelector('.cm-content')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      '/review',
+      undefined,
+      undefined,
+      expect.any(Function),
+      undefined,
+    );
   });
 
   it('does not serialize the whole document again for a slash menu refresh', async () => {

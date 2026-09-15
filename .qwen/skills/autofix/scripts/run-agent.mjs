@@ -67,7 +67,17 @@ const specs = {
     anyOutput: true,
     exclusiveOutput: true,
     invocation: (o) =>
-      `/autofix address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
+      [
+        `/autofix address-review --pr ${o.pr} --issue ${o.issue} --workdir ${o.workdir} --conflict ${o.conflict} --base ${o.base}`,
+        // In-round self-review arm (af-156). The workflow decides the arm
+        // per PR; the skill reads these three lines — and nothing else — to
+        // know whether it may run the delta review before the commit, with
+        // which CLI entry (the host's `qwen` wrapper is not on PATH inside
+        // the sandbox), and until when.
+        `Self-review: ${o.selfReview}`,
+        `Self-review CLI: ${o.selfReviewCli || 'qwen'}`,
+        `Round deadline (UTC): ${o.deadline || 'unknown'}`,
+      ].join('\n'),
   },
 };
 
@@ -516,6 +526,9 @@ const { values } = parseArgs({
     pr: { type: 'string' },
     'print-prompt': { type: 'boolean', default: false },
     'qwen-bin': { type: 'string', default: 'qwen' },
+    'self-review': { type: 'string', default: 'off' },
+    'self-review-cli': { type: 'string', default: '' },
+    deadline: { type: 'string', default: '' },
     workdir: { type: 'string', default: '/tmp/autofix' },
   },
 });
@@ -523,11 +536,26 @@ const options = {
   ...values,
   printPrompt: values['print-prompt'],
   qwenBin: values['qwen-bin'],
+  selfReview: values['self-review'],
+  selfReviewCli: values['self-review-cli'],
 };
 const spec = specs[options.mode];
 if (!spec) fail(`--mode must be one of: ${Object.keys(specs).join(', ')}`);
 if (!['true', 'false'].includes(options.conflict)) {
   fail('--conflict must be true or false');
+}
+if (!['on', 'off'].includes(options.selfReview)) {
+  fail('--self-review must be on or off');
+}
+// Both values land verbatim in the prompt: keep them to a path/command and
+// an ISO instant so nothing can smuggle prose into the skill. The path
+// class covers every character a runner workspace path uses — a refusal
+// here fails the whole round, so it must never fire on a real path.
+if (!/^[A-Za-z0-9_./@:+=~%, -]*$/.test(options.selfReviewCli)) {
+  fail('--self-review-cli must be a plain command path');
+}
+if (!/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)?$/.test(options.deadline)) {
+  fail('--deadline must be an ISO-8601 UTC instant (YYYY-MM-DDTHH:MM:SSZ)');
 }
 for (const key of spec.required ?? []) {
   if (!options[key]) fail(`--${key} is required for ${options.mode}`);

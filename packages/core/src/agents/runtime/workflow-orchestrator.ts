@@ -34,7 +34,11 @@ import {
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
 import { resolveStallMs, runStallResilient } from './workflow-stall.js';
-import { deriveAgentKey, deriveArgsSeed } from './workflow-journal.js';
+import {
+  DISPATCH_AFFECTING_AGENT_OPTS,
+  deriveAgentKey,
+  deriveArgsSeed,
+} from './workflow-journal.js';
 import type { WorkflowJournal, JournalReplay } from './workflow-journal.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -51,7 +55,12 @@ import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
 } from './agent-events.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
+import {
+  normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
+} from '../../core/reasoning-effort.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -240,10 +249,11 @@ function resolveSubagentBound(
 /** Per-attempt turn ceiling for a workflow subagent. */
 export function resolveSubagentMaxTurns(
   env: Record<string, string | undefined> = process.env,
+  defaultValue = DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
 ): number {
   return resolveSubagentBound(
     WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
-    DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+    defaultValue,
     HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING,
     env,
   );
@@ -252,10 +262,11 @@ export function resolveSubagentMaxTurns(
 /** Per-attempt wall-clock ceiling, in minutes, for a workflow subagent. */
 export function resolveSubagentMaxTimeMinutes(
   env: Record<string, string | undefined> = process.env,
+  defaultValue = DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 ): number {
   return resolveSubagentBound(
     WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
-    DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+    defaultValue,
     HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING,
     env,
   );
@@ -269,8 +280,11 @@ export function resolveSubagentMaxTimeMinutes(
  * and MonitorTool depends on AgentTool-owned notification callbacks that
  * workflow subagents do not register. Defense-in-depth alongside the workflow
  * system prompt's return-value contract.
+ *
+ * A per-call `agent({ disallowedTools })` is unioned on top of this floor and
+ * can only narrow the set further; nothing a script passes removes an entry.
  */
-const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
+export const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.ASK_USER_QUESTION,
   ToolNames.SEND_MESSAGE,
   ToolNames.MONITOR,
@@ -319,6 +333,7 @@ export type { WorkflowAgentResult, WorkflowMeta, WorkflowOrchestratorEmitter };
 export interface WorkflowRunRequest {
   script: string;
   args: unknown;
+  maxWallClockMs?: number;
   // FIX-D (Round 3 ARCH-I1): `signal` was previously declared here but never
   // read by `run()` — cancellation flows through `createProductionDispatch`'s
   // closure-captured signal, not via per-run state. Removed to prevent
@@ -458,6 +473,11 @@ function sanitizeForErrorMessage(value: string): string {
   return stripAnsiAndControl(value);
 }
 
+export interface WorkflowSubagentBounds {
+  max_turns: number;
+  max_time_minutes: number;
+}
+
 /**
  * Build the production agent-dispatch function.
  *
@@ -501,6 +521,7 @@ export function createProductionDispatch(
     emitter: AgentEventEmitter,
     dispatchId?: string,
   ) => () => void,
+  subagentBounds?: WorkflowSubagentBounds,
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -530,6 +551,13 @@ export function createProductionDispatch(
     // agentType definition rides along so the override path reuses it
     // instead of re-scanning subagent files per attempt.
     const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
+    if (agentIdentity.resolvedAgentType?.executor !== undefined) {
+      throw new Error(
+        'Workflow agent() does not support external-executor agents: ' +
+          'token budgets, schema output, and workflow tool restrictions ' +
+          'cannot be enforced. Use an in-process agent definition instead.',
+      );
+    }
     let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {
@@ -556,6 +584,7 @@ export function createProductionDispatch(
             workflowAgentId,
             agentIdentity,
             onTokens,
+            subagentBounds,
           );
         } finally {
           cleanupTranscript();
@@ -718,6 +747,7 @@ async function runSingleDispatch(
   /** The identity the runtime agent runs under — see resolveWorkflowAgentIdentity. */
   agentIdentity: WorkflowAgentIdentity,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
+  subagentBounds?: WorkflowSubagentBounds,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
@@ -727,14 +757,12 @@ async function runSingleDispatch(
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
   // override path or it would be silently dropped and the agent would run in
-  // the parent working tree.
-  if (
-    opts.agentType === undefined &&
-    opts.model === undefined &&
-    opts.isolation === undefined &&
-    opts.schema === undefined &&
-    opts.workingDir === undefined
-  ) {
+  // the parent working tree. The same holds for every option that changes
+  // what a dispatch does (`effort` needs the agent's own content-generator
+  // config, `disallowedTools` the override path's deny union), so the guard is
+  // driven by the one list the resume key also projects: an option added there
+  // cannot silently take this path.
+  if (DISPATCH_AFFECTING_AGENT_OPTS.every((key) => opts[key] === undefined)) {
     const subagent = await AgentHeadless.create(
       agentIdentity.name,
       config,
@@ -746,7 +774,7 @@ async function runSingleDispatch(
       // cannot loop the model indefinitely. Without this, runConfig was {}
       // and the loop guards never tripped — combined with the cancellation
       // bug below, workflows were effectively unkillable.
-      {
+      subagentBounds ?? {
         max_turns: resolveSubagentMaxTurns(),
         max_time_minutes: resolveSubagentMaxTimeMinutes(),
       },
@@ -802,6 +830,7 @@ async function runSingleDispatch(
     agentIdentity,
     onTokens,
     emitter,
+    subagentBounds,
   );
 }
 
@@ -833,7 +862,48 @@ function reportTokens(
 }
 
 /**
- * Override path for `agent({ agentType, model, isolation })`. Resolves the
+ * `opts.effort` as its canonical tier, or `undefined` when omitted. The sandbox
+ * already normalizes it; this re-check covers a host caller that dispatches
+ * without going through the sandbox.
+ */
+function resolveDispatchEffort(raw: unknown): ReasoningEffort | undefined {
+  if (raw === undefined) return undefined;
+  const tier =
+    typeof raw === 'string' ? normalizeReasoningEffort(raw) : undefined;
+  if (tier === undefined) {
+    throw new Error(
+      `agent({effort}): unknown effort tier ${sanitizeForErrorMessage(
+        JSON.stringify(raw) ?? String(raw),
+      )}. Known tiers are: ${REASONING_EFFORT_TIERS.join(', ')}.`,
+    );
+  }
+  return tier;
+}
+
+/**
+ * `opts.disallowedTools` as a list (`[]` when omitted), with built-in display
+ * names mapped to tool names as the sandbox maps them. Same host-side re-check
+ * as {@link resolveDispatchEffort}.
+ */
+function resolveDispatchDenies(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (name) =>
+        typeof name !== 'string' || name.length === 0 || name !== name.trim(),
+    )
+  ) {
+    throw new Error(
+      "agent({disallowedTools}): must be an array of non-empty tool-name strings without surrounding whitespace, e.g. ['run_shell_command', 'write_file'].",
+    );
+  }
+  return (raw as string[]).map((name) => resolveBuiltinToolName(name) ?? name);
+}
+
+/**
+ * Override path for `agent({ agentType, model, effort, isolation,
+ * disallowedTools })`. Resolves the
  * requested agentType against `SubagentManager`, applies the workflow
  * disallowed-tool floor, threads `opts.model` into `SubagentConfig.model`
  * so provider routing in `buildRuntimeContentGeneratorView` sees the
@@ -853,7 +923,13 @@ function reportTokens(
  * (not via `toolConfigOverride`): augmenting before `convertToRuntimeConfig`
  * lets the manager's `transformToToolNames` normalize all entries together
  * (display name → tool name + MCP pattern preservation). A toolConfigOverride
- * would bypass that normalization and require us to duplicate it here.
+ * would bypass that normalization and require us to duplicate it here. A
+ * per-call `disallowedTools` joins the same union for the same reason.
+ *
+ * Why `effort` goes into `modelConfigOverrides.reasoningEffort`: the manager
+ * builds this agent its own content generator from a copy of the session
+ * config and writes the tier onto that copy, limited to the tiers `/effort`
+ * offers for the agent's model, so the session's own tier is never touched.
  *
  * Why the worktree-rebound Config is passed as `runtimeContext` (not
  * `toolConfigOverride`): `SubagentManager` derives its subagent context from
@@ -887,6 +963,7 @@ async function runOverridePath(
    * so the watchdog and schema capture observe the one subagent's events.
    */
   emitter?: AgentEventEmitter,
+  subagentBounds?: WorkflowSubagentBounds,
 ): Promise<WorkflowAgentResult> {
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
@@ -896,6 +973,9 @@ async function runOverridePath(
       "agent({isolation:'remote'}) is not available in this build.",
     );
   }
+
+  const effort = resolveDispatchEffort(opts.effort);
+  const requestedDenies = resolveDispatchDenies(opts.disallowedTools);
 
   const subagentMgr = config.getSubagentManager();
   let baseConfig: SubagentConfig;
@@ -986,9 +1066,43 @@ async function runOverridePath(
       new Set([
         ...(baseConfig.disallowedTools ?? []),
         ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
+        ...requestedDenies,
       ]),
     ),
   };
+
+  // A deny that matches no tool denies nothing: the agent would keep the tool
+  // the script meant to take away while the script believes it narrowed it.
+  // Refuse such entries before anything is provisioned. MCP patterns, built-in
+  // tools not registered in this session and registered tools all pass.
+  if (requestedDenies.length > 0) {
+    const unmatched = await subagentMgr.findUnmatchedToolNames(requestedDenies);
+    if (unmatched.length > 0) {
+      throw new Error(
+        `agent({disallowedTools}): ${sanitizeForErrorMessage(
+          unmatched.map((name) => JSON.stringify(name)).join(', '),
+        )} ${unmatched.length === 1 ? 'matches' : 'match'} no tool. Use a tool name (run_shell_command, write_file, edit), a display name (Shell, WriteFile, Edit), or an MCP pattern (mcp__<server>, mcp__<server>__*, mcp__<server>__<tool>).`,
+      );
+    }
+  }
+
+  // A schema agent answers only through structured_output. Denying that tool,
+  // from this call or from the agent type's own definition, leaves it no way
+  // to deliver the one result the script accepts, and the run would spend the
+  // dispatch before failing as if the agent had ignored the contract. Refuse
+  // before anything is provisioned. Built-in names resolve statically, so the
+  // display name is caught whether or not the tool is registered here.
+  if (
+    opts.schema !== undefined &&
+    [...(baseConfig.disallowedTools ?? []), ...requestedDenies].some(
+      (name) =>
+        (resolveBuiltinToolName(name) ?? name) === ToolNames.STRUCTURED_OUTPUT,
+    )
+  ) {
+    throw new Error(
+      'agent({schema, disallowedTools}): schema mode needs the structured_output tool, but disallowedTools deny it (from this call or from the agent type).',
+    );
+  }
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
@@ -1136,10 +1250,13 @@ async function runOverridePath(
         // Workflow always bounds resource ceiling regardless of agentType's
         // own runConfig / maxTurns — these are workflow-level safety bounds,
         // not subagent-level preferences. P5 will refine via budget.
-        runConfigOverrides: {
+        runConfigOverrides: subagentBounds ?? {
           max_turns: resolveSubagentMaxTurns(),
           max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
+        ...(effort !== undefined
+          ? { modelConfigOverrides: { reasoningEffort: effort } }
+          : {}),
         eventEmitter,
         taskName: String(ctx.get('task_prompt')),
         subagentId: workflowAgentId,
@@ -2146,6 +2263,7 @@ export class WorkflowOrchestrator {
 
     const sandbox = createWorkflowSandbox({
       args: req.args,
+      maxWallClockMs: req.maxWallClockMs,
       runId,
       dispatch: countedDispatch,
       parallel: parallelImpl,

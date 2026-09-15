@@ -128,6 +128,12 @@ export const TranscriptViewport = forwardRef<
       offset: row.getBoundingClientRect().top - top,
     };
   }, [historical, pin, rows, scroller, toolSources]);
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
+  const refreshAnchor = () => {
+    // Virtual rows may not exist when the scroll event starts the request.
+    anchor.current = captureRef.current() ?? anchor.current;
+  };
   useImperativeHandle(
     ref,
     () => ({
@@ -274,6 +280,14 @@ export const TranscriptViewport = forwardRef<
     const loadWhenVisible = () => {
       loadFrame.current = undefined;
       if (intent !== scrollIntent.current) return;
+      const scroll = scroller();
+      if (
+        !scroll ||
+        (direction === 'older'
+          ? scroll.scrollTop >= 200
+          : scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop >= 200)
+      )
+        return;
       const saved = capture();
       // A scroll event can arrive before the virtualized rows mount. Loading
       // without an anchor would leave no reading position to restore.
@@ -284,7 +298,7 @@ export const TranscriptViewport = forwardRef<
       }
       anchor.current = saved;
       entryDirection.current = direction;
-      void viewport.load(direction);
+      void viewport.load(direction, refreshAnchor);
     };
     loadWhenVisible();
   };
@@ -395,7 +409,7 @@ export const TranscriptViewport = forwardRef<
                     size="sm"
                     onClick={() => {
                       anchor.current = capture();
-                      viewport.retry();
+                      viewport.retry(refreshAnchor);
                     }}
                   >
                     {t('history.retry')}
@@ -431,6 +445,7 @@ export const TranscriptViewport = forwardRef<
                   onReloadTranscript: undefined,
                   transcriptReloadPaused: true,
                   onEditUserMessage: undefined,
+                  onSubmitUserMessageEdit: undefined,
                   onShowContextDetail: undefined,
                   onBranchSession: undefined,
                   onRetryClick: undefined,

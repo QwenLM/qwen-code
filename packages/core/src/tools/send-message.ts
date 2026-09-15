@@ -135,6 +135,9 @@ class SendMessageInvocation extends BaseToolInvocation<
       // Addresses this tool would keep in-process must never be handed
       // back to the model as a peer address, bare.
       isReserved: (address) => isInProcessRecipient(address, teamFile),
+      // Which of this process's records is the sender. Matters only for a
+      // process hosting several sessions; the default covers the rest.
+      slot: this.config.getSessionRegistrySlot(),
     });
 
     switch (outcome.kind) {

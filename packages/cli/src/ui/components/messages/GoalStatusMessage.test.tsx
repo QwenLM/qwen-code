@@ -187,6 +187,146 @@ describe('<GoalStatusMessage />', () => {
     expect(lastFrame()).not.toContain('tokens');
   });
 
+  it('shows stalled checkpoints and the last failure on an active card', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          checkpointStalls: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Checkpoint: 2/3 stalled · Error: provider failed',
+    );
+  });
+
+  it('shows a checkpoint failure that spent no stall', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Checkpoint: last check failed · Error: provider failed',
+    );
+  });
+
+  it('keeps the failure on the card of a Goal the stall breaker stopped', () => {
+    // The stop reason names the kind of failure; only this line says which.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('usage_limited', 'idle', 'checkpoints stalled', {
+          checkpointStalls: 3,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Reason: checkpoints stalled');
+    expect(lastFrame()).toContain(
+      'Checkpoint: 3/3 stalled · Error: provider failed',
+    );
+  });
+
+  it('hides checkpoint health on a completed Goal that still carries it', () => {
+    // The terminal snapshot spreads the record and overrides only `status`,
+    // so a Goal that completed after a failed check journals both fields.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('complete', 'idle', 'all acceptance checks passed', {
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Goal complete');
+    expect(lastFrame()).not.toContain('Checkpoint');
+  });
+
+  it('hides a stall-free failure once the Goal stops for another reason', () => {
+    const paused = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', 'no progress in three turns', {
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+    expect(paused.lastFrame()).not.toContain('Checkpoint');
+
+    // A running streak is still the truth about the window a resume re-enters.
+    const streak = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', 'paused by the user', {
+          checkpointStalls: 2,
+          lastCheckpointFailure: 'Error: provider failed',
+        })}
+      />,
+    );
+    expect(streak.lastFrame()).toContain('Checkpoint: 2/3 stalled');
+  });
+
+  it('shows a bare stall streak without a trailing separator', () => {
+    // A stop for another reason clears the diagnostic and keeps the streak.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('paused', 'idle', 'paused by the user', {
+          checkpointStalls: 2,
+        })}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Checkpoint: 2/3 stalled');
+    expect(lastFrame()).not.toContain('stalled ·');
+  });
+
+  it('never writes control or bidi characters from the diagnostic to the terminal', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'running', undefined, {
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'stalled\rGoal complete \u202efailed',
+        })}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Checkpoint: 1/3 stalled');
+    expect(frame).not.toContain('\r');
+    expect(frame).not.toContain('\u202e');
+  });
+
+  it('never writes control characters from a stop reason to the terminal', () => {
+    // A pause reason can embed a raw provider error.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot(
+          'paused',
+          'idle',
+          'paused\r\u001b]52;c;ZXh0cmFjdGVk\u0007 by user',
+        )}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Reason: paused');
+    expect(frame).not.toContain('\r');
+    expect(frame).not.toContain('\u0007');
+  });
+
+  it('says nothing about checkpoints on a healthy card', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage snapshot={snapshot('active', 'running')} />,
+    );
+
+    expect(lastFrame()).not.toContain('Checkpoint');
+  });
+
   it('leaves the legacy card without spend it cannot know', () => {
     // The legacy props carry an iteration count and nothing else; there is no
     // record behind them to read a spend off.

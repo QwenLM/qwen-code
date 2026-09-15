@@ -164,6 +164,7 @@ export function getAllSettingKeys(): string[] {
 const SETTINGS_DIALOG_ORDER: readonly string[] = [
   // Workflow Control - most impactful setting
   'tools.approvalMode',
+  'tools.codeModeOnly',
 
   // Localization - users often set this first
   'general.language',
@@ -181,6 +182,7 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'ide.enabled',
   'ui.showLineNumbers',
   'ui.hideTips',
+  'ui.showToolCallDetails',
   'general.terminalBell',
   'ui.enableWelcomeBack',
 
@@ -244,6 +246,14 @@ export function validateSettingValue(
       break;
     default:
       return `Settings of type '${def.type}' cannot be modified via this API`;
+  }
+  if (
+    (typeof value === 'string' || typeof value === 'number') &&
+    // `includes` is SameValueZero, so a `[0]` exclusion also catches the `-0`
+    // that `Number('-0')` produces and `JSON.stringify` would persist as `0`.
+    def.excludedValues?.includes(value as string | number)
+  ) {
+    return `Value must not be ${String(value)}`;
   }
   return undefined;
 }

@@ -20,6 +20,12 @@ import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 
 const registerSession = vi.hoisted(() => vi.fn());
+
+/**
+ * What `registerSession` reports for the interactive UI: the record
+ * landed, in the one shared slot a single-session process owns.
+ */
+const REGISTERED = { registered: true, slot: 'shared' };
 const registerCleanup = vi.hoisted(() => vi.fn());
 const inkRender = vi.hoisted(() => vi.fn());
 const lastPeerInboxFailure = vi.hoisted(() => ({ value: null as unknown }));
@@ -145,7 +151,7 @@ type TestConfig = Config & {
 };
 
 function makeConfig(): TestConfig {
-  const trackSessionRegistration = vi.fn((registration: Promise<boolean>) => {
+  const trackSessionRegistration = vi.fn((registration: Promise<unknown>) => {
     void registration.catch(() => undefined);
   });
   return {
@@ -186,7 +192,7 @@ describe('startInteractiveUI session registration', () => {
   });
 
   it('registers the session with its id, target dir, CLI version, and kind', async () => {
-    registerSession.mockResolvedValue(true);
+    registerSession.mockResolvedValue(REGISTERED);
     const config = makeConfig();
 
     await start(config);
@@ -203,11 +209,11 @@ describe('startInteractiveUI session registration', () => {
     expect(config.trackSessionRegistration).toHaveBeenCalledTimes(1);
     await expect(
       config.trackSessionRegistration.mock.calls[0]?.[0],
-    ).resolves.toBe(true);
+    ).resolves.toEqual(REGISTERED);
   });
 
   it('arms teardown before serialized registry cleanup', async () => {
-    registerSession.mockResolvedValue(true);
+    registerSession.mockResolvedValue(REGISTERED);
     const config = makeConfig();
     await start(config);
 
@@ -219,7 +225,7 @@ describe('startInteractiveUI session registration', () => {
   });
 
   it('does not await a stalled registration before returning startup', async () => {
-    registerSession.mockReturnValue(new Promise<boolean>(() => undefined));
+    registerSession.mockReturnValue(new Promise(() => undefined));
     const config = makeConfig();
 
     const result = await Promise.race([
@@ -254,7 +260,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     vi.clearAllMocks();
     lastPeerInboxFailure.value = null;
     observedPeerInboxFailure.value = null;
-    registerSession.mockResolvedValue(true);
+    registerSession.mockResolvedValue(REGISTERED);
     peerMessagingStart.mockResolvedValue({
       close: vi.fn().mockResolvedValue(undefined),
     });

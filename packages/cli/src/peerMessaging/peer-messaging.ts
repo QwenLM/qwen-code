@@ -189,6 +189,16 @@ export interface PeerMessagingOptions {
    * session holds now. Absent means frames are never checked against it.
    */
   getSessionId?: () => string;
+  /**
+   * For a process hosting several sessions: whether `id` is one of them.
+   *
+   * Wired instead of `getSessionId` — the two are mutually exclusive,
+   * because a process either has one session to name or a set to test
+   * against. With this set, a frame naming no session at all is
+   * misaddressed: an unpinned frame could have meant the one session a
+   * single-session process holds, and here it could mean any of several.
+   */
+  ownsSessionId?: (id: string) => boolean;
   socketPath?: string;
   /**
    * Overrides the generated inbox token. A test seam like `socketPath`:
@@ -241,6 +251,7 @@ export class PeerMessaging {
     ipcToken?: string,
   ) => Promise<void> = async () => {};
   private getSessionId: (() => string) | null = null;
+  private ownsSessionId: ((id: string) => boolean) | null = null;
   private settleSentMessage: (
     msgId: string,
     status: PeerDeliveryStatus,
@@ -292,6 +303,15 @@ export class PeerMessaging {
   static async start(
     options: PeerMessagingOptions,
   ): Promise<PeerMessaging | null> {
+    if (options.getSessionId && options.ownsSessionId) {
+      // A configuration mistake rather than a runtime condition: one asks
+      // which session this process is, the other which sessions it hosts,
+      // and a process that answered both would judge pins against
+      // whichever happened to be checked first.
+      throw new Error(
+        'PeerMessaging: pass getSessionId or ownsSessionId, not both',
+      );
+    }
     const messaging = new PeerMessaging();
     const controllerRegistryPath =
       options.controllerRegistryPath ?? getPeerControllerRegistryPath();
@@ -335,6 +355,9 @@ export class PeerMessaging {
       isControllerValid: (id) => messaging.validControllerIds?.has(id) ?? true,
       ...(options.admission ? { admission: options.admission } : {}),
       getSessionId: options.getSessionId,
+      ...(options.ownsSessionId
+        ? { ownsSessionId: options.ownsSessionId }
+        : {}),
       deliver: (frame, origin) => messaging.deliver(frame, origin),
       reportDropped: (frame, reason, origin) =>
         dropReceipts.note(frame, origin ?? { selfSent: false }, reason),
@@ -364,6 +387,7 @@ export class PeerMessaging {
     // session id and the send ledger this process holds, not against the
     // nulls a later assignment would leave in place.
     messaging.getSessionId = options.getSessionId ?? null;
+    messaging.ownsSessionId = options.ownsSessionId ?? null;
     messaging.settleSentMessage =
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
@@ -857,13 +881,19 @@ export class PeerMessaging {
     // may be the stale side (a skipped /clear patch), so it is re-asserted
     // too; otherwise every later send here would be refused the same way.
     const ownSessionId = this.getSessionId?.();
-    if (
-      frame.toSessionId !== undefined &&
-      ownSessionId !== undefined &&
-      frame.toSessionId !== ownSessionId
-    ) {
+    const ownsSessionId = this.ownsSessionId;
+    const misaddressed = ownsSessionId
+      ? // Hosting several sessions: a frame has to say which, and name one
+        // this process still holds.
+        frame.toSessionId === undefined || !ownsSessionId(frame.toSessionId)
+      : frame.toSessionId !== undefined &&
+        ownSessionId !== undefined &&
+        frame.toSessionId !== ownSessionId;
+    if (misaddressed) {
       debugLogger.debug(
-        `refusing peer message ${frame.msgId}: addressed to session ${frame.toSessionId}, this is ${ownSessionId}`,
+        `refusing peer message ${frame.msgId}: addressed to session ${
+          frame.toSessionId ?? '(unspecified)'
+        }, this process does not hold it`,
       );
       if (frame.from) {
         void sendDeliveryStatus(

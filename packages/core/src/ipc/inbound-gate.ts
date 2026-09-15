@@ -347,6 +347,16 @@ export interface InboundGateOptions {
    */
   getSessionId?: () => string | undefined;
   /**
+   * For a process hosting several sessions: whether `id` is one of them.
+   *
+   * Wired instead of `getSessionId`, which asks "what is the one session
+   * here" — a question such a process has no single answer to. A frame
+   * that names no session at all is not for any of them: with one session
+   * an unpinned frame can only have meant that one, and with several
+   * there is nothing to guess from.
+   */
+  ownsSessionId?: (id: string) => boolean;
+  /**
    * How long a message may sit parked before it expires, in
    * milliseconds, or null to keep it until the session ends. Read on
    * every reschedule rather than captured once, so changing the setting
@@ -624,6 +634,12 @@ export class InboundGate {
     frame: PeerUserFrame,
     origin: PeerOrigin = { selfSent: false },
   ): GateDecision {
+    // Only a process holding one session can "change session" — that is
+    // what a `/clear` or a resume does, and the meter starts over because
+    // the conversation it was pacing is gone. A process hosting several
+    // wires `ownsSessionId` instead, has no single id to compare, and
+    // meters across all of them: its sessions come and go constantly, and
+    // resetting on each would hand a flooding peer a fresh allowance.
     const sessionId = this.options.getSessionId?.();
     if (
       this.admissionSessionObserved &&
@@ -971,6 +987,14 @@ export class InboundGate {
    * session holds now, not the one the frame saw on arrival.
    */
   private pinStillValid(frame: PeerUserFrame): boolean {
+    const ownsSessionId = this.options.ownsSessionId;
+    if (ownsSessionId) {
+      // A process hosting several sessions cannot act on an unpinned
+      // frame: there is no one session it could have meant.
+      return (
+        frame.toSessionId !== undefined && ownsSessionId(frame.toSessionId)
+      );
+    }
     if (frame.toSessionId === undefined) return true;
     const ownSessionId = this.options.getSessionId?.();
     return ownSessionId === undefined || frame.toSessionId === ownSessionId;

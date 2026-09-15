@@ -36,7 +36,7 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
-> Opening an HTML export loads the renderer for that exact Qwen Code version from `unpkg.com`. If the version has not been published or the renderer cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
+> Opening an HTML export loads the renderer and stylesheet for that exact Qwen Code version from `unpkg.com`. If the version has not been published or either asset cannot be reached, the file shows a load error. Markdown, JSON, and JSONL exports remain self-contained.
 
 > [!note]
 >
@@ -85,53 +85,53 @@ Commands specifically for controlling interface and output language.
 
 Commands for managing AI tools and models.
 
-| Command               | Description                                                                           | Usage Examples                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/mcp`                | List configured MCP servers and tools                                                 | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
-| `/import-config`      | Import MCP servers from Claude configs                                                | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
-| `/tools`              | Display currently available tool list                                                 | `/tools`, `/tools desc`                                                                                   |
-| `/skills`             | Open the Skills panel to browse, search, toggle, and launch skills                    | `/skills`, `/<skill-name>`                                                                                |
-| `/learn`              | Create a reusable project skill from a file, directory, URL, video, or text           | `/learn https://docs.example.com/api`, `/learn ./tutorial.mp4 focus on deployment`                        |
-| `/curator`            | Inspect, pin, archive, or restore inactive project auto-skills                        | `/curator`, `/curator run --dry-run`, `/curator pin <directory>`, `/curator restore <directory>`          |
-| `/plan`               | Switch to plan mode or exit plan mode                                                 | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
-| `/approval-mode`      | Change the tool-approval mode (current session only)                                  | `/approval-mode`, `/approval-mode auto-edit`                                                              |
-| → `plan`              | Analysis only, no execution (secure review)                                           | `/approval-mode plan`                                                                                     |
-| → `default`           | Require approval for edits (daily use)                                                | `/approval-mode default`                                                                                  |
-| → `auto-edit`         | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
-| → `auto`              | Classifier-evaluated approval (autonomous)                                            | `/approval-mode auto`                                                                                     |
-| → `yolo`              | Auto-approve everything (quick prototyping)                                           | `/approval-mode yolo`                                                                                     |
-| `/peers`              | Review held peer messages; manage trusted controllers                                 | `/peers`, `/peers accept <id>`, `/peers deny all`, `/peers controllers`, `/peers revoke <id>`             |
-| `/model`              | Switch model used in current session                                                  | `/model`, `/model <model-id>` (switch immediately)                                                        |
-| `/model --fast`       | Set a lighter model for prompt suggestions                                            | `/model --fast qwen3-coder-flash`                                                                         |
-| `/model --voice`      | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
-| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model      | `/model --vision <model-id>`                                                                              |
-| `/model --compaction` | Set the model used for chat compression                                               | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
-| `/model --image`      | Set an image-generation-capable model for the built-in image generation tool          | `/model --image <model-id>`                                                                               |
-| `/effort`             | Set reasoning effort for thinking-capable models                                      | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
-| `/output-style`       | Choose the output style that shapes how responses are written                         | `/output-style` (opens picker), `/output-style Concise`, `/output-style default` (no style)               |
-| `/extensions`         | Manage extensions                                                                     | `/extensions list`, `/extensions manage`                                                                  |
-| → `list`              | List installed extensions                                                             | `/extensions list`                                                                                        |
-| → `manage`            | Manage installed extensions (interactive)                                             | `/extensions manage`                                                                                      |
-| → `explore`           | Open extensions page in browser                                                       | `/extensions explore <Gemini\|ClaudeCode>`                                                                |
-| → `install`           | Install an extension from a git repo or path                                          | `/extensions install <repo-or-path>`                                                                      |
-| `/memory`             | Open the Memory Manager dialog                                                        | `/memory`                                                                                                 |
-| `/remember`           | Save a durable memory                                                                 | `/remember Prefer terse responses`                                                                        |
-| `/forget`             | Remove matching entries from auto-memory                                              | `/forget <query>`                                                                                         |
-| `/dream`              | Manually run auto-memory consolidation                                                | `/dream`                                                                                                  |
-| `/hooks`              | Manage Qwen Code hooks                                                                | `/hooks`, `/hooks list`                                                                                   |
-| `/reload-plugins`     | Reload extension changes (commands, skills, agents, hooks, MCP/LSP servers) from disk | `/reload-plugins`                                                                                         |
-| `/permissions`        | Manage permission rules                                                               | `/permissions`                                                                                            |
-| `/agents`             | Manage subagents                                                                      | `/agents manage`, `/agents create`                                                                        |
-| `/arena`              | Manage Arena sessions                                                                 | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
-| `/goal`               | Set a Goal — keep working until a verifier confirms it (see [Goals](./goals.md))      | `/goal <objective>`, `/goal edit <objective>`, `/goal pause`, `/goal resume`, `/goal clear`               |
-| `/tasks`              | List background tasks                                                                 | `/tasks`                                                                                                  |
-| `/workflows`          | Inspect workflow runs; cooperatively pause/resume a background run                    | `/workflows`, `/workflows <runId>`, `/workflows p <runId>`                                                |
-| `/lsp`                | Show LSP server status                                                                | `/lsp`                                                                                                    |
-| `/trust`              | Manage folder trust settings                                                          | `/trust`                                                                                                  |
+| Command               | Description                                                                                      | Usage Examples                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `/mcp`                | List configured MCP servers and tools                                                            | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
+| `/import-config`      | Import MCP servers from Claude configs                                                           | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
+| `/tools`              | Display currently available tool list                                                            | `/tools`, `/tools desc`                                                                                   |
+| `/skills`             | Open the Skills panel to browse, search, toggle, and launch skills                               | `/skills`, `/<skill-name>`                                                                                |
+| `/learn`              | Create a reusable project skill from a file, directory, URL, video, or text                      | `/learn https://docs.example.com/api`, `/learn ./tutorial.mp4 focus on deployment`                        |
+| `/curator`            | Inspect, pin, archive, or restore inactive project auto-skills                                   | `/curator`, `/curator run --dry-run`, `/curator pin <directory>`, `/curator restore <directory>`          |
+| `/plan`               | Switch to plan mode or exit plan mode                                                            | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
+| `/approval-mode`      | Change the tool-approval mode (current session only)                                             | `/approval-mode`, `/approval-mode auto-edit`                                                              |
+| → `plan`              | Analysis only, no execution (secure review)                                                      | `/approval-mode plan`                                                                                     |
+| → `default`           | Require approval for edits (daily use)                                                           | `/approval-mode default`                                                                                  |
+| → `auto-edit`         | Auto-approve edits (trusted environment)                                                         | `/approval-mode auto-edit`                                                                                |
+| → `auto`              | Classifier-evaluated approval (autonomous)                                                       | `/approval-mode auto`                                                                                     |
+| → `yolo`              | Auto-approve everything (quick prototyping)                                                      | `/approval-mode yolo`                                                                                     |
+| `/peers`              | Review held peer messages; manage trusted controllers                                            | `/peers`, `/peers accept <id>`, `/peers deny all`, `/peers controllers`, `/peers revoke <id>`             |
+| `/model`              | Switch model used in current session                                                             | `/model`, `/model <model-id>` (switch immediately)                                                        |
+| `/model --fast`       | Set a lighter model for prompt suggestions                                                       | `/model --fast qwen3-coder-flash`                                                                         |
+| `/model --voice`      | Set the model used for voice transcription                                                       | `/model --voice <model-id>`                                                                               |
+| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model                 | `/model --vision <model-id>`                                                                              |
+| `/model --compaction` | Set the model used for chat compression                                                          | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
+| `/model --image`      | Set an image-generation-capable model for the built-in image generation tool                     | `/model --image <model-id>`                                                                               |
+| `/effort`             | Set reasoning effort for thinking-capable models                                                 | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
+| `/output-style`       | Choose the output style that shapes how responses are written                                    | `/output-style` (opens picker), `/output-style Concise`, `/output-style default` (no style)               |
+| `/extensions`         | Manage extensions                                                                                | `/extensions list`, `/extensions manage`                                                                  |
+| → `list`              | List installed extensions                                                                        | `/extensions list`                                                                                        |
+| → `manage`            | Manage installed extensions (interactive)                                                        | `/extensions manage`                                                                                      |
+| → `explore`           | Open extensions page in browser                                                                  | `/extensions explore <Gemini\|ClaudeCode>`                                                                |
+| → `install`           | Install an extension from a git repo or path                                                     | `/extensions install <repo-or-path>`                                                                      |
+| `/memory`             | Open the Memory Manager dialog                                                                   | `/memory`                                                                                                 |
+| `/remember`           | Save a durable memory                                                                            | `/remember Prefer terse responses`                                                                        |
+| `/forget`             | Remove matching entries from auto-memory                                                         | `/forget <query>`                                                                                         |
+| `/dream`              | Manually run auto-memory consolidation                                                           | `/dream`                                                                                                  |
+| `/hooks`              | Manage Qwen Code hooks                                                                           | `/hooks`, `/hooks list`                                                                                   |
+| `/reload-plugins`     | Reload extension changes (commands, skills, agents, workflows, hooks, MCP/LSP servers) from disk | `/reload-plugins`                                                                                         |
+| `/permissions`        | Manage permission rules                                                                          | `/permissions`                                                                                            |
+| `/agents`             | Manage subagents                                                                                 | `/agents manage`, `/agents create`                                                                        |
+| `/arena`              | Manage Arena sessions                                                                            | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
+| `/goal`               | Set a Goal — keep working until a verifier confirms it (see [Goals](./goals.md))                 | `/goal <objective>`, `/goal edit <objective>`, `/goal pause`, `/goal resume`, `/goal clear`               |
+| `/tasks`              | List background tasks                                                                            | `/tasks`                                                                                                  |
+| `/workflows`          | Inspect workflow runs; cooperatively pause/resume a background run                               | `/workflows`, `/workflows <runId>`, `/workflows p <runId>`                                                |
+| `/lsp`                | Show LSP server status                                                                           | `/lsp`                                                                                                    |
+| `/trust`              | Manage folder trust settings                                                                     | `/trust`                                                                                                  |
 
 > [!warning]
 >
-> Only install extensions (`/extensions install`) from sources you trust. Extensions can bundle MCP servers, skills, and commands that run with the same permissions as Qwen Code itself — they can access your files, API keys, and conversation data. `/extensions install` does not prompt for confirmation.
+> Only install extensions (`/extensions install`) from sources you trust. Extensions can bundle MCP servers, skills, and commands that run with the same permissions as Qwen Code itself — they can access your files, API keys, and conversation data. They can also ship workflow scripts, which run in the workflow sandbox without direct file or shell access, act through the subagents they start, and go through the Workflow tool's approval. `/extensions install` does not prompt for confirmation.
 
 > [!warning]
 >
@@ -140,6 +140,10 @@ Commands for managing AI tools and models.
 > [!note]
 >
 > `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+
+> [!note]
+>
+> A skill from an installed extension is a slash command too, and its name carries its owner: `/rust:pdf`, not `/pdf`. The bare form is not an alias — if another skill is named `pdf`, `/pdf` runs that skill instead. `slashCommands.disabled` gates such a command under either spelling, so an entry written before the name carried the owner still bites. See [How extension Skills are named](./skills.md#how-extension-skills-are-named).
 
 ### 1.5 Built-in Skills
 
@@ -776,7 +780,10 @@ A table with columns: NAME, KIND, PID, AGE, DIRECTORY.
 KIND says what registered the session — `tui` for someone at a terminal,
 `external` for a program that is not a Qwen Code session at all (a voice
 front-end, a relay), and `headless` or `serve` for a session another
-program drives. It is a self-report, like NAME and DIRECTORY: every field
+program drives. Several `serve` or `headless` rows can share one PID: a
+`qwen --acp` child hosts all its sessions in one process — `serve` when
+the daemon spawned it, `headless` when a client is driving it directly —
+and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
 session is allowed to do depends on it. See
 [Cross-Session Protocol](./cross-session-protocol.md) for the record
@@ -1027,6 +1034,28 @@ Anyone who holds the token can send as that controller, so treat it like
 any other credential: give it to one program, keep it out of shared
 config, and revoke it when that program is done.
 
+### Sessions a program drives over ACP
+
+Any `qwen --acp` child registers each session it hosts — as `serve` when
+the daemon spawned the process, as `headless` when an editor or another
+client is driving `qwen --acp` directly — and the session appears in
+`qwen sessions ps` and in another session's `list_agents` like any
+other. It can send: its model can call `send_message` to reach a terminal
+you have open. Several of them share one process and one inbox, so a
+sender has to name the session it means — every Qwen Code session does
+that automatically.
+
+Messages sent _to_ one are refused rather than held. Holding is a
+question put to a person, and nobody is watching a held-message list on a
+driven session's behalf; a sender is told at once instead of
+waiting out an expiry. Where a held message should surface for those
+sessions is not settled yet.
+
+A session registers only while its own settings have
+`agents.crossSessionMessaging` on. With it off it stays invisible,
+because the only reason to list a session nobody can message would be to
+advertise an address that never answers.
+
 ### Programs that are not Qwen Code sessions
 
 Everything above works between sessions, but nothing in it is specific to
@@ -1041,3 +1070,8 @@ writing one: the record schema and how liveness is judged, the socket
 paths and framing, the auth line, every frame field, the receipt states
 and their transitions, and what a receiver does with a message before its
 model sees it.
+
+A Node program does not have to write any of that by hand:
+`@qwen-code/sdk/peer` implements the contract. `PeerEndpoint.start({ name })`
+publishes the record and binds the inbox, `list()` and `send()` address
+sessions by name, and `onMessage` receives what they send.

@@ -41,6 +41,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { buildFailureLines } from './workflow-failure-lines.js';
+import { parseExtensionWorkflowName } from './runtime/workflow-saved.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
@@ -391,6 +392,13 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * reconstructing the path from a storage handle it does not have.
    */
   journalPath?: string;
+  /**
+   * Failure hint naming where the authoring reference is in this session, for
+   * a script the model authored. The foreground tool result carries it in the
+   * run trailer; a backgrounded run has only its completion notification, so
+   * it rides here. Process-local, like the notification it feeds.
+   */
+  authoringHint?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -1828,9 +1836,17 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
   const lines: string[] = [];
   const resume = buildResumeCall(entry);
   if (resume) {
-    const pathAdvice = entry.workflowName
-      ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
-      : 'Edit the generated script copy first if the script needs to change.';
+    // Only an extension workflow's name carries `<extension>:`. Its file is
+    // third-party and an extension update replaces it, so the copy has to
+    // land somewhere the user owns.
+    const extension = entry.workflowName
+      ? parseExtensionWorkflowName(entry.workflowName)
+      : null;
+    const pathAdvice = extension
+      ? `This reads the /${entry.workflowName} workflow the ${extension.extensionName} extension ships; copy it into .qwen/workflows before making a run-specific change.`
+      : entry.workflowName
+        ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
+        : 'Edit the generated script copy first if the script needs to change.';
     const journalAdvice = entry.journalPath
       ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
       : 'No journal was written for this run, so every agent() call runs live.';
@@ -1841,6 +1857,9 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
   }
   if (entry.journalPath) {
     lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
+  }
+  if (entry.authoringHint) {
+    lines.push(stripAnsiAndControl(entry.authoringHint));
   }
   return lines;
 }
@@ -1857,7 +1876,9 @@ function buildDiagnosticsLines(entry: WorkflowTask): string[] {
   if (resume) {
     lines.push(
       entry.workflowName
-        ? `Re-run the saved /${entry.workflowName} workflow: ${resume}`
+        ? parseExtensionWorkflowName(entry.workflowName)
+          ? `Re-run the /${entry.workflowName} extension workflow: ${resume}`
+          : `Re-run the saved /${entry.workflowName} workflow: ${resume}`
         : `Re-run after editing the generated script: ${resume}`,
     );
     if (hasUninlinableResumeArgs(entry)) {
