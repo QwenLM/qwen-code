@@ -522,19 +522,25 @@ describe('deriveSessionCards', () => {
 });
 
 describe('SessionOverviewPanel', () => {
-  it('includes qwen-live sessions in the overview and attention filter', () => {
+  it('disables single and batch cleanup of idle Qwen Live tasks', () => {
     sessionsState.sessions = [
       session('live', {
         displayName: 'Live task',
         sourceType: 'qwen-live',
-        isWaitingForPermission: true,
+        clientCount: 1,
+        hasActivePrompt: false,
       }),
-      session('ordinary', { displayName: 'Ordinary task' }),
     ];
     render();
-    expect(rowTitles()).toEqual(['Live task', 'Ordinary task']);
-    act(() => click(statusFilterButton('Needs attention')));
     expect(rowTitles()).toEqual(['Live task']);
+    for (const action of ['Archive', 'Delete']) {
+      expect(rowActionButton(rows()[0]!, action).disabled).toBe(true);
+    }
+    act(() => click(selectAllCheckbox()));
+    expect(footerButton('Archive')!.disabled).toBe(true);
+    expect(footerButton('Delete')!.disabled).toBe(true);
+    expect(workspaceClient.deleteSessionsData).not.toHaveBeenCalled();
+    expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
   });
 
   it.each(['FEATURE/TOPIC', '1234', '#1234', 'SESSION-SEARCH'])(

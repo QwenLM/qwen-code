@@ -16,9 +16,9 @@ Add a two-option source switch above the sidebar's project session list:
 
 - **Tasks** requests `sourceType: "default"` and remains the initial selection.
   The daemon catalog includes default, legacy, and `qwen-live` sessions.
-  Separately, the Sidebar adds sessions bound to durable scheduled tasks with
-  a mode other than `per_run` to its ordinary task list; scheduled-task run
-  history stays in its dedicated view.
+  Scheduled-task run sessions (`sourceType: 'default'` with a
+  `scheduled_task_run:` sourceId) appear in dedicated sections. Bound controller
+  sessions use `sourceType: 'scheduled_task'` and are excluded from this catalog.
 - **Channels** lists `sourceType: "channel"`.
 
 The switch is shown only when the daemon advertises
@@ -58,8 +58,12 @@ visible text.
   The internal Conversations filter is unchanged.
 - Session Overview, the Split View picker, and workspace total, running, and
   attention counts share the expanded default catalog, including `qwen-live`.
-  Scheduled-task eligibility is unchanged. REST close, delete, and archive reject
-  Live tasks with an attached client or active prompt.
+  Scheduled-task eligibility is unchanged. Web Shell hides delete and archive
+  actions for `qwen-live` sidebar rows and excludes them from the deletion picker.
+  Session Overview disables single and batch delete/archive for these tasks.
+  Opening and explicitly releasing these tasks remain available. Source metadata
+  is attribution, not daemon authorization: REST and ACP mutations keep their
+  existing built-in Live call protection and can terminate external Live tasks.
 - The switch is in-memory UI state and resets to Tasks on page reload.
 - Channel type classification reflects the current workspace configuration;
   sessions do not persist a historical platform type.

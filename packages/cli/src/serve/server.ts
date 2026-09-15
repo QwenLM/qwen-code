@@ -2955,21 +2955,8 @@ export function createServeApp(
     virtualSubagentSessions,
     conversationRuntimeActivity,
     ...(standaloneSessionService ? { standaloneSessionService } : {}),
-    isLiveSessionActive: (sessionId: string) => {
-      if (liveCoordinator.isActiveSession(sessionId)) return true;
-      return getSessionBridges().some((sessionBridge) => {
-        try {
-          const session = sessionBridge.getSessionSummary(sessionId);
-          return (
-            session.sourceType === 'qwen-live' &&
-            (session.clientCount > 0 || session.hasActivePrompt)
-          );
-        } catch (error) {
-          if (error instanceof SessionNotFoundError) return false;
-          throw error;
-        }
-      });
-    },
+    isLiveSessionActive: (sessionId: string) =>
+      liveCoordinator.isActiveSession(sessionId),
     ...(liveConversationWorkspaceForRoutes
       ? {
           ensureConversationRuntime: ensureConversationRuntimeWithLifecycle,

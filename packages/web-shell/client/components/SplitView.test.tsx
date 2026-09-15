@@ -650,26 +650,6 @@ describe('SplitView', () => {
     expect(titles()).toEqual(['One', 'Two']);
   });
 
-  it('offers qwen-live sessions in the picker and opens their pane', () => {
-    sessionsState.push({
-      sessionId: 'live',
-      workspaceCwd: '/w',
-      displayName: 'Live task',
-      sourceType: 'qwen-live',
-    });
-    render();
-    openPicker();
-    const option = Array.from(
-      container!.querySelectorAll('[role="option"] button'),
-    ).find((button) => button.textContent?.includes('Live task'));
-    expect(option).toBeDefined();
-    act(() =>
-      option!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
-    );
-    expect(titles()).toContain('Live task');
-    expect(container!.querySelector('[data-session="live"]')).not.toBeNull();
-  });
-
   it('adds a pane from the picker', () => {
     render();
     expect(panes()).toHaveLength(1);

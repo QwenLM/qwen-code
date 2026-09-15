@@ -1957,6 +1957,7 @@ export function WebShellSidebar({
   );
   const canShowDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('delete') &&
       canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
     [
@@ -2057,6 +2058,7 @@ export function WebShellSidebar({
   );
   const canArchiveSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
       !session.hasActivePrompt &&
@@ -4421,7 +4423,9 @@ export function WebShellSidebar({
       const showPin = !standalone && canOrganizeSession(session, 'pin');
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
-        : sessionActionItems.has('archive') && canMutateSessionArchive(session);
+        : session.sourceType !== 'qwen-live' &&
+          sessionActionItems.has('archive') &&
+          canMutateSessionArchive(session);
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);

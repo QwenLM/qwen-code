@@ -16,9 +16,9 @@
 - daemon 的公共 `sourceType=default` 过滤器包含 `sourceType: 'default'`、
   未设置 `sourceType` 的会话，以及 `qwen-live` 会话。其他来源过滤器仍然精确匹配。
   显式指定 `sourceId` 时，会在所选目录内进一步按标识符精确过滤。
-- 此外，Sidebar 将绑定到持久定时任务、且会话模式不是 `per_run` 的会话加入普通
-  任务列表。这项客户端处理不会扩大 daemon 过滤器的范围。定时任务的运行历史仍在
-  Sidebar 的专用视图中展示。
+- Sidebar 将定时任务运行会话（`sourceType: 'default'` 且 `sourceId` 以
+  `scheduled_task_run:` 开头）放入专用分组。绑定的控制会话使用
+  `sourceType: 'scheduled_task'`，不属于默认目录。
 - 在支持组织结构的会话视图中提供来源过滤，避免过滤使分组、置顶或归档会话行为失效。
 - 将组织视图的分页游标绑定到生成该游标时使用的来源过滤器。
 
@@ -30,6 +30,8 @@
 `channel` 过滤器，以及内部 Conversations 过滤器均保持不变。省略 `sourceType`
 的调用方仍获得未过滤的结果。
 
-除了现有的内置 Live 通话保护外，REST close、delete 和 archive 还会拒绝客户端仍
-附着或提示请求仍处于活动状态的 `qwen-live` 会话。客户端已脱离且空闲的 Live 会话
-仍可执行这些操作。
+Web Shell 对 `qwen-live` 侧栏行隐藏删除和归档操作，并将这些任务排除在永久删除
+选择器之外。Session Overview 也禁用这些任务的单行和批量删除、归档。用户仍可打开任务，也可通过 Release 对话框显式释放其运行时。
+这是 UI 策略，不是授权边界：客户端声明的来源元数据不授予 daemon 变更保护。
+显式 REST 和 ACP close、delete、archive 保持既有行为，包括保护内置活动 Live
+通话拥有的会话。外部客户端仍负责自身任务生命周期；这些 API 调用可以终止其工作。

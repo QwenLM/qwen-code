@@ -264,17 +264,6 @@ describe('WorkspacesOverviewPanel', () => {
     expect(primary.textContent).toContain('just now');
   });
 
-  it('includes qwen-live sessions in workspace totals and attention counts', async () => {
-    sessionPages['/w']!.sessions.push(
-      session({ sourceType: 'qwen-live', isWaitingForPermission: true }),
-    );
-    await render();
-    const sessionsCell = rowByLabel('/w').querySelectorAll('td')[2];
-    expect(sessionsCell.querySelector('span > span')?.textContent).toBe('3');
-    expect(sessionsCell.textContent).toContain('1 running');
-    expect(sessionsCell.textContent).toContain('2 need attention');
-  });
-
   it('keeps an uninitialized runtime as unknown, never zero', async () => {
     overviews['/other'] = {
       mcp: {

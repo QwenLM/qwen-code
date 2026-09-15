@@ -13,8 +13,9 @@ daemon 管理的渠道会创建 `sourceType: "channel"` 的普通工作空间会
 在侧边栏的项目会话列表上方增加包含两个选项的来源切换控件：
 
 - **Tasks** 请求 `sourceType: "default"`，并保持为初始选项。daemon 目录包含
-  default、旧版无来源会话和 `qwen-live` 会话。此外，Sidebar 将绑定到持久定时任务、
-  且模式不是 `per_run` 的会话加入普通任务列表；定时任务运行历史仍在专用视图中展示。
+  default、旧版无来源会话和 `qwen-live` 会话。定时任务运行会话（`sourceType: 'default'`
+  且 `sourceId` 以 `scheduled_task_run:` 开头）放入专用分组。绑定的控制会话使用
+  `sourceType: 'scheduled_task'`，不属于这个目录。
 - **Channels** 列出 `sourceType: "channel"` 的会话。
 
 只有 daemon 声明支持 `session_source_metadata` 时才显示切换控件。较旧的 daemon
@@ -43,8 +44,11 @@ daemon 管理的渠道会创建 `sourceType: "channel"` 的普通工作空间会
   `qwen-live`；其他来源过滤器仍精确匹配，显式指定的 `sourceId` 仍在所选目录内
   进行精确限制。内部 Conversations 过滤器不变。
 - Session Overview、Split View 选择器，以及工作空间的会话总数、运行数和待处理数
-  共用扩展后的默认目录，其中包含 `qwen-live`。定时任务资格判断不变。REST close、
-  delete 和 archive 拒绝客户端仍附着或提示请求仍处于活动状态的 Live 任务。
+  共用扩展后的默认目录，其中包含 `qwen-live`。定时任务资格判断不变。Web Shell 对
+  `qwen-live` 侧栏行隐藏删除和归档操作，并将其排除在删除选择器之外。Session Overview 也禁用
+  这些任务的单行和批量删除、归档。仍可打开任务
+  或显式释放其运行时。来源元数据只用于归属，不是 daemon 授权依据；REST 和 ACP
+  变更保留内置 Live 通话保护，可以终止外部 Live 任务。
 - 切换选项保存在内存中的 UI 状态里，页面重新加载后重置为 Tasks。
 - 渠道类型分类反映工作空间当前配置；会话不持久化历史平台类型。
 

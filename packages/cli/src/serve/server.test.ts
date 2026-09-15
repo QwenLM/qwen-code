@@ -41091,12 +41091,12 @@ describe('Live conversation runtime lifecycle', () => {
     { clientCount: 1, hasActivePrompt: false },
     { clientCount: 0, hasActivePrompt: true },
   ])(
-    'blocks destructive REST actions for externally active Live sessions %j',
+    'does not grant Live call protection to client-declared source metadata %j',
     async (activity) => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440211';
       const summary: BridgeSessionSummary = {
         sessionId,
-        workspaceCwd: '/tmp',
+        workspaceCwd: WS_BOUND,
         createdAt: '2026-05-17T12:00:00.000Z',
         sourceType: 'qwen-live',
         ...activity,
@@ -41109,11 +41109,22 @@ describe('Live conversation runtime lifecycle', () => {
         },
       });
       const app = createServeApp(
-        { ...baseOpts, workspace: '/tmp' },
+        { ...baseOpts, workspace: WS_BOUND },
         undefined,
-        { bridge, boundWorkspace: '/tmp' },
+        {
+          bridge,
+          boundWorkspace: WS_BOUND,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'live-source-test',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              bridge,
+            }),
+          ]),
+        },
       );
-      const workspaceId = encodeURIComponent('/tmp');
+      const workspaceId = encodeURIComponent(WS_BOUND);
       const responses = [
         await request(app)
           .delete('/session/' + sessionId)
@@ -41129,30 +41140,10 @@ describe('Live conversation runtime lifecycle', () => {
           );
         }
       }
-      for (const response of responses) {
-        expect(response.status).toBe(409);
-        expect(response.body).toMatchObject({
-          code: 'live_session_active',
-          sessionId,
-        });
-      }
-      expect(bridge.closeCalls).toHaveLength(0);
-
-      summary.clientCount = 0;
-      summary.hasActivePrompt = false;
-      const stopped = await request(app)
-        .delete('/session/' + sessionId)
-        .set('Host', '127.0.0.1:' + baseOpts.port);
-      expect(stopped.status).toBe(204);
-
-      summary.sourceType = 'default';
-      summary.clientCount = 1;
-      summary.hasActivePrompt = true;
-      const ordinary = await request(app)
-        .delete('/session/' + sessionId)
-        .set('Host', '127.0.0.1:' + baseOpts.port);
-      expect(ordinary.status).toBe(204);
-      expect(bridge.closeCalls).toHaveLength(2);
+      expect(responses.map((response) => response.status)).toEqual([
+        204, 200, 200, 200, 200,
+      ]);
+      expect(bridge.closeCalls.length).toBeGreaterThan(0);
     },
   );
 
