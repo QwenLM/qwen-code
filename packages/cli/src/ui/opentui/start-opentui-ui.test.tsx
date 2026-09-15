@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Fallback-contract tests for the OpenTUI entry (Batch 6): startup must
@@ -31,6 +32,27 @@ const mocks = vi.hoisted(() => {
     sidecarRejects: false,
     cleanups: [] as Array<() => void | Promise<void>>,
     stderrLines: [] as string[],
+    /** State-driven live turn; the mock hook returns this object and
+     * `rerenderLiveTurn` forces the entry to re-render after it changes. */
+    liveTurn: {
+      items: [] as never[],
+      streaming: false,
+      streamingCharsRef: { current: 0 },
+      isReceivingContent: false,
+      waitingCalls: [] as Array<{ callId: string; name: string }>,
+      queueLength: 0,
+      popQueue: () => null,
+      submit: () => {},
+      interrupt: () => {},
+      resetTranscript: () => {},
+      applyEvent: () => {},
+      settleWaitingCall: () => {},
+    },
+    rerenderLiveTurn: null as null | (() => void),
+    /** Props captured from the mocked shell / transcript when the entry
+     * tree is executed for real. */
+    shellProps: null as null | Record<string, unknown>,
+    transcriptProps: null as null | Record<string, unknown>,
     /** Records the warm-up/renderer order — the warm-up only fixes the
      * web-tree-sitter UMD probe if it wins the race against the renderer
      * constructor installing `globalThis.window`. */
@@ -96,26 +118,36 @@ vi.mock('./opentui-runtime.js', () => ({
     create: vi.fn(() => mocks.state.runtime),
   },
 }));
-vi.mock('./opentui-app-shell.js', () => ({ OpenTuiApp: () => null }));
+vi.mock('./opentui-app-shell.js', () => ({
+  OpenTuiApp: (props: Record<string, unknown>) => {
+    mocks.state.shellProps = props;
+    const renderMain = props['renderMain'] as
+      | ((popup: { toolDialogPreempted: boolean }) => unknown)
+      | undefined;
+    return renderMain?.({ toolDialogPreempted: false }) ?? null;
+  },
+}));
 vi.mock('./transcript-view.js', () => ({
-  OpenTuiTranscriptView: () => null,
+  OpenTuiTranscriptView: (props: Record<string, unknown>) => {
+    mocks.state.transcriptProps = props;
+    return null;
+  },
 }));
-vi.mock('./live-turn.js', () => ({
-  useOpenTuiLiveTurn: () => ({
-    items: [],
-    streaming: false,
-    streamingCharsRef: { current: 0 },
-    isReceivingContent: false,
-    waitingCalls: [],
-    queueLength: 0,
-    popQueue: () => null,
-    submit: () => {},
-    interrupt: () => {},
-    resetTranscript: () => {},
-    applyEvent: () => {},
-    settleWaitingCall: () => {},
-  }),
-}));
+vi.mock('./live-turn.js', async () => {
+  const React = await import('react');
+  return {
+    useOpenTuiLiveTurn: () => {
+      const [, setTick] = React.useState(0);
+      React.useEffect(() => {
+        mocks.state.rerenderLiveTurn = () => setTick((t) => t + 1);
+        return () => {
+          mocks.state.rerenderLiveTurn = null;
+        };
+      }, []);
+      return mocks.state.liveTurn;
+    },
+  };
+});
 vi.mock('../handleAutoUpdate.js', () => ({
   setUpdateHandler: () => ({ cleanup: () => {}, flush: () => {} }),
 }));
@@ -151,7 +183,16 @@ vi.mock('./early-input.js', () => ({
 vi.mock('./resume-session.js', () => ({
   resumeEventsFromConfig: () => null,
 }));
+vi.mock('./followup-generation.js', () => ({
+  useFollowupSuggestionGeneration: () => ({
+    promptSuggestion: null,
+    abortPromptSuggestion: () => {},
+    dismissPromptSuggestion: () => {},
+  }),
+}));
 
+import { act, render } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { startOpenTuiUI } from './start-opentui-ui.js';
 import { createCliRenderer } from '@opentui/core';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -295,6 +336,57 @@ describe('startOpenTuiUI fallback contract', () => {
     ).toBe(true);
     expect(mocks.state.stderrLines).toEqual([]);
     expect(renderedInitialDialog()).toBeNull();
+  });
+
+  it('hands the transcript the mounted waiting call’s id, re-passing it when the mounted call settles (R5-3)', async () => {
+    // The transcript prices every parked card against the ONE mounted
+    // confirmation dialog and the shell mounts waitingToolCalls[0], so the
+    // entry must pass that callId down and re-pass it when the mounted call
+    // leaves — a stale renderMain memo would leave the cards priced against
+    // a dialog that no longer exists.
+    mocks.state.liveTurn.waitingCalls = [
+      { callId: 'w1', name: 'run_shell_command' },
+      { callId: 'w2', name: 'run_shell_command' },
+    ];
+    expect(
+      await startOpenTuiUI(
+        buildConfig(),
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(true);
+    // root.render is mocked, so the captured element (SessionStatsProvider
+    // wrapping OpenTuiEntryApp) is executed here against the prop-capturing
+    // shell/transcript mocks.
+    const provider = mocks.state.root.render.mock.calls.at(-1)?.[0];
+    render(provider as ReactElement);
+    expect(mocks.state.transcriptProps?.['activeWaitingCallId']).toBe('w1');
+
+    // The mounted call settles: waitingToolCalls[0] becomes w2 and the
+    // re-created renderMain must carry it.
+    act(() => {
+      mocks.state.liveTurn.waitingCalls = [
+        { callId: 'w2', name: 'run_shell_command' },
+      ];
+      mocks.state.rerenderLiveTurn?.();
+    });
+    expect(mocks.state.transcriptProps?.['activeWaitingCallId']).toBe('w2');
+
+    // A sibling parking BESIDE the mounted call leaves the id — and the
+    // memoized renderMain, whose dep is the callId primitive rather than
+    // the array — untouched.
+    const renderMainBefore = mocks.state.shellProps?.['renderMain'];
+    act(() => {
+      mocks.state.liveTurn.waitingCalls = [
+        { callId: 'w2', name: 'run_shell_command' },
+        { callId: 'w3', name: 'run_shell_command' },
+      ];
+      mocks.state.rerenderLiveTurn?.();
+    });
+    expect(mocks.state.transcriptProps?.['activeWaitingCallId']).toBe('w2');
+    expect(mocks.state.shellProps?.['renderMain']).toBe(renderMainBefore);
   });
 
   it('warms the shell AST parser before the renderer is created', async () => {

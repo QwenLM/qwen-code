@@ -31,9 +31,11 @@ import { ICON, TOOL_STATUS } from '../constants.js';
 import {
   getCachedStringWidth,
   sanitizeMultilineForDisplay,
+  sanitizeTerminalText,
   toCodePoints,
 } from '../utils/textUtils.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
+import { renderDiffBody } from './diff-render.js';
 import { formatDuration } from '../utils/displayUtils.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
@@ -105,9 +107,41 @@ export function hiddenLinesLabel(hiddenCount: number): string {
   return `... first ${hiddenCount} line${hiddenCount === 1 ? '' : 's'} hidden ...`;
 }
 
-/** Physical rows a logical row occupies when soft-wrapped to `cols` columns. */
+/**
+ * Physical rows a logical row occupies when soft-wrapped to `cols` columns.
+ * String widths count TAB as 0 columns while the renderer advances it
+ * exactly 2 (the detab convention dialogs-confirm's TextBody paints), so
+ * the row is measured detabbed — this is the single measuring site the
+ * window helpers, the dialog-body price and the transcript's painted-row
+ * model all share, and the convention cannot drift between them (R11-2).
+ */
 function physicalRowCount(row: string, cols: number): number {
-  return Math.max(1, Math.ceil(getCachedStringWidth(row) / cols));
+  return Math.max(
+    1,
+    Math.ceil(getCachedStringWidth(row.replace(/\t/g, '  ')) / cols),
+  );
+}
+
+/**
+ * Total physical rows `rows` occupy when soft-wrapped to `cols` columns —
+ * the shared total behind headWindowPhysical, tailWindowPhysical,
+ * pendingCardMaxRows's dialog-body measure and transcript-view's
+ * paintedTextRows, so all four agree by construction (the TAB detab lives
+ * in physicalRowCount; no caller can forget it). `stopAfter` ends the scan
+ * early for callers whose consumers all clamp past a threshold: every
+ * larger total produces the identical clamped outcome.
+ */
+export function physicalRowsTotal(
+  rows: readonly string[],
+  cols: number,
+  stopAfter = Number.POSITIVE_INFINITY,
+): number {
+  let sum = 0;
+  for (const row of rows) {
+    sum += physicalRowCount(row, cols);
+    if (sum > stopAfter) break;
+  }
+  return sum;
 }
 
 /** Cuts a row to `maxCols` display columns without splitting a surrogate pair. */
@@ -147,7 +181,7 @@ export function headWindowPhysical(
 ): { visible: string[]; hiddenRows: number } {
   const cols = Math.max(width - 2, 10);
   const height = (row: string) => physicalRowCount(row, cols);
-  const total = rows.reduce((sum, row) => sum + height(row), 0);
+  const total = physicalRowsTotal(rows, cols);
   if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
   const budget = Math.max(maxRows - 1, 1);
   const visible: string[] = [];
@@ -189,7 +223,7 @@ export function tailWindowPhysical(
 ): { visible: string[]; hiddenRows: number } {
   const cols = Math.max(width - 2, 10);
   const height = (row: string) => physicalRowCount(row, cols);
-  const total = rows.reduce((sum, row) => sum + height(row), 0);
+  const total = physicalRowsTotal(rows, cols);
   if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
   const budget = Math.max(maxRows, 1);
   const visible: string[] = [];
@@ -222,63 +256,378 @@ export function tailWindowPhysical(
 export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 
 /**
- * Rows reserved below a pending tool card so the confirmation dialog's
- * COLLAPSED body (frame + title/question + 20-row body + outcome list +
- * footer ≈ 36 rows) still ends inside the viewport. Excludes any payload
- * the dialog only reveals on ctrl-s expansion — that bound lives in
- * pendingCardMaxRows.
- */
-export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
-
-/**
- * Rows a pending card's expanded confirmation dialog does not own. Above the
- * card's description rows: the banner (6), the startup notices a fresh
- * session shows (≈ 3), the prompt echo with its turn margin (2), and the
- * card's own hidden-tail and awaiting rows (2). In the dialog itself, around
- * the body: the frame's border and padding (4), title (1), body margins (2),
- * question row (1), outcome list (2), footer hint (1) ≈ 11. The sum (≈ 24,
- * padded to 26 against notice timing) is what an 80-row viewport measured:
- * at 14 the expanded tail and the outcome list ran off the bottom of the
- * screen (mem0 e2e regression).
+ * Rows a pending card's confirmation dialog does not own. Above the card's
+ * description rows: the banner (6), the startup notices a fresh session
+ * shows (≈ 3), the prompt echo with its turn margin (2), and the card's own
+ * hidden-tail and awaiting rows (2). In the dialog itself, around the body:
+ * the frame's border and padding (4), title (1), body margins (2), question
+ * row (1), outcome list (2 — 4 when a trusted folder adds the
+ * always-allow rows, a difference the padding below absorbs), footer hint
+ * (1) ≈ 11. The sum (≈ 24, padded to 26 against notice timing) is what an
+ * 80-row viewport measured: at 14 the expanded tail and the outcome list
+ * ran off the bottom of the screen (mem0 e2e regression).
+ * dialogs-confirm's EXPANDED_BODY_RESERVE_ROWS prices the same region from
+ * the dialog's side; keep the two consistent when the dialog chrome
+ * changes.
+ *
+ * The transcript share of this reserve prices only a FRESH session (the
+ * ≈ 5 rows of startup notices and prompt echo); a grown session's extra
+ * painted rows reach pendingCardMaxRows as `rowsAbove` and spend from the
+ * same region, so the card budget shrinks as the transcript grows.
  */
 export const DIALOG_EXPANDED_RESERVE_ROWS = 26;
+
+/**
+ * Collapsed row cap for a confirmation dialog's body (dialogs-confirm's
+ * TextBody and DiffBody). Longer plain-text bodies expand on ctrl-s, which
+ * is the transition pendingCardMaxRows's expanded-dialog bound keys on.
+ */
+export const CONFIRM_BODY_COLLAPSED_ROWS = 20;
+
+/**
+ * The collapsed-dialog bound's non-body rows: the transcript region above
+ * the card plus the dialog's frame, title/question, outcome list and
+ * footer. This IS the expanded reserve — both bounds price the same region
+ * and differ only in the body height charged, and making that one quantity
+ * by construction is why a body fitting the collapsed window always makes
+ * the two bounds coincide (the expanded bound only binds past the window),
+ * so dialogBodyMeasure needs no collapsed/expanded gate.
+ */
+const COLLAPSED_DIALOG_CHROME_ROWS = DIALOG_EXPANDED_RESERVE_ROWS;
+
+/**
+ * Transcript rows the reserve already prices: the startup notices a fresh
+ * session shows (≈ 3) and the prompt echo with its turn margin (2). A grown
+ * session's `rowsAbove` counts every painted transcript row outside the
+ * pending cards, so only the excess over this baseline spends from the
+ * shared region — charging the whole count would double-spend these five.
+ */
+const FRESH_TRANSCRIPT_ROWS = 5;
+
+/**
+ * Collapsed body rows of an mcp confirmation dialog — the server and tool
+ * name lines plus body margins. It is the one fixed-body dialog whose
+ * collapsed footprint is measurably smaller than the collapsed window;
+ * every other dialog can fill the window, so they charge it in full.
+ */
+const MCP_CONFIRM_BODY_ROWS = 5;
+
+/**
+ * The lone mcp pending card's minimum description budget. The mcp
+ * confirmation dialog shows only the server and tool names, so the pending
+ * card is the only surface carrying the call's arguments (R5-9) — and once
+ * the grown transcript saturates the shared region the fixed-body dialog
+ * is off the alt screen no matter what the card yields, so yielding past
+ * that point stops buying the dialog rows and only deletes the head of the
+ * payload being approved (R12-1). Eleven budget rows (≈ 1061 visible
+ * description columns at a 110-column terminal) restore the head-room the
+ * pre-overage budget measured for a ~4k-column args payload at h=80.
+ */
+export const MCP_PENDING_CARD_MIN_ROWS = 11;
 
 /**
  * Measured at a 110-column terminal the card's flex row gives the
  * description ~79 of the 108 columns capToolCardDescription budgets with
  * (the name column takes the rest), so a budget of B rows renders about
  * B / 0.73 rows. Budgeting at 0.7 keeps the estimate on the safe side of
- * that inflation across plausible name lengths.
+ * that inflation across plausible SHORT name lengths; pendingCardMaxRows
+ * tightens it per card by the name width the card actually paints (a raw
+ * mcp__server__tool name is wider than the ~32 columns 0.7 absorbs).
  */
 const CARD_DESC_WRAP_RATIO = 0.7;
 
 /**
+ * The card's flex row paints the status glyph and the tool name before the
+ * description, so the description wraps in the row's remaining columns —
+ * pendingCardMaxRows's name-aware wrap ratio expressed as a column count.
+ * transcript-view's settled-card row model prices the same header on this
+ * basis, so the budget and the row model stop disagreeing about one card
+ * (R10-1).
+ */
+export function cardDescriptionColumns(cols: number, nameCols: number): number {
+  return Math.max(
+    Math.floor(
+      cols *
+        Math.min(
+          CARD_DESC_WRAP_RATIO,
+          Math.max((cols - nameCols) / cols, 0.05),
+        ),
+    ),
+    1,
+  );
+}
+
+/**
+ * What the transcript knows about the pending call's confirmation dialog.
+ * `type` is confirmationDetails.type; `body` is the text the dialog renders
+ * for the types whose body is a plain text block (info's prompt, plan's
+ * plan, exec's command — see event-adapter's confirmationDialogBody, which
+ * mirrors dialogs-confirm's ConfirmationBody switch) — and edit's raw
+ * diff, whose tail-windowed lines wrap, so the card prices them by painted
+ * height; `extra` is the rows the dialog renders OUTSIDE the body window
+ * (info's urls block, exec's warnings, edit's fileName row and warnings,
+ * ask_user_question's opening question block); `extras` is
+ * ask_user_question's candidate question blocks — the flow paints one at a
+ * time and the wrap decides which paints tallest, so the price takes the
+ * max of the candidates at the dialog's columns (R10-1).
+ */
+export interface PendingDialogBody {
+  type?: string;
+  body?: string;
+  extra?: string;
+  extras?: string[];
+}
+
+/**
+ * The pending confirmation dialog's body in physical rows: `expanded` is
+ * the body's full height, charged by the expanded-dialog bound — or null
+ * for the fixed-body types whose dialogs render no measurable text;
+ * `collapsed` is the body height the collapsed-dialog bound charges, and is
+ * present only where it can decide the price. For a measured body the
+ * expanded bound always dominates: the two bounds subtract the same chrome
+ * quantity (COLLAPSED_DIALOG_CHROME_ROWS IS DIALOG_EXPANDED_RESERVE_ROWS)
+ * and the collapsed window never charges MORE than the full body, so the
+ * collapsed term cannot win the min and is omitted. The collapsed bound is
+ * live only for the fixed-body types and the body-less proxy.
+ *
+ * info and plan render an expandable TextBody and exec renders its command
+ * in full (no window at all), so for them the body's OWN rows decide
+ * (measured like TextBody: sanitized, split on newlines, each logical row
+ * charged its wrapped height): a many-short-line plan folds to one card row
+ * but fills the dialog, and a multi-line command folds to one card row but
+ * renders every line. Rows the dialog renders OUTSIDE the body window —
+ * info's urls block and exec's warnings, carried as `extra` — charge in
+ * addition to the measured body, the same split the render makes (TextBody
+ * windows only the prompt). The named fixed-body types return a null
+ * expansion: mcp's dialog body is two fixed lines and the card is the only
+ * surface carrying the call's arguments (R5-9); edit's dialog is a
+ * tail-windowed diff painted BELOW the fileName row and an unbounded
+ * warnings list — charged the windowed lines' PAINTED height when the
+ * diff arrives (the logical-line window wraps; R10-1), the flat collapsed
+ * window when it does not — and ask_user_question's flow paints one
+ * question block at a time, charged the painted-tallest candidate block —
+ * the wrap decides which at the dialog's columns, so the candidates arrive
+ * as `extras` and the max is taken at pricing time — with no collapsed
+ * window at all (ConfirmationBody renders no body for it). Both carry
+ * those outside-the-window rows as `extra`, charged in addition to the
+ * body: a PreToolUse 'ask' bounce can prepend hook-authored warnings of
+ * arbitrary length to an edit confirmation, and unpriced those rows push
+ * the mounted dialog's outcome list off the alt screen while the parked
+ * cards keep their budget (R7-1). Everything else — a typed
+ * confirmation whose body text never arrived, and any type this module does
+ * not know (a future ToolCallConfirmationDetails variant, a version-skewed
+ * wire event) — keeps the folded card-payload proxy: there the yield is
+ * what brings the outcome list back on screen, so the safe side is
+ * yielding.
+ */
+function dialogBodyMeasure(
+  dialog: PendingDialogBody | undefined,
+  payloadRows: number,
+  dialogWidth: number,
+  measureCap: number,
+): { expanded: number | null; collapsed?: number } {
+  const type = dialog?.type;
+  const cols = Math.max(dialogWidth - 2, 10);
+  // The painted rows these measures price are the sanitized text TextBody
+  // windows in dialogs-confirm; the TAB detab itself lives in
+  // physicalRowCount, the one measuring site every leg shares (R11-2).
+  const extraRows = (extra: string | undefined): number =>
+    extra === undefined
+      ? 0
+      : physicalRowsTotal(
+          sanitizeTerminalText(extra).split('\n'),
+          cols,
+          measureCap,
+        );
+  if (
+    (type === 'info' || type === 'plan' || type === 'exec') &&
+    dialog?.body !== undefined
+  ) {
+    const rows = physicalRowsTotal(
+      sanitizeTerminalText(dialog.body).split('\n'),
+      cols,
+      measureCap,
+    );
+    return { expanded: rows + extraRows(dialog.extra) };
+  }
+  if (type === 'mcp') {
+    return {
+      expanded: null,
+      collapsed: MCP_CONFIRM_BODY_ROWS + extraRows(dialog?.extra),
+    };
+  }
+  if (type === 'edit') {
+    // DiffBody tail-windows the diff's LOGICAL lines and those lines wrap,
+    // so the flat collapsed window under-prices a wide diff: price the same
+    // windowed lines (and the window's hidden-lines label) physically
+    // (R10-1). A diff that never arrived — a version-skewed wire event —
+    // keeps the flat-window proxy.
+    if (dialog?.body === undefined) {
+      return {
+        expanded: null,
+        collapsed: CONFIRM_BODY_COLLAPSED_ROWS + extraRows(dialog?.extra),
+      };
+    }
+    const window = tailWindow(
+      renderDiffBody(dialog.body).map((line) =>
+        line.map((span) => span.text).join(''),
+      ),
+      CONFIRM_BODY_COLLAPSED_ROWS,
+    );
+    return {
+      expanded: null,
+      collapsed:
+        extraRows(dialog?.extra) +
+        physicalRowsTotal(window.visible, cols, measureCap) +
+        (window.hiddenCount > 0 ? 1 : 0),
+    };
+  }
+  if (type === 'ask_user_question') {
+    // ConfirmationBody renders nothing for ask — the flow paints one
+    // question block at a time — so there is no collapsed body window to
+    // charge: the price covers the block that paints TALLEST at these
+    // columns, and the wrap decides which candidate that is, so the
+    // adapter carries every block and the max is taken here where the
+    // columns live (R10-1). A wire that predates the candidates falls back
+    // to the single extra.
+    const blocks = dialog?.extras;
+    if (blocks && blocks.length > 0) {
+      return {
+        expanded: null,
+        collapsed: Math.max(...blocks.map((block) => extraRows(block))),
+      };
+    }
+    return { expanded: null, collapsed: extraRows(dialog?.extra) };
+  }
+  return { expanded: payloadRows, collapsed: CONFIRM_BODY_COLLAPSED_ROWS };
+}
+
+/**
  * Description budget for a pending tool card, bounded three ways: never
- * past the ink-parity history cap, never so tall that the confirmation
- * dialog's collapsed body overflows the viewport, and — when the payload
- * is wide enough that the dialog will render it expanded (hook-forced
- * confirmations duplicate the card's description) — shrunk so the expanded
- * body plus chrome still fits. `descriptionWidth` is the display width of
- * the text the card would print; short terminals fall back to the settled
- * cap.
+ * past the ink-parity history cap, never so tall that the pending cards
+ * plus the confirmation dialog's collapsed body overflow the viewport, and
+ * — when the dialog will show a taller body on ctrl-s expansion (a
+ * hook-forced info confirmation duplicates the card's description; a plan
+ * body is much taller than its folded card row) — shrunk so the expanded
+ * body plus chrome still fits. Both dialog bounds are priced in budget
+ * rows: a budget row renders ~1/0.7 physical rows, so the physical rows the
+ * region above the card and the dialog occupy are converted by the card's
+ * wrap ratio (CARD_DESC_WRAP_RATIO tightened by `nameWidth`, the display
+ * columns the card's name plus its trailing space occupy — default 0, the
+ * short-name ceiling) — spending them unconverted over-budgets the card
+ * ~1.37x and the dialog's question row and outcome list leave the screen —
+ * and both bounds are shared between the `pendingCount` cards awaiting
+ * approval, since N parked calls each painting the full region push the
+ * first call's dialog off the alt screen. `descriptionWidth` is the display
+ * width of the text the card would print; `rowsAbove` is the transcript's
+ * painted height outside the pending cards (transcript-view's per-item
+ * model) — the reserve prices a fresh session's five rows, so only the
+ * overage spends from the region. A lone pending card never drops
+ * below the settled cap (the short-terminal fallback) — unless its dialog
+ * is mcp: that dialog shows only the server and tool names, so the card is
+ * the only surface carrying the call's arguments (R5-9), and past
+ * transcript saturation the fixed-body dialog is off the alt screen
+ * whatever the card yields, so the floor lifts to MCP_PENDING_CARD_MIN_ROWS
+ * — yielding further stops buying the dialog rows and only deletes the
+ * head of the payload being approved (R12-1). Once siblings
+ * share the region the floor drops to one row — a floor at the settled cap
+ * would lift the divided bound back up from the batch size where it falls
+ * below it, and N cards at the cap grow the region linearly past the
+ * viewport with nothing left to give. Before the division the shared region
+ * also spends each sibling card's own chrome — the hidden-tail label and
+ * awaiting row a parked card paints outside its budgeted description rows,
+ * two rows per card past the first (the reserve already charges one
+ * card's) — or eight cards priced at 4 budget rows would still paint 7 rows
+ * each and overflow a 49-row region.
  */
 export function pendingCardMaxRows(
   terminalHeight: number,
   descriptionWidth: number,
   width: number,
+  dialog?: PendingDialogBody,
+  pendingCount = 1,
+  nameWidth = 0,
+  rowsAbove = 0,
 ): number {
   const h = Math.floor(terminalHeight);
-  const payloadRows = Math.ceil(
-    descriptionWidth / Math.max(width - STATUS_INDICATOR_WIDTH, 10),
+  const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
+  const payloadRows = Math.ceil(descriptionWidth / cols);
+  // A budget row buys only (cols - nameWidth) description columns — the
+  // card's flex row paints the status glyph and the name first — so the
+  // physical region converts at the card's OWN wrap ratio, not the fixed
+  // 0.7 ceiling measured on a short display name: an mcp card renders its
+  // raw mcp__<server>__<tool> name (never in TOOL_DISPLAY_BY_NAME), and at
+  // a 42-column name the fixed ratio hands back 34 rows that paint ~54
+  // physical rows against the 49-row region, pushing the mounted dialog's
+  // outcome list off the alt screen (R6-1). The floor keeps a name wider
+  // than the row yielding some budget.
+  const wrapRatio = Math.min(
+    CARD_DESC_WRAP_RATIO,
+    Math.max((cols - nameWidth) / cols, 0.05),
   );
+  // The card's payload folds on the transcript's width, but the dialog's
+  // body measures on the dialog's own content columns: the frame spends
+  // dialogs-shared's DIALOG_FRAME_CHROME_COLUMNS (one column of border and
+  // one of padding on each side), and start-opentui-ui passes
+  // availableWidth as terminalWidth - 4 — so the dialog's column basis here
+  // IS width (dialogWidth = width + 2, minus the headWindowPhysical-style
+  // measure's own 2 columns), the same basis dialogs-confirm's TextBody
+  // windows on. The measure stops once the count can no longer change the
+  // clamped outcome: every total past
+  // h - DIALOG_EXPANDED_RESERVE_ROWS bottoms the expanded bound out at the
+  // floor.
+  const body = dialogBodyMeasure(
+    dialog,
+    payloadRows,
+    width + 2,
+    Math.max(h - DIALOG_EXPANDED_RESERVE_ROWS, CONFIRM_BODY_COLLAPSED_ROWS),
+  );
+  // Each parked card also paints its hidden-tail label and awaiting row
+  // OUTSIDE the budgeted description rows; the reserve charges those two
+  // chrome rows once, so every sibling past the first spends them from the
+  // shared region before it is divided (eight cards priced at 4 budget rows
+  // would otherwise paint 7 rows each and overflow a 49-row region).
+  const siblingChromeRows = Math.max(pendingCount - 1, 0) * 2;
+  // The reserve prices the transcript region at its fresh-session height;
+  // a grown session's extra painted rows (rowsAbove past the baseline)
+  // spend from the same region, or the card keeps budget rows the viewport
+  // no longer has and the mounted dialog's outcome list leaves the alt
+  // screen (R2-2).
+  const transcriptOverage = Math.max(rowsAbove - FRESH_TRANSCRIPT_ROWS, 0);
+  const expandedDialogBound =
+    body.expanded === null
+      ? Number.POSITIVE_INFINITY
+      : Math.floor(
+          ((h -
+            DIALOG_EXPANDED_RESERVE_ROWS -
+            body.expanded -
+            siblingChromeRows -
+            transcriptOverage) *
+            wrapRatio) /
+            Math.max(pendingCount, 1),
+        );
+  const collapsedDialogBound =
+    body.collapsed === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.floor(
+          ((h -
+            COLLAPSED_DIALOG_CHROME_ROWS -
+            body.collapsed -
+            siblingChromeRows -
+            transcriptOverage) *
+            wrapRatio) /
+            Math.max(pendingCount, 1),
+        );
   return Math.max(
-    TOOL_CARD_DESCRIPTION_ROWS,
+    pendingCount > 1
+      ? 1
+      : dialog?.type === 'mcp'
+        ? MCP_PENDING_CARD_MIN_ROWS
+        : TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
       maxHistoryItemRows(terminalHeight),
-      h - PENDING_CARD_VIEWPORT_RESERVE_ROWS,
-      Math.floor(
-        (h - DIALOG_EXPANDED_RESERVE_ROWS - payloadRows) * CARD_DESC_WRAP_RATIO,
-      ),
+      collapsedDialogBound,
+      expandedDialogBound,
     ),
   );
 }
@@ -301,7 +650,16 @@ export function capToolCardDescription(
   const rows = Math.ceil((nameCols + getCachedStringWidth(description)) / cols);
   if (rows <= maxRows) return { description, hiddenRows: 0 };
   const descRows = Math.max(maxRows - 1, 1);
-  const visibleCols = Math.max(descRows * cols - nameCols, 0);
+  // Floor at one full row of columns only where the exact slice is empty:
+  // the sibling division can drop the budget to a single row, where a
+  // display name wider than the row would otherwise zero the slice and
+  // DELETE the description — the only surface carrying an mcp call's
+  // arguments (R7-2), so the name then shares the row with whatever
+  // description fits. Applied unconditionally the floor overrides a
+  // positive slice too, and the card paints name + a full-row description
+  // — 2 physical rows against a budget that certified 1 (R11-1).
+  const exactCols = descRows * cols - nameCols;
+  const visibleCols = exactCols > 0 ? exactCols : cols;
   return {
     description: sliceRowToWidth(description, visibleCols, 'head'),
     hiddenRows: Math.max(rows - descRows, 1),
@@ -352,7 +710,16 @@ export function toolCardSummarySuffix(
  * sequences and bare control bytes (model-controlled args must not reach
  * the terminal raw). */
 export function toolCardText(v: string): string {
-  return sanitizeMultilineForDisplay(v.replace(/\s*\n\s*/g, ' ').trim());
+  // Detab here, not in the cap: capToolCardDescription slices this same
+  // string, and the renderer advances TAB 2 columns while string widths
+  // count it as 0 — the slice and the painted card row must agree on one
+  // text (R11-2).
+  return sanitizeMultilineForDisplay(
+    v
+      .replace(/\s*\n\s*/g, ' ')
+      .replace(/\t/g, '  ')
+      .trim(),
+  );
 }
 
 export function toolCardDescription(rawName: string, args?: string): string {
@@ -551,7 +918,7 @@ function TodoItemRow({ todo }: { todo: TodoItem }) {
 }
 
 /** ink AnsiOutput DEFAULT_HEIGHT (components/AnsiOutput.tsx). */
-const ANSI_DEFAULT_HEIGHT = 24;
+export const ANSI_DEFAULT_HEIGHT = 24;
 
 /**
  * Line-level truncate (ink Text wrap="truncate" parity — a hard cut, no

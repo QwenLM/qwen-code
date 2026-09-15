@@ -65,6 +65,406 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ).toEqual([{ type: 'tool-end', id: 'c1', success: true, summary: 'ok' }]);
   });
 
+  it('carries the confirmation type and dialog body on confirm events', () => {
+    // pendingCardMaxRows prices the card against the dialog's own body:
+    // info/plan render an expandable TextBody and exec renders its command
+    // in full, so the confirm event must carry the type and (for them) the
+    // body text.
+    const map = createEventMapper();
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c1', name: 'exit_plan_mode' },
+          details: {
+            title: 'Approve this plan?',
+            type: 'plan',
+            plan: 'step one\nstep two',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c1',
+        tool: 'exit_plan_mode',
+        title: 'Approve this plan?',
+        confirmType: 'plan',
+        confirmBody: 'step one\nstep two',
+      },
+    ]);
+    // mcp confirmations have no expandable body: type only, no body text.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c2', name: 'mcp__fs__write_file' },
+          details: {
+            title: 'Allow?',
+            type: 'mcp',
+            serverName: 'fs',
+            toolName: 'write_file',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c2',
+        tool: 'mcp__fs__write_file',
+        title: 'Allow?',
+        confirmType: 'mcp',
+        confirmBody: undefined,
+      },
+    ]);
+    // A hook-forced info confirmation carries its prompt as the body: the
+    // core scheduler's PreToolUse 'ask' bounce builds { type: 'info',
+    // prompt: hookReason }, and the pending card prices the dialog's
+    // expandable body against it.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c3', name: 'mcp__fs__write_file' },
+          details: {
+            title: 'Hook requested confirmation to run mcp__fs__write_file',
+            type: 'info',
+            prompt: 'line one\nline two',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c3',
+        tool: 'mcp__fs__write_file',
+        title: 'Hook requested confirmation to run mcp__fs__write_file',
+        confirmType: 'info',
+        confirmBody: 'line one\nline two',
+      },
+    ]);
+    // An exec confirmation carries its command: the dialog renders it in
+    // full with no collapsed window, so the card prices the real body
+    // newline-aware instead of the folded card-payload proxy.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c4', name: 'run_shell_command' },
+          details: {
+            title: 'Run this command?',
+            type: 'exec',
+            command: 'echo hi\necho bye',
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c4',
+        tool: 'run_shell_command',
+        title: 'Run this command?',
+        confirmType: 'exec',
+        confirmBody: 'echo hi\necho bye',
+      },
+    ]);
+    // An info dialog renders a `URLs to fetch:` block OUTSIDE the prompt's
+    // window (one margin row, one header row, one row per URL — web_fetch
+    // always produces this shape), so the block travels as its own field:
+    // the dialog's TextBody windows only the prompt, and the block's rows
+    // must charge in addition to the body, not inside the same string.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c5', name: 'web_fetch' },
+          details: {
+            title: 'Confirm Web Fetch',
+            type: 'info',
+            prompt:
+              'Fetch content from https://example.com/docs and process with: summarize',
+            urls: ['https://example.com/docs'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c5',
+        tool: 'web_fetch',
+        title: 'Confirm Web Fetch',
+        confirmType: 'info',
+        confirmBody:
+          'Fetch content from https://example.com/docs and process with: summarize',
+        confirmExtra: '\nURLs to fetch:\n - https://example.com/docs',
+      },
+    ]);
+    // The dialog's displayUrls predicate: a single URL identical to the
+    // prompt would be listed twice, so no block renders and none is priced.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c6', name: 'web_fetch' },
+          details: {
+            title: 'Confirm Web Fetch',
+            type: 'info',
+            prompt: 'https://example.com',
+            urls: ['https://example.com'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c6',
+        tool: 'web_fetch',
+        title: 'Confirm Web Fetch',
+        confirmType: 'info',
+        confirmBody: 'https://example.com',
+        confirmExtra: undefined,
+      },
+    ]);
+    // An exec dialog renders one row per warning below the command —
+    // outside any body window — so the rows join the priced body.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c7', name: 'run_shell_command' },
+          details: {
+            title: 'Confirm Shell Command',
+            type: 'exec',
+            command: 'echo $(date)',
+            warnings: ['Command substitution detected'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c7',
+        tool: 'run_shell_command',
+        title: 'Confirm Shell Command',
+        confirmType: 'exec',
+        confirmBody: 'echo $(date)',
+        confirmExtra: '⚠ Command substitution detected',
+      },
+    ]);
+    // An edit dialog paints the fileName row and one ⚠ row per warning
+    // ABOVE its tail-windowed diff, so those rows travel as the extra
+    // (R7-1) — and the diff itself travels as the body so the pending card
+    // prices the windowed lines at their painted (wrapping) height instead
+    // of a flat window charge (R10-1).
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c8', name: 'edit' },
+          details: {
+            title: 'Apply this change?',
+            type: 'edit',
+            fileName: 'a.txt',
+            fileDiff: '@@ -1,1 +1,1 @@',
+            warnings: ['Exact shell command: `ls`'],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c8',
+        tool: 'edit',
+        title: 'Apply this change?',
+        confirmType: 'edit',
+        confirmBody: '@@ -1,1 +1,1 @@',
+        confirmExtra: 'a.txt\n⚠ Exact shell command: `ls`',
+      },
+    ]);
+    // An ask_user_question dialog has no body window at all: the flow
+    // paints one block per question (header, question text, option labels),
+    // so the candidate blocks travel as the extras — which of them paints
+    // tallest is a wrap question only the pricing site's columns answer —
+    // and the extra keeps the block the flow opens with.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c9', name: 'ask_user_question' },
+          details: {
+            title: 'Answer?',
+            type: 'ask_user_question',
+            questions: [
+              {
+                header: 'Scope',
+                question: 'Which scope?',
+                options: [{ label: 'This file' }, { label: 'Workspace' }],
+              },
+            ],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c9',
+        tool: 'ask_user_question',
+        title: 'Answer?',
+        confirmType: 'ask_user_question',
+        confirmExtra: '\nScope (1/1)\nWhich scope?\n\nThis file\nWorkspace',
+        confirmExtras: ['\nScope (1/1)\nWhich scope?\n\nThis file\nWorkspace'],
+      },
+    ]);
+  });
+
+  it('prices the tallest ask_user_question block, not the sum (R10-1)', () => {
+    // AskUserQuestionFlow paints ONE question block at a time, so the
+    // card's static price covers whichever step is showing — the tallest
+    // block. Summing every block charged rows the dialog never paints
+    // together and shrank the card's budget for nothing. Which block paints
+    // tallest is a wrap question, though, and this module has no columns to
+    // answer it with: the candidates travel as the extras and the price
+    // takes the max at the dialog's columns, while the extra keeps the
+    // block the flow opens with.
+    const map = createEventMapper();
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c10', name: 'ask_user_question' },
+          details: {
+            title: 'Answer?',
+            type: 'ask_user_question',
+            questions: [
+              {
+                header: 'Pick',
+                question: 'Which one?',
+                options: [{ label: 'a' }, { label: 'b' }, { label: 'c' }],
+                multiSelect: true,
+              },
+              {
+                header: 'Confirm',
+                question: 'Sure?',
+                options: [{ label: 'yes' }],
+              },
+            ],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c10',
+        tool: 'ask_user_question',
+        title: 'Answer?',
+        confirmType: 'ask_user_question',
+        confirmExtra: '\nPick (1/2)\nWhich one?\n\n[ ] a\n[ ] b\n[ ] c',
+        confirmExtras: [
+          '\nPick (1/2)\nWhich one?\n\n[ ] a\n[ ] b\n[ ] c',
+          '\nConfirm (2/2)\nSure?\n\nyes',
+        ],
+      },
+    ]);
+
+    // The discriminating case: the FIRST block has fewer logical lines but
+    // a long wrapping question, so at the dialog's columns it paints taller
+    // than the many-option block. A logical-line comparator picks the
+    // second block here and the price would under-cover the step the flow
+    // opens with — so the selection must not key on line count: the extra
+    // is the first block, and the painted-tallest is settled from the
+    // candidates where the columns live.
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c11', name: 'ask_user_question' },
+          details: {
+            title: 'Answer?',
+            type: 'ask_user_question',
+            questions: [
+              {
+                header: 'Scope',
+                question: `Which scope? ${'x'.repeat(900)}`,
+                options: [{ label: 'This file' }],
+              },
+              {
+                header: 'Details',
+                question: 'Sure?',
+                options: [
+                  { label: 'a' },
+                  { label: 'b' },
+                  { label: 'c' },
+                  { label: 'd' },
+                  { label: 'e' },
+                  { label: 'f' },
+                ],
+              },
+            ],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c11',
+        tool: 'ask_user_question',
+        title: 'Answer?',
+        confirmType: 'ask_user_question',
+        confirmExtra: `\nScope (1/2)\nWhich scope? ${'x'.repeat(900)}\n\nThis file`,
+        confirmExtras: [
+          `\nScope (1/2)\nWhich scope? ${'x'.repeat(900)}\n\nThis file`,
+          '\nDetails (2/2)\nSure?\n\na\nb\nc\nd\ne\nf',
+        ],
+      },
+    ]);
+  });
+
+  it('fails the dialog body back to the payload proxy on version-skewed details (R5-2)', () => {
+    // A field present in an unexpected shape means the rest of the dialog
+    // may differ too (a skewed 'exec' could window its command): the
+    // confirm event keeps the type but drops body and extra to undefined,
+    // so the pending card prices its own folded payload. Asserted with
+    // toBeUndefined — toEqual ignores undefined keys and would pass
+    // vacuously.
+    const map = createEventMapper();
+    const confirmOf = (details: Record<string, unknown>) =>
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'sk1', name: 'some_tool' },
+          details: { title: 'Confirm?', ...details },
+        },
+      } as unknown as AnyEv)[0] as {
+        confirmType?: string;
+        confirmBody?: unknown;
+        confirmExtra?: unknown;
+      };
+    for (const [details, type] of [
+      [{ type: 'info', prompt: 42 }, 'info'],
+      [{ type: 'info', prompt: 'x', urls: 'https://example.com' }, 'info'],
+      [{ type: 'info', prompt: 'x', urls: ['a', 7] }, 'info'],
+      [{ type: 'plan', plan: null }, 'plan'],
+      [{ type: 'exec', command: 'ls', warnings: 'nope' }, 'exec'],
+      [{ type: 'exec', command: 42 }, 'exec'],
+      [{ type: 'edit', fileName: 42 }, 'edit'],
+      [{ type: 'edit', fileName: 'a.txt', warnings: 'nope' }, 'edit'],
+      [{ type: 'edit', fileName: 'a.txt', fileDiff: 42 }, 'edit'],
+      [{ type: 'ask_user_question', questions: 'nope' }, 'ask_user_question'],
+      [
+        {
+          type: 'ask_user_question',
+          questions: [{ question: 'q', header: 'h', options: [42] }],
+        },
+        'ask_user_question',
+      ],
+    ] as const) {
+      const ev = confirmOf(details);
+      expect(ev.confirmType).toBe(type);
+      expect(ev.confirmBody).toBeUndefined();
+      expect(ev.confirmExtra).toBeUndefined();
+    }
+  });
+
   it('carries FileDiff resultDisplay as a structured diff payload', () => {
     const map = createEventMapper();
     const fileDiff = '@@ -1,1 +1,1 @@\n-old\n+new';

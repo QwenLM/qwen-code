@@ -16,19 +16,22 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
+  ANSI_DEFAULT_HEIGHT,
   AnsiRows,
   TOOL_CARD_DESCRIPTION_ROWS,
   TodoRows,
   assistantMessageMeta,
   capToolCardDescription,
+  cardDescriptionColumns,
   hiddenLinesLabel,
   hiddenTailLinesLabel,
   maxHistoryItemRows,
   pendingCardMaxRows,
+  physicalRowsTotal,
   selectionProps,
   STATUS_INDICATOR_WIDTH,
   tailWindow,
@@ -79,6 +82,16 @@ export interface TranscriptViewProps {
   availableTerminalHeight?: number;
   /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
   thoughtsExpanded?: boolean;
+  /** The callId whose confirmation dialog the shell has mounted
+   * (waitingToolCalls[0] — opentui-app-shell renders that call's dialog), so
+   * parked cards price against THAT dialog rather than the transcript's
+   * first parked item. */
+  activeWaitingCallId?: string;
+  /** False when the shell's popup slot is preempted by the gated-MCP
+   * approval dialog, which outranks the tool confirmation (opentui-app-shell's
+   * popup rank): no tool dialog is mounted then, so parked cards must price
+   * the body-less payload proxy instead of a dialog that is not painting. */
+  pendingDialogMounted?: boolean;
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -100,13 +113,411 @@ function itemMarginTop(kind: LiveHistoryItem['kind']): number {
   }
 }
 
+/** Physical rows `text` paints soft-wrapped at `cols` columns. */
+function paintedTextRows(text: string, cols: number): number {
+  return physicalRowsTotal(text.split('\n'), Math.max(cols, 10));
+}
+
+/** The settled-cap card a resolved call paints: name + (capped)
+ * description rows, the hidden-tail label, then the result body. */
+function toolItemRows(
+  item: LiveToolItem,
+  width: number,
+  maxRows: number,
+): number {
+  const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
+  const name = toolCardName(item.tool);
+  const description =
+    item.description ?? toolCardDescription(item.tool, item.args);
+  const text = toolCardText(description);
+  const cap = capToolCardDescription(
+    text,
+    name,
+    width,
+    TOOL_CARD_DESCRIPTION_ROWS,
+  );
+  const nameCols = getCachedStringWidth(name) + 1;
+  const suffix = toolCardSummarySuffix(item.done, item.summary);
+  // The header's flex row paints the status glyph and the name before the
+  // description wraps, so the description occupies the name-aware column
+  // share the budget itself converts with (messages.tsx's
+  // cardDescriptionColumns) — the raw-cols measure under-counts every
+  // capped card that share widens (R10-1).
+  const descCols = cardDescriptionColumns(cols, nameCols);
+  let rows =
+    Math.max(
+      1,
+      Math.ceil(
+        ((cap.description ? getCachedStringWidth(cap.description) : 0) +
+          getCachedStringWidth(suffix)) /
+          descCols,
+      ),
+    ) + (cap.hiddenRows > 0 ? 1 : 0);
+  // ToolCardBody, indented by the same status column.
+  if (item.todos) {
+    rows += item.todos.reduce(
+      (sum, todo) => sum + paintedTextRows(todo.content, cols - 3),
+      0,
+    );
+  } else if (item.ansi) {
+    const window = tailWindow(item.ansi.grid, ANSI_DEFAULT_HEIGHT);
+    rows +=
+      window.visible.length +
+      (window.hiddenCount > 0 ? 1 : 0) +
+      ((item.ansi.totalLines ?? 0) > ANSI_DEFAULT_HEIGHT ||
+      (item.ansi.totalBytes ?? 0) > 0
+        ? 1
+        : 0);
+  } else if (item.diff) {
+    const window = tailWindow(renderDiffBody(item.diff.fileDiff), maxRows);
+    rows +=
+      window.visible.reduce(
+        (sum, line) =>
+          sum + paintedTextRows(line.map((span) => span.text).join(''), cols),
+        0,
+      ) + (window.hiddenCount > 0 ? 1 : 0);
+  } else {
+    const output = truncateResultDisplayChars(item.output);
+    if (output) {
+      const window = tailWindow(
+        sanitizeTerminalText(output).split('\n'),
+        maxRows,
+      );
+      rows +=
+        window.visible.reduce(
+          (sum, line) => sum + paintedTextRows(line, cols),
+          0,
+        ) + (window.hiddenCount > 0 ? 1 : 0);
+      if (item.visionBridgeNotice) {
+        rows += paintedTextRows(
+          sanitizeTerminalText(item.visionBridgeNotice),
+          cols,
+        );
+      }
+    }
+  }
+  return rows;
+}
+
+/** GoalCard / LegacyGoalCard painted rows (describe* parity). */
+function goalItemRows(
+  item: Extract<LiveHistoryItem, { kind: 'goal' }>,
+  width: number,
+): number {
+  if (item.legacy) {
+    const view = describeLegacyGoalCard(item.legacy);
+    if (view.state === 'hidden') return 0;
+    let rows = 1 + paintedTextRows(view.condition, width - 2);
+    if (view.state === 'checking' && view.judgeReason) {
+      rows += paintedTextRows(view.judgeReason, width - 2);
+    }
+    if (view.state === 'card' && view.lastCheck) {
+      rows += paintedTextRows(view.lastCheck, width - 2);
+    }
+    return rows;
+  }
+  const view = describeGoalCard(item.snapshot, item.cause);
+  if (view.state === 'hidden') return 0;
+  if (view.state === 'cleared') return 1;
+  let rows = paintedTextRows(
+    `${view.icon} ${view.title}${view.subtitle ? ` · ${view.subtitle}` : ''}`,
+    width,
+  );
+  rows += paintedTextRows(view.objective, width - 2);
+  if (view.reason) rows += paintedTextRows(view.reason, width - 2);
+  if (view.checkpoint) rows += paintedTextRows(view.checkpoint, width - 2);
+  return rows;
+}
+
+/**
+ * ArenaSessionCard painted rows (ArenaSessionRow parity): every line the
+ * card paints, composed the way the row composes it — the flat per-line
+ * charge dropped the approach lines' diff-stat suffix and never wrapped
+ * the status, file-group or token lines (R10-1).
+ */
+function arenaSessionRows(item: LiveArenaSessionItem, width: number): number {
+  const { sessionStatus, agents } = item;
+  const comparing = sessionStatus === 'idle' || sessionStatus === 'completed';
+  const title = comparing
+    ? 'Arena Comparison Summary'
+    : sessionStatus === 'cancelled'
+      ? 'Arena Cancelled'
+      : 'Arena Failed';
+  if (!comparing) return paintedTextRows(title, width);
+  const branch = (index: number, total: number) =>
+    index === total - 1 ? '└─' : '├─';
+  const n = agents.length;
+  const groups = arenaFileGroups(agents);
+  let rows =
+    paintedTextRows(title, width) + paintedTextRows('Status Summary:', width);
+  agents.forEach((agent, index) => {
+    const { text } = getArenaStatusLabel(agent.status);
+    rows += paintedTextRows(
+      `  ${branch(index, n)} ${sanitizeTerminalText(agent.label)}: ${text}`,
+      width,
+    );
+  });
+  rows += paintedTextRows('Files Modified:', width);
+  groups.forEach((group, index) => {
+    rows += paintedTextRows(
+      `  ${branch(index, groups.length)} ${sanitizeTerminalText(group.label)}: ${sanitizeTerminalText(arenaFileList(group.files))}`,
+      width,
+    );
+  });
+  rows += paintedTextRows('Approach Summary:', width);
+  agents.forEach((agent, index) => {
+    const stats = arenaDiffStats(agent);
+    const files = arenaAgentFiles(agent).length;
+    const summary = agent.approachSummary ?? 'No approach summary available.';
+    rows += paintedTextRows(
+      `  ${branch(index, n)} ${sanitizeTerminalText(agent.label)}: ${sanitizeTerminalText(summary)} ` +
+        `(${files} ${files === 1 ? 'file' : 'files'}, +${stats.additions} -${stats.deletions} lines, ` +
+        `${agent.toolCalls} ${agent.toolCalls === 1 ? 'tool call' : 'tool calls'})`,
+      width,
+    );
+  });
+  rows += paintedTextRows('Token Efficiency:', width);
+  agents.forEach((agent, index) => {
+    rows += paintedTextRows(
+      `  ${branch(index, n)} ${sanitizeTerminalText(agent.label)}: ${agent.outputTokens.toLocaleString()} tokens · runtime ${formatDuration(agent.durationMs)}`,
+      width,
+    );
+  });
+  rows += paintedTextRows(
+    `Run /arena select${sessionStatus === 'idle' ? ' to view detailed diff or pick a winner.' : ' to pick a winner.'}`,
+    width,
+  );
+  return rows;
+}
+
+/**
+ * Painted-height model for one transcript item — the input
+ * pendingCardMaxRows's `rowsAbove` prices (R2-2): the reserve assumes a
+ * fresh session's transcript, so the budget can only shrink with the
+ * session if someone measures what the transcript actually paints. Mirrors
+ * the render row by row, margins included, and biases toward over-counting
+ * (an over-count only shrinks a card's description, while an under-count
+ * keeps budget rows the viewport no longer has and pushes the mounted
+ * dialog's outcome list off the alt screen). Known under-count gaps: a
+ * thought opened by mouse click (the view knows only the global ctrl+o
+ * toggle) paints its body uncounted, markdown block spacing the
+ * source-line measure cannot see, and the renderer's word wrap against
+ * this model's character wrap (an unbroken token past the wrap column
+ * lands differently). Pending cards are excluded by the caller:
+ * their chrome rides the reserve / sibling charge and their descriptions
+ * ARE the budget being priced.
+ */
+function transcriptItemRows(
+  item: LiveHistoryItem,
+  width: number,
+  maxRows: number,
+  thoughtsExpanded: boolean,
+): number {
+  const margin = itemMarginTop(item.kind);
+  switch (item.kind) {
+    case 'user':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'assistant':
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(
+            assistantMarkdownForRender(item.text, item.streaming),
+          ),
+          width - 2,
+        )
+      );
+    case 'thinking': {
+      // A live thought streams open; a committed one collapses to its
+      // header unless the global toggle is on. The header is an unpadded
+      // wrapping text (a duration-labelled one is ~40 columns), so price
+      // the string ThinkingRow builds — a flat row under-counts it past
+      // the wrap column (R10-1).
+      const open = thoughtsExpanded || !item.done;
+      const meta = thinkingMeta(item.done, open, false, item.durationMs);
+      return (
+        margin +
+        paintedTextRows(
+          `${meta.icon} ${meta.label}${meta.hint ? ` ${meta.hint}` : ''}`,
+          width,
+        ) +
+        (open && item.text
+          ? paintedTextRows(sanitizeTerminalText(item.text), width)
+          : 0)
+      );
+    }
+    case 'tool':
+      return margin + toolItemRows(item, width, maxRows);
+    case 'task':
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(
+            `${item.name} ${item.description}${item.stats ? ` · ${item.stats}` : ''}`,
+          ),
+          width - 2,
+        ) +
+        item.progress.reduce(
+          (sum, line) =>
+            sum + paintedTextRows(sanitizeTerminalText(line), width),
+          0,
+        )
+      );
+    case 'image':
+      return margin + 1;
+    case 'compaction':
+      return (
+        margin +
+        paintedTextRows(getCompressionStatusText(item.compression), width - 2)
+      );
+    case 'info':
+    case 'warning':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'error':
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(item.text) +
+            (item.hint ? ` (${sanitizeTerminalText(item.hint)})` : ''),
+          width - 2,
+        )
+      );
+    case 'retry': {
+      // The countdown row is an unpadded wrapping text like the message
+      // row: price the string RetryRows builds at its mount-time (longest)
+      // value — the remaining seconds only tick down (R10-1).
+      const countdownSec = Math.max(0, Math.ceil(item.delayMs / 1000));
+      return (
+        margin +
+        paintedTextRows(
+          sanitizeTerminalText(
+            item.message ??
+              `Attempt ${item.attempt} of ${item.maxRetries} failed`,
+          ),
+          width,
+        ) +
+        paintedTextRows(
+          `↻ Retrying in ${countdownSec}s… (attempt ${item.attempt} of ${item.maxRetries})`,
+          width,
+        )
+      );
+    }
+    case 'stop-hook':
+      return (
+        margin +
+        1 +
+        paintedTextRows(sanitizeTerminalText(item.message), width - 2)
+      );
+    case 'goal':
+      return margin + goalItemRows(item, width);
+    case 'away-recap':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 9)
+      );
+    case 'user-shell':
+      return (
+        margin + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'advisor':
+      return (
+        margin + 1 + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
+      );
+    case 'arena-agent': {
+      // ArenaAgentRow paints THREE unconditional rows — status, Tokens,
+      // Tool Calls — plus the error row; one flat row for the Tokens /
+      // Tool Calls pair priced every card a row low (R10-1).
+      const { agent } = item;
+      const { icon, text } = getArenaStatusLabel(agent.status);
+      const failed = agent.failedToolCalls > 0;
+      return (
+        margin +
+        paintedTextRows(
+          `${icon} ${sanitizeTerminalText(agent.label)} · ${text} · ${formatDuration(agent.durationMs)}`,
+          width,
+        ) +
+        paintedTextRows(
+          `  Tokens: ${agent.totalTokens.toLocaleString()} (in ${agent.inputTokens.toLocaleString()}, out ${agent.outputTokens.toLocaleString()})`,
+          width,
+        ) +
+        paintedTextRows(
+          `  Tool Calls: ${agent.toolCalls}${failed ? ` (✓ ${agent.successfulToolCalls} ✕ ${agent.failedToolCalls})` : ''}`,
+          width,
+        ) +
+        (agent.error
+          ? paintedTextRows(`  ${sanitizeTerminalText(agent.error)}`, width)
+          : 0)
+      );
+    }
+    case 'arena-session':
+      return margin + arenaSessionRows(item, width);
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
+  }
+}
+
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
   thoughtsExpanded = false,
+  activeWaitingCallId,
+  pendingDialogMounted = true,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  // Pending tool cards share the transcript region with the confirmation
+  // dialog: each budgets its description against the sibling count so N
+  // parked calls cannot each claim the whole viewport.
+  const pendingItems = items.filter(
+    (item): item is LiveToolItem =>
+      item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+  );
+  const pendingCount = pendingItems.length;
+  // The painted rows the transcript spends outside the pending cards: the
+  // reserve pendingCardMaxRows prices against assumes a fresh session, so
+  // the budget can only shrink with the session when the grown transcript's
+  // height reaches it (R2-2). Rows below the cards count too — the
+  // confirmation dialog renders beneath the whole transcript.
+  const rowsAbove = useMemo(() => {
+    let total = 0;
+    for (const item of items) {
+      if (item.kind === 'tool' && item.confirm === 'pending' && !item.done)
+        continue;
+      total += transcriptItemRows(
+        item,
+        availableWidth,
+        maxRows,
+        thoughtsExpanded,
+      );
+    }
+    return total;
+  }, [items, availableWidth, maxRows, thoughtsExpanded]);
+  // At most one TOOL confirmation dialog is ever mounted — the shell
+  // renders waitingToolCalls[0] — but the gated-MCP approval dialog outranks
+  // it in the shell's popup rank, and while it owns the slot no tool dialog
+  // paints (reported here as pendingDialogMounted === false). The two
+  // orderings can also diverge: a resolved call's card updates in place at
+  // its transcript index while a re-parked call appends at the waiting
+  // list's end, so the mounted call can be a LATER transcript item. Every
+  // parked card budgets against the MOUNTED dialog's body rather than a
+  // hypothetical one of its own: a parked mcp sibling of an exec call must
+  // yield for the command the mounted dialog renders in full — and when no
+  // tool dialog is mounted at all, the body-less payload proxy keeps the
+  // cards on the yielding side.
+  const mountedPending =
+    pendingDialogMounted === false
+      ? undefined
+      : (pendingItems.find((item) => item.id === activeWaitingCallId) ??
+        pendingItems[0]);
+  const pendingDialogType = mountedPending?.confirmType;
+  const pendingDialogBody = mountedPending?.confirmBody;
+  const pendingDialogExtra = mountedPending?.confirmExtra;
+  const pendingDialogExtras = mountedPending?.confirmExtras;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -120,6 +531,12 @@ export function OpenTuiTranscriptView({
             maxRows={maxRows}
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
+            pendingCount={pendingCount}
+            pendingDialogType={pendingDialogType}
+            pendingDialogBody={pendingDialogBody}
+            pendingDialogExtra={pendingDialogExtra}
+            pendingDialogExtras={pendingDialogExtras}
+            rowsAbove={rowsAbove}
             thoughtsExpanded={thoughtsExpanded}
           />
         </box>
@@ -133,12 +550,24 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  pendingCount,
+  pendingDialogType,
+  pendingDialogBody,
+  pendingDialogExtra,
+  pendingDialogExtras,
+  rowsAbove,
   thoughtsExpanded,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  pendingCount: number;
+  pendingDialogType?: string;
+  pendingDialogBody?: string;
+  pendingDialogExtra?: string;
+  pendingDialogExtras?: string[];
+  rowsAbove: number;
   thoughtsExpanded: boolean;
 }) {
   switch (item.kind) {
@@ -155,6 +584,12 @@ function TranscriptItem({
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
+          pendingCount={pendingCount}
+          pendingDialogType={pendingDialogType}
+          pendingDialogBody={pendingDialogBody}
+          pendingDialogExtra={pendingDialogExtra}
+          pendingDialogExtras={pendingDialogExtras}
+          rowsAbove={rowsAbove}
         />
       );
     case 'task':
@@ -296,11 +731,23 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  pendingCount,
+  pendingDialogType,
+  pendingDialogBody,
+  pendingDialogExtra,
+  pendingDialogExtras,
+  rowsAbove,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  pendingCount: number;
+  pendingDialogType?: string;
+  pendingDialogBody?: string;
+  pendingDialogExtra?: string;
+  pendingDialogExtras?: string[];
+  rowsAbove: number;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -315,17 +762,57 @@ function ToolCard({
   // confirmation dialog shows only the server and tool names, so the card
   // is the only surface carrying the arguments (R5-9) — the settled 5-row
   // cap would hide the tail of exactly the payload being approved. The
-  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and a hook-forced
-  // confirmation renders this same payload in its body, so the card must
-  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
-  const cap = capToolCardDescription(
-    text,
-    name,
-    width,
-    item.confirm === 'pending' && !item.done
-      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
-      : TOOL_CARD_DESCRIPTION_ROWS,
+  // pending budget stays viewport- and dialog-aware (pendingCardMaxRows):
+  // the dialog renders in flow below the transcript, so when the dialog's
+  // own body can expand past its collapsed footprint (a hook-forced info
+  // confirmation duplicates this payload; a plan body is much taller than
+  // its folded card row) the card yields rows for it — and when it cannot
+  // (mcp, whose card is the only surface with the arguments; edit, whose
+  // card description is a single path row; ask_user_question) the card
+  // keeps them. Memoized: a sibling call's stream events re-render this
+  // card, and the pending measure scans the whole confirmation body.
+  const cap = useMemo(
+    () =>
+      capToolCardDescription(
+        text,
+        name,
+        width,
+        item.confirm === 'pending' && !item.done
+          ? pendingCardMaxRows(
+              terminalHeight,
+              getCachedStringWidth(text),
+              width,
+              {
+                type: pendingDialogType,
+                body: pendingDialogBody,
+                extra: pendingDialogExtra,
+                extras: pendingDialogExtras,
+              },
+              pendingCount,
+              // The budget's physical-to-budget conversion spends the name
+              // column the flex row paints first (the same nameCols
+              // capToolCardDescription computes): a raw mcp__server__tool
+              // name leaves the description far fewer columns than the
+              // fixed 0.7 ceiling assumes.
+              getCachedStringWidth(name) + 1,
+              rowsAbove,
+            )
+          : TOOL_CARD_DESCRIPTION_ROWS,
+      ),
+    [
+      text,
+      name,
+      width,
+      terminalHeight,
+      pendingCount,
+      pendingDialogType,
+      pendingDialogBody,
+      pendingDialogExtra,
+      pendingDialogExtras,
+      rowsAbove,
+      item.confirm,
+      item.done,
+    ],
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   return (
