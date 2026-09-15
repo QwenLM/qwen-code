@@ -29,7 +29,6 @@ const {
   endTurnCallbackRef,
   streamChunkCallbackRef,
   transcriptUpdateCallbackRef,
-  askUserQuestionCallbackRef,
   mockShowInformationMessage,
   mockWindowState,
   mockQwenAgentManagerInstances,
@@ -101,17 +100,13 @@ const {
       | ((notification: Record<string, unknown>) => void)
       | undefined,
   },
-  askUserQuestionCallbackRef: {
-    current: undefined as
-      | ((request: unknown) => Promise<{ optionId: string }>)
-      | undefined,
-  },
   mockShowInformationMessage: vi.fn<
     (message: string, ...items: string[]) => Thenable<string | undefined>
   >(() => Promise.resolve(undefined)),
   mockWindowState: { focused: true },
   mockQwenAgentManagerInstances: [] as Array<{
     onPermissionRequest: ReturnType<typeof vi.fn>;
+    onAskUserQuestion: ReturnType<typeof vi.fn>;
     disconnect: ReturnType<typeof vi.fn>;
   }>,
   mockClipboardWriteText: vi.fn(),
@@ -284,11 +279,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onToolCall = vi.fn();
     onPlan = vi.fn();
     onPermissionRequest = vi.fn();
-    onAskUserQuestion = vi.fn(
-      (callback: (request: unknown) => Promise<{ optionId: string }>) => {
-        askUserQuestionCallbackRef.current = callback;
-      },
-    );
+    onAskUserQuestion = vi.fn();
     onTranscriptUpdate = vi.fn(
       (callback: (notification: Record<string, unknown>) => void) => {
         transcriptUpdateCallbackRef.current = callback;
@@ -342,7 +333,6 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
 vi.mock('./MessageHandler.js', () => ({
   MessageHandler: class {
     setAuthInteractiveHandler = vi.fn();
-    setAskUserQuestionHandler = vi.fn();
     setCurrentConversationId = vi.fn();
     getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
@@ -509,7 +499,6 @@ beforeEach(() => {
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
   transcriptUpdateCallbackRef.current = undefined;
-  askUserQuestionCallbackRef.current = undefined;
   mockWindowState.focused = true;
   mockShowInformationMessage.mockReset();
   mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
@@ -881,11 +870,12 @@ describe('WebViewProvider.attachToView', () => {
     expect(panelPostMessage).not.toHaveBeenCalled();
   });
 
-  it('does not register the retired legacy ACP permission bridge', async () => {
+  it('does not register the retired legacy ACP input bridge', async () => {
     const { postMessage } = await setupAttachedProvider();
     const agentManager = mockQwenAgentManagerInstances.at(-1);
 
     expect(agentManager?.onPermissionRequest).not.toHaveBeenCalled();
+    expect(agentManager?.onAskUserQuestion).not.toHaveBeenCalled();
     expect(postMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'permissionRequest' }),
     );
@@ -1766,37 +1756,6 @@ describe('Notification & dot indicator', () => {
     endTurnCallbackRef.current?.('end_turn');
 
     // User left VS Code — should notify even though panel is visible
-    expect(mockShowInformationMessage).toHaveBeenCalledWith(
-      'Qwen Code: Waiting for your input.',
-      'Show',
-    );
-  });
-
-  it('shows blue dot and notification for askUserQuestion when panel is not active', async () => {
-    const mockPanel = {
-      active: false,
-      visible: false,
-      webview: { postMessage: vi.fn() },
-      iconPath: undefined as unknown,
-    };
-    mockGetPanel.mockReturnValue(mockPanel as never);
-    mockWindowState.focused = false;
-
-    await setupAttachedProvider();
-
-    // Trigger askUserQuestion — don't await, it blocks on user response
-    void askUserQuestionCallbackRef.current?.({
-      questions: [{ question: 'Which option?' }],
-    });
-
-    // Blue dot
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-
-    // Notification without tool name (generic message)
     expect(mockShowInformationMessage).toHaveBeenCalledWith(
       'Qwen Code: Waiting for your input.',
       'Show',

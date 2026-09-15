@@ -16,6 +16,7 @@ import type {
   ModelInfo,
   RequestPermissionRequest,
 } from '@agentclientprotocol/sdk';
+import type { AskUserQuestionRequest } from '../types/acpTypes.js';
 
 vi.mock('vscode', () => ({
   window: {
@@ -65,14 +66,17 @@ describe('extractSessionListItems', () => {
   });
 });
 
-describe('QwenAgentManager permission fallback', () => {
-  it('cancels when no permission callback is registered', async () => {
+describe('QwenAgentManager input fallbacks', () => {
+  it('cancels when no input callbacks are registered', async () => {
     const manager = new QwenAgentManager();
     const connection = (
       manager as unknown as {
         connection: {
           onPermissionRequest: (
             request: RequestPermissionRequest,
+          ) => Promise<{ optionId: string }>;
+          onAskUserQuestion: (
+            request: AskUserQuestionRequest,
           ) => Promise<{ optionId: string }>;
         };
       }
@@ -99,6 +103,13 @@ describe('QwenAgentManager permission fallback', () => {
           kind: 'execute',
           status: 'pending',
         },
+      }),
+    ).resolves.toEqual({ optionId: 'cancel' });
+
+    await expect(
+      connection.onAskUserQuestion({
+        sessionId: 'session-1',
+        questions: [],
       }),
     ).resolves.toEqual({ optionId: 'cancel' });
   });

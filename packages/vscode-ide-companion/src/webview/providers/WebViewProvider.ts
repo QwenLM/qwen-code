@@ -12,8 +12,6 @@ import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
 import type { AvailableCommand, ModelInfo } from '@agentclientprotocol/sdk';
-import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
-import type { AskUserQuestionResponseMessage } from '../../types/webviewMessageTypes.js';
 import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
@@ -65,15 +63,12 @@ function getDaemonProcess(context: vscode.ExtensionContext): QwenDaemonProcess {
 const DotColor = {
   /** Task completed while tab was not active. */
   Orange: 'orange',
-  /** Agent needs user input (permission / question). Higher priority than orange. */
-  Blue: 'blue',
 } as const;
 type DotColor = (typeof DotColor)[keyof typeof DotColor];
 
 /** Asset file names for tab dot icon states. */
 const DOT_ICON: Record<DotColor | 'default', string> = {
   orange: 'icon-orange.png',
-  blue: 'icon-blue.png',
   default: 'icon.png',
 };
 
@@ -145,11 +140,6 @@ export class WebViewProvider {
   private agentInitialized = false; // Track if agent has been initialized
   private isSyncingToVSCode = false; // Guard to prevent config change loop
   private readonly webShellPermissionOwners = new Map<vscode.Webview, string>();
-  // Track a pending ask user question request and its resolver
-  private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
-  private pendingAskUserQuestionResolve:
-    | ((result: { optionId: string; answers?: Record<string, string> }) => void)
-    | null = null;
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
   private authState: boolean | null = null;
@@ -180,10 +170,8 @@ export class WebViewProvider {
   private authFlowActive = false;
   /** Timestamp (ms) when the current agent task started (first stream chunk) */
   private agentStartTime: number | null = null;
-  /** Current tab-dot state: null = no dot, 'orange' = task done, 'blue' = needs attention */
+  /** Current tab-dot state: null = no dot, 'orange' = task done. */
   private dotState: DotColor | null = null;
-  /** Guard: attention notification already sent for the current permission/question request */
-  private attentionNotified = false;
   /** Guard: idle notification already sent for the current task (prevents multi-turn duplicates) */
   private idleNotificationSent = false;
 
@@ -199,12 +187,6 @@ export class WebViewProvider {
         if (webview !== this.attachedWebview) {
           this.webShellPermissionOwners.delete(webview);
         }
-      }
-      // Panel dispose callback — unblock any pending ACP Promises
-      if (this.pendingAskUserQuestionResolve) {
-        this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
-        this.pendingAskUserQuestionResolve = null;
-        this.pendingAskUserQuestionRequest = null;
       }
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
@@ -542,63 +524,6 @@ export class WebViewProvider {
         data: { entries },
       });
     });
-
-    this.agentManager.onAskUserQuestion(
-      async (request: AskUserQuestionRequest) => {
-        // Notify the user immediately (dot + optional system notification)
-        this.handleAgentNeedsAttention();
-
-        // Send ask user question request to WebView
-        this.sendMessageToWebView({
-          type: 'askUserQuestion',
-          data: request,
-        });
-
-        // Wait for user response
-        return new Promise<{
-          optionId: string;
-          answers?: Record<string, string>;
-        }>((resolve) => {
-          // Cache the pending request and its resolver
-          this.pendingAskUserQuestionRequest = request;
-          this.pendingAskUserQuestionResolve = (result) => {
-            try {
-              resolve(result);
-            } finally {
-              // Always clear pending state
-              this.pendingAskUserQuestionRequest = null;
-              this.pendingAskUserQuestionResolve = null;
-              // Instruct the webview UI to close the dialog
-              this.sendMessageToWebView({
-                type: 'askUserQuestionResolved',
-                data: { optionId: result.optionId },
-              });
-            }
-          };
-          const handler = (message: AskUserQuestionResponseMessage) => {
-            if (message.type !== 'askUserQuestionResponse') {
-              return;
-            }
-
-            const { optionId, answers, cancelled } = message.data;
-
-            // Resolve with the result
-            if (cancelled) {
-              this.pendingAskUserQuestionResolve?.({
-                optionId: 'cancel',
-              });
-            } else {
-              this.pendingAskUserQuestionResolve?.({
-                optionId: optionId || 'proceed_once',
-                answers,
-              });
-            }
-          };
-          // Store handler in message handler
-          this.messageHandler.setAskUserQuestionHandler(handler);
-        });
-      },
-    );
 
     this.agentManager.onDisconnected((code, signal) => {
       logger.log(
@@ -2060,14 +1985,10 @@ export class WebViewProvider {
     return false;
   }
 
-  /** Update the tab-dot icon. Blue takes priority over orange. */
+  /** Update the tab-dot icon. */
   private setTabDot(color: DotColor): void {
     const config = vscode.workspace.getConfiguration('qwen-code');
     if (!config.get<boolean>('dotIndicator', true)) {
-      return;
-    }
-    // Blue takes priority; never downgrade from blue to orange.
-    if (this.dotState === DotColor.Blue && color === DotColor.Orange) {
       return;
     }
     this.dotState = color;
@@ -2191,8 +2112,6 @@ export class WebViewProvider {
     // onEndTurn multiple times and resetting would lose the true start time.
     // It is reset when the user sends the next message (see onDidReceiveMessage).
     const startTime = this.agentStartTime;
-    this.attentionNotified = false; // reset for next permission/question cycle
-
     const panel = this.panelManager.getPanel();
     const panelActive = panel?.active ?? false;
 
@@ -2216,32 +2135,6 @@ export class WebViewProvider {
     ) {
       this.idleNotificationSent = true;
       this.notifyUser('Waiting for your input.');
-    }
-  }
-
-  /**
-   * Called when the agent needs user attention (permission request or ask-question).
-   * @param detail - optional context, e.g. the tool name that needs approval.
-   */
-  private handleAgentNeedsAttention(detail?: string): void {
-    const panel = this.panelManager.getPanel();
-    const panelActive = panel?.active ?? false;
-
-    if (!panelActive) {
-      this.setTabDot(DotColor.Blue);
-    }
-
-    const userWatching = this.isUserWatchingPanel();
-
-    // Notify once per request regardless of task duration.
-    if (!userWatching && !this.attentionNotified) {
-      this.attentionNotified = true;
-      if (this.isNotificationsEnabled()) {
-        const message = detail
-          ? `Needs your permission to use ${detail}.`
-          : 'Waiting for your input.';
-        this.notifyUser(message);
-      }
     }
   }
 
@@ -2422,25 +2315,6 @@ export class WebViewProvider {
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
             panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
-          }
-          return;
-        }
-        // Handle ask user question response
-        if (message.type === 'askUserQuestionResponse') {
-          const askUserQuestionMsg = message as AskUserQuestionResponseMessage;
-          const answers = askUserQuestionMsg.data.answers || {};
-          const cancelled = askUserQuestionMsg.data.cancelled || false;
-
-          // Resolve the pending ask user question promise
-          if (cancelled) {
-            this.pendingAskUserQuestionResolve?.({
-              optionId: 'cancel',
-            });
-          } else {
-            this.pendingAskUserQuestionResolve?.({
-              optionId: 'proceed_once',
-              answers,
-            });
           }
           return;
         }
@@ -2655,12 +2529,6 @@ export class WebViewProvider {
    * Dispose the WebView provider and clean up resources
    */
   dispose(): void {
-    // Unblock any pending ACP Promises before tearing down
-    if (this.pendingAskUserQuestionResolve) {
-      this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
-      this.pendingAskUserQuestionResolve = null;
-      this.pendingAskUserQuestionRequest = null;
-    }
     if (WebViewProvider.lastContextMenuProvider === this) {
       WebViewProvider.lastContextMenuProvider = null;
     }
