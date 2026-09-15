@@ -1079,6 +1079,236 @@ cell reads the last one. Rendering the same shape through the real renderer over
 five state changes leaves exactly one row, so this is the harness, not the
 dialog.
 
+## Decision 33 — the keystrokes of one read are handled by the render they started in
+
+The first review round found the class Decision 24 had closed for the line-input
+helper waiting in every other place that reads dialog state and writes it back.
+The renderer's key hook keeps the handler in a reference it refreshes during the
+layout phase of a commit, and one stdin read hands over the keys it carries back
+to back — a held arrow's auto-repeat at ~30 ms, or a bracketed paste together
+with the Enter the terminal tacks on. Nothing commits between them, so every key
+after the first is handled by the closure the previous commit installed, and every
+value it reads is one keystroke old. At human speed the bug cannot be seen, since
+each keystroke flushes a render of its own, and a suite that spends one act per
+character cannot see it either — which is how the existing dialog tests missed it.
+
+Each piece of state those handlers read to place the next keystroke now has a
+mirror written in the same call as the setter, and the handler reads the mirror:
+the question dialog's tab, its option cursor, its per-question checkbox sets and
+its typed entries; the wizard's recommended-model set; the line editor's text and
+caret. The question dialog's handler derives its whole view from the mirrors —
+which question this is, single or multi select, free-text row or not — rather than
+from what this render drew, so no branch can act on one keystroke's position with
+another keystroke's value. Two reads of the answers themselves are the recorded
+exceptions below. The line editor hands out getters over its mirror instead of
+snapshots, since a consumer that captured its text once would have reintroduced
+exactly this bug in one line.
+
+One read is narrower than the mirrors. The free-text row keeps its keys only while
+the burst still stands on the tab that row was drawn for: the row's buffer is
+re-seeded during render, so a letter landing after a tab move inside one read would
+append to the question the render drew and store it as the answer of the question
+the burst reached. Those keys are dropped, as they were before this round, and a
+test of an arrow held across a tab boundary pins it.
+
+Submitting was the same bug pointed the other way. The wizard's endpoint and
+key steps called their submit functions with no argument, so an Enter sharing a
+read with the characters in front of it read the parent's state — still the value
+from before those characters — and the wizard advanced on a half-typed endpoint,
+falling back to the protocol's default host without an error. They take the live
+text as an argument now, which is how ink's text input calls its submit with the
+buffer's own text and how ink's question dialog declares its submit signature. The
+recommended-model checkboxes came with the same finding: two ticks of a held Space
+in one read, or a tick and the Enter that submits it, are one checkbox's two states
+and a submission that knows about neither until the mirror is read.
+
+The hook is shared with ink's wizard, and ink's endpoint step already passes its
+buffer text into it, so in this same case the ink leg now submits the value it
+shows. Away from a read that carries several keys the two strings are identical;
+this is the one point where the round changes ink's behaviour.
+
+Two mirrors are read where no keystroke sequence can show them disagreeing, and
+that is written down here rather than counted as coverage. Ticking a recommended
+model syncs the shared model-id string with the field's live text, and committing
+the free-text row takes the tab it is standing on, but a burst cannot both edit a
+field and tick a list row — the two branches are chosen by a focus the batch itself
+cannot change — and a manual tab move puts the cursor on the first row, which is
+the free-text row only for a question with no predefined options, which the tool's
+own validation rejects. They are kept so that a handler has exactly one source for
+each fact. Two siblings are recorded instead of fixed, both still read from state:
+whether a multi-select's typed entry counts, so a read that types into the
+free-text row, steps off it and submits leaves that entry out of the answer; and
+the picked answers behind the review tab's submit, so a read that answers a
+question, steps to the review tab and submits leaves that answer out. Each needs
+three keystrokes in one read to show, which no scenario on either leg produces;
+closing them adds one mirror each and joins the follow-ups.
+
+This change stops at the handlers the round was asked about, and the class is
+wider than they are. Every other list in this renderer reads its cursor the same
+way — the shared select hook seven other dialog files mount, the arena dialog's
+model list, the composer's completion rows, the wizard's protocol and
+endpoint-option steps, the focus of its recommended-model list (its check set is
+mirrored above), its advanced-config row, and this dialog's own main
+and sub menus. There the accepting key acts on the row the previous render drew
+rather than the one the burst reached, and where a step is computed from that drawn
+cursor — the shared hook, the endpoint-option list, and those two menus — a held
+arrow moves one row per read instead of one per key. Closing it belongs to those
+widgets together rather than to either dialog fixed here, and is recorded under
+Follow-up.
+
+Coverage is fourteen new unit tests, five in the authentication suite and nine
+in the confirmation dialog's, and eleven mutations, nine of which fail the tests that
+own the behaviour taken away: a line editor back to a render snapshot, an Enter
+submitting the prop value, the models step's check set read twice over (the tick
+and the submission) with its field's live text read at the submission as well, a
+question handler working from rendered state, the option reads of the Space
+and Enter branches, and a burst that moves tab editing the question it left behind.
+The two surviving mutations are the unreachable reads above.
+What no evidence reaches is a machine: the acceptance harness types one character
+per write on purpose, so a keystroke lands in its own read, and it never pastes
+into these dialogs — every burst case here rests on the unit suites.
+
+## Decision 34 — a manual tab move calls off the swap already scheduled
+
+The question dialog answers a question, pauses 150 ms so the tick on the row just
+answered is visible, then swaps to the next one. ink schedules that swap and never
+calls it off: neither a second answer inside the pause nor a left or right arrow of
+the user's own clears the timer, so two swaps can run and the question between them
+is never drawn. The port inherited that, and the review round caught it on the
+arrow case — the user had navigated to a question and the dialog took it away again
+a tenth of a second later.
+
+Both paths now cancel a pending swap first: the arrow because the keystroke is the
+user's own answer to "which question am I on", the second answer because it
+supersedes the swap the first one scheduled. This is one of the places where the
+port deliberately does not match ink; the same 150 ms pause, the same clamping at
+the last tab, and the same tick-before-swap are kept. ink's behaviour is recorded
+as a defect of its own rather than reproduced, and the double-fire the acceptance
+matrix had already watched on ink's leg is the same defect seen from outside.
+
+Both paths are pinned in the confirmation dialog's suite, each by a mutation of
+its own: a right arrow that lands during a pending pause keeps the question it
+moved to, and removing that cancel fails this test alone; two answers inside one
+pause leave exactly the swap the second one scheduled, in a test that predates
+this round, and removing the cancel in the answer path fails that one alone. On a
+machine the pause and the arrow were already covered by the matrix scenarios that
+answer several questions; the cancellation itself was not observed there, since it
+needs two keystrokes inside 150 ms.
+
+## Decision 35 — the cursor cell prints the character that owns the focus
+
+The field row draws its value in three parts: before the caret, the cell the caret
+is on, after it. The first version of the highlighted cell printed the middle part
+only while the field was focused, so a field that lost the cursor to a sibling lost
+a character as well — the row displayed a value one code point shorter than the one
+stored, which is what a review round's Critical was. The character belongs to the
+value whoever owns the focus; only the background says which field the caret is in,
+as it does in ink, whose text input decides whether to draw the cursor's
+highlight while always drawing the text under it.
+
+The same row's caret now follows a rule the previous pass had inverted. The caret
+indexes the value the field's owner acknowledged, not the one the keys typed: when
+a keystroke reaches a field whose owner refuses it — a letter into the
+context-window field, which keeps digits only — the accepted value has no character
+at that position to hold a caret, so the cap at the shared prefix between the two
+texts leaves the caret exactly where it was. Before that, each refused key moved
+the caret one code point right, and the first backspace after a burst of them ate a
+real character. Where the two texts are equal the rule reduces to the plain clamp,
+so every accepted edit still behaves as it did.
+
+The row prints only what the flow accepted, which is the divergence Decision 32
+records against ink rather than a new one: ink's buffer is the source of truth and
+keeps showing the character its own flow threw away, so the same keystroke leaves a
+visible trace there. Matching that would mean moving the display onto the buffer,
+which is ink's defect to fix; the caret rule above was chosen so that a refused
+keystroke leaves no trace of its own in either renderer's column layout. One test
+had pinned the drift as the expected behaviour, since the caret it asserted was the
+drift; it pins the absence of one now, and the difference from the shape the review
+asked for is stated in that thread.
+
+Two tests and three mutations. The cell that dropped its character when the field
+lost focus fails the new row test in the authentication suite; the resync that
+calls the plain clamp where the shared-prefix cap belongs, and that cap reduced to
+a length clamp, fail the context-window field's edit test and the new unit test of
+the rule itself. Each mutation fails exactly the tests that own the behaviour it
+takes away. The machine leg is unchanged here — a caret in a field the wizard
+renders is still not reachable by any scenario, so the row's rendering rests on the
+unit suites.
+
+## Decision 36 — the arrow names the call the queue can answer
+
+The arrow that marks an awaiting call had been derived from the transcript: the
+first card that is pending and unfinished. That is ink's rule read from the wrong
+list. ink's marker names the call whose confirmation is on screen, and only the
+waiting queue knows which call that is — the same rule that decides which call
+Ctrl+C settles and which call the shell dialog names. An `ask` decision from a
+PreToolUse hook re-arms a call the user has already approved by appending it
+_behind_ another waiting call while its card returns to pending where it stands, so
+transcript order and queue order disagree, and the arrow sat on a card the user had
+no dialog for.
+
+The shell now passes the queue's first call id down, and the row still has to be a
+pending, unfinished tool card to draw the marker. Keeping that second condition is
+what preserves Decision 25's one-arrow rule: a card the queue names but the
+transcript no longer shows pending gets no arrow, and neither does any other card.
+The prop is optional on the view, so a caller that has no queue to consult gets no
+marker rather than a guessed one.
+
+The new case asserts the arrow sits on the call the queue names when that is not
+the first pending row, and that exactly one arrow is drawn — it fails, one test in
+a suite of seventeen, if the id is dropped and the transcript's order decides
+again. Six
+existing renders in that suite gained the id, because a marker that must come from
+the queue cannot be asserted by a render that supplies none. On a machine the
+ordering this needs — a re-armed call behind a waiting one — was not reproduced;
+the scenario that drove the arrow in the matrix has a single awaiting call, where
+both rules agree.
+
+## Decision 37 — a field stops taking keys once its read has submitted it
+
+Making a mid-read submit succeed (Decision 33) made the next keystroke of that read
+meaningful, and it is not: the Enter leaves the wizard on the following step while the
+read still holds keys, and those keys are handled by the step the burst just left. That
+step keeps its value in the flow's own state, and the review step's submit rebuilds the
+install plan from that state, so a single trailing letter was written to `settings.json`
+— the key step showed `sk-test`, submitted `sk-test`, and saved `sk-testZ`.
+
+A field now settles when its Enter moves the wizard, and takes no further key of that
+read. The latch sits on the shared line model, which every leaking field already goes
+through, and each field's handler checks it before its branches: the endpoint and key
+steps via the shared helper, the model-ID step (whose Enter also stops a Space from
+ticking the recommended list behind it), the advanced-config step's context-window
+field, and the question dialog's free-text row. That last one was the same defect seen
+from the other end: a multi-select's answer is re-assembled from the field when the
+review tab submits, so a letter trailing the Enter widened an answer the user had
+already given.
+
+The latch arms only on an Enter that reports the step moved. An Enter refused by
+validation keeps the step mounted and the read belongs to it, so `abc`, Enter, `def` in
+one read still leaves `abcdef` in the endpoint field. It is a per-render flag rather than
+a per-mount one: the renderer installs a fresh handler per commit and a read cannot span
+a commit, so the flag spans exactly one read, and a field whose submit was rejected — or
+whose auth failed a step later — is editable again on the next render.
+
+What stays un-latched is deliberate. The question dialog's tab arrows keep working
+inside the pause Decision 34 protects, because there the keystroke is the user's answer
+to "which question am I on"; only the field stops taking keys, not the dialog.
+
+ink cannot reach this leak. Its buffer notifies the parent from an effect run at commit
+(`text-buffer.ts`), so a keystroke handled after the Enter never gets a commit where its
+step is still mounted, and its text never reaches the state the plan is built from. Ours
+writes through the setter synchronously, which is what makes a mid-read submit read the
+live text at all, so it needs the explicit stop.
+
+Coverage is five new unit tests, four in the authentication suite and one in the
+confirmation dialog's, and five mutations (M15–M19). Each fails exactly the test that
+owns the behaviour taken away: the endpoint and key field's guard, the guard armed on a
+refused Enter as well, the model-ID step's guard, the advanced-config step's guard, and
+the settled clause of the free-text row's burst-ownership guard. M2's anchor moved with
+the line it rewrote. Nothing here was reached on a machine, for the reason recorded in
+Decision 33: the acceptance harness writes one character per write and never pastes into
+these dialogs.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
@@ -1186,6 +1416,26 @@ What was verified, and how far the verification reaches:
   confirmation and then rotates the mode. The wiring is pinned by a test with
   its negative control — the intermediate mode that must release nothing — and
   the selection rule it consumes was already covered on its own.
+- **Every burst case is unit evidence only.** The acceptance harness writes one
+  character per pty write on purpose, so a keystroke lands in a stdin read of its
+  own, and it never pastes into a dialog input. Neither leg of the matrix can
+  therefore produce the multi-key reads Decisions 33, 34 and 37 are about; those
+  rest on the two dialog suites they added tests to, and on the mutation record,
+  with no screen evidence behind any of them.
+- **ink's own auth-wizard suite fails locally, and this change is not shown to be
+  why.** That file guards nineteen tests behind a check its own comment explains —
+  simulated TUI input is unreliable on slow runners — and skips them on CI and on
+  win32, so CI never runs them. Outside CI, thirteen of that family fail here, each
+  at the suite's own five-second wait, all thirteen among the guarded ones. Six runs
+  at this head gave five copies of that same set and one run twelve of its names, so
+  the count moves with the machine while no failure lands outside the guarded
+  family. A one-variable control says this round's edit to the shared provider-setup
+  hook is not what does it: the same thirteen names failed, in the same list, with
+  that file back at the version it has on `origin/main` — which is also the version
+  this branch's commits leave it at, read off an empty diff against that ref. What
+  was not observed is a clean upstream checkout in this environment: a separate
+  worktree stops at the workspace build prerequisite before any test runs, so "these
+  fail there too" is inferred from the arms above rather than measured.
 - **The thought toggle's keystroke is not covered at all.** The entry's own test
   replaces the keyboard hook with a no-op, so only the consumer half is
   asserted: the flag reaching the row and opening it. Nor is it frame-covered,
@@ -1335,6 +1585,39 @@ What was verified, and how far the verification reaches:
   scope for a sweep that measures itself against ink's behaviour as it stands;
   it is recorded here so the divergence between the two renderers is not
   re-reported as a porting gap.
+- Two reads of the answer still come from rendered state. A single stdin read that
+  types into a multi-select's free-text row, steps off it and submits can leave that
+  entry out of the answer, because the branch deciding whether the text counts
+  consults what the last render drew rather than a mirror; and one that answers a
+  question, steps to the review tab and submits can leave that answer out, for the
+  same reason on the picked set. Decision 33 mirrors the four pieces of state that
+  handler reads to place a keystroke; these are the fifth and sixth, recorded rather
+  than fixed because no scenario on either leg can put three keystrokes into one
+  read, so either change would ship unobservable.
+- The stale-cursor class is open everywhere except the two handlers Decision 33
+  touched. Read from the source: the shared select hook, the arena dialog's model
+  list, the composer's completion rows, and the auth wizard's four list steps plus
+  its main and sub menus all answer from the row the last render drew. The mirror
+  shape is already set by the question flow and the line editor, so this is one
+  change over those widgets and their tests, not a per-dialog one — and each site
+  needs its own burst case, since a mutation that fails the question dialog proves
+  nothing about a list it does not touch.
+- Decision 37's latch stops a field, not a step. The wizard's list steps and its
+  review row still run one branch per key. The review row applied the plan twice
+  for a burst of two Enters — two writer calls, read off a scratch test at this
+  head — and the protocol and endpoint rows have the same shape read from the
+  source: each of their selects advances a step, so a second Enter in the same
+  read skips the step between. ink's steps are the same shape, so closing this is
+  not a divergence to land ahead of ink's, and it belongs with the widget pass
+  above, which the same one-action-per-read latch would cover.
+- The latch stops keys, not a paste. Every field it settles also subscribes to the
+  renderer's paste event, and that subscription never consults the latch: a read
+  carrying the Enter that moves the wizard and then a bracketed paste would let
+  the pasted text write into the step the burst left. The other order — a paste
+  and the Enter that submits it — is what a terminal actually sends and is pinned
+  by a test; this one needs a second input channel to land inside the same read,
+  and no leg of the harness pastes into a dialog. It joins the widget pass above,
+  where the same guard belongs on every field.
 - A settled card keeps the position it was created at, where ink commits it to
   permanent history after whatever notices arrived meanwhile, so a notice
   printed during a tool call lands after the card here and before it there.
