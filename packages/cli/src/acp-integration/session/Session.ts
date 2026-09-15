@@ -1713,7 +1713,6 @@ function parsePromptChannelDelivery(
   };
 }
 
-const MAX_NOTIFICATION_QUEUE = 20;
 const TEAMMATE_NOTIFICATION_TASK_PREFIX = 'teammate-';
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
