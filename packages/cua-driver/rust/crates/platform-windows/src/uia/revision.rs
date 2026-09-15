@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use cua_driver_core::observation_revision::{
@@ -175,20 +175,15 @@ impl WindowsObservationRevisions {
         let runtime_ids = tree
             .nodes
             .iter()
-            .map(|node| node.runtime_id.clone())
-            .collect::<Option<Vec<_>>>();
-        let Some(runtime_ids) = runtime_ids else {
-            self.store.lock().unwrap().remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
-        };
-        if runtime_ids.iter().collect::<HashSet<_>>().len() != runtime_ids.len() {
-            self.store.lock().unwrap().remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
-        }
-        if tree.nodes.iter().any(|node| node.element_ptr == 0) {
-            self.store.lock().unwrap().remove(&key);
-            return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
-        }
+            .map(|node| {
+                if node.element_ptr == 0 {
+                    None
+                } else {
+                    node.runtime_id.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let runtime_id_counts = runtime_id_counts(&runtime_ids);
 
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -234,7 +229,7 @@ impl WindowsObservationRevisions {
             .iter()
             .map(|(runtime_id, identity)| (runtime_id.clone(), identity.element.as_ptr()))
             .collect::<HashMap<_, _>>();
-        let stable_ids = match reconcile_runtime_ids(
+        let stable_ids = reconcile_runtime_ids(
             &previous,
             &runtime_ids,
             &mut lineage.next_native_identity,
@@ -248,26 +243,7 @@ impl WindowsObservationRevisions {
                     tree.nodes[current_index].element_ptr,
                 )
             },
-        ) {
-            Ok(ids) => ids,
-            Err(ReconcileError::DuplicateIdentity) => {
-                drop(lineage);
-                self.store
-                    .lock()
-                    .unwrap()
-                    .remove_if_current(&key, &lineage_state);
-                return transient_full(&tree.nodes, FullResyncReason::IdentityUnavailable);
-            }
-            Err(ReconcileError::ProviderInvalidated(error)) => {
-                drop(lineage);
-                self.store
-                    .lock()
-                    .unwrap()
-                    .remove_if_current(&key, &lineage_state);
-                tracing::debug!(target: "uia", "CompareElements failed: {error}");
-                return transient_full(&tree.nodes, FullResyncReason::ProviderInvalidated);
-            }
-        };
+        );
 
         let captured = tree
             .nodes
@@ -301,16 +277,14 @@ impl WindowsObservationRevisions {
 
         let mut next_identities = HashMap::with_capacity(tree.nodes.len());
         for ((node, runtime_id), stable_id) in tree.nodes.iter().zip(runtime_ids).zip(stable_ids) {
-            let element = match unsafe { RetainedUiaElement::retain(node.element_ptr) } {
-                Ok(element) => element,
-                Err(error) => {
-                    drop(lineage);
-                    self.store
-                        .lock()
-                        .unwrap()
-                        .remove_if_current(&key, &lineage_state);
-                    return Err(error);
-                }
+            let Some(runtime_id) = runtime_id else {
+                continue;
+            };
+            if runtime_id_counts.get(&runtime_id) != Some(&1) {
+                continue;
+            }
+            let Ok(element) = (unsafe { RetainedUiaElement::retain(node.element_ptr) }) else {
+                continue;
             };
             next_identities.insert(runtime_id, NativeIdentity { stable_id, element });
         }
@@ -409,33 +383,47 @@ fn compare_elements(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum ReconcileError {
-    DuplicateIdentity,
-    ProviderInvalidated(String),
+fn runtime_id_counts(runtime_ids: &[Option<Vec<i32>>]) -> HashMap<Vec<i32>, usize> {
+    let mut counts = HashMap::new();
+    for runtime_id in runtime_ids.iter().flatten() {
+        *counts.entry(runtime_id.clone()).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn reconcile_runtime_ids(
     previous: &HashMap<Vec<i32>, u64>,
-    current: &[Vec<i32>],
+    current: &[Option<Vec<i32>>],
     next_identity: &mut u64,
     mut compare: impl FnMut(&[i32], usize) -> Result<bool, String>,
-) -> Result<Vec<u64>, ReconcileError> {
-    if current.iter().collect::<HashSet<_>>().len() != current.len() {
-        return Err(ReconcileError::DuplicateIdentity);
-    }
+) -> Vec<u64> {
+    let counts = runtime_id_counts(current);
     current
         .iter()
         .enumerate()
         .map(|(index, runtime_id)| {
-            if let Some(stable_id) = previous.get(runtime_id) {
-                if compare(runtime_id, index).map_err(ReconcileError::ProviderInvalidated)? {
-                    return Ok(*stable_id);
+            if let Some(runtime_id) = runtime_id {
+                if counts.get(runtime_id) != Some(&1) {
+                    let stable_id = *next_identity;
+                    *next_identity += 1;
+                    return stable_id;
+                }
+                if let Some(stable_id) = previous.get(runtime_id) {
+                    match compare(runtime_id, index) {
+                        Ok(true) => return *stable_id,
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::debug!(
+                                target: "uia",
+                                "CompareElements failed for one node; replacing its identity: {error}"
+                            );
+                        }
+                    }
                 }
             }
             let stable_id = *next_identity;
             *next_identity += 1;
-            Ok(stable_id)
+            stable_id
         })
         .collect()
 }
@@ -445,16 +433,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn incomplete_capture_evicts_the_current_lineage() {
+        let revisions = WindowsObservationRevisions::new();
+        let session = ObservationSessionIdentity {
+            runtime_scope: "runtime".into(),
+            session_id: "session".into(),
+            transport_session_id: "transport".into(),
+        };
+        let request = ObservationRevisionRequest {
+            version: 1,
+            serializer_version: "serializer".into(),
+            projection_version: "projection".into(),
+            base_revision_id: None,
+            force_full: false,
+        };
+        let key = RevisionKey {
+            session: session.clone(),
+            pid: 42,
+            hwnd: 7,
+            max_elements: 100,
+            max_depth: 10,
+            serializer_version: request.serializer_version.clone(),
+            projection_version: request.projection_version.clone(),
+        };
+        {
+            let mut store = revisions.store.lock().unwrap();
+            store
+                .lineages
+                .insert(key.clone(), WindowsLineageEntry::new().unwrap());
+            store.touch(&key);
+        }
+        let tree = UiaTreeResult {
+            tree_markdown: "button".into(),
+            nodes: vec![UiaNode {
+                element_index: Some(0),
+                control_type: "Button".into(),
+                name: Some("Retry".into()),
+                value: None,
+                automation_id: Some("retry".into()),
+                help_text: None,
+                actions: vec!["invoke".into()],
+                runtime_id: Some(vec![1]),
+                enabled: Some(true),
+                selected: None,
+                element_ptr: 0,
+                center_x: 0,
+                center_y: 0,
+                rect: None,
+                msaa_role: None,
+                depth: 0,
+                parent_element_index: None,
+                in_web_content: false,
+            }],
+            backend: UiaBackend::Uia,
+            complete: false,
+            truncated: false,
+            incomplete_notes: vec!["provider timed out".into()],
+        };
+
+        let result = revisions
+            .observe(session, 42, 7, 100, 10, &tree, &request)
+            .unwrap();
+
+        assert_eq!(
+            result.full_resync_reason,
+            Some(FullResyncReason::CaptureIncomplete)
+        );
+        assert!(!result.stable_element_ids);
+        assert!(!revisions.store.lock().unwrap().lineages.contains_key(&key));
+    }
+
+    #[test]
     fn runtime_id_candidate_requires_native_confirmation() {
         let previous = HashMap::from([(vec![1, 2], 9)]);
         let mut next = 10;
         let same =
-            reconcile_runtime_ids(&previous, &[vec![1, 2]], &mut next, |_, _| Ok(true)).unwrap();
+            reconcile_runtime_ids(&previous, &[Some(vec![1, 2])], &mut next, |_, _| Ok(true));
         assert_eq!(same, vec![9]);
         assert_eq!(next, 10);
 
         let recreated =
-            reconcile_runtime_ids(&previous, &[vec![1, 2]], &mut next, |_, _| Ok(false)).unwrap();
+            reconcile_runtime_ids(&previous, &[Some(vec![1, 2])], &mut next, |_, _| Ok(false));
         assert_eq!(recreated, vec![10]);
         assert_eq!(next, 11);
     }
@@ -465,28 +524,35 @@ mod tests {
         let mut next = 6;
         let identities = reconcile_runtime_ids(
             &previous,
-            &[vec![2], vec![3], vec![1]],
+            &[Some(vec![2]), Some(vec![3]), Some(vec![1])],
             &mut next,
             |_, _| Ok(true),
-        )
-        .unwrap();
+        );
         assert_eq!(identities, vec![5, 6, 4]);
         assert_eq!(next, 7);
     }
 
     #[test]
-    fn duplicates_and_provider_errors_fail_closed() {
-        let previous = HashMap::from([(vec![1], 4)]);
-        let mut next = 5;
+    fn unavailable_or_ambiguous_identities_are_replaced_locally() {
+        let previous = HashMap::from([(vec![1], 4), (vec![2], 5)]);
+        let mut next = 6;
         assert_eq!(
-            reconcile_runtime_ids(&previous, &[vec![1], vec![1]], &mut next, |_, _| Ok(true)),
-            Err(ReconcileError::DuplicateIdentity)
+            reconcile_runtime_ids(
+                &previous,
+                &[Some(vec![1]), None, Some(vec![1]), Some(vec![2])],
+                &mut next,
+                |_, _| Ok(true),
+            ),
+            vec![6, 7, 8, 5]
         );
-        assert!(matches!(
-            reconcile_runtime_ids(&previous, &[vec![1]], &mut next, |_, _| {
-                Err("provider disconnected".into())
-            }),
-            Err(ReconcileError::ProviderInvalidated(_))
-        ));
+        assert_eq!(next, 9);
+
+        assert_eq!(
+            reconcile_runtime_ids(&previous, &[Some(vec![1])], &mut next, |_, _| Err(
+                "provider disconnected".into()
+            ),),
+            vec![9]
+        );
+        assert_eq!(next, 10);
     }
 }

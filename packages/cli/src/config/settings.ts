@@ -34,6 +34,7 @@ import {
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
 import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
@@ -401,6 +402,28 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         `Warning: ${ref.section}.${ref.key} in workspace settings (${workspaceFile.path}) is ignored because ${definingScope} scope settings also set it. A workspace value is honored only when no User, System, or SystemDefaults scope sets this setting.`,
       );
     }
+    // Tighten-only keys: the same verdict the merge applied, so the
+    // warning and the strip cannot disagree about a value. A value that
+    // merely repeats what is already in force is dropped without a
+    // warning — it lost nothing.
+    for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
+      const verdict = tightenOnlyVerdict(entry, workspaceFile.settings, {
+        system: loadedSettings.system.settings,
+        systemDefaults: loadedSettings.systemDefaults.settings,
+        user: loadedSettings.user.settings,
+      });
+      if (verdict === undefined || verdict.kept) continue;
+      const key = `${entry.section}.${entry.key}`;
+      if (verdict.reason === 'system-sets') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because System scope settings also set it.`,
+        );
+      } else if (verdict.reason === 'looser') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because it would loosen the ${verdict.against} value. A workspace may only make this setting stricter.`,
+        );
+      }
+    }
   }
   return [...warningSet];
 }
@@ -489,6 +512,79 @@ function stripWorkspaceOverrides(
   );
 }
 
+type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
+
+type TightenOnlyVerdict =
+  | { kept: true }
+  | { kept: false; reason: 'system-sets' }
+  | {
+      kept: false;
+      reason: 'looser';
+      against: 'User' | 'SystemDefaults' | 'default';
+    }
+  | { kept: false; reason: 'same' };
+
+/**
+ * Decide one tighten-only key for a workspace, or `undefined` when the
+ * workspace does not set it.
+ *
+ * System wins outright, as it does for every setting. Otherwise the
+ * workspace value is compared against whichever of User and SystemDefaults
+ * sets the key — the stricter of the two if both do — and against the
+ * feature's default when neither does. Strictly stricter is kept; equal
+ * is dropped silently; looser is dropped with a warning.
+ */
+function tightenOnlyVerdict(
+  entry: TightenOnlyEntry,
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): TightenOnlyVerdict | undefined {
+  const read = (settings: Settings): unknown =>
+    (settings[entry.section] as Record<string, unknown> | undefined)?.[
+      entry.key
+    ];
+  const candidate = read(workspace);
+  if (candidate === undefined) return undefined;
+  if (read(scopes.system) !== undefined) {
+    return { kept: false, reason: 'system-sets' };
+  }
+  let against: 'User' | 'SystemDefaults' | 'default' = 'default';
+  let baseline = entry.strictness(undefined);
+  for (const [name, settings] of [
+    ['SystemDefaults', scopes.systemDefaults],
+    ['User', scopes.user],
+  ] as const) {
+    const value = read(settings);
+    if (value === undefined) continue;
+    const rank = entry.strictness(value);
+    if (against === 'default' || rank > baseline) {
+      against = name;
+      baseline = rank;
+    }
+  }
+  const rank = entry.strictness(candidate);
+  if (rank > baseline) return { kept: true };
+  if (rank === baseline) return { kept: false, reason: 'same' };
+  return { kept: false, reason: 'looser', against };
+}
+
+/**
+ * Drop the workspace's tighten-only values that would not make the
+ * setting stricter than the operator scopes already have it.
+ */
+function stripWorkspaceLoosenings(
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_TIGHTEN_ONLY_SETTINGS.filter((entry) => {
+      const verdict = tightenOnlyVerdict(entry, workspace, scopes);
+      return verdict !== undefined && !verdict.kept;
+    }),
+  );
+}
+
 function mergeSettings(
   system: Settings,
   systemDefaults: Settings,
@@ -498,11 +594,14 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
-          systemDefaults,
-          user,
-          system,
-        ]),
+        stripWorkspaceLoosenings(
+          stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
+            systemDefaults,
+            user,
+            system,
+          ]),
+          { system, systemDefaults, user },
+        ),
         'workspace',
       )
     : ({} as Settings);

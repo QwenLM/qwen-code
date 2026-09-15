@@ -28,7 +28,7 @@
  * and the keyboard; it delegates every decision here.
  */
 
-import { escapePath } from '@qwen-code/qwen-code-core';
+import { escapePath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { Fzf, type FzfResultItem } from 'fzf';
 import type { Suggestion } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
@@ -46,7 +46,10 @@ import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
 } from '../commands/commands.js';
-import { getCommandDisplayName } from '../../services/commandMetadata.js';
+import {
+  getCommandDisplayName,
+  getCommandSourceBadge,
+} from '../../services/commandMetadata.js';
 import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
 import type { InputHistory } from './input-history.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
@@ -566,6 +569,26 @@ export function isPerfectSlashMatch(parsed: CommandParseResult): boolean {
 }
 
 /**
+ * {@link isPerfectSlashMatch} for a target detected from the buffer as it
+ * stands right now, so a caller holding a key event can answer without the
+ * published completion state — that state is render-derived and trails the
+ * buffer by a render, and reading it on Enter accepts the row of an earlier
+ * keystroke instead of submitting what was typed.
+ */
+export function isPerfectMatchForTarget(
+  target: CompletionTarget,
+  slashCommands: readonly SlashCommand[],
+): boolean {
+  if (target.mode !== CompletionMode.SLASH) return false;
+  return isPerfectSlashMatch(
+    parseSlashCommandQuery(
+      target.query,
+      slashCommandPool(target, slashCommands),
+    ),
+  );
+}
+
+/**
  * Suggestion builder over one command level, porting useSlashCompletion's
  * useCommandSuggestions: an empty partial lists every visible command with
  * recently-used ones first; a non-empty partial goes through the fzf fuzzy
@@ -810,6 +833,7 @@ function toCommandSuggestion(
     label: getCommandDisplayName(command, { matchedAlias, includeAliases }),
     value: command.name,
     description: command.description,
+    sourceBadge: getCommandSourceBadge(command) ?? undefined,
     argumentHint: command.argumentHint,
     matchedAlias,
     submitOnAccept: command.submitOnAccept,

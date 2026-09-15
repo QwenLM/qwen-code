@@ -126,7 +126,9 @@ export function buildSessionRecoveryPlanFromApiHistory({
   historyGaps,
   options,
 }: BuildSessionRecoveryPlanFromApiHistoryInput): SessionRecoveryPlan {
-  const originalApiHistory = structuredClone(inputApiHistory);
+  // Never mutated below — interruption detection only reads it, and the repair
+  // runs on the clone — so the caller's array can be aliased instead of copied.
+  const originalApiHistory = inputApiHistory;
   const gaps = historyGaps ?? [];
   const planId = createPlanId(sessionId, originalApiHistory.length);
 

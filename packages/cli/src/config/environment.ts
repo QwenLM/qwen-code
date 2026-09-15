@@ -15,6 +15,7 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
+  isPrivateProvenanceEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
@@ -458,6 +459,11 @@ function canApplyParsedEnvKey(
   // repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
   // #8653 cross-workspace vector.
   if (isLoaderEnvKey(key)) return false;
+  // Private daemon→child provenance markers are fixed constants, so unlike the
+  // hardcoded project tier they are rejected at every scope — a home `.env`
+  // must not be able to forge Conversations provenance onto an ordinary
+  // session either.
+  if (isPrivateProvenanceEnvKey(key)) return false;
   if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;

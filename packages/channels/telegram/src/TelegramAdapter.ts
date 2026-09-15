@@ -31,15 +31,6 @@ const TELEGRAM_BOT_COMMANDS = [
 ] as const;
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 
-const TELEGRAM_START_MESSAGE = [
-  'Qwen Code Telegram bot',
-  '',
-  'Send any message to chat with Qwen Code.',
-  'Use /new to start a fresh conversation.',
-  'Use /cancel to stop a running request.',
-  'Use /help to see available commands.',
-].join('\n');
-
 export class TelegramChannel extends ChannelBase {
   private bot: Bot;
   private botId: number = 0;
@@ -59,7 +50,7 @@ export class TelegramChannel extends ChannelBase {
     super(name, config, bridge, options);
     this.bot = this.createBot();
     this.registerCommand('start', async (envelope) => {
-      await this.sendMessage(envelope.chatId, TELEGRAM_START_MESSAGE);
+      await this.sendMessage(envelope.chatId, this.startMessage());
       return true;
     });
     this.registerCancelCommand();
@@ -140,6 +131,7 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || '(image)',
         msg.caption_entities,
+        !msg.caption,
       );
 
       // Pick the largest photo size (last in array)
@@ -159,6 +151,8 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download photo: ${err instanceof Error ? err.message : err}\n`,
           );
+          const promptText = msg.caption ? envelope.text : '';
+          envelope.text = `${promptText}\n\n(User sent an image but download failed)`;
         }
       }).catch((err) => {
         this.reportInboundError(envelope, err, () =>
@@ -177,6 +171,7 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || `(file: ${fileName})`,
         msg.caption_entities,
+        !msg.caption,
       );
 
       this.prepareThenHandleInbound(envelope, async () => {
@@ -209,9 +204,10 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
           );
-          envelope.text =
-            (msg.caption || '') +
-            `\n\n(User sent a file "${fileName}" but download failed)`;
+          // Mirrors the success branch: the placeholder is adapter text, so
+          // only a real caption may survive into the prompt.
+          const promptText = msg.caption || '';
+          envelope.text = `${promptText}\n\n(User sent a file "${fileName}" but download failed)`;
         }
       }).catch((err) => {
         this.reportInboundError(envelope, err, () =>
@@ -230,6 +226,9 @@ export class TelegramChannel extends ChannelBase {
         msg,
         msg.caption || '(voice message)',
         msg.caption_entities,
+        // Standard Telegram clients cannot caption a voice message, so
+        // this is effectively always synthetic.
+        !msg.caption,
       );
 
       this.prepareThenHandleInbound(envelope, async () => {
@@ -259,9 +258,10 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
           );
-          envelope.text =
-            (msg.caption || '') +
-            `\n\n(User sent a voice message but download failed)`;
+          // Mirrors the success branch: the placeholder is adapter text, so
+          // only a real caption may survive into the prompt.
+          const promptText = msg.caption || '';
+          envelope.text = `${promptText}\n\n(User sent a voice message but download failed)`;
         }
       }).catch((err) => {
         this.reportInboundError(envelope, err, () =>
@@ -291,6 +291,17 @@ export class TelegramChannel extends ChannelBase {
         `[Telegram:${this.name}] Failed to register bot commands: ${err instanceof Error ? err.message : err}\n`,
       );
     }
+  }
+
+  private startMessage(): string {
+    return [
+      'Qwen Code Telegram bot',
+      '',
+      'Send any message to chat with Qwen Code.',
+      'Use /new to start a fresh conversation.',
+      'Use /cancel to stop a running request.',
+      'Use /help to see available commands.',
+    ].join('\n');
   }
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
@@ -491,6 +502,8 @@ export class TelegramChannel extends ChannelBase {
     },
     text: string,
     entities?: Array<{ type: string; offset: number; length: number }>,
+    /** Whether the text is an adapter-generated media placeholder. */
+    syntheticText = false,
   ): Envelope {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
 
@@ -536,6 +549,7 @@ export class TelegramChannel extends ChannelBase {
           ? String(msg.message_thread_id)
           : undefined,
       text: cleanText,
+      ...(syntheticText ? { syntheticText: true as const } : {}),
       isGroup,
       isMentioned,
       isReplyToBot,

@@ -38,21 +38,45 @@ import {
   useState,
   useSyncExternalStore,
   type ReactNode,
+  type RefObject,
 } from 'react';
-import type { Config, Logger, ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  ToolConfirmationOutcome,
+  type Config,
+  type Logger,
+} from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
-import type { HistoryItem } from '../types.js';
+import {
+  MessageType,
+  type HistoryItem,
+  type HistoryItemWithoutId,
+} from '../types.js';
+import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  consumesContextAnnouncementLatch,
+} from '../utils/commandUtils.js';
 import type { OpenTuiRuntime } from './opentui-runtime.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
-import type { WaitingCallInfo } from './live-session.js';
+import {
+  nextApprovalMode,
+  selectAutoApprovals,
+  type WaitingCallInfo,
+} from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
+import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
+import { executeUserShell } from './shell-mode.js';
+import { STATUS_INDICATOR_WIDTH } from './messages.js';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import type { KeyEvent } from '@opentui/core';
+import { toOriginalKey } from './key-map.js';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -62,14 +86,20 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import { isExitInProgress } from './exit-lifecycle.js';
+import { injectCapturedInput } from './early-input.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
+import { OpenTuiBanner } from './opentui-header.js';
+import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import {
   OpenTuiActionConfirmation,
+  OpenTuiMcpApprovalDialog,
   OpenTuiShellConfirmation,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
+import { useMcpApproval } from '../hooks/useMcpApproval.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -82,6 +112,13 @@ export interface OpenTuiAppProps {
   /** Runtime sidecar, created by the entry and passed straight through. */
   runtime?: OpenTuiRuntime;
   extensionRefreshState?: ExtensionRefreshState;
+  /**
+   * Dialog auto-opened at boot (U-6). Ink auto-opens the auth dialog from the
+   * unauthenticated initial state (useAuth) and the one-shot startup
+   * authError (useInitializationAuthError); here the entry computes that once
+   * and every later setDialog stays slash-dispatch owned.
+   */
+  initialDialog?: OpenTuiDialogRequest | null;
 
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
@@ -103,6 +140,11 @@ export interface OpenTuiAppProps {
   /** Replays a transcript batch (session switch / resume). */
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
   /**
+   * Folds one projected host-history event into the live transcript
+   * (U-28 project-on-write); wired to the live turn's `applyEvent`.
+   */
+  onTranscriptEvent?: (event: OpenTuiStreamEvent) => void;
+  /**
    * Re-keys UI-side session state (chat id + stats) after core rotates the
    * session. `/resume` and `/branch` treat this call as their commit point, so
    * the shell reports a notice when no owner is wired rather than leaving the
@@ -117,11 +159,21 @@ export interface OpenTuiAppProps {
    * that populates it lands with a later batch, so the layout stays fixed.
    */
   updateNotice?: string | null;
+  /**
+   * Armed two-press quit warning from the entry layer's exit guard. ink paints
+   * it in the footer's own hint slot, so it travels there rather than into the
+   * transcript region.
+   */
+  exitHint?: string | null;
   availableTerminalHeight?: number;
 
   // --- Batch 6: live-turn + confirmation wiring ---------------------------
   /** A live model turn is in flight (composer Esc interrupts, footer spins). */
   streaming?: boolean;
+  /** Live output-character count behind the indicator's token estimate. */
+  streamingCharsRef?: RefObject<number>;
+  /** False while waiting on the API (↑), true once content arrives (↓). */
+  isReceivingContent?: boolean;
   /** Aborts the in-flight turn (Esc while streaming). */
   onInterrupt?: () => void;
   approvalMode?: ApprovalMode;
@@ -142,6 +194,12 @@ export interface OpenTuiAppProps {
   composerHandle?: {
     current: { getText: () => string; setText: (text: string) => void } | null;
   };
+  /** U-7: finished follow-up suggestion, shown as the ghost placeholder. */
+  promptSuggestion?: string | null;
+  /** U-7: clears the published suggestion (accept/typing/submit). */
+  onPromptSuggestionDismiss?: () => void;
+  /** U-7/R2-2: aborts the suggestion without clearing it (typing path). */
+  onPromptSuggestionAbort?: () => void;
 }
 
 interface ShellModal {
@@ -172,10 +230,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onSubmitPrompt,
     onQuit,
     onTranscriptReset,
+    onTranscriptEvent,
     onStartNewSession,
     onToggleVim,
     updateNotice,
+    exitHint,
     streaming,
+    streamingCharsRef,
+    isReceivingContent,
     onInterrupt,
     approvalMode,
     queueLength,
@@ -183,15 +245,196 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     waitingToolCalls,
     onToolCallSettled,
     onRenderError,
+    promptSuggestion,
+    onPromptSuggestionDismiss,
+    onPromptSuggestionAbort,
   } = props;
 
-  const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(null);
+  const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
+    props.initialDialog ?? null,
+  );
   const [noticeText, setNoticeText] = useState<string | null>(null);
   const [commandList, setCommandList] = useState<readonly SlashCommand[]>(
     commands ?? [],
   );
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
+
+  // U-33: `!` shell mode (ink shellModeActive parity). The state lives here
+  // with the submit routing; the composer only renders the chrome and the
+  // toggle. Every running command's controller is kept so quit (and unmount)
+  // can kill all of them — a single slot would orphan an older command.
+  const [shellModeActive, setShellModeActive] = useState(false);
+  const shellControllersRef = useRef<Set<AbortController>>(new Set());
+  const { width: terminalWidth, height: terminalHeight } =
+    useTerminalDimensions();
+  const toggleShellMode = useCallback(
+    () => setShellModeActive((active) => !active),
+    [],
+  );
+  // ink's Composer hides the footer while the completion list is open; the
+  // list lives inside the composer, so its visibility is lifted here.
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const onSuggestionsVisibilityChange = useCallback(
+    (visible: boolean) => setShowSuggestions(visible),
+    [],
+  );
+  // ink's useAutoAcceptIndicator holds the mode locally so a cycle repaints at
+  // once — the `approvalMode` prop is only re-read when the entry re-renders —
+  // and keeps re-syncing from it so a change made elsewhere (`/plan`, the
+  // approval-mode dialog) still lands. Both routes funnel through
+  // adoptApprovalMode so entering AUTO explains itself either way.
+  const [currentApprovalMode, setCurrentApprovalMode] = useState(approvalMode);
+  useEffect(() => {
+    setCurrentApprovalMode(approvalMode);
+  }, [approvalMode]);
+  // emitAutoModeEntryNotices only ever adds INFO rows.
+  const addInfoItem = useCallback(
+    (item: HistoryItemWithoutId) => {
+      if (item.type === MessageType.INFO) {
+        onTranscriptEvent?.({ type: 'info', text: item.text });
+      }
+    },
+    [onTranscriptEvent],
+  );
+  const adoptApprovalMode = useCallback(
+    (next: ApprovalMode) => {
+      setCurrentApprovalMode(next);
+      // Both of ink's routes guard the notices on "was not already AUTO". A
+      // rotation can never re-enter AUTO, but the dialog can — it opens with
+      // the current mode already selected, so Enter re-picks it and would
+      // reprint the stripped-rules notice, the one part of the entry notices
+      // that is not idempotent.
+      if (
+        next === ApprovalMode.AUTO &&
+        currentApprovalMode !== ApprovalMode.AUTO
+      ) {
+        emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
+      }
+      // ink's handleApprovalModeChange pairs the switch with releasing what is
+      // already parked: entering an auto-approving mode confirms those calls
+      // instead of leaving a dialog up over a mode that would not have asked.
+      for (const call of selectAutoApprovals(next, waitingToolCalls ?? [])) {
+        void call.confirmationDetails
+          .onConfirm(ToolConfirmationOutcome.ProceedOnce)
+          .catch(() => {});
+        onToolCallSettled?.(call.callId);
+      }
+    },
+    [
+      config,
+      settings,
+      addInfoItem,
+      currentApprovalMode,
+      waitingToolCalls,
+      onToolCallSettled,
+    ],
+  );
+  const cycleApprovalMode = useCallback(() => {
+    const next = nextApprovalMode(config.getApprovalMode());
+    try {
+      config.setApprovalMode(next);
+    } catch (e) {
+      addInfoItem({ type: MessageType.INFO, text: (e as Error).message });
+      return;
+    }
+    adoptApprovalMode(next);
+  }, [config, addInfoItem, adoptApprovalMode]);
+  // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
+  // at App level (disabled only for the agent-tab view), so it still cycles
+  // while a dialog or a confirmation has the composer unmounted. The composer
+  // keeps only the Windows bare-Tab fallback — the one route that has to know
+  // whether Tab was already spent on a completion.
+  useKeyboard((key: KeyEvent) => {
+    const { name, shift, ctrl } = toOriginalKey(key);
+    if (name !== 'tab' || !shift || ctrl) return;
+    key.preventDefault();
+    cycleApprovalMode();
+  });
+  // ink announces AUTO on mount too, so `--approval-mode auto` and
+  // `tools.approvalMode: "auto"` do not open a session silently in AUTO. The
+  // keypress and dialog routes above never fire for a mode set before start.
+  useEffect(() => {
+    if (approvalMode === ApprovalMode.AUTO) {
+      emitAutoModeEntryNotices({ config, settings, addItem: addInfoItem });
+    }
+    // Intentionally mount-only, as in ink; later entries go through
+    // adoptApprovalMode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const runShellCommand = useCallback(
+    (command: string) => {
+      const emit = props.onTranscriptEvent;
+      if (!emit) return;
+      const controller = new AbortController();
+      shellControllersRef.current.add(controller);
+      return executeUserShell(
+        config,
+        command,
+        emit,
+        controller.signal,
+        // The `!` row renders behind the 2-col input indicator, and the child
+        // runs over that inner width (ink parity: it also passes the raw
+        // terminal width to its `!` child — no SHELL_WIDTH_FRACTION here,
+        // which only reaches the model-driven tool).
+        {
+          width: Math.max(terminalWidth - STATUS_INDICATOR_WIDTH, 10),
+          height: terminalHeight,
+        },
+      )
+        .catch((error: unknown) => {
+          // executeUserShell reports its own failures; this guards the seam
+          // itself so a rejection can neither strand the controller in the
+          // gate set nor escape the fire-and-forget call sites (R5-7).
+          emit({
+            type: 'error',
+            text: `An unexpected error occurred: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+        })
+        .finally(() => {
+          shellControllersRef.current.delete(controller);
+          // The drain also waits for the shell lane, so a command finishing has
+          // to re-arm it for anything queued while the command held the gate.
+          setDeferredRevision((revision) => revision + 1);
+        });
+    },
+    [config, props.onTranscriptEvent, terminalWidth, terminalHeight],
+  );
+
+  // A render teardown (error bailout, unmount) must not leave `!` children
+  // running with no transcript to report into.
+  useEffect(
+    () => () => {
+      for (const controller of shellControllersRef.current) {
+        controller.abort();
+      }
+    },
+    [],
+  );
+
+  // U-9: the shell owns the settings sub-dialog routing (ink DialogManager
+  // parity: ui.theme/editor/model rows open their dialogs; anything else
+  // closes) and the composer fill the arena picker relies on.
+  const handleSelectSetting = useCallback((name: string) => {
+    if (name === 'ui.theme') setDialog({ dialog: 'theme' });
+    else if (name === 'general.preferredEditor')
+      setDialog({ dialog: 'editor' });
+    else if (name === 'fastModel') setDialog({ dialog: 'model', mode: 'fast' });
+    else if (name === 'visionModel')
+      setDialog({ dialog: 'model', mode: 'vision' });
+    else setDialog(null);
+  }, []);
+
+  const fillComposer = useCallback(
+    (text: string) => {
+      // The picker unmounts the prompt before remounting it, so the handle
+      // is briefly absent; the injector polls until it reattaches.
+      injectCapturedInput(() => props.composerHandle?.current ?? null, text);
+    },
+    [props.composerHandle],
+  );
 
   // Modal confirmation bridge (Batch 6): presentShell/presentAction enqueue
   // a dialog and hand back the promise that its resolution settles. Both
@@ -244,12 +487,34 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const activeToolCall = waitingToolCalls?.[0] ?? null;
 
-  const transcript = useMemo(
-    () => ({
-      reset: (events: OpenTuiStreamEvent[]) => onTranscriptReset?.(events),
-    }),
-    [onTranscriptReset],
-  );
+  // ink drives the gated-server approval queue from a renderer-agnostic hook at
+  // app level; without it a `.mcp.json` checked into the project is never
+  // offered here and its servers stay silently disconnected.
+  const mcpApproval = useMcpApproval(config);
+
+  // ink AppContainer's contextFilesAnnouncedRef: the context-file set is
+  // announced once per session, on the first submission that reaches a model.
+  const contextFilesAnnouncedRef = useRef(false);
+
+  const transcript = useMemo(() => {
+    // ink re-arms that latch in three places and reconciles its history-
+    // replacement site against the restored rows. One place suffices here:
+    // every route that takes the emitted row off screen — /clear, resume,
+    // branch — funnels through a transcript reset, and the replay a reset
+    // installs carries no info rows, so re-arming unconditionally cannot
+    // announce a second time.
+    const reset = (events: OpenTuiStreamEvent[]) => {
+      contextFilesAnnouncedRef.current = false;
+      onTranscriptReset?.(events);
+    };
+    return {
+      reset,
+      // /clear semantics: a fresh transcript — the live turn's reset with an
+      // empty batch (it also drops a stray steering queue).
+      clear: () => reset([]),
+      append: (event: OpenTuiStreamEvent) => onTranscriptEvent?.(event),
+    };
+  }, [onTranscriptReset, onTranscriptEvent]);
 
   const host = useMemo(
     () =>
@@ -295,15 +560,37 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
-  // Slash submissions held back while a model turn streams (ink's message
-  // queue, restricted to commands: a queued prompt is the live turn's job).
-  const deferredCommandsRef = useRef<string[]>([]);
+  // Slash and shell submissions held back while a model turn streams (ink's
+  // message queue; a queued shell entry carries its routing so the drain
+  // cannot be fooled by a mid-turn toggle).
+  const deferredCommandsRef = useRef<
+    Array<{
+      text: string;
+      shell?: boolean;
+      prompt?: boolean;
+      imagePaths?: string[];
+    }>
+  >([]);
   // Push nonce for the drain (ink's queueDrainNonce). The queue itself stays a
   // ref so re-queueing behind a turn or a dialog does not re-trigger the
   // effect, but a push has to: the mid-turn gate awaits the registry, and a
   // verdict that lands after the idle edge would otherwise strand the command
   // until some future streaming transition.
   const [deferredRevision, setDeferredRevision] = useState(0);
+  // Guards one drain instance at a time (R5-6).
+  const drainingRef = useRef(false);
+  // Render-mirrored gate state for the drain's mid-loop re-check (R6-4): the
+  // effect samples streaming/dialog once, but a canRunDuringStreaming dispatch
+  // admitted during a shell entry's await window can open a dialog or start a
+  // turn, and the entries behind it must wait like newly submitted ones.
+  const streamingRef = useRef(streaming);
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
+  const dialogRef = useRef(dialog);
+  useEffect(() => {
+    dialogRef.current = dialog;
+  }, [dialog]);
 
   useEffect(() => {
     const dispatcher = new OpenTuiSlashDispatcher(
@@ -355,6 +642,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               modelOverride: outcome.modelOverride,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
+              invocationEchoed: true,
             });
           else notify('The live prompt turn is not wired in this shell.');
           return;
@@ -369,6 +657,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           // asked to leave.
           deferredCommandsRef.current = [];
           onPopQueue?.();
+          // A running `!` shell command dies with the session too — every
+          // one of them, not just the most recent.
+          for (const controller of shellControllersRef.current) {
+            controller.abort();
+          }
           // ink's quit action cancels the ongoing request before the exit
           // drains, so a mid-turn /quit stops the stream instead of racing the
           // cleanup chain (recording flush, config.shutdown) against a turn
@@ -394,15 +687,49 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       const submission = normalizeQuitSubmission(text);
       // ink parity (AppContainer.handleFinalSubmit): while a turn responds,
       // only a command that opted into canRunDuringStreaming runs now — the
-      // rest wait for idle instead of racing the stream.
-      if (streaming && (await gateway.mustDeferDuringStreaming(submission))) {
-        const command = submission.trim();
-        deferredCommandsRef.current.push(command);
-        setDeferredRevision((revision) => revision + 1);
-        notify(
-          `Queued ${command} — it will run when the current response ends.`,
-        );
-        return;
+      // rest wait for idle instead of racing the stream. A shell-mode
+      // submission (non-slash) defers the same way, tagged so the drain
+      // routes it back to the executor; the tag asks the dispatcher's own
+      // admission rule, not a re-derived classifier, or a `?`-form the
+      // dispatcher takes would run as a shell command. A running `!` command
+      // holds the same gate (ink keeps isResponding for the whole execution):
+      // a concurrent submission would race the command's LLM-history write
+      // into a live turn's chat.
+      if (streaming || shellControllersRef.current.size > 0) {
+        const takesAsSlash = await gateway.takesAsSlashCommand(submission);
+        const shellEntry = shellModeActive && !takesAsSlash;
+        // A plain prompt submitted while a `!` command runs must not start a
+        // turn even when shell mode was toggled off meanwhile (Esc): the
+        // command's completion injects LLM history between sends, and a
+        // concurrent turn turns that write into a mid-turn addHistory
+        // (R5-5). Ink holds the same gate via isResponding covering the
+        // whole execution. Slash-form input is exempt — the dispatcher's own
+        // admission rule (quit, canRunDuringStreaming, ?btw fork) decides.
+        const blockedByRunningShell =
+          !takesAsSlash && shellControllersRef.current.size > 0;
+        if (
+          shellEntry ||
+          blockedByRunningShell ||
+          (await gateway.mustDeferDuringStreaming(submission))
+        ) {
+          const command = submission.trim();
+          deferredCommandsRef.current.push({
+            text: command,
+            shell: shellEntry,
+            // The attachments ride the entry: the seam's contract keeps image
+            // paths in the second, structured argument, so a prompt the
+            // running-`!` gate held back must not lose them in the queue
+            // (R5-5 fix-induced).
+            ...(blockedByRunningShell && !shellEntry
+              ? { prompt: true, imagePaths }
+              : {}),
+          });
+          setDeferredRevision((revision) => revision + 1);
+          notify(
+            `Queued ${command} — it will run when the current response ends.`,
+          );
+          return;
+        }
       }
       const settlement = await gateway.dispatch(submission);
       if (settlement.kind === 'rejected') {
@@ -410,6 +737,33 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         return;
       }
       if (settlement.outcome === false) {
+        // ink order (use-llm-stream): slash commands dispatch first; a
+        // shell-mode submission runs only when dispatch did not claim it.
+        const query = text.trim();
+        // ink AppContainer's one-shot context-files announcement. The latch is
+        // consulted before the shell-mode intercept because the shared helper
+        // is what decides whether the submission reaches the model, and it
+        // needs shellModeActive to decide.
+        if (
+          !contextFilesAnnouncedRef.current &&
+          consumesContextAnnouncementLatch(query, {
+            shellModeActive,
+            slashCommands: commandList,
+          })
+        ) {
+          const contextFilePaths = config.getContextFilePaths();
+          if (contextFilePaths.length > 0) {
+            contextFilesAnnouncedRef.current = true;
+            addInfoItem({
+              type: MessageType.INFO,
+              text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} ${contextFilePaths.join(', ')}`,
+            });
+          }
+        }
+        if (shellModeActive && query) {
+          void runShellCommand(query);
+          return;
+        }
         if (!onSubmitPrompt) {
           notify('The live prompt turn is not wired in this shell.');
           return;
@@ -417,7 +771,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         // The raw typed text is both the prompt and the `UserPromptSubmit`
         // provenance; `@path` expansion happens where the prompt enters the
         // stream (live-session), so text queued mid-turn expands too.
-        const query = text.trim();
         onSubmitPrompt(query, imagePaths, {
           submittedPrompt: query || undefined,
         });
@@ -425,7 +778,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       }
       applyOutcome(settlement.outcome);
     },
-    [gateway, onSubmitPrompt, applyOutcome, notify, streaming],
+    [
+      gateway,
+      onSubmitPrompt,
+      applyOutcome,
+      notify,
+      streaming,
+      shellModeActive,
+      runShellCommand,
+      config,
+      commandList,
+      addInfoItem,
+    ],
   );
 
   // Runs the commands the mid-turn gate held back, in submission order, once
@@ -438,33 +802,96 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     // shared exit latch — at the edge and between dispatches, since the exit
     // can start while an earlier command is still awaiting its outcome.
     if (isExitInProgress()) return;
-    if (streaming || dialog || deferredCommandsRef.current.length === 0) {
+    // A running `!` command holds the same gate as a live turn: entries queued
+    // behind it must wait for it to end (its own finally re-arms this drain).
+    if (
+      streaming ||
+      dialog ||
+      shellControllersRef.current.size > 0 ||
+      deferredCommandsRef.current.length === 0
+    ) {
       return;
     }
+    // One drain at a time: a re-arm that lands mid-drain (a shell entry's own
+    // finally bumps the revision) must be a no-op, not a second instance
+    // racing the first on the gateway's single busy slot — the loser's
+    // command would be dropped with a busy rejection (R5-6). The queue is a
+    // ref, so the release below bumps the revision or entries queued behind
+    // a live drain strand.
+    if (drainingRef.current) return;
+    drainingRef.current = true;
     const pending = deferredCommandsRef.current;
     deferredCommandsRef.current = [];
     void (async () => {
-      for (const [i, command] of pending.entries()) {
-        if (isExitInProgress()) return;
-        const settlement = await gateway.dispatch(command);
-        if (settlement.kind === 'rejected') {
-          notify(settlement.reason);
-          continue;
+      // A holdsUi pause re-queues the remainder for the turn/dialog it waits
+      // for; re-arming here would drain it before that owner even starts.
+      let paused = false;
+      try {
+        for (const [i, entry] of pending.entries()) {
+          if (isExitInProgress()) return;
+          // Re-read the gate after the previous iteration's await (R6-4): the
+          // re-queue mirrors the holdsUi branch — paused, no re-arm — so the
+          // dep change that closed the gate is what resumes the batch.
+          if (
+            streamingRef.current ||
+            dialogRef.current ||
+            shellControllersRef.current.size > 0
+          ) {
+            deferredCommandsRef.current.unshift(...pending.slice(i));
+            paused = true;
+            return;
+          }
+          if (entry.shell) {
+            await runShellCommand(entry.text);
+            continue;
+          }
+          if (entry.prompt) {
+            // A plain prompt the running-`!` gate held back (R5-5). Routed
+            // straight to the seam: dispatch would answer outcome=false and
+            // the drain drops that silently.
+            if (!onSubmitPrompt) {
+              notify('The live prompt turn is not wired in this shell.');
+              continue;
+            }
+            onSubmitPrompt(entry.text, entry.imagePaths, {
+              submittedPrompt: entry.text || undefined,
+            });
+            // The turn it starts owns the drain until it ends, exactly like a
+            // dispatched submit_prompt outcome below.
+            if (i + 1 < pending.length) {
+              deferredCommandsRef.current.unshift(...pending.slice(i + 1));
+              paused = true;
+            }
+            return;
+          }
+          const settlement = await gateway.dispatch(entry.text);
+          if (settlement.kind === 'rejected') {
+            notify(settlement.reason);
+            continue;
+          }
+          if (settlement.outcome === false) continue;
+          const outcome = settlement.outcome;
+          applyOutcome(outcome);
+          // A submit_prompt outcome starts a turn and an open_dialog outcome
+          // takes the UI over, so the commands behind either wait for that turn
+          // to end or that dialog to close rather than racing the stream or
+          // overwriting the dialog with a second setDialog().
+          const holdsUi =
+            outcome.kind === 'open_dialog' ||
+            (outcome.kind === 'submit_prompt' && !!onSubmitPrompt);
+          if (holdsUi && i + 1 < pending.length) {
+            deferredCommandsRef.current.unshift(...pending.slice(i + 1));
+            paused = true;
+            return;
+          }
         }
-        if (settlement.outcome === false) continue;
-        const outcome = settlement.outcome;
-        applyOutcome(outcome);
-        // A submit_prompt outcome starts a turn and an open_dialog outcome
-        // takes the UI over, so the commands behind either wait for that turn
-        // to end or that dialog to close rather than racing the stream or
-        // overwriting the dialog with a second setDialog().
-        const holdsUi =
-          outcome.kind === 'open_dialog' ||
-          (outcome.kind === 'submit_prompt' && !!onSubmitPrompt);
-        if (holdsUi && i + 1 < pending.length) {
-          deferredCommandsRef.current.unshift(...pending.slice(i + 1));
-          return;
-        }
+      } finally {
+        drainingRef.current = false;
+        // Entries that arrived mid-drain strand unless the completion re-arms
+        // the drain (the queue is a ref; a push alone triggers nothing) — but
+        // a holdsUi pause must not re-arm, or the remainder runs before the
+        // turn/dialog it waits for even starts (R5-6).
+        if (!paused) setDeferredRevision((revision) => revision + 1);
       }
     })();
   }, [
@@ -475,6 +902,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     notify,
     applyOutcome,
     onSubmitPrompt,
+    runShellCommand,
   ]);
 
   const userMessages = useMemo(
@@ -493,15 +921,32 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       onError={(error) => onRenderError?.(error)}
     >
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
+        <OpenTuiBanner config={config} settings={settings} />
         {renderMain ? renderMain() : null}
-        {!dialog && !activeModal && !activeToolCall && updateNotice ? (
+        {!dialog &&
+        !activeModal &&
+        !activeToolCall &&
+        !mcpApproval.isMcpApprovalDialogOpen &&
+        updateNotice ? (
           <text>{updateNotice}</text>
         ) : null}
         {noticeText ? <text>{noticeText}</text> : null}
-        {activeToolCall ? (
+        {mcpApproval.isMcpApprovalDialogOpen &&
+        mcpApproval.currentMcpApproval ? (
+          // ink ranks the gated-server approval above both the shell and the
+          // tool confirmation, so it takes the slot outright.
+          <OpenTuiMcpApprovalDialog
+            key={`mcp-${mcpApproval.currentMcpApproval.name}`}
+            server={mcpApproval.currentMcpApproval}
+            pendingServers={mcpApproval.pendingMcpApprovals}
+            remaining={mcpApproval.mcpApprovalRemaining}
+            onSelect={mcpApproval.handleMcpApprovalSelect}
+          />
+        ) : activeToolCall ? (
           <OpenTuiToolConfirmation
             key={activeToolCall.callId}
             call={activeToolCall}
+            config={config}
             onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
           />
         ) : activeModal ? (
@@ -523,34 +968,83 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             />
           )
         ) : dialog ? (
-          <OpenTuiDialogMount
-            key={dialog.dialog}
-            request={dialog}
-            host={host}
-            config={config}
-            settings={settings}
-            commands={commandList}
-            onClose={() => setDialog(null)}
-            notify={notify}
-            onApprovalModeChanged={undefined}
-            availableTerminalHeight={props.availableTerminalHeight}
-          />
+          // ink's layout wraps every popup in a two-column margin and caps its
+          // width, so a dialog's border runs from column 2 to column 97 instead
+          // of spanning the terminal. The confirmations stay outside: their
+          // body reads the terminal width to estimate line wrapping.
+          //
+          // The keys on this branch and the composer's are load-bearing: both
+          // are a `<box>` in the same slot, so without them React reuses one
+          // instance and diffs props — and @opentui's margin/width setters
+          // ignore the `null` its reconciler passes for a removed prop, leaving
+          // the previous branch's layout stuck on the node.
+          <box
+            key="dialog-area"
+            marginLeft={2}
+            width={dialogAreaWidth(terminalWidth)}
+          >
+            <OpenTuiDialogMount
+              key={dialog.dialog}
+              request={dialog}
+              host={host}
+              config={config}
+              settings={settings}
+              commands={commandList}
+              onClose={() => setDialog(null)}
+              notify={notify}
+              fillInput={fillComposer}
+              onSelectSetting={handleSelectSetting}
+              onApprovalModeChanged={adoptApprovalMode}
+              availableTerminalHeight={props.availableTerminalHeight}
+            />
+          </box>
         ) : (
-          <OpenTuiInputPrompt
-            onSubmit={(text, imagePaths) => {
-              void onSubmit(text, imagePaths);
-            }}
-            userMessages={userMessages}
-            config={config}
-            focus
-            streaming={streaming}
-            onInterrupt={onInterrupt}
-            approvalMode={approvalMode}
-            queueLength={queueLength}
-            onPopQueue={onPopQueue}
-            composerHandle={props.composerHandle}
-          />
+          <box key="composer" flexDirection="column" marginTop={1}>
+            <OpenTuiLoadingIndicator
+              streaming={Boolean(streaming)}
+              streamingCharsRef={streamingCharsRef}
+              isReceivingContent={isReceivingContent}
+            />
+            <OpenTuiInputPrompt
+              onSubmit={(text, imagePaths) => {
+                void onSubmit(text, imagePaths);
+              }}
+              userMessages={userMessages}
+              config={config}
+              focus
+              streaming={streaming}
+              onInterrupt={onInterrupt}
+              approvalMode={currentApprovalMode}
+              queueLength={queueLength}
+              onPopQueue={onPopQueue}
+              composerHandle={props.composerHandle}
+              promptSuggestion={promptSuggestion}
+              onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+              onPromptSuggestionAbort={onPromptSuggestionAbort}
+              shellModeActive={shellModeActive}
+              onToggleShellMode={toggleShellMode}
+              onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+              onCycleApprovalMode={cycleApprovalMode}
+            />
+          </box>
         )}
+        {/* An armed quit warning forces the footer to mount: a dialog unmounts
+            the composer, so nothing intercepts Ctrl+C and the app-level guard
+            still arms — hiding the footer here would drop the only row telling
+            the user that a second press exits. With the warning set the footer
+            returns just that row, so nothing else appears. */}
+        {exitHint ||
+        (!dialog && !activeModal && !activeToolCall && !showSuggestions) ? (
+          <OpenTuiFooter
+            config={config}
+            streaming={Boolean(streaming)}
+            approvalMode={currentApprovalMode}
+            queueLength={queueLength}
+            sessionName={host.sessionName}
+            shellModeActive={shellModeActive}
+            exitHint={exitHint}
+          />
+        ) : null}
       </box>
     </OpenTuiErrorBoundary>
   );

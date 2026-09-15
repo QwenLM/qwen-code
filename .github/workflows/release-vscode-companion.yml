@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -99,6 +99,16 @@ jobs:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci
+
+      - name: 'Verify published export renderer'
+        run: |-
+          renderer_version=$(node -p "require('./package.json').version")
+          published_renderer=$(mktemp)
+          trap 'rm -f "${published_renderer}"' EXIT
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://unpkg.com/@qwen-code/qwen-code@${renderer_version}/export-transcript-document.js" \
+            --output "${published_renderer}"
+          cmp packages/web-templates/src/export-html/dist/export-transcript-document.js "${published_renderer}"
 
       - name: 'Get the version'
         id: 'version'
@@ -152,12 +162,6 @@ jobs:
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
 
-      - name: 'Build webui dependency'
-        if: |-
-          ${{ github.event.inputs.force_skip_tests != 'true' }}
-        run: |
-          npm run build --workspace=@qwen-code/webui
-
       - name: 'Run Tests'
         if: |-
           ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -204,7 +208,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
@@ -231,6 +235,8 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         shell: 'bash'
         run: |-
+          # Keep the verified, prebuilt export renderer reference pinned to the
+          # published CLI version from the selected source ref.
           npm run release:version -- "${RELEASE_VERSION}"
 
       - name: 'Prepare VSCode Extension'
@@ -289,7 +295,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.release.tag_name || github.event.inputs.ref || github.sha }}'
 

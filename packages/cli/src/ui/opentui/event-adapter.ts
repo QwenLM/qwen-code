@@ -29,7 +29,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { CompressionProps } from '../types.js';
+import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
@@ -73,6 +73,15 @@ export type OpenTuiStreamEvent =
       visionBridgeNotice?: string;
     }
   | { type: 'confirm'; id: string; tool: string; title: string }
+  /** The call left awaiting_approval (approved, declined, or bounced):
+   * releases the transcript card's pending marker and records how it left
+   * — 'rejected' when the scheduler cancelled the call (No/Esc), otherwise
+   * 'approved' (running means someone approved it). */
+  | {
+      type: 'confirm-resolved';
+      id: string;
+      outcome: 'approved' | 'rejected';
+    }
   /** Structured compression item (/compress command): rendered as the ink
    * CompressionMessage row (spinner/diamond + token counts) instead of the
    * flattened text projection. */
@@ -123,6 +132,27 @@ export type OpenTuiStreamEvent =
       durationMs?: number;
       lastReason?: string;
     }
+  /** Away-summary recap (ink away_recap → AwayRecapMessage): `※` gutter +
+   * bold "recap:" label, all secondary-colored. */
+  | { type: 'away-recap'; text: string }
+  /** User `!`-shell command row (ink user_shell → UserShellMessage):
+   * `$ ` prefix + the command text. */
+  | { type: 'user-shell'; text: string }
+  /** Advisor review card (ink advisor → AdvisorMessage): header with the
+   * resolved model + the review body as markdown. */
+  | { type: 'advisor'; text: string; model: string }
+  /** Arena agent card (ink arena_agent_complete → ArenaAgentCard):
+   * structured agent result carried so the row can color the status. */
+  | { type: 'arena-agent'; agent: ArenaAgentCardData }
+  /** Arena session summary card (ink arena_session_complete →
+   * ArenaSessionCard): structured cross-agent comparison. */
+  | {
+      type: 'arena-session';
+      sessionStatus: string;
+      task: string;
+      totalDurationMs: number;
+      agents: ArenaAgentCardData[];
+    }
   /**
    * Turn segmentation marker (core `finished` / one-shot notices): closes
    * the streaming assistant block WITHOUT settling tool cards or dropping
@@ -154,6 +184,31 @@ export interface EventMapperContext {
    * handleCitationEvent; absent means citations are shown.
    */
   showCitations?: () => boolean;
+}
+
+/**
+ * Shared with the item projector (item-projection.ts) so the stream mapper
+ * and the host-history projection render one identical row shape.
+ */
+export function formatStopHookLoopText(
+  stopHookCount: number,
+  reasons: string[],
+): string {
+  return (
+    `Ran ${stopHookCount} stop hooks\n` +
+    `  ⎿  Stop hook error: ${reasons[reasons.length - 1] ?? ''}`
+  );
+}
+
+/** Shared with the item projector — ink redacts the echoed prompt. */
+export function formatUserPromptSubmitBlocked(
+  reason: string,
+  originalPrompt: string,
+): string {
+  return (
+    `✕ UserPromptSubmit operation blocked by hook:\n${reason}\n\n` +
+    `Original prompt: ${sanitizeSensitiveText(originalPrompt)}`
+  );
 }
 
 /** One-line compact JSON for tool-call args (empty object → undefined). */
@@ -235,6 +290,12 @@ export function renderResultDisplay(display: unknown): string {
         .map((line) => line.map((t) => t.text ?? '').join(''))
         .join('\n');
     }
+    if (
+      o['type'] === 'ask_user_question_answers' &&
+      typeof o['text'] === 'string'
+    ) {
+      return o['text'];
+    }
     // Structured displays ink's classifyDisplay handles individually.
     if (o['type'] === 'plan_summary') {
       const message = typeof o['message'] === 'string' ? o['message'] : '';
@@ -304,6 +365,50 @@ export function renderResultDisplay(display: unknown): string {
     if (typeof o['message'] === 'string') return o['message'];
   }
   return JSON.stringify(display, null, 2);
+}
+
+/**
+ * The structured payload a result display carries, if any. The tool card has an
+ * ink-parity renderer for each of a file diff, a todo list and an ANSI grid,
+ * and `renderResultDisplay` would reduce any of them to text — a todo list to
+ * its raw JSON. Split out from {@link toolResultEvent} because the live-chunk
+ * and resume paths emit an incremental `tool-output` for the flattened text and
+ * only want the structured half shared.
+ */
+export function extractStructuredResult(
+  display: unknown,
+): Partial<
+  Pick<
+    Extract<OpenTuiStreamEvent, { type: 'tool-result' }>,
+    'diff' | 'todos' | 'ansi'
+  >
+> | null {
+  const diff = extractFileDiff(display);
+  if (diff) return { diff };
+  const todos = extractTodos(display);
+  if (todos) return { todos };
+  const ansi = extractAnsiOutput(display);
+  if (ansi) return { ansi };
+  return null;
+}
+
+/**
+ * The tool-result event one result display expands to, or `null` when it
+ * carries nothing renderable. Every path that turns a completed or replayed
+ * display into events goes through here so the precedence cannot drift between
+ * them.
+ */
+export function toolResultEvent(
+  id: string,
+  display: unknown,
+  visionBridgeNotice?: string,
+): OpenTuiStreamEvent | null {
+  const notice = visionBridgeNotice ? { visionBridgeNotice } : {};
+  const structured = extractStructuredResult(display);
+  if (structured)
+    return { type: 'tool-result', id, display: '', ...structured, ...notice };
+  const text = renderResultDisplay(display);
+  return text ? { type: 'tool-result', id, display: text, ...notice } : null;
 }
 
 /**
@@ -437,47 +542,12 @@ export function createEventMapper(
           typeof v.visionBridgeNotice === 'string' && v.visionBridgeNotice
             ? v.visionBridgeNotice
             : undefined;
-        const diff = extractFileDiff(v.resultDisplay);
-        if (diff) {
-          out.push({
-            type: 'tool-result',
-            id: v.callId,
-            display: '',
-            diff,
-            ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-          });
-        } else {
-          const todos = extractTodos(v.resultDisplay);
-          if (todos) {
-            out.push({
-              type: 'tool-result',
-              id: v.callId,
-              display: '',
-              todos,
-              ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-            });
-          } else {
-            const ansi = extractAnsiOutput(v.resultDisplay);
-            if (ansi) {
-              out.push({
-                type: 'tool-result',
-                id: v.callId,
-                display: '',
-                ansi,
-                ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-              });
-            } else {
-              const display = renderResultDisplay(v.resultDisplay);
-              if (display)
-                out.push({
-                  type: 'tool-result',
-                  id: v.callId,
-                  display,
-                  ...(visionBridgeNotice ? { visionBridgeNotice } : {}),
-                });
-            }
-          }
-        }
+        const result = toolResultEvent(
+          v.callId,
+          v.resultDisplay,
+          visionBridgeNotice,
+        );
+        if (result) out.push(result);
         const cancelled = v.executionStatus === 'cancelled';
         const failed = v.error !== undefined || v.executionStatus === 'error';
         out.push({
@@ -650,16 +720,19 @@ export function createEventMapper(
         out.push({ type: 'stop-hook-message', message: ev.value as string });
         break;
       }
+      case 'goal_settlement_failed': {
+        closeThought();
+        out.push({ type: 'warning', text: ev.value as string });
+        break;
+      }
       case 'user_prompt_submit_blocked': {
         closeThought();
         const v = ev.value as { reason: string; originalPrompt: string };
         out.push({
           type: 'warning',
-          text:
-            `✕ UserPromptSubmit operation blocked by hook:\n${v.reason}\n\n` +
-            // ink redacts the echoed prompt (HistoryItemDisplay): sensitive
-            // patterns masked and the text capped at 200 chars.
-            `Original prompt: ${sanitizeSensitiveText(v.originalPrompt)}`,
+          // ink redacts the echoed prompt (HistoryItemDisplay): sensitive
+          // patterns masked and the text capped at 200 chars.
+          text: formatUserPromptSubmitBlocked(v.reason, v.originalPrompt),
         });
         break;
       }
@@ -672,9 +745,7 @@ export function createEventMapper(
         };
         out.push({
           type: 'info',
-          text:
-            `Ran ${v.stopHookCount} stop hooks\n` +
-            `  ⎿  Stop hook error: ${v.reasons[v.reasons.length - 1] ?? ''}`,
+          text: formatStopHookLoopText(v.stopHookCount, v.reasons),
         });
         break;
       }
@@ -731,6 +802,10 @@ export type GoalSnapshotLike = {
     status?: string;
     turnCount?: number;
     activeTimeMs?: number;
+    tokensUsed?: number;
+    tokenBudget?: number;
+    checkpointStalls?: number;
+    lastCheckpointFailure?: string;
     lastReason?: string;
   } | null;
   activity?: string;

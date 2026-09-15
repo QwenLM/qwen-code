@@ -7,6 +7,7 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
+import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
@@ -27,6 +28,16 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // These two select which file becomes the System / SystemDefaults settings
+  // layer. A project `.env` must never redirect them: the System layer
+  // outranks the operator's own User settings, so a repository could promote
+  // its own file into the highest-precedence layer — renaming the product in
+  // every connected browser via `ui.brand`, among other operator-only
+  // settings that read only the operator scopes.
+  'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+  'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+  // Downloaded updates execute as the user; a project must not select them.
+  'QWEN_UPDATE_BASE_URL',
   // This points to a host temp file that carries build warnings. A project
   // `.env` must not redirect it to an arbitrary file to read or delete.
   'QWEN_CODE_WARNINGS_FILE',
@@ -55,6 +66,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // from repository content at all. prebuild.test.ts pins the membership
   // with both real symbols.
   'QWEN_REVIEW_PREBUILD',
+  // The automatic-review marker (commands/review/lib/docs-nav-profile.ts
+  // `automaticReviewRequested`) is an operator decision in the same class:
+  // it selects the reduced docs-nav profile, so a repository must not
+  // declare its own — possibly manual — review automatic and shrink the
+  // review of its own change to one reviewer with no reverse audit. CI
+  // welds it as a real step env, never a file.
+  'QWEN_REVIEW_AUTOMATIC',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -204,6 +222,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (documented as a per-daemon opt-in), so only the daemon's launch
   // environment or a home `.env` may set it.
   'QWEN_SERVE_NEW_FILE_MODE',
+  'QWEN_SERVE_MAX_WORKSPACES',
   // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT decides where the daemon stores
   // every workspace's session attachments. A project `.env` redirecting it
   // would capture uploads for ALL workspaces the daemon serves — and reads
@@ -218,6 +237,11 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // distributed to every workspace's session children — reopening the #8653
   // vector for any repo whose .env happens to carry DEV=true.
   'DEV',
+  // The Conversations provenance marker is a private daemon-to-child signal:
+  // a project `.env` or settings.env must never mark an ordinary workspace
+  // child as Conversations-hosted (it would force the writer lease and the
+  // unbound-durable-task skip onto sessions the contract does not cover).
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -251,6 +275,20 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
       pattern.test(lowerKey),
     )
   );
+}
+
+// Private daemon→child provenance markers. Unlike the private ACP capability
+// (a random per-spawn nonce), these are fixed constants, so a home-scoped
+// `.env` could forge one — and home-scoped files are deliberately exempt from
+// the hardcoded project exclusions above. No env file at any scope may set
+// them: the only legitimate carrier is the spawner's child env, which the CLI
+// entry point captures and deletes before any environment-file load.
+const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
+]);
+
+export function isPrivateProvenanceEnvKey(key: string): boolean {
+  return PRIVATE_PROVENANCE_ENV_KEYS.has(key.toLowerCase());
 }
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [

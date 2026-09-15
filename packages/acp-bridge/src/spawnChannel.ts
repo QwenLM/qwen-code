@@ -5,7 +5,6 @@
  */
 
 import { spawn } from 'node:child_process';
-import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
 import { CLIENT_METHODS, type AnyMessage } from '@agentclientprotocol/sdk';
@@ -24,6 +23,7 @@ import {
 } from '@agentclientprotocol/sdk/dist/schema/zod.gen.js';
 /* eslint-enable import/no-internal-modules */
 import type { ChannelFactory } from './channel.js';
+import { markChannelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import { redactLogCredentials } from './logRedaction.js';
 import {
   NdJsonQueueLimitError,
@@ -38,6 +38,7 @@ import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
 import type { ChildHeapPolicy } from './child-heap-policy.js';
 import { estimateJsonStringBytes } from './json-string-bytes.js';
+import { detectAvailableMemoryMb } from './daemon-memory-budget.js';
 
 let cachedMemoryArgs: string[] | undefined;
 export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
@@ -318,14 +319,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
-  const constrainedMemory = (process as { constrainedMemory?: () => number })
-    .constrainedMemory;
-  const constrained =
-    typeof constrainedMemory === 'function' ? constrainedMemory() : 0;
-  const totalBytes =
-    constrained && constrained > 0 ? constrained : os.totalmem();
-  const totalMB = Math.floor(totalBytes / (1024 * 1024));
-  const targetMB = Math.min(Math.floor(totalMB * 0.5), 16_384);
+  const { memoryMb } = detectAvailableMemoryMb();
+  const targetMB = Math.min(Math.floor(memoryMb * 0.5), 16_384);
   const currentLimitMB = Math.floor(
     getHeapStatistics().heap_size_limit / (1024 * 1024),
   );
@@ -436,7 +431,11 @@ export function createSpawnChannelFactory(
 ): ChannelFactory {
   if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
-  return async (workspaceCwd, childEnvOverrides, signal) => {
+  const factory: ChannelFactory = async (
+    workspaceCwd,
+    childEnvOverrides,
+    signal,
+  ) => {
     if (signal?.aborted) {
       throw signal.reason instanceof Error
         ? signal.reason
@@ -625,6 +624,8 @@ export function createSpawnChannelFactory(
       exited: trackedChild.exited,
     };
   };
+  markChannelFactoryForwardsChildEnv(factory);
+  return factory;
 }
 
 /**

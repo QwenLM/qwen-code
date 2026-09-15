@@ -137,7 +137,7 @@ Notes:
 Example:
 
 ```tsx
-import { WebShellTranscript } from '@qwen-code/web-shell';
+import { WebShellTranscript } from '@qwen-code/web-shell/transcript';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 
 export function HistoryView({

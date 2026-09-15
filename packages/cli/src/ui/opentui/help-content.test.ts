@@ -15,6 +15,7 @@ import type { SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
 import {
   HELP_COMMAND_LIST_VISIBLE_LINES,
+  HELP_COMMANDS_TAB_CHROME_ROWS,
   HELP_DOCS_URL,
   HELP_KEY_COL_WIDTH,
   HELP_LAYOUT_FIXED_ROWS,
@@ -25,7 +26,10 @@ import {
   formatHelpText,
   getHelpShortcuts,
   groupHelpCommands,
+  helpCommandWindowRows,
+  helpScrollMax,
   truncateHelpText,
+  type HelpLine,
 } from './help-content.js';
 
 function cmd(
@@ -217,5 +221,42 @@ describe('computeHelpWidthLayout (narrow-width /help parity)', () => {
     const layout = computeHelpWidthLayout(40);
     expect(layout.safeWidth).toBe(72);
     expect(layout.colWidth).toBe(Math.floor((72 - 6 - 2) / 2));
+  });
+});
+
+describe('helpScrollMax', () => {
+  const lines = (count: number): HelpLine[] =>
+    Array.from({ length: count }, () => ({ type: 'blank' }));
+  const full = HELP_COMMAND_LIST_VISIBLE_LINES;
+
+  it('offers no scrolling while the list fits the window', () => {
+    expect(helpScrollMax(lines(full), full)).toBe(0);
+    expect(helpScrollMax(lines(0), full)).toBe(0);
+  });
+
+  it('stops at the last offset that still moves the window', () => {
+    expect(helpScrollMax(lines(full + 5), full)).toBe(5);
+  });
+
+  it('tracks a window the body budget narrowed', () => {
+    expect(helpScrollMax(lines(20), 16)).toBe(4);
+  });
+});
+
+describe('helpCommandWindowRows', () => {
+  it('keeps the full window while the budget covers the chrome', () => {
+    const roomy =
+      HELP_COMMAND_LIST_VISIBLE_LINES + HELP_COMMANDS_TAB_CHROME_ROWS;
+    expect(helpCommandWindowRows(roomy)).toBe(HELP_COMMAND_LIST_VISIBLE_LINES);
+    expect(helpCommandWindowRows(40)).toBe(HELP_COMMAND_LIST_VISIBLE_LINES);
+  });
+
+  it('gives the chrome its rows before the list claims any', () => {
+    expect(helpCommandWindowRows(20)).toBe(16);
+  });
+
+  it('never collapses to zero rows on a tiny budget', () => {
+    expect(helpCommandWindowRows(HELP_COMMANDS_TAB_CHROME_ROWS)).toBe(1);
+    expect(helpCommandWindowRows(0)).toBe(1);
   });
 });

@@ -285,7 +285,9 @@ for (const theme of [
       .getByRole('button', { expanded: false })
       .first();
     await historyRow.click();
-    await expect(page.locator('[data-workflow-dispatch="d1"]')).toBeVisible();
+    await expect(
+      page.getByRole('tabpanel').locator('[data-workflow-dispatch="d1"]'),
+    ).toBeVisible();
     await page.waitForTimeout(400);
     await captureScreenshot(page, `workflow-page-history-${theme}`);
   });

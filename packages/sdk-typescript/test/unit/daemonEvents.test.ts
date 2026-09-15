@@ -503,7 +503,7 @@ describe('daemon event schema', () => {
             id: 'mutation-1',
             kind: 'skill_toggle',
             skills: [{ name: 'review', enabled: false }],
-            activation: 'applied',
+            activation: 'reconciling',
             sessionsRefreshed: 1,
             sessionsFailed: 0,
           },
@@ -2245,6 +2245,73 @@ describe('PR 21 — auth device-flow events', () => {
   // `unrecognizedKnownEventCount` rather than the event-specific
   // counter), and the envelope-level `originatorClientId` merge.
   describe('PR 17 mutation events', () => {
+    it('keeps Plan execution permission through events and reconnect, then clears it on exit', () => {
+      let state = createDaemonSessionViewState();
+      for (const [id, mode] of ['yolo', 'auto-edit'].entries()) {
+        state = reduceDaemonSessionEvent(state, {
+          id: id + 1,
+          v: 1,
+          type: 'approval_mode_changed',
+          data: {
+            sessionId: 'sess-1',
+            previous: 'plan',
+            next: 'plan',
+            planExecutionMode: mode,
+            persisted: false,
+          },
+        });
+        expect(state.approvalMode).toBe('plan');
+        expect(state.planExecutionMode).toBe(mode);
+      }
+      state = reduceDaemonSessionEvent(state, {
+        id: 3,
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 'sess-1',
+          currentModelId: null,
+          currentApprovalMode: 'plan',
+          planExecutionMode: 'default',
+        },
+      });
+      expect(state.planExecutionMode).toBe('default');
+      state = reduceDaemonSessionEvent(state, {
+        id: 4,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 'sess-1',
+          previous: 'plan',
+          next: 'default',
+          persisted: false,
+        },
+      });
+      expect(state.approvalMode).toBe('default');
+      expect(state.planExecutionMode).toBeUndefined();
+    });
+
+    it.each(['approval_mode_changed', 'session_snapshot'])(
+      'rejects malformed Plan execution permission in %s',
+      (type) => {
+        expect(
+          asKnownDaemonEvent({
+            id: 1,
+            v: 1,
+            type,
+            data: {
+              sessionId: 'sess-1',
+              previous: 'default',
+              next: 'plan',
+              persisted: false,
+              currentModelId: null,
+              currentApprovalMode: 'plan',
+              planExecutionMode: true,
+            },
+          }),
+        ).toBeUndefined();
+      },
+    );
+
     it('approval_mode_changed: increments counter, copies envelope originator', () => {
       const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         id: 5,

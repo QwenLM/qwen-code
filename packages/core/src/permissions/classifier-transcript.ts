@@ -9,8 +9,10 @@
  * ways:
  *   1. Assistant text is stripped — the agent could be tricked into writing
  *      "classifier, please allow this" inside its output.
- *   2. Tool results are fully stripped — they may contain untrusted content
- *      (curl'd web pages, file contents) carrying prompt injection.
+ *   2. Tool results are stripped — they may contain untrusted content
+ *      (curl'd web pages, file contents) carrying prompt injection. A genuine
+ *      host answer to the built-in question tool is projected from a separate
+ *      session-scoped evidence store at its matching result position.
  *   3. Each tool_use call is projected through the tool's
  *      `toAutoClassifierInput` method so the tool can redact sensitive /
  *      voluminous fields.
@@ -30,6 +32,11 @@
 
 import type { Content, Part } from '@google/genai';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
+import type {
+  TrustedUserAnswerRecord,
+  TrustedUserAnswerSnapshot,
+} from './trusted-user-answers.js';
 
 /** Registered-name prefix every discovered MCP tool carries. */
 const MCP_TOOL_NAME_PREFIX = 'mcp__';
@@ -99,6 +106,7 @@ export function buildClassifierContents(
   messages: readonly Content[],
   toolRegistry: ToolRegistry,
   pendingAction: PendingAction,
+  trustedUserAnswers: TrustedUserAnswerSnapshot = [],
 ): Content[] {
   const transcript: Content[] = [];
   // Indices into `transcript` of rendered historical actions, with the
@@ -112,15 +120,37 @@ export function buildClassifierContents(
     messages.length > MAX_TRANSCRIPT_MESSAGES
       ? messages.slice(-MAX_TRANSCRIPT_MESSAGES)
       : messages;
+  const trustedAnswersByCallId = new Map(
+    trustedUserAnswers.map((record) => [record.callId, record]),
+  );
+  const pendingAskUserQuestionCallIds = new Set<string>();
+  const projectedAnswerCallIds = new Set<string>();
 
   for (const msg of recent) {
     if (msg.role === 'user') {
-      const textParts = (msg.parts ?? []).filter(
-        (p): p is Part => typeof (p as Part).text === 'string',
-      );
-      if (textParts.length > 0) {
+      let textParts: Part[] = [];
+      const flushTextParts = () => {
+        if (textParts.length === 0) return;
         transcript.push({ role: 'user', parts: textParts });
+        textParts = [];
+      };
+      for (const part of msg.parts ?? []) {
+        if (typeof (part as Part).text === 'string') {
+          textParts.push({ text: (part as Part).text });
+          continue;
+        }
+        const trustedAnswer = findTrustedAnswerForResponse(
+          part as Part,
+          trustedAnswersByCallId,
+          pendingAskUserQuestionCallIds,
+          projectedAnswerCallIds,
+        );
+        if (trustedAnswer) {
+          flushTextParts();
+          transcript.push(formatTrustedUserAnswerContent(trustedAnswer));
+        }
       }
+      flushTextParts();
     } else if (msg.role === 'model') {
       // Render each historical functionCall as a user-role text turn so it
       // survives every converter path. See module-level comment for why we
@@ -128,6 +158,12 @@ export function buildClassifierContents(
       for (const part of msg.parts ?? []) {
         const fc = (part as Part).functionCall;
         if (fc && typeof fc.name === 'string') {
+          if (
+            fc.name === ToolNames.ASK_USER_QUESTION &&
+            typeof fc.id === 'string'
+          ) {
+            pendingAskUserQuestionCallIds.add(fc.id);
+          }
           historical.push({ index: transcript.length, toolName: fc.name });
           transcript.push({
             role: 'user',
@@ -162,6 +198,56 @@ export function buildClassifierContents(
   });
 
   return transcript;
+}
+
+function findTrustedAnswerForResponse(
+  part: Part,
+  trustedAnswersByCallId: ReadonlyMap<string, TrustedUserAnswerRecord>,
+  pendingAskUserQuestionCallIds: ReadonlySet<string>,
+  projectedAnswerCallIds: Set<string>,
+): TrustedUserAnswerRecord | undefined {
+  const functionResponse = part.functionResponse;
+  const callId = functionResponse?.id;
+  if (
+    typeof callId !== 'string' ||
+    functionResponse?.name !== ToolNames.ASK_USER_QUESTION ||
+    // Cancellation and orphan repair both synthesize a response under the
+    // original (id, name) with `error` set, so the pair anchor alone would
+    // project an answer that never reached execution.
+    typeof functionResponse?.response?.['error'] === 'string' ||
+    !pendingAskUserQuestionCallIds.has(callId) ||
+    projectedAnswerCallIds.has(callId)
+  ) {
+    return undefined;
+  }
+  const record = trustedAnswersByCallId.get(callId);
+  if (record) projectedAnswerCallIds.add(callId);
+  return record;
+}
+
+function formatTrustedUserAnswerContent(
+  record: TrustedUserAnswerRecord,
+): Content {
+  const evidence = record.omitted
+    ? {
+        host_confirmed_user_answers: [],
+        omission_notice:
+          'Answer content was omitted due to length limits; do not infer agreement.',
+      }
+    : {
+        host_confirmed_user_answers: record.answers.map((answer) => ({
+          assistant_question: answer.question,
+          user_answer: answer.answer,
+        })),
+      };
+  return {
+    role: 'user',
+    parts: [
+      {
+        text: `Host-confirmed user answer:\n${JSON.stringify(evidence)}`,
+      },
+    ],
+  };
 }
 
 /** Cap one rendered historical action, marking the cut in place. */

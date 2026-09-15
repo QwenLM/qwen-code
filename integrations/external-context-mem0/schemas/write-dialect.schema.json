@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mem0 External Context bounded write dialect v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["writeDialectVersion", "id", "auth", "create", "response"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$"
+    },
+    "auth": {
+      "enum": ["authorization-token", "authorization-bearer", "x-api-key"]
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completion", "collection", "idField"],
+      "properties": {
+        "completion": {
+          "enum": ["records", "records-or-event"]
+        },
+        "collection": {
+          "enum": ["results", "root-array", "root-object"]
+        },
+        "idField": {
+          "enum": ["id", "memory_id"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "completion": {
+                "const": "records-or-event"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "collection": {
+                "const": "results"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "writeDialectVersion": {
+      "const": 1
+    },
+    "create": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "userIdLocation",
+        "agentIdLocation",
+        "appIdLocation"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^/"
+        },
+        "userIdLocation": {
+          "$ref": "#/definitions/scopeLocation"
+        },
+        "agentIdLocation": {
+          "$ref": "#/definitions/scopeLocation"
+        },
+        "appIdLocation": {
+          "$ref": "#/definitions/scopeLocation"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "scopeLocation": {
+      "enum": ["json", "omit"]
+    }
+  }
+}

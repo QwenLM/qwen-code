@@ -211,7 +211,7 @@ export function getHookShortDescription(eventName: string): string {
       'When a permission dialog is displayed',
     ),
     [HookEventName.PermissionDenied]: t(
-      'When a tool call is denied before a permission dialog is displayed',
+      'When AUTO-mode classification denies a tool call',
     ),
     [HookEventName.TodoCreated]: t('When a new todo item is created'),
     [HookEventName.TodoCompleted]: t('When a todo item is marked as completed'),
@@ -244,7 +244,7 @@ export function getHookDescription(eventName: string): string {
       'Input to command is JSON with file_path, memory_type, load_reason, and optional trigger_file_path and parent_file_path.',
     ),
     [HookEventName.UserPromptSubmit]: t(
-      'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
+      'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).',
     ),
     [HookEventName.UserPromptExpansion]: t(
       'Input to command is JSON with command_name, command_args, and expanded prompt text.',

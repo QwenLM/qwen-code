@@ -35,6 +35,7 @@ import {
   NativeLspService,
   isBareMode,
   isTruthy,
+  parsePositiveIntegerEnv,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
@@ -47,7 +48,8 @@ import {
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
   BUILT_IN_OUTPUT_STYLES,
-  getBuiltInOutputStyle,
+  findOutputStyle,
+  loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
@@ -88,6 +90,7 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
@@ -99,12 +102,15 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
+  validateGoalCheckpointTimeoutSeconds,
+  validateGoalMaxActiveMinutes,
+  validateGoalMaxTurns,
   validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
-import { resolveSkillSettings } from './skill-settings.js';
+import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -858,6 +864,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(hooksCommand)
     // Register Channel subcommands
     .command(channelCommand)
+    .command(boardCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
@@ -897,6 +904,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'board' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
@@ -1021,7 +1029,8 @@ function resolveModelFallbacks(
  * Resolve the built-in WebSearch tool settings, with env overrides taking
  * precedence over `tools.webSearch` (mirroring the QWEN_SANDBOX_IMAGE
  * pattern): ENABLE_WEB_SEARCH for the flag, WEB_SEARCH_MODEL for the model
- * selector, WEB_SEARCH_EXTRACTOR for page reading.
+ * selector, WEB_SEARCH_EXTRACTOR for page reading, WEB_SEARCH_TIMEOUT_MS for
+ * the per-search budget, WEB_SEARCH_MAX_PER_SESSION for the per-session cap.
  *
  * Env-only backend: WEB_SEARCH_BASE_URL mirrors a modelProviders entry's
  * baseUrl for environments that cannot write settings.json; the API key
@@ -1044,6 +1053,19 @@ function resolveWebSearchSettings(
     envExtractor !== undefined
       ? isTruthy(envExtractor)
       : webSearch?.webExtractor;
+  // A non-numeric or non-positive override is ignored rather than zeroing the
+  // budget; the core resolver applies the default and the cap.
+  const envTimeoutMs = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_TIMEOUT_MS'],
+    0,
+  );
+  const timeoutMs = envTimeoutMs > 0 ? envTimeoutMs : webSearch?.timeoutMs;
+  const envMaxPerSession = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_MAX_PER_SESSION'],
+    0,
+  );
+  const maxPerSession =
+    envMaxPerSession > 0 ? envMaxPerSession : webSearch?.maxPerSession;
   const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
     ? process.env['WEB_SEARCH_API_KEY']?.trim()
@@ -1054,11 +1076,21 @@ function resolveWebSearchSettings(
     enabled === undefined &&
     model === undefined &&
     webExtractor === undefined &&
-    baseUrl === undefined
+    baseUrl === undefined &&
+    timeoutMs === undefined &&
+    maxPerSession === undefined
   ) {
     return undefined;
   }
-  return { enabled, model, webExtractor, baseUrl, apiKeyEnv };
+  return {
+    enabled,
+    model,
+    webExtractor,
+    baseUrl,
+    apiKeyEnv,
+    timeoutMs,
+    maxPerSession,
+  };
 }
 
 /**
@@ -1096,6 +1128,38 @@ function resolveGoalTokenBudget(settings: Settings): number | undefined {
   if (fromSettings === undefined) return undefined;
   try {
     return validateGoalTokenBudget(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalMaxTurns(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxTurns;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxTurns(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxActiveMinutes;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxActiveMinutes(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalCheckpointTimeoutSeconds(
+  settings: Settings,
+): number | undefined {
+  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalCheckpointTimeoutSeconds(fromSettings);
   } catch (err) {
     throw new Error(`settings.json: ${(err as Error).message}`);
   }
@@ -1278,6 +1342,24 @@ export function buildEnabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).enabledNames;
 }
 
+export function buildSkillSettingsListsProvider(merged: {
+  skills?: {
+    enabled?: unknown;
+    defaultDisabled?: unknown;
+    disabled?: unknown;
+  };
+}): () => {
+  enabled: ReadonlySet<string>;
+  defaultDisabled: ReadonlySet<string>;
+  hardDisabled: ReadonlySet<string>;
+} {
+  return () => ({
+    enabled: normalizeSkillNames(merged.skills?.enabled),
+    defaultDisabled: normalizeSkillNames(merged.skills?.defaultDisabled),
+    hardDisabled: normalizeSkillNames(merged.skills?.disabled),
+  });
+}
+
 /**
  * Thrown (instead of `process.exit(1)`) when a caller-supplied session id
  * already exists and `throwOnSessionIdConflict` is set. The interactive CLI
@@ -1321,6 +1403,8 @@ export function normalizeModelProposedGoals(
 export function resolveOutputStyle(
   argvStyle: unknown,
   settingsStyle: unknown,
+  /** The selectable styles; built-ins only unless a catalog was loaded. */
+  available: readonly OutputStyleDefinition[] = BUILT_IN_OUTPUT_STYLES,
 ): OutputStyleDefinition | undefined {
   // yargs collects a repeated string flag into an array; the last value wins,
   // as it does for every other repeated flag, and the user is told so.
@@ -1364,11 +1448,11 @@ export function resolveOutputStyle(
   if (!name || name.toLowerCase() === 'default') {
     return undefined;
   }
-  const style = getBuiltInOutputStyle(name);
+  const style = findOutputStyle(available, name);
   if (style) {
     return style;
   }
-  const known = BUILT_IN_OUTPUT_STYLES.map((s) => s.name).join(', ');
+  const known = available.map((s) => s.name).join(', ');
   warnAboutOutputStyle(
     `Unknown output style "${truncateForDisplay(name)}" (from ${source}); using the default style. Available styles: ${known}.`,
   );
@@ -1533,6 +1617,15 @@ export async function loadCliConfig(
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
   const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
+
+  // Custom style files are prompts: a project's are read only from a trusted
+  // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
+  const outputStyleCatalog =
+    bareMode || safeMode
+      ? BUILT_IN_OUTPUT_STYLES
+      : await loadOutputStyleCatalog({
+          projectRoot: trustedFolder ? cwd : undefined,
+        });
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
@@ -2131,6 +2224,7 @@ export async function loadCliConfig(
     outputStyle: resolveOutputStyle(
       argv.outputStyle,
       bareMode || safeMode ? undefined : settings.general?.outputStyle,
+      outputStyleCatalog,
     ),
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools:
@@ -2148,6 +2242,10 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     enabledSkillNamesProvider:
       bareMode || safeMode ? undefined : enabledSkillNamesProvider,
+    skillSettingsListsProvider:
+      bareMode || safeMode
+        ? undefined
+        : buildSkillSettingsListsProvider(settings),
     terminalImageRenderSupportProvider: interactive
       ? async () => {
           const { getTerminalImageRenderSupport } = await import(
@@ -2174,6 +2272,8 @@ export async function loadCliConfig(
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
+    codeModeOnly:
+      !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2257,6 +2357,9 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     goalTokenBudget: resolveGoalTokenBudget(settings),
+    goalMaxTurns: resolveGoalMaxTurns(settings),
+    goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
+    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2275,6 +2378,7 @@ export async function loadCliConfig(
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     sessionWorkflowEnabled: settings.experimental?.sessionWorkflow ?? false,
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
+    todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
@@ -2377,8 +2481,12 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    // Bare and safe mode must switch the tool off explicitly: `undefined`
+    // means "derive it" now that WebSearch is opt-out.
     webSearch:
-      bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
+      bareMode || safeMode
+        ? { enabled: false }
+        : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
@@ -2446,6 +2554,18 @@ export async function loadCliConfig(
   };
 
   const config = new Config(configParams);
+
+  // Load the selected transport only when an external subagent is requested.
+  config.setExternalAgentExecutor({
+    create: (params) =>
+      params.spec.kind === 'codex'
+        ? import('../external-agents/codex-subagent-executor.js').then(
+            (module) => module.codexExternalAgentExecutor.create(params),
+          )
+        : import('../external-agents/acp-subagent-executor.js').then((module) =>
+            module.acpExternalAgentExecutor.create(params),
+          ),
+  });
 
   if (lspEnabled) {
     try {

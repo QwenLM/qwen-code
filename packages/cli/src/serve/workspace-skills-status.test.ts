@@ -52,6 +52,19 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(status.workspaceCwd).toBe('/some/workspace');
   });
 
+  it('does not load workspace environment while enumerating Skills', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-env-'),
+    );
+    const key = 'QWEN_SKILLS_STATUS_ENV_TEST';
+    await fsp.writeFile(path.join(workspace, '.env'), `${key}=leaked\n`);
+    delete process.env[key];
+
+    await createWorkspaceSkillsStatusProvider()(workspace);
+
+    expect(process.env[key]).toBeUndefined();
+  });
+
   it('returns a non-initialized error status (and logs) when enumeration fails', async () => {
     vi.spyOn(SkillManager.prototype, 'listSkills').mockRejectedValueOnce(
       new Error('boom'),
@@ -69,6 +82,24 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     // Non-fatal failures are logged to the daemon's stderr.
     expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
     expect(mockWriteStderrLine.mock.calls[0][0]).toContain('boom');
+  });
+
+  it('fails closed when a configured Skills directory cannot be read', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-unreadable-'),
+    );
+    const notDirectory = path.join(workspace, 'not-a-directory');
+    await fsp.writeFile(notDirectory, 'x');
+    vi.spyOn(SkillManager.prototype, 'getSkillsBaseDirs').mockReturnValueOnce([
+      notDirectory,
+    ]);
+
+    const status = await createWorkspaceSkillsStatusProvider()(workspace);
+
+    expect(status.initialized).toBe(false);
+    expect(status.skills).toEqual([]);
+    expect(status.errors?.[0]?.status).toBe('error');
+    await fsp.rm(workspace, { recursive: true, force: true });
   });
 
   it('marks skills disabled in workspace settings', async () => {
@@ -248,6 +279,31 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       name: 'project-skill',
       status: 'ok',
     });
+    await fsp.rm(workspace, { recursive: true, force: true });
+  });
+
+  it('can inventory inert workspace Skill manifests without trusting settings', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-untrusted-config-'),
+    );
+    const skillDir = path.join(workspace, '.qwen', 'skills', 'local-skill');
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: local-skill\ndescription: Local Skill\n---\nInstructions',
+    );
+    const provider = createWorkspaceSkillsStatusProvider({
+      workspaceTrusted: false,
+      includeUntrustedSkills: true,
+    });
+
+    const status = await provider(workspace);
+
+    expect(status.skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'local-skill', level: 'project' }),
+      ]),
+    );
     await fsp.rm(workspace, { recursive: true, force: true });
   });
 

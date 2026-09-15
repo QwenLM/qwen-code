@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   DaemonSessionAgentTaskStatus,
+  DaemonSessionAttachmentReference,
+  DaemonSessionArtifact,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
@@ -17,15 +19,25 @@ import {
   LoaderCircleIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
+  NetworkIcon,
   WorkflowIcon,
 } from 'lucide-react';
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
+import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
+import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { isComposerTask } from '../../utils/composerTasks';
 import { BranchPickerPopover } from '../BranchPickerPopover';
+import { FileTypeIcon } from '../FileTypeIcon';
+import { Skeleton } from '../ui/skeleton';
 import styles from './EnvironmentPanel.module.css';
+import { SourcesSection, type SourcesState } from './SourcesSection';
+import type { SessionSource } from '@qwen-code/sdk/daemon';
 
 interface EnvironmentPanelProps {
+  sources?: SourcesState;
+  onOpenSource?: (source: SessionSource) => void;
+  retrySourceRegistration?: () => Promise<void>;
   floating?: boolean;
   hidden?: boolean;
   workspaceCwd?: string;
@@ -35,20 +47,34 @@ interface EnvironmentPanelProps {
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
   agentTasks?: readonly EnvironmentAgentTask[];
+  attachments?: readonly DaemonSessionAttachmentReference[];
+  attachmentsLoading?: boolean;
+  attachmentsError?: string;
+  onRetryAttachments?: () => void;
+  artifacts?: readonly DaemonSessionArtifact[];
+  artifactsLoading?: boolean;
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
   onOpenGitCommit?: () => void;
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
+  onOpenAgentWorkflow?: () => void;
   onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  /** Resolve an attachment to a displayable `data:` URL. */
+  onReadImage?: (attachmentId: string) => Promise<string>;
+  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onAttachmentPreviewError?: (error: unknown) => void;
+  onOpenArtifact?: (artifactId: string) => void;
   onDismiss?: () => void;
 }
 
 export type EnvironmentAgentTask = DaemonSessionAgentTaskStatus & {
   color?: string;
+  lineageState?: 'complete' | 'orphaned' | 'cycle';
 };
 
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'subagents', 'backgroundTasks'];
+  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const AGENT_COLORS: Readonly<Record<string, string>> = {
   red: '#e5484d',
   blue: 'var(--agent-blue-500)',
@@ -115,6 +141,9 @@ function agentColorValue(color: string | undefined): string {
 }
 
 export function EnvironmentPanel({
+  sources,
+  onOpenSource,
+  retrySourceRegistration,
   floating = false,
   hidden = false,
   workspaceCwd,
@@ -124,11 +153,23 @@ export function EnvironmentPanel({
   gitStatus,
   tasks,
   agentTasks,
+  attachments,
+  attachmentsLoading = false,
+  attachmentsError,
+  onRetryAttachments,
+  artifacts,
+  artifactsLoading = false,
   items = DEFAULT_ENVIRONMENT_PANEL_ITEMS,
   onOpenGitDiff,
   onOpenGitCommit,
   onOpenAgent,
+  onOpenAgentWorkflow,
   onOpenTask,
+  onReadImage,
+  onImagePreview,
+  onAttachmentPreview,
+  onAttachmentPreviewError,
+  onOpenArtifact,
   onDismiss,
 }: EnvironmentPanelProps) {
   const { t } = useI18n();
@@ -142,9 +183,11 @@ export function EnvironmentPanel({
   // not to this session's Tasks section.
   const backgroundTasks = tasks.filter(isComposerTask);
   const [environmentExpanded, setEnvironmentExpanded] = useState(true);
-  const [agentsExpanded, setAgentsExpanded] = useState(false);
-  const [tasksExpanded, setTasksExpanded] = useState(false);
+  const [agentsExpanded, setAgentsExpanded] = useState(true);
+  const [tasksExpanded, setTasksExpanded] = useState(true);
+  const [artifactsExpanded, setArtifactsExpanded] = useState(true);
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const activeBranch = branch ?? gitStatus?.branch;
 
   useEffect(() => {
@@ -154,7 +197,14 @@ export function EnvironmentPanel({
   }, [activeBranch, environmentExpanded, gitWorkspaceCwd, hidden]);
 
   useEffect(() => {
-    if (!floating || hidden || !onDismiss || branchPickerOpen) return;
+    if (
+      !floating ||
+      hidden ||
+      !onDismiss ||
+      branchPickerOpen ||
+      sourceDialogOpen
+    )
+      return;
     const dismissOnOutsidePointerDown = (event: PointerEvent) => {
       if (
         event
@@ -177,7 +227,7 @@ export function EnvironmentPanel({
     document.addEventListener('pointerdown', dismissOnOutsidePointerDown);
     return () =>
       document.removeEventListener('pointerdown', dismissOnOutsidePointerDown);
-  }, [branchPickerOpen, floating, hidden, onDismiss]);
+  }, [branchPickerOpen, sourceDialogOpen, floating, hidden, onDismiss]);
 
   const gitDetails = [
     gitStatus?.operation
@@ -234,7 +284,7 @@ export function EnvironmentPanel({
                 onClick={onOpenGitDiff}
               >
                 <FileDiffIcon />
-                <span>{t('environment.changes')}</span>
+                <span className={styles.label}>{t('environment.changes')}</span>
                 <span className={styles.value}>
                   {gitStatus === undefined
                     ? t('environment.unavailable')
@@ -245,7 +295,9 @@ export function EnvironmentPanel({
               </button>
               <div className={styles.row} title={workspaceCwd}>
                 <FolderClosedIcon className={styles.workspaceIcon} />
-                <span>{t('environment.workspace')}</span>
+                <span className={styles.label}>
+                  {t('environment.workspace')}
+                </span>
                 <span className={styles.value}>
                   {workspaceCwd?.split(/[/\\]/).filter(Boolean).at(-1) ??
                     t('environment.unavailable')}
@@ -285,17 +337,49 @@ export function EnvironmentPanel({
         </section>
       )}
 
+      {(items.includes('sources') || items.includes('attachments')) && (
+        <SourcesSection
+          hidden={hidden}
+          state={items.includes('sources') ? sources : undefined}
+          attachments={attachments}
+          attachmentsLoading={attachmentsLoading}
+          attachmentsError={attachmentsError}
+          onRetryAttachments={onRetryAttachments}
+          onReadImage={onReadImage}
+          onImagePreview={onImagePreview}
+          onAttachmentPreview={onAttachmentPreview}
+          onAttachmentPreviewError={onAttachmentPreviewError}
+          onDialogOpenChange={setSourceDialogOpen}
+          onOpen={onOpenSource}
+          retryRegistration={
+            items.includes('sources') ? retrySourceRegistration : undefined
+          }
+        />
+      )}
       {items.includes('subagents') && agents.length > 0 && (
         <section className={styles.section}>
-          <button
-            type="button"
-            className={styles.sectionHeader}
-            aria-expanded={agentsExpanded}
-            onClick={() => setAgentsExpanded((expanded) => !expanded)}
-          >
-            <span>{t('environment.agents')}</span>
-            {!agentsExpanded && <ChevronRightIcon />}
-          </button>
+          <div className={styles.sectionHeaderRow}>
+            <button
+              type="button"
+              className={styles.sectionHeader}
+              aria-expanded={agentsExpanded}
+              onClick={() => setAgentsExpanded((expanded) => !expanded)}
+            >
+              <span>{t('environment.agents')}</span>
+              {!agentsExpanded && <ChevronRightIcon />}
+            </button>
+            {onOpenAgentWorkflow && (
+              <button
+                type="button"
+                className={styles.sectionAction}
+                aria-label={t('workflow.open')}
+                title={t('workflow.open')}
+                onClick={onOpenAgentWorkflow}
+              >
+                <NetworkIcon />
+              </button>
+            )}
+          </div>
           {agentsExpanded && (
             <ul className={styles.tasks}>
               {agents.map((task, index) => (
@@ -386,6 +470,74 @@ export function EnvironmentPanel({
           )}
         </section>
       )}
+
+      {items.includes('artifacts') && (
+        <section className={styles.section}>
+          <button
+            type="button"
+            className={styles.sectionHeader}
+            aria-expanded={artifactsExpanded}
+            onClick={() => setArtifactsExpanded((expanded) => !expanded)}
+          >
+            <span>{t('environment.artifacts')}</span>
+            {!artifactsExpanded && <ChevronRightIcon />}
+          </button>
+          {artifactsExpanded && (
+            <>
+              {artifactsLoading ? (
+                <FileListSkeleton label={t('common.loading')} />
+              ) : artifacts?.length ? (
+                <ul className={styles.attachmentFiles}>
+                  {artifacts.map((artifact) => (
+                    <li key={artifact.id}>
+                      <button
+                        type="button"
+                        className={styles.attachmentFile}
+                        title={artifact.title}
+                        onClick={() => onOpenArtifact?.(artifact.id)}
+                      >
+                        <FileTypeIcon
+                          name={artifact.workspacePath ?? artifact.title}
+                          mimeType={artifact.mimeType}
+                          size={16}
+                          strokeWidth={1.7}
+                          className={styles.attachmentFileIcon}
+                          aria-hidden="true"
+                        />
+                        <span className={styles.attachmentFileName}>
+                          {artifact.title}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className={styles.emptyDescription}>
+                  {t('environment.artifactsEmpty')}
+                </p>
+              )}
+            </>
+          )}
+        </section>
+      )}
     </aside>
+  );
+}
+
+function FileListSkeleton({ label }: { label: string }) {
+  return (
+    <ul
+      className={styles.attachmentFiles}
+      data-testid="environment-file-list-skeleton"
+      role="status"
+      aria-label={label}
+    >
+      {[72, 88, 64].map((width) => (
+        <li key={width} className={styles.attachmentFile}>
+          <Skeleton className="size-4 shrink-0 rounded-sm" />
+          <Skeleton className="h-4" style={{ width: `${width}%` }} />
+        </li>
+      ))}
+    </ul>
   );
 }

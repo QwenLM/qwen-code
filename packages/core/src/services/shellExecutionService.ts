@@ -28,6 +28,7 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from './shellContextEnv.js';
+import { noteConPtyHostReleased, releaseConPtyHost } from './conpty-host.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 
@@ -300,8 +301,10 @@ function appendOutputCaptureLimitNotice(
  * `'completed'` / `'failed'` on natural child exit.
  *
  * Backwards compat: if `postPromote` is unset on the options bag the
- * service falls back to the PR-2 detach-everything contract — no
- * regressions for callers that don't opt in.
+ * service preserves the caller-visible half of the PR-2 detach-everything
+ * contract — no data listener is re-attached and no callback the caller did
+ * not provide fires. The settle listener that reaps and releases the conout
+ * worker is still attached internally (see #11303).
  */
 export interface ShellPostPromoteHandlers {
   /**
@@ -343,7 +346,8 @@ export interface ShellExecuteOptions {
   streamStdout?: boolean;
   /**
    * Post-promote callback hooks. See {@link ShellPostPromoteHandlers}.
-   * Optional; omit to preserve the PR-2 detach-everything contract.
+   * Optional; omit to preserve the caller-visible PR-2 detach-everything
+   * contract (the settle listener still attaches internally).
    */
   postPromote?: ShellPostPromoteHandlers;
 }
@@ -616,6 +620,7 @@ const windowsStrategy: ProcessCleanupStrategy = {
     } catch {
       // already gone
     }
+    noteConPtyHostReleased(pty.ptyProcess);
   },
   killChildProcesses: (pids) => {
     if (pids.size > 0) {
@@ -1478,6 +1483,12 @@ export class ShellExecutionService {
       // This should not happen, but as a safeguard...
       throw new Error('PTY implementation not found');
     }
+    const useBundledConpty = os.platform() === 'win32';
+    // Records whether pty.spawn returned. The catch at the end of this method
+    // needs it to tell a spawn-phase failure — no child exists yet, so handing
+    // the command to the child_process fallback cannot run it twice — from
+    // anything raised after the PTY is live.
+    let ptySpawned = false;
     try {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
@@ -1515,7 +1526,20 @@ export class ShellExecutionService {
           ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
+        // Windows: with the inbox ConPTY backend a natural shell exit orphans
+        // the `conhost.exe --headless` that backend spawned — the native exit
+        // watcher erases the pty baton before JS can reach ClosePseudoConsole
+        // (microsoft/node-pty#965), so hosts accumulate until the CLI exits.
+        // The bundled backend calls ConptyReleasePseudoConsole after spawn,
+        // releasing the reference that otherwise keeps its host alive after
+        // the last client exits. Windows verification must count both
+        // `conhost.exe` and `OpenConsole.exe` (or all attributable children),
+        // because the bundled backend normally launches `OpenConsole.exe`. Off
+        // Windows the option is inert: `useConptyDll` appears nowhere in the
+        // POSIX prebuilds.
+        useConptyDll: useBundledConpty,
       });
+      ptySpawned = true;
 
       const result = new Promise<ShellExecutionResult>((resolve) => {
         const headlessTerminal = new Terminal({
@@ -1527,6 +1551,26 @@ export class ShellExecutionService {
           logLevel: 'off',
         });
         headlessTerminal.scrollToTop();
+
+        // Bundled ConPTY (useBundledConpty above) answers no terminal queries
+        // itself, so a shell that probes the terminal — PowerShell's DA query
+        // at startup — stalls for its full ~2s timeout unless the emulated
+        // terminal's auto-generated reply is written back (measured 3.22s →
+        // 0.23s per command). Scoped to Windows to keep the POSIX path
+        // byte-identical; the hook dies with headlessTerminal.dispose() in
+        // both the foreground and background-promote cleanups.
+        const queryResponseDisposable = useBundledConpty
+          ? headlessTerminal.onData((data) => {
+              try {
+                ptyProcess.write(data);
+              } catch (e) {
+                // A reply racing shell exit finds a dead PTY — drop it.
+                debugLogger.warn(
+                  `writing terminal query reply to PTY threw: ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
+            })
+          : null;
 
         this.activePtys.set(ptyProcess.pid, { ptyProcess, headlessTerminal });
 
@@ -1816,6 +1860,13 @@ export class ShellExecutionService {
             );
           }
           try {
+            queryResponseDisposable?.dispose();
+          } catch (e) {
+            debugLogger.warn(
+              `queryResponseDisposable.dispose() threw during PTY cleanup: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
             headlessTerminal.dispose();
           } catch (e) {
             debugLogger.warn(
@@ -1854,6 +1905,16 @@ export class ShellExecutionService {
           ) {
             windowsKillPid(ptyProcess.pid, cancelKillDispatched);
           }
+          // The taskkill above owns the shell; this releases node-pty's conout
+          // worker thread, which nothing else frees once we delete from
+          // activePtys below. It is NOT under the isPtyActive guard: the
+          // healthy path — shell exited cleanly, so no taskkill — is exactly
+          // the one that leaks it, once per tool call (#11303).
+          //
+          // Bundled ConPTY already released its host reference after spawn,
+          // but node-pty skips worker cleanup on this natural-exit path.
+          // releaseConPtyHost disposes that worker without signalling the pid.
+          releaseConPtyHost(ptyProcess);
           this.activePtys.delete(ptyProcess.pid);
         };
 
@@ -1984,7 +2045,9 @@ export class ShellExecutionService {
           // path), and the eventual natural-exit transitions the
           // registry entry to `'completed'` / `'failed'` instead of
           // leaving it stuck on `'running'`. When postPromote is
-          // undefined the PR-2 detach-everything contract is preserved.
+          // undefined the caller-visible half of the PR-2 detach-everything
+          // contract is preserved (no data listener, no caller callback); the
+          // settle listener still attaches internally to reap and release.
           exited = true;
           listenersDetached = true;
           abortSignal.removeEventListener('abort', abortHandler);
@@ -2116,6 +2179,13 @@ export class ShellExecutionService {
             ) {
               windowsKillPid(ptyProcess.pid, false);
             }
+            // ...and release node-pty's conout worker. The promote branch
+            // already dropped this pid from activePtys, so the process-exit
+            // cleanup() cannot reach it either — without this a backgrounded
+            // command leaks the worker exactly like the foreground path did
+            // (#11303). Bundled ConPTY handles the host lifecycle separately;
+            // releaseConPtyHost is still required for the worker.
+            releaseConPtyHost(ptyProcess);
             if (!postPromote?.onSettle) return;
             try {
               postPromote.onSettle(info);
@@ -2145,46 +2215,73 @@ export class ShellExecutionService {
               );
             }
           }
-          if (postPromote) {
-            try {
-              postPromoteExitDisposable = ptyProcess.onExit(
-                ({
-                  exitCode,
-                  signal,
-                }: {
-                  exitCode: number;
-                  signal?: number;
-                }) => {
-                  firePostSettle({
-                    exitCode,
-                    signal: signal === 0 ? null : (signal ?? null),
-                    endTime: Date.now(),
-                  });
-                },
-              );
-            } catch (e) {
-              debugLogger.warn(
-                `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
-            try {
-              postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
-                if (isExpectedPtyReadExitError(err)) {
-                  return;
-                }
+          // The settle path is attached UNCONDITIONALLY, unlike the onData
+          // forwarding above. `firePostSettle` is the only thing that reaps a
+          // promoted shell and releases its conout worker (#11303), and
+          // the promote branch already dropped this pid from `activePtys`, so
+          // with no listener a promote that passes no `postPromote` leaks the
+          // worker for the life of the CLI and nothing left can reach them.
+          //
+          // Routing the no-`postPromote` promote through `firePostSettle` also
+          // gives it the #5873 settle-time reap: `windowsKillPid(pid, false)`
+          // (`taskkill /f /pid`) runs whenever `isPtyActive(pid)` is still
+          // true, a taskkill the caller did not explicitly ask for. That is the
+          // same recycle race the cancel path documents; it is pre-existing in
+          // kind, and narrower than it looks. Most shipped `execute()` call
+          // sites omit `postPromote`, but none of them can reach this code:
+          // `performBackgroundPromote` is only entered from a
+          // `{ kind: 'background' }` abort (see the abortHandler switch below),
+          // and that abort's sole producer is the shell tool's Ctrl+B handler
+          // firing the `promoteAbortController` it created on the foreground
+          // `execute()` path (tools/shell.ts) — the one call site that also
+          // passes `postPromote`. So a no-`postPromote` promote is reachable
+          // only from that user-initiated foreground-to-background handoff,
+          // where the settle-time reap is the intended ownership transfer
+          // rather than a surprise taskkill.
+          //
+          // Only the *forwarding* to caller handlers stays gated:
+          // `firePostSettle` early-returns on `!postPromote?.onSettle` after
+          // the reap and the release, so no caller callback fires and no data
+          // listener is attached when the caller did not opt in. Attaching the
+          // 'error' listener unconditionally is load-bearing for a different
+          // reason than the text above: node-pty routes `on('error')` to the
+          // conout socket, whose own handler throws once it sees fewer than two
+          // 'error' listeners (`listeners('error').length < 2`), and the
+          // foreground handler was removed at promote — so without this
+          // listener a post-promote socket error escapes as an
+          // uncaughtException and takes the CLI down.
+          try {
+            postPromoteExitDisposable = ptyProcess.onExit(
+              ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
                 firePostSettle({
-                  error: err,
-                  exitCode: null,
-                  signal: null,
+                  exitCode,
+                  signal: signal === 0 ? null : (signal ?? null),
                   endTime: Date.now(),
                 });
-              };
-              ptyProcess.on('error', postPromoteErrorListener);
-            } catch (e) {
-              debugLogger.warn(
-                `re-attaching post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
+              },
+            );
+          } catch (e) {
+            debugLogger.warn(
+              `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          try {
+            postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
+              if (isExpectedPtyReadExitError(err)) {
+                return;
+              }
+              firePostSettle({
+                error: err,
+                exitCode: null,
+                signal: null,
+                endTime: Date.now(),
+              });
+            };
+            ptyProcess.on('error', postPromoteErrorListener);
+          } catch (e) {
+            debugLogger.warn(
+              `re-attaching post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
+            );
           }
 
           // Drain in-flight chain work (already-enqueued
@@ -2292,6 +2389,13 @@ export class ShellExecutionService {
             });
           } finally {
             try {
+              queryResponseDisposable?.dispose();
+            } catch (e) {
+              debugLogger.warn(
+                `queryResponseDisposable.dispose() threw during background-promote cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            try {
               headlessTerminal.dispose();
             } catch (e) {
               debugLogger.warn(
@@ -2334,10 +2438,41 @@ export class ShellExecutionService {
             // Then tear down the ConPTY host so onExit fires and the cancel
             // resolves even if taskkill couldn't kill the tree. Harmless once
             // the tree is already dead. Mirrors the POSIX branch's kill fallback.
+            //
+            // kill() is right *here* — unlike on the healthy path — as the
+            // fallback for a taskkill that never launched: the shell is then
+            // genuinely still running, so node-pty's console-process-list
+            // lookup resolves for real. When the taskkill above did land, the
+            // shell is already dead by the time kill() runs and the lookup
+            // takes node-pty's 5 s `[innerPid]` fallback instead
+            // (windowsPtyAgent._getConsoleProcessList has only a message
+            // listener plus that timeout), so the #6067 collateral-kill mode is
+            // still reachable on this path. That is tracked separately and
+            // deliberately out of scope here — do not read this call as
+            // evidence the shell is alive. Record the release when it actually
+            // ran so the finalizer's releaseConPtyHost does not close the same
+            // pseudo-console twice: while the shell is alive, native PtyKill
+            // closes the HPCON but leaves the baton in its handle list, so a
+            // second close is a double-free. See #11303.
             try {
               ptyProcess.kill();
+              // `WindowsTerminal.kill()` routes its whole teardown through
+              // `_deferNoArgs`, which QUEUES it until the terminal is ready —
+              // and `_isReady` flips only inside the conout socket's first
+              // 'data' callback. A cancel that lands before the shell's first
+              // output byte (Esc during pwsh startup, `timeout /t 30 >nul`)
+              // therefore queues a teardown that may never run, so noting a
+              // release there would permanently suppress the finalizer's
+              // releaseConPtyHost and leak the conout worker — the one resource
+              // this path can still release. Reading the optional `_isReady`
+              // degrades to the previous behavior if the field is ever renamed
+              // (undefined !== false).
+              if ((ptyProcess as { _isReady?: boolean })._isReady !== false) {
+                noteConPtyHostReleased(ptyProcess);
+              }
             } catch {
-              // already gone
+              // already gone — kill() threw, so nothing was torn down and the
+              // finalizer's release must still run.
             }
           } else {
             try {
@@ -2393,6 +2528,23 @@ export class ShellExecutionService {
       return { pid: ptyProcess.pid, result };
     } catch (e) {
       const error = e as Error;
+      if (!ptySpawned && useBundledConpty) {
+        // The bundled ConPTY backend (useConptyDll above) adds throw sites
+        // node-pty reaches synchronously out of spawn — the conpty.dll it
+        // ships being missing or unloadable among them — and none of those
+        // messages contain `posix_spawnp failed`. Resolving below would report
+        // exitCode 1 with empty output and skip the child_process fallback
+        // that execute() already has for a PTY that cannot start, so rethrow
+        // into it. Nothing was spawned, so the command cannot run twice. The
+        // sandbox warning below does not apply here: this is not a sandbox
+        // restriction, and it must not be worded as one.
+        debugLogger.warn(
+          `Windows PTY spawn failed, falling back to child_process: ${
+            error instanceof Error ? error.message : String(e)
+          }`,
+        );
+        throw e;
+      }
       if (error.message.includes('posix_spawnp failed')) {
         onOutputEvent({
           type: 'data',

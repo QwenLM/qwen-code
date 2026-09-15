@@ -16,19 +16,20 @@ import type { ReasoningEffort } from '../../reasoning-effort.js';
 import {
   REASONING_EFFORT_TIERS,
   clampReasoningEffort,
+  getGptReasoningCapabilities,
+  parseModelReasoningCapabilities,
+  isReasoningEffortPlaceholder,
 } from '../../reasoning-effort.js';
+import { isOpenRouterHostname } from './openrouter.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
+import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
 /**
- * Tiers a generic OpenAI-compatible endpoint accepts. `max` is a vendor
- * extension rather than part of the shared contract: DeepSeek, GLM-5.2+ and
- * newer Anthropic models take it natively, but a generic endpoint's ladder
- * stops at `xhigh` and 400s on anything above it. Matches the OpenAI column
- * of the effort ladder in
- * docs/design/2026-06-30-unified-reasoning-effort-cli.md. Subclasses whose
- * endpoint does accept `max` override `supportedReasoningEfforts`.
+ * Default tiers for an OpenAI-compatible endpoint without known model
+ * capabilities. Model-specific capabilities and provider subclasses can
+ * override this fallback, including support for `max`.
  */
 const OPENAI_COMPATIBLE_EFFORTS: readonly ReasoningEffort[] = [
   'low',
@@ -127,6 +128,11 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ),
     });
   }
 
@@ -140,9 +146,21 @@ export class DefaultOpenAICompatibleProvider
    * `super.buildRequest` path.
    */
   protected supportedReasoningEffortsFor(
-    _model: string | undefined,
+    model: string | undefined,
   ): readonly ReasoningEffort[] {
-    return OPENAI_COMPATIBLE_EFFORTS;
+    const gpt = getGptReasoningCapabilities(model);
+    if (!gpt) return OPENAI_COMPATIBLE_EFFORTS;
+    const { authType, baseUrl } = this.contentGeneratorConfig;
+    const configured =
+      authType && model
+        ? parseModelReasoningCapabilities(
+            this.cliConfig.getResolvedModelConfig?.(authType, model, baseUrl)
+              ?.capabilities.reasoning,
+          )
+        : undefined;
+    return configured && !configured.toggleOnly
+      ? configured.efforts
+      : gpt.efforts;
   }
 
   /**
@@ -152,8 +170,8 @@ export class DefaultOpenAICompatibleProvider
    * session too.
    *
    * Only the pipeline-injected tier is capped. A `reasoning` object the user
-   * put in `samplingParams` ships verbatim (the pipeline hands those keys
-   * straight to the wire and skips the injection entirely), and `extra_body`
+   * put in `samplingParams` ships verbatim. Unrelated GPT sampling options
+   * still receive the configured effort and need clamping. `extra_body`
    * merges after this, so both explicit overrides survive unchanged.
    */
   protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
@@ -209,11 +227,31 @@ export class DefaultOpenAICompatibleProvider
       ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
       : requestWithTokenLimits.messages;
 
-    return {
+    const result = {
       ...requestWithTokenLimits,
       messages,
       ...(extraBody ? extraBody : {}),
     };
+    this.flattenGptReasoningEffort(result);
+    return result;
+  }
+
+  protected flattenGptReasoningEffort(body: Record<string, unknown>): void {
+    if (
+      !getGptReasoningCapabilities(body['model'] as string | undefined) ||
+      isOpenRouterHostname(this.contentGeneratorConfig) ||
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined ||
+      this.contentGeneratorConfig.extra_body?.['reasoning'] !== undefined
+    )
+      return;
+    const reasoning = body['reasoning'] as { effort?: unknown } | undefined;
+    if (typeof reasoning?.effort !== 'string' || !reasoning.effort) return;
+    if (isReasoningEffortPlaceholder(body['reasoning_effort'])) {
+      body['reasoning_effort'] = reasoning.effort;
+    }
+    const { effort: _drop, ...rest } = reasoning;
+    if (Object.keys(rest).length > 0) body['reasoning'] = rest;
+    else delete body['reasoning'];
   }
 
   getDefaultGenerationConfig(): GenerateContentConfig {

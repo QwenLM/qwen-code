@@ -41,6 +41,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'general.outputLanguage',
   'ide.enabled',
   'ui.showLineNumbers',
+  'ui.showToolCallArgs',
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
@@ -56,6 +57,7 @@ const TUI_ONLY_SETTINGS = new Set([
 const WEB_SHELL_SETTINGS = new Set([
   'ui.compactMode',
   'voiceModel',
+  'imageModel',
   'mcpServers',
 ]);
 
@@ -127,13 +129,15 @@ function rejectWorkspaceRestrictedWrite(
   scope: string,
   key: string,
 ): boolean {
-  if (scope !== 'workspace' || !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key))
-    return false;
-  res.status(400).json({
-    error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
-    code: 'workspace_restricted_setting',
-  });
-  return true;
+  if (scope !== 'workspace') return false;
+  if (WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key)) {
+    res.status(400).json({
+      error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
+      code: 'workspace_restricted_setting',
+    });
+    return true;
+  }
+  return false;
 }
 
 function getAllowedKeys(includeLiveVoice = false): Set<string> {
@@ -346,6 +350,9 @@ export interface WorkspaceSettingsRouteDeps {
     value: unknown,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  syncImageModel?: (
+    scope: SettingScope,
+  ) => Promise<{ status: 'applied' | 'deferred' | 'failed' }>;
   updateSessionWorkflow: (enabled: boolean) => Promise<unknown>;
   /**
    * Fan a user-scope Session Workflow write out to the non-primary workspace
@@ -694,11 +701,28 @@ export function registerWorkspaceSettingsRoutes(
       }
       if (writeOutcome !== 'ok') return;
 
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            !deps.syncImageModel ||
+            (await deps.syncImageModel(settingScope)).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );
@@ -943,11 +967,32 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         ...(clientId ? { originatorClientId: clientId } : {}),
       });
       if (writeOutcome !== 'ok') return;
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            (
+              await runtime.workspaceService.reloadModelProviders({
+                route: 'POST /workspaces/:workspace/settings imageModel',
+                workspaceCwd: runtime.workspaceCwd,
+              })
+            ).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );

@@ -80,6 +80,7 @@ import {
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -128,6 +129,7 @@ const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+const QUIT_COMMAND_NAMES = [quitCommand.name, ...(quitCommand.altNames ?? [])];
 
 function shouldHideSlashCommandInvocation(
   command: SlashCommand | undefined,
@@ -891,11 +893,25 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      const {
+      let {
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
       } = parseSlashCommand(trimmed, commands);
+
+      if (!commandToExecute) {
+        const fallback = parseSlashCommand(trimmed, [quitCommand]);
+        if (
+          fallback.commandToExecute &&
+          !(config?.getDisabledSlashCommands() ?? []).some((name) =>
+            QUIT_COMMAND_NAMES.includes(name.trim().toLowerCase()),
+          )
+        ) {
+          commandToExecute = fallback.commandToExecute;
+          args = fallback.args;
+          resolvedCommandPath = fallback.canonicalPath;
+        }
+      }
 
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {

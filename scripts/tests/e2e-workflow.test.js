@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 describe('e2e workflow', () => {
   const workflow = readFileSync('.github/workflows/e2e.yml', 'utf8');
+  const e2eRunScript = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
   const buildSandboxScript = readFileSync('scripts/build_sandbox.js', 'utf8');
   const yml = parse(workflow);
 
@@ -34,6 +35,62 @@ describe('e2e workflow', () => {
     expect(group).toContain('github.head_ref || github.ref_name');
   });
 
+  it('isolates child-process-heavy suites from the three parallel forks', () => {
+    const linuxJob = yml.jobs['e2e-test-linux'];
+    const runStep = linuxJob.steps.find(
+      (step) => step.name === 'Run E2E tests',
+    );
+
+    expect(linuxJob.strategy.matrix.shard).toEqual(['1/1']);
+    expect(runStep.run).toContain('.github/scripts/run-e2e-tests.sh');
+    expect(e2eRunScript).toContain(
+      'npx cross-env QWEN_E2E_RENDERER=ink QWEN_SANDBOX=docker vitest run --root ./integration-tests "$@"',
+    );
+    expect(e2eRunScript).toContain(
+      'QWEN_E2E_RENDERER=ink npm run test:integration:sandbox:none -- "$@"',
+    );
+    expect(
+      e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
+    ).toHaveLength(1);
+    expect(
+      e2eRunScript.match(/--exclude '\*\*\/sdk-typescript\/\*\*'/g),
+    ).toHaveLength(1);
+    expect(e2eRunScript).toContain(
+      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
+    );
+    expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
+    // The arrangement is load-bearing: the batch must run first and the
+    // isolated suites second, joined by `&&` with no other command between
+    // or after. Counts and substrings are order- and backgrounding-blind;
+    // the pattern tolerates formatting-only rewrites (continuations, comment
+    // lines, trailing spaces) so a benign edit cannot turn CI red.
+    expect(e2eRunScript).toMatch(
+      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
+    );
+    // Text pins never touch the tree: renaming the file or directory these
+    // filters name silently returns the suites to the three-fork batch.
+    expect(existsSync('integration-tests/cli/qwen-serve-routes.test.ts')).toBe(
+      true,
+    );
+    expect(existsSync('integration-tests/sdk-typescript')).toBe(true);
+    expect(existsSync('integration-tests/channel-plugin.test.ts')).toBe(true);
+    expect(
+      existsSync('integration-tests/chat-transcript-document.test.ts'),
+    ).toBe(true);
+    expect(
+      existsSync('integration-tests/interactive/cron-interactive.test.ts'),
+    ).toBe(true);
+    // existsSync pins the directory's name, not its contents: suites moved
+    // out of it would rejoin the three-fork batch through the dead exclude,
+    // while vitest silently ignores a positional filter that matches nothing
+    // as long as a sibling filter still matches.
+    expect(
+      readdirSync('integration-tests/sdk-typescript').some((file) =>
+        file.endsWith('.test.ts'),
+      ),
+    ).toBe(true);
+  });
+
   describe('sandbox image preparation', () => {
     const steps = yml.jobs['e2e-test-linux'].steps;
     const setupStep = steps.find((step) => step.name === 'Set up Docker');
@@ -44,19 +101,19 @@ describe('e2e workflow', () => {
     });
 
     it('serializes image preparation on the shared Docker host', () => {
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain(
         'docker-sandbox-build-e2e-${GITHUB_SHA}.lock',
       );
-      expect(runStep.run).toContain('flock --wait 1800 8');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --wait 1800 8');
+      expect(e2eRunScript).toContain(
         'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
       );
-      expect(runStep.run).toContain('flock --shared --wait 1800 9');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --shared --wait 1800 9');
+      expect(e2eRunScript).toContain(
         'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
       );
-      expect(runStep.run).toContain('flock --wait 1800 7');
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain('flock --wait 1800 7');
+      expect(e2eRunScript).toContain(
         'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
       );
     });
@@ -65,20 +122,20 @@ describe('e2e workflow', () => {
       expect(runStep.env.BUILD_SANDBOX_FLAGS).toContain(
         'org.qwen-code.ci.sandbox=true',
       );
-      expect(runStep.run).toContain('sandboxImageUri")-e2e-${GITHUB_SHA}"');
-      expect(runStep.run).toContain('docker image inspect "$sandbox_image"');
+      expect(e2eRunScript).toContain('sandboxImageUri")-e2e-${GITHUB_SHA}"');
+      expect(e2eRunScript).toContain('docker image inspect "$sandbox_image"');
     });
 
     it('pins each shard to the prepared image ID', () => {
-      expect(runStep.run).toContain("docker image inspect --format '{{.Id}}'");
-      expect(runStep.run).toContain(
+      expect(e2eRunScript).toContain("docker image inspect --format '{{.Id}}'");
+      expect(e2eRunScript).toContain(
         'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
       );
     });
 
     it('keeps one bounded retry without pruning the shared daemon', () => {
-      expect(runStep.run.match(/build_image/g)).toHaveLength(3);
-      expect(runStep.run).toContain(
+      expect(e2eRunScript.match(/build_image/g)).toHaveLength(3);
+      expect(e2eRunScript).toContain(
         'npm run build:sandbox -- -s --no-prune -i "$sandbox_image"',
       );
       expect(buildSandboxScript).toContain(".option('prune'");
@@ -90,6 +147,31 @@ describe('e2e workflow', () => {
       expect(runStep.env.VERBOSE).toBe('true');
     });
 
+    it('reaps only the sandbox containers owned by its matrix job', () => {
+      const owner =
+        '${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}';
+      const cleanupStep = steps.find(
+        (step) => step.name === 'Remove job-owned E2E containers',
+      );
+
+      expect(yml.jobs['e2e-test-linux'].env.E2E_CONTAINER_OWNER).toBe(owner);
+      expect(runStep.env.SANDBOX_FLAGS).toContain(
+        'org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}',
+      );
+      expect(e2eRunScript).toContain('trap cleanup_e2e_job EXIT');
+      expect(e2eRunScript).toContain("trap 'exit 1' INT TERM");
+      expect(e2eRunScript).toContain(
+        '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
+      );
+      expect(cleanupStep.if).toContain('always()');
+      expect(cleanupStep.run).toContain(
+        '--filter "label=org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}"',
+      );
+      expect(cleanupStep.run).toContain('docker rm -f > /dev/null || true');
+      expect(cleanupStep.run.match(/docker ps -aq/g)).toHaveLength(2);
+      expect(cleanupStep.run).toContain('E2E containers remain');
+    });
+
     it('never waits on a lock another run holds through its tests', () => {
       // Run 33637097713 lost two Docker shards to the #10605 protocol on one
       // host: shard 1/3 held the per-commit coordinator lock and polled 30
@@ -97,17 +179,17 @@ describe('e2e workflow', () => {
       // kept shared through its whole test phase, then shard 2/3 timed out
       // behind the coordinator lock shard 1/3 was still holding. Image
       // preparation may only ever wait on locks bounded by a build.
-      const sharedIndex = runStep.run.indexOf('flock --shared --wait 1800 9');
-      const buildLockIndex = runStep.run.indexOf('flock --wait 1800 7');
-      const releaseIndex = runStep.run.indexOf('flock --unlock 7');
-      const testIndex = runStep.run.indexOf('vitest run');
+      const sharedIndex = e2eRunScript.indexOf('flock --shared --wait 1800 9');
+      const buildLockIndex = e2eRunScript.indexOf('flock --wait 1800 7');
+      const releaseIndex = e2eRunScript.indexOf('flock --unlock 7');
+      const testIndex = e2eRunScript.indexOf('vitest run');
       expect(sharedIndex).toBeGreaterThanOrEqual(0);
       expect(buildLockIndex).toBeGreaterThan(sharedIndex);
       expect(releaseIndex).toBeGreaterThan(buildLockIndex);
       expect(testIndex).toBeGreaterThan(releaseIndex);
-      expect(runStep.run).not.toContain('acquire_daemon_write_lock');
-      expect(runStep.run).not.toContain('flock --unlock 9');
-      expect(runStep.run).not.toContain('flock --nonblock 9');
+      expect(e2eRunScript).not.toContain('acquire_daemon_write_lock');
+      expect(e2eRunScript).not.toContain('flock --unlock 9');
+      expect(e2eRunScript).not.toContain('flock --nonblock 9');
       expect(
         yml.jobs['e2e-test-linux'].strategy['max-parallel'],
       ).toBeUndefined();
@@ -118,10 +200,12 @@ describe('e2e workflow', () => {
       // inherits the descriptor and outlives its job keeps holding the lock
       // on the host. This shell keeps its own copy of the descriptor, so
       // closing it in children costs nothing.
-      expect(runStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
-      expect(runStep.run).toContain("--shard='${{ matrix.shard }}' 9>&-");
-      expect(runStep.run).toContain('exec 7>&-');
-      expect(runStep.run).toContain('exec 8>&-');
+      expect(e2eRunScript).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+      expect(e2eRunScript).toContain(
+        'vitest run --root ./integration-tests "$@" 9>&-',
+      );
+      expect(e2eRunScript).toContain('exec 7>&-');
+      expect(e2eRunScript).toContain('exec 8>&-');
       const cleanupStep = steps.find(
         (step) => step.name === 'Prune dangling docker images',
       );
@@ -160,28 +244,28 @@ describe('e2e workflow', () => {
     });
 
     it('wraps the sandbox:none shard command in a retryable function', () => {
-      expect(runStep.run).toContain('run_shard() {');
+      expect(e2eRunScript).toContain('run_shard() {');
     });
 
     it('retries the full shard command, shard and excludes included', () => {
-      // Everything after `--` is forwarded to vitest by the npm script, so
-      // shard and exclude coverage lives only in this argument list. The
-      // excludes are shared verbatim with the docker leg above.
-      expect(runStep.run).toContain(
-        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'",
-      );
+      expect(e2eRunScript).toContain('run_vitest "${bulk_args[@]}"');
+      expect(e2eRunScript).toContain('--poolOptions.forks.maxForks=3');
+      expect(e2eRunScript).toContain('--shard="$shard"');
     });
 
     it('retries the sandbox:none shard exactly once', () => {
-      expect(runStep.run).toContain('run_shard || {');
+      expect(e2eRunScript).toContain('run_shard || {');
       // Definition + first attempt + one retry: the second attempt's exit
       // status is the step's, and a third attempt would burn pool time for
       // nothing.
-      expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
+      const retryBranch = e2eRunScript.slice(
+        e2eRunScript.lastIndexOf('if [ "$sandbox" = \'sandbox:docker\' ]'),
+      );
+      expect(retryBranch.match(/run_shard/g)).toHaveLength(3);
       // End-anchored scope: the retry is the group's last command and the
       // group is the script's last statement. A retry moved outside the
       // `|| { ... }` would run unconditionally, re-running green shards too.
-      expect(runStep.run).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
+      expect(e2eRunScript).toMatch(/run_shard\s*\n\s*\}\s*\n\s*fi\s*$/);
     });
 
     it('gates the retry on the remaining job budget', () => {
@@ -189,7 +273,7 @@ describe('e2e workflow', () => {
       // that exits the step when the job cannot fit another shard. Shape
       // only — bash itself witnesses the execution semantics in
       // e2e-shard-retry.test.js.
-      const group = runStep.run.slice(runStep.run.indexOf('run_shard || {'));
+      const group = e2eRunScript.slice(e2eRunScript.indexOf('run_shard || {'));
       expect(group).toMatch(/elapsed[\s\S]*exit 1[\s\S]*run_shard\s*\n\s*\}/);
     });
 
@@ -211,48 +295,125 @@ describe('e2e workflow', () => {
       expect(yml.jobs['e2e-test-linux']['continue-on-error']).toBeUndefined();
     });
 
-    it('keeps the default step shell the execution harness assumes', () => {
-      // e2e-shard-retry.test.js executes this step's script under `bash -e`,
-      // GitHub's default Linux step shell only while the step carries no
-      // `shell:` override and neither the workflow nor the job a `defaults:`
-      // block. Any of those switches the lane's shell semantics — explicit
-      // `bash` expands to `bash --noprofile --norc -e -o pipefail {0}` —
-      // while the harness keeps executing the old shell, so every execution
-      // witness stays green for a contract the lane no longer runs. Absence
-      // only: this pins e2e.yml, not workflows that deliberately set a shell.
-      expect(runStep.shell).toBeUndefined();
-      expect(yml.defaults).toBeUndefined();
-      expect(yml.jobs['e2e-test-linux'].defaults).toBeUndefined();
+    it('passes the matrix sandbox and shard to the runner script', () => {
+      expect(runStep.run).toBe(
+        "exec bash .github/scripts/run-e2e-tests.sh '${{ matrix.sandbox }}' '${{ matrix.shard }}'",
+      );
     });
 
     it('does not retry the docker leg', () => {
-      // Two ~30min docker attempts would outrun the job's timeout-minutes.
-      expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
-        1,
+      const dockerBranch = e2eRunScript
+        .slice(
+          e2eRunScript.lastIndexOf('if [ "$sandbox" = \'sandbox:docker\' ]'),
+        )
+        .split('\nelse\n', 1)[0];
+      expect(dockerBranch.match(/run_shard/g)).toHaveLength(1);
+    });
+  });
+
+  describe('one build for every leg', () => {
+    // Each leg used to build and bundle on its own runner — 4–8 minutes on a
+    // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
+    // job does it once on a hosted VM and the legs unpack its archive; these
+    // pins keep a leg from quietly growing its own build back.
+    const build = yml.jobs.build;
+    const legs = [
+      'e2e-test-linux',
+      'e2e-test-macos',
+      'e2e-interactive-opentui',
+      'isolated-nightly',
+    ];
+
+    it('builds once, on a hosted runner, off the shared pool', () => {
+      expect(build.needs).toBeUndefined();
+      expect(build['runs-on']).toBe('ubuntu-latest');
+      const names = build.steps.map((step) => step.name);
+      expect(names).toContain('Build project');
+      expect(names).toContain('Bundle CLI for E2E tests');
+      const pack = build.steps.find(
+        (step) => step.name === 'Pack build outputs',
       );
-      // Structure, not just count: wrapping the docker command in a
-      // function and calling it twice keeps the literal count at one. The
-      // docker leg defines its own helper functions, so match by brace
-      // depth rather than any earlier definition: every `${...}` brace in
-      // the script is balanced, leaving the command at depth zero unless
-      // something wraps it.
-      const commandIndex = runStep.run.indexOf(
-        'QWEN_SANDBOX=docker vitest run',
+      expect(pack.run).toContain('.github/scripts/e2e-build-pack.sh');
+      // The same "the install must not build" premise as on the legs: without
+      // it npm ci runs prepare (a full build and bundle) and the explicit
+      // build steps below then do it a second time on the critical path.
+      const install = build.steps.find(
+        (step) => step.name === 'Install dependencies',
       );
-      let depth = 0;
-      for (const ch of runStep.run.slice(0, commandIndex)) {
-        if (ch === '{') depth += 1;
-        if (ch === '}') depth -= 1;
+      expect(install.env.QWEN_SKIP_PREPARE).toBe('1');
+      const upload = build.steps.find(
+        (step) => step.name === 'Upload build artifact',
+      );
+      expect(upload.uses).toMatch(/^actions\/upload-artifact@/);
+      expect(upload.with.name).toBe('e2e-build');
+      expect(upload.with['retention-days']).toBe(1);
+    });
+
+    it('gates the build like the legs, so a skipped build skips them', () => {
+      // The three fork-gated legs carry the build's exact gate; the nightly
+      // legs are narrower (schedule/dispatch only), which is a subset.
+      for (const job of [
+        'e2e-test-linux',
+        'e2e-test-macos',
+        'e2e-interactive-opentui',
+      ]) {
+        expect(yml.jobs[job].if, job).toBe(build.if);
       }
-      expect(depth).toBe(0);
+      // The whole expression, not a substring: the workflow declares no
+      // pull_request trigger, so the `event_name != 'pull_request' ||`
+      // prefix is the only clause that is ever true. Dropping it would skip
+      // the build — and every leg behind it — on every real event, green.
+      expect(build.if).toBe(
+        "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}",
+      );
+    });
+
+    it('keeps the web-shell regression job building during its install', () => {
+      // That job has no build step of its own: its tree comes solely from
+      // the prepare script that npm ci runs, so it must not carry the skip
+      // the artifact-fed legs carry.
+      const install = yml.jobs['web-shell-browser-regression'].steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env?.QWEN_SKIP_PREPARE).toBeUndefined();
+    });
+
+    it.each(legs)('%s unpacks the shared build instead of building', (job) => {
+      const { needs, steps } = yml.jobs[job];
+      expect(needs).toEqual(['build']);
+      const names = steps.map((step) => step.name);
+      expect(names).not.toContain('Build project');
+      expect(names).not.toContain('Bundle CLI for E2E tests');
+      const download = steps.find(
+        (step) => step.name === 'Download build artifact',
+      );
+      expect(download.with.name).toBe('e2e-build');
+      const unpack = steps.find(
+        (step) => step.name === 'Unpack build artifact',
+      );
+      expect(unpack.run).toContain('.github/scripts/e2e-build-unpack.sh');
+      // Unpack before anything runs the CLI, after node_modules exist.
+      expect(names.indexOf('Install dependencies')).toBeLessThan(
+        names.indexOf('Unpack build artifact'),
+      );
+      expect(names.indexOf('Unpack build artifact')).toBeLessThan(
+        names.findIndex((name) => name.startsWith('Run ')),
+      );
+      const install = steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env.QWEN_SKIP_PREPARE).toBe('1');
+    });
+
+    it('keeps the docker sandbox image build on the leg', () => {
+      // The image builds inside Docker from the checkout, so it is not part
+      // of the archive; the leg still prepares it under the host locks.
+      expect(e2eRunScript).toContain('npm run build:sandbox');
     });
   });
 
   it('routes Linux E2E scratch files away from /tmp', () => {
-    const runStep = yml.jobs['e2e-test-linux'].steps.find(
-      (step) => step.name === 'Run E2E tests',
-    );
-    expect(runStep.run).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
-    expect(runStep.run).toContain('trap \'rm -rf "$TMPDIR"');
+    expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
+    expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
   });
 });

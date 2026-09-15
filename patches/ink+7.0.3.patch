@@ -18,7 +18,7 @@ index 1d7bf6b..29401a6 100644
 -export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 +export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, selectable, selectionFlow, selectionBreakAfter, selectionJoiner, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 diff --git a/node_modules/ink/build/components/Text.js b/node_modules/ink/build/components/Text.js
-index 2e4b9ff..1ec2ae6 100644
+index 2e4b9ff..77ed0f6 100644
 --- a/node_modules/ink/build/components/Text.js
 +++ b/node_modules/ink/build/components/Text.js
 @@ -6,7 +6,7 @@ import { backgroundContext } from './BackgroundContext.js';
@@ -38,6 +38,7 @@ index 2e4b9ff..1ec2ae6 100644
 +    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform, selectable: selectable, selectionFlow: selectionFlow, selectionBreakAfter: selectionBreakAfter, selectionJoiner: selectionJoiner }, childrenOrAriaLabel));
  }
  //# sourceMappingURL=Text.js.map
+\ No newline at end of file
 diff --git a/node_modules/ink/build/cursor-helpers.d.ts b/node_modules/ink/build/cursor-helpers.d.ts
 index c6e9466..6dd4c0f 100644
 --- a/node_modules/ink/build/cursor-helpers.d.ts
@@ -202,6 +203,43 @@ index 0000000..745a4ba
 +};
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
+diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
+index c4386e4..d1921ca 100644
+--- a/node_modules/ink/build/hooks/use-box-metrics.js
++++ b/node_modules/ink/build/hooks/use-box-metrics.js
+@@ -1,4 +1,4 @@
+-import { useState, useEffect, useCallback, useMemo } from 'react';
++import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+ import { addLayoutListener } from '../dom.js';
+ import useStdout from './use-stdout.js';
+ const emptyMetrics = {
+@@ -50,8 +50,26 @@ const useBoxMetrics = (
+ ref) => {
+     const [metrics, setMetrics] = useState(emptyMetrics);
+     const [hasMeasured, setHasMeasured] = useState(false);
++    // Per-instance budget breaking the commit -> layout listener -> setState
++    // feedback loop. A box whose measured size feeds back into its own layout
++    // can oscillate, re-measuring and re-rendering until React throws error
++    // #185 and the process dies. The budget refills as wall-clock time passes,
++    // so mount, resize, and content-driven measuring are unaffected. A timer
++    // based refill would leave a pending handle that fake-timer tests never
++    // drain, which stalls React's act queue.
++    const guardRef = useRef({ count: 0, windowStart: 0 });
+     const { stdout } = useStdout();
+     const updateMetrics = useCallback(() => {
++        const guard = guardRef.current;
++        const now = performance.now();
++        if (now - guard.windowStart >= 16) {
++            guard.count = 0;
++            guard.windowStart = now;
++        }
++        if (guard.count >= 32) {
++            return;
++        }
++        guard.count += 1;
+         const layout = ref.current?.yogaNode?.getComputedLayout() ?? emptyMetrics;
+         setMetrics(previousMetrics => {
+             const hasChanged = previousMetrics.width !== layout.width ||
 diff --git a/node_modules/ink/build/index.d.ts b/node_modules/ink/build/index.d.ts
 index f3e7349..cce56fe 100644
 --- a/node_modules/ink/build/index.d.ts
@@ -224,7 +262,7 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..767d861 100644
+index ef659f3..1beca9b 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
 @@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
@@ -290,7 +328,7 @@ index ef659f3..767d861 100644
          const hasStaticOutput = staticOutput !== '';
          const isTty = this.options.stdout.isTTY;
          // Detect fullscreen: output fills or exceeds terminal height.
-@@ -710,7 +729,7 @@ export default class Ink {
+@@ -707,7 +726,7 @@ export default class Ink {
              if (sync) {
                  this.options.stdout.write(bsu);
              }
@@ -300,10 +338,10 @@ index ef659f3..767d861 100644
              this.lastOutputToRender = outputToRender;
              this.lastOutputHeight = outputHeight;
 diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-update.js
-index cdb5fc4..3247e02 100644
+index cdb5fc4..cd10dc2 100644
 --- a/node_modules/ink/build/log-update.js
 +++ b/node_modules/ink/build/log-update.js
-@@ -4,6 +4,10 @@
+@@ -4,6 +4,10 @@ import { cursorPositionChanged, buildCursorSuffix, buildCursorOnlySequence, buil
  // Count visible lines in a string, ignoring the trailing empty element
  // that `split('\n')` produces when the string ends with '\n'.
  const visibleLineCount = (lines, str) => str.endsWith('\n') ? lines.length - 1 : lines.length;
@@ -314,7 +352,7 @@ index cdb5fc4..3247e02 100644
  const createStandard = (stream, { showCursor = false } = {}) => {
      let previousLineCount = 0;
      let previousOutput = '';
-@@ -12,7 +16,26 @@
+@@ -12,7 +16,26 @@ const createStandard = (stream, { showCursor = false } = {}) => {
      let cursorDirty = false;
      let previousCursorPosition;
      let cursorWasShown = false;
@@ -342,7 +380,7 @@ index cdb5fc4..3247e02 100644
      const hasChanges = (str, activeCursor) => {
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          return str !== previousOutput || cursorChanged;
-@@ -24,7 +47,7 @@
+@@ -24,7 +47,7 @@ const createStandard = (stream, { showCursor = false } = {}) => {
          }
          // Only use cursor if setCursorPosition was called since last render.
          // This ensures stale positions don't persist after component unmount.
@@ -351,7 +389,7 @@ index cdb5fc4..3247e02 100644
          cursorDirty = false;
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          if (!hasChanges(str, activeCursor)) {
-@@ -32,7 +55,8 @@
+@@ -32,7 +55,8 @@ const createStandard = (stream, { showCursor = false } = {}) => {
          }
          const lines = str.split('\n');
          const visibleCount = visibleLineCount(lines, str);
@@ -361,7 +399,7 @@ index cdb5fc4..3247e02 100644
          if (str === previousOutput && cursorChanged) {
              stream.write(buildCursorOnlySequence({
                  cursorWasShown,
-@@ -40,6 +64,7 @@
+@@ -40,6 +64,7 @@ const createStandard = (stream, { showCursor = false } = {}) => {
                  previousCursorPosition,
                  visibleLineCount: visibleCount,
                  cursorPosition: activeCursor,
@@ -369,7 +407,7 @@ index cdb5fc4..3247e02 100644
              }));
          }
          else {
-@@ -50,6 +75,7 @@
+@@ -50,6 +75,7 @@ const createStandard = (stream, { showCursor = false } = {}) => {
                  str +
                  cursorSuffix);
              previousLineCount = lines.length;
@@ -377,7 +415,7 @@ index cdb5fc4..3247e02 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -62,12 +88,16 @@
+@@ -62,12 +88,16 @@ const createStandard = (stream, { showCursor = false } = {}) => {
          previousLineCount = 0;
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -394,7 +432,7 @@ index cdb5fc4..3247e02 100644
          if (!showCursor) {
              cliCursor.show(stream);
              hasHiddenCursor = false;
-@@ -78,18 +108,21 @@
+@@ -78,18 +108,21 @@ const createStandard = (stream, { showCursor = false } = {}) => {
          previousLineCount = 0;
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -418,7 +456,7 @@ index cdb5fc4..3247e02 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -97,9 +130,10 @@
+@@ -97,9 +130,10 @@ const createStandard = (stream, { showCursor = false } = {}) => {
      render.setCursorPosition = (position) => {
          cursorPosition = position;
          cursorDirty = true;
@@ -430,7 +468,7 @@ index cdb5fc4..3247e02 100644
      return render;
  };
  const createIncremental = (stream, { showCursor = false } = {}) => {
-@@ -110,7 +144,26 @@
+@@ -110,7 +144,26 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
      let cursorDirty = false;
      let previousCursorPosition;
      let cursorWasShown = false;
@@ -458,7 +496,7 @@ index cdb5fc4..3247e02 100644
      const hasChanges = (str, activeCursor) => {
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          return str !== previousOutput || cursorChanged;
-@@ -122,7 +175,7 @@
+@@ -122,7 +175,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          }
          // Only use cursor if setCursorPosition was called since last render.
          // This ensures stale positions don't persist after component unmount.
@@ -467,7 +505,7 @@ index cdb5fc4..3247e02 100644
          cursorDirty = false;
          const cursorChanged = cursorPositionChanged(activeCursor, previousCursorPosition);
          if (!hasChanges(str, activeCursor)) {
-@@ -138,6 +191,7 @@
+@@ -138,6 +191,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
                  previousCursorPosition,
                  visibleLineCount: visibleCount,
                  cursorPosition: activeCursor,
@@ -475,7 +513,7 @@ index cdb5fc4..3247e02 100644
              }));
              previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
              cursorWasShown = activeCursor !== undefined;
-@@ -145,7 +199,7 @@
+@@ -145,7 +199,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          }
          const returnPrefix = buildReturnToBottomPrefix(cursorWasShown, previousLines.length, previousCursorPosition);
          if (str === '\n' || previousOutput.length === 0) {
@@ -484,7 +522,7 @@ index cdb5fc4..3247e02 100644
              stream.write(returnPrefix +
                  ansiEscapes.eraseLines(previousLines.length) +
                  str +
-@@ -154,6 +208,7 @@
+@@ -154,6 +208,7 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
              previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
              previousOutput = str;
              previousLines = nextLines;
@@ -492,7 +530,7 @@ index cdb5fc4..3247e02 100644
              return true;
          }
          const hasTrailingNewline = str.endsWith('\n');
-@@ -187,13 +242,14 @@
+@@ -187,13 +242,14 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
                  // has no trailing newline (fullscreen mode).
                  (isLastLine && !hasTrailingNewline ? '' : '\n'));
          }
@@ -508,7 +546,7 @@ index cdb5fc4..3247e02 100644
          return true;
      };
      render.clear = () => {
-@@ -203,12 +259,16 @@
+@@ -203,12 +259,16 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          previousLines = [];
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -525,7 +563,7 @@ index cdb5fc4..3247e02 100644
          if (!showCursor) {
              cliCursor.show(stream);
              hasHiddenCursor = false;
-@@ -219,18 +279,21 @@
+@@ -219,18 +279,21 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
          previousLines = [];
          previousCursorPosition = undefined;
          cursorWasShown = false;
@@ -549,7 +587,7 @@ index cdb5fc4..3247e02 100644
          }
          previousCursorPosition = activeCursor ? { ...activeCursor } : undefined;
          cursorWasShown = activeCursor !== undefined;
-@@ -238,9 +301,10 @@
+@@ -238,9 +301,10 @@ const createIncremental = (stream, { showCursor = false } = {}) => {
      render.setCursorPosition = (position) => {
          cursorPosition = position;
          cursorDirty = true;
@@ -596,7 +634,7 @@ index 0f4523f..a3ef634 100644
  }
  export {};
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index c763b77..ac81f2e 100644
+index c763b77..bfd3d08 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
 @@ -1,6 +1,26 @@
@@ -886,7 +924,7 @@ index 127c620..6d5a005 100644
  }) => void;
  export default renderNodeToOutput;
 diff --git a/node_modules/ink/build/render-node-to-output.js b/node_modules/ink/build/render-node-to-output.js
-index f00a278..07a98d0 100644
+index f00a278..e6bc4ca 100644
 --- a/node_modules/ink/build/render-node-to-output.js
 +++ b/node_modules/ink/build/render-node-to-output.js
 @@ -1,7 +1,6 @@

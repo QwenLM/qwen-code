@@ -1,4 +1,11 @@
-import { memo, useContext, useMemo, type ReactElement } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactElement,
+} from 'react';
 import type {
   ACPToolCall,
   Message,
@@ -11,6 +18,12 @@ import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
+import { QuestionAnswerMessage } from './messages/QuestionAnswerMessage';
+import {
+  extractText,
+  getQuestionAnswerResult,
+  isCompletedAskUserQuestion,
+} from './messages/toolFormatting';
 import {
   AssistantMessage,
   ThinkingMessage,
@@ -31,6 +44,7 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -40,7 +54,18 @@ interface MessageItemProps {
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onEditUserMessage?: () => void;
+  /**
+   * Open the in-place editor for this user message. Return `true` when a host
+   * owns the edit lifecycle — then the inline editor stays closed.
+   */
+  onEditUserMessage?: () => boolean | void;
+  /**
+   * Send the text the user confirmed in the inline editor. Resolves `false`
+   * when the resend was refused or failed; the editor stays open then.
+   */
+  onSubmitUserMessageEdit?: (
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
@@ -54,6 +79,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
   onInsightReportOpen,
@@ -63,6 +89,7 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onEditUserMessage,
+  onSubmitUserMessageEdit,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
@@ -72,6 +99,33 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  // The inline editor is owned here because the toggle (in the timestamp row)
+  // and the edited bubble are siblings under this row.
+  const [editingUserMessage, setEditingUserMessage] = useState(false);
+  // Held while the resend is in flight so the editor can show progress and
+  // survive a refusal instead of dropping the user's text.
+  const [submittingUserMessageEdit, setSubmittingUserMessageEdit] =
+    useState(false);
+  const openUserMessageEditor = useCallback(() => {
+    if (onEditUserMessage?.() === true) return;
+    setEditingUserMessage(true);
+  }, [onEditUserMessage]);
+  const closeUserMessageEditor = useCallback(() => {
+    setEditingUserMessage(false);
+  }, []);
+  const submitUserMessageEdit = useCallback(
+    (content: string) => {
+      if (!onSubmitUserMessageEdit) return;
+      setSubmittingUserMessageEdit(true);
+      void Promise.resolve(onSubmitUserMessageEdit(content))
+        .catch(() => false)
+        .then((accepted) => {
+          setSubmittingUserMessageEdit(false);
+          if (accepted !== false) setEditingUserMessage(false);
+        });
+    },
+    [onSubmitUserMessageEdit],
+  );
   const boundBranchSession = useMemo(
     () =>
       onBranchSession && branchRecordId
@@ -80,7 +134,17 @@ export const MessageItem = memo(function MessageItem({
     [onBranchSession, branchRecordId],
   );
   const compactMode = useContext(CompactModeContext);
+  const questionTool =
+    message.role === 'tool_group' &&
+    message.tools.length === 1 &&
+    isCompletedAskUserQuestion(message.tools[0])
+      ? message.tools[0]
+      : undefined;
+  const questionAnswer = questionTool
+    ? getQuestionAnswerResult(questionTool)
+    : null;
   const isUserStyled =
+    !!questionAnswer ||
     message.role === 'user' ||
     (message.role === 'system' &&
       message.source === 'mid_turn_message_injected');
@@ -96,7 +160,10 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
-            onEdit={onEditUserMessage}
+            editing={editingUserMessage}
+            submittingEdit={submittingUserMessageEdit}
+            onEditSubmit={submitUserMessageEdit}
+            onEditCancel={closeUserMessageEditor}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
           />
@@ -125,6 +192,24 @@ export const MessageItem = memo(function MessageItem({
           />
         );
       case 'tool_group':
+        if (
+          questionTool &&
+          !questionAnswer &&
+          !extractText(questionTool)?.trim()
+        ) {
+          return null;
+        }
+        if (questionAnswer && questionTool) {
+          if (!questionAnswer.answers.length && !questionAnswer.text.trim())
+            return null;
+          return (
+            <QuestionAnswerMessage
+              tool={questionTool}
+              result={questionAnswer}
+              isLocateFlashing={isLocateFlashing}
+            />
+          );
+        }
         return (
           <ToolGroup
             tools={message.tools}
@@ -154,6 +239,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             showRetryHint={showRetryHint && message.retryable === true}
@@ -258,10 +344,23 @@ export const MessageItem = memo(function MessageItem({
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
+      hideTimestamp={
+        message.role === 'system' &&
+        (message.source === 'background_task_completed' ||
+          message.source === 'background_notification_turn_started')
+      }
       chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
-      copyText={isUserStyled ? message.content : undefined}
+      copyText={
+        isUserStyled && 'content' in message ? message.content : undefined
+      }
       copyTitle={t('common.copy')}
+      onEdit={
+        onEditUserMessage && !editingUserMessage
+          ? openUserMessageEditor
+          : undefined
+      }
+      editTitle={t('userMessage.edit')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -301,6 +400,8 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
+    return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
@@ -309,6 +410,8 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
+    return false;
   if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
@@ -441,6 +544,7 @@ function areToolCallsEqual(
     prev.callId === next.callId &&
     prev.toolName === next.toolName &&
     prev.status === next.status &&
+    prev.subagentSessionReady === next.subagentSessionReady &&
     prev.title === next.title &&
     prev.kind === next.kind &&
     prev.startTime === next.startTime &&

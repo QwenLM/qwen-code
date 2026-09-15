@@ -5,9 +5,14 @@ import postcss, { type Rule } from 'postcss';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
+const TRANSCRIPT_DIST_PATH = resolve(DIST_DIR, 'transcript.js');
 
 function readBundle(): string {
   return readFileSync(DIST_PATH, 'utf8');
+}
+
+function readTranscriptBundle(): string {
+  return readFileSync(TRANSCRIPT_DIST_PATH, 'utf8');
 }
 
 function readPackageJavascript(): string {
@@ -17,10 +22,8 @@ function readPackageJavascript(): string {
     .join('\n');
 }
 
-function readInjectedCss(): string {
-  const match = readBundle().match(
-    /^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");/,
-  );
+function readInjectedCss(bundle = readBundle()): string {
+  const match = bundle.match(/^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");/);
   if (!match?.[1]) throw new Error('Injected component CSS not found');
   return JSON.parse(match[1]) as string;
 }
@@ -301,5 +304,104 @@ describe('build artifact — package boundary', () => {
 
     expect(mathmlRule?.selector).toContain('[data-web-shell-root]');
     expect(hasInlineFont).toBe(true);
+  });
+});
+
+describe('build artifact — transcript entry (#11031)', () => {
+  // `@qwen-code/web-shell/transcript` exists so the self-contained
+  // `/export html` document renderer can bundle the read-only transcript
+  // without the interactive shell. Nothing here is enforced by tree shaking:
+  // the package root injects its stylesheet as a top-level side effect, which
+  // no bundler can drop, so the boundary has to be a real entry point.
+  it('does not pull the editor stack into the transcript entry', () => {
+    // Import specifiers of externals survive minification verbatim, so their
+    // absence is a reliable signal that the module never entered the graph.
+    // The signal lives in the JS only: injectCssModules (vite.lib.config.ts)
+    // prepends the stylesheet as a single-line `__qwenWebShellCss` constant,
+    // and Tailwind v4 compiles classes from every scanned source file rather
+    // than this entry's graph, so the CSS carries e.g. drawer.tsx's
+    // `data-[vaul-drawer-direction=…]` selectors even though no transcript JS
+    // imports vaul. Guard the JS remainder; if the injection shape changes
+    // the replace() is a no-op and these checks fail loudly, not falsely.
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('@codemirror/');
+    expect(js).not.toContain('"codemirror"');
+    expect(js).not.toContain('vaul');
+  });
+
+  it('keeps the transcript entry a fraction of the interactive entry', () => {
+    // The daemon hook runtime is NOT absent from this entry — MessageList
+    // renders McpStatusMessage, TasksStatusMessage and the artifact turn
+    // outputs, and those call the strict useDaemonActions /
+    // useDaemonWorkspace hooks, so the provider guards ship. Asserting their
+    // absence would assert something this entry does not deliver (see the
+    // docblock in client/transcript.ts and #11100).
+    //
+    // What the entry does deliver is a bounded payload, so bound it. The JS
+    // remainder measured 1,140,948 bytes at 1d94060f5 (a reviewer's local
+    // build of this branch), against 7,021,715 for dist/index.js in the same
+    // build. The ceiling is that measurement plus headroom; re-measure and
+    // lower it if the entry gets leaner.
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js.length).toBeLessThan(1_300_000);
+  });
+
+  it('still carries what a transcript actually renders', () => {
+    const bundle = readTranscriptBundle();
+    expect(bundle).toContain('react-markdown');
+    expect(bundle).toContain('WebShellTranscript');
+  });
+
+  it('injects its stylesheet under its own entry key', () => {
+    // Separate rollup runs produce different stylesheets per entry, so the
+    // injection guard is keyed per entry — a shared key would let whichever
+    // entry loaded first suppress the other's rules.
+    expect(readBundle()).toContain('data-qwen-web-shell-entry="index"');
+    expect(readTranscriptBundle()).toContain(
+      'data-qwen-web-shell-entry="transcript"',
+    );
+    // Both keep the shared marker that shadow-root style adoption reads.
+    expect(readTranscriptBundle()).toContain(
+      's.dataset.qwenWebShell="component"',
+    );
+  });
+
+  it('keeps KaTeX border overrides after Tailwind preflight', () => {
+    for (const bundle of [readBundle(), readTranscriptBundle()]) {
+      const rules: Rule[] = [];
+      postcss
+        .parse(readInjectedCss(bundle))
+        .walkRules((rule) => rules.push(rule));
+      const preflightIndex = rules.findIndex(
+        (rule) =>
+          rule.selector.includes('[data-web-shell-shadcn]') &&
+          rule.selector.includes('::backdrop') &&
+          rule.nodes.some(
+            (node) =>
+              node.type === 'decl' &&
+              node.prop === 'border-color' &&
+              node.value === 'var(--border)',
+          ),
+      );
+      const katexIndex = rules.findIndex(
+        (rule) =>
+          rule.selector.includes('.katex *') &&
+          rule.nodes.some(
+            (node) =>
+              node.type === 'decl' &&
+              node.prop === 'border-color' &&
+              node.value === 'currentColor',
+          ),
+      );
+
+      expect(preflightIndex).toBeGreaterThanOrEqual(0);
+      expect(katexIndex).toBeGreaterThan(preflightIndex);
+    }
   });
 });
