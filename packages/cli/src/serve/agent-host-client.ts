@@ -9,7 +9,10 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { HostRunAssignment, HostRunResult } from '@qwen-code/qwen-code-core';
+import type {
+  HostRunAssignment,
+  HostRunResult,
+} from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';

@@ -1949,8 +1949,17 @@ function parsePersistedArtifactPanelTab(
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
     case 'agent_activity':
-      if (typeof tab['threadId'] !== 'string' || typeof tab['workspaceCwd'] !== 'string') return;
-      return { ...common, kind: 'agent_activity', threadId: tab['threadId'], workspaceCwd: tab['workspaceCwd'] };
+      if (
+        typeof tab['threadId'] !== 'string' ||
+        typeof tab['workspaceCwd'] !== 'string'
+      )
+        return;
+      return {
+        ...common,
+        kind: 'agent_activity',
+        threadId: tab['threadId'],
+        workspaceCwd: tab['workspaceCwd'],
+      };
     case 'workflow':
       return {
         ...common,
@@ -2102,7 +2111,15 @@ function serializeArtifactPanelTabs(
             ]
           : [];
       case 'agent_activity':
-        return [{ id, kind: tab.kind, title, threadId: tab.threadId, workspaceCwd: tab.workspaceCwd }];
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            threadId: tab.threadId,
+            workspaceCwd: tab.workspaceCwd,
+          },
+        ];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'pending': {
@@ -8673,10 +8690,16 @@ export function App({
     collaborationThread?.server === workspace.baseUrl
       ? collaborationThread.id
       : undefined;
-  const [collaborationTitle, setCollaborationTitle] = useState<{ id: string; title: string }>();
-  const [collaborationHeaderActions, setCollaborationHeaderActions] = useState<HTMLDivElement | null>(null);
+  const [collaborationTitle, setCollaborationTitle] = useState<{
+    id: string;
+    title: string;
+  }>();
+  const [collaborationHeaderActions, setCollaborationHeaderActions] =
+    useState<HTMLDivElement | null>(null);
   const updateCollaborationTitle = useCallback((id: string, title: string) => {
-    setCollaborationTitle((current) => current?.id === id && current.title === title ? current : { id, title });
+    setCollaborationTitle((current) =>
+      current?.id === id && current.title === title ? current : { id, title },
+    );
   }, []);
   const [agentsNav, setAgentsNav] = useState<{
     view: 'agents' | 'tasks' | 'runtime';
@@ -17737,7 +17760,8 @@ export function App({
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
-    onOpenCollaborationSession: (sessionId: string, workspaceCwd: string) => void loadSidebarSession(sessionId, workspaceCwd),
+    onOpenCollaborationSession: (sessionId: string, workspaceCwd: string) =>
+      void loadSidebarSession(sessionId, workspaceCwd),
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
     contextUsageControls,
