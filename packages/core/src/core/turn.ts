@@ -173,6 +173,13 @@ export interface ToolCallResponseInfo {
   persistedOutputFiles?: string[];
   modelOverride?: string;
   terminateTurn?: boolean;
+  /**
+   * Set only when the call was denied because it needed user approval and the
+   * session had no way to ask for it (non-interactive mode). Headless front
+   * ends use it to suggest an approval mode; every other denial, such as a
+   * hook block or a deny rule, reports its own reason instead.
+   */
+  approvalRequired?: true;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
   boundaryArtifact?: ToolResultBoundaryArtifact;

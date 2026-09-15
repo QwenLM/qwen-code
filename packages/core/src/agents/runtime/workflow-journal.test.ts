@@ -305,3 +305,38 @@ describe('deriveArgsSeed', () => {
     expect(k1).not.toBe(k2); // same prompt+opts, different args → different key
   });
 });
+
+// A resume that changed how hard an agent thinks, or what it may call, has to
+// run that agent live. The sandbox normalizes spellings before the key is
+// derived; that half is pinned end to end in workflow-orchestrator.test.ts.
+describe('resume key for effort and disallowedTools', () => {
+  it('projects both into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        effort: 'high',
+        disallowedTools: ['run_shell_command', 'write_file'],
+      }),
+    ).toBe(
+      JSON.stringify({
+        disallowedTools: ['run_shell_command', 'write_file'],
+        effort: 'high',
+      }),
+    );
+  });
+
+  it('gives a different effort a different key', () => {
+    const low = deriveAgentKey('', 'review it', { effort: 'low' });
+    expect(low).not.toBe(deriveAgentKey('', 'review it', { effort: 'high' }));
+    expect(low).not.toBe(deriveAgentKey('', 'review it', {}));
+    expect(low).toBe(deriveAgentKey('', 'review it', { effort: 'low' }));
+  });
+
+  it('gives a different deny set a different key', () => {
+    expect(
+      deriveAgentKey('', 'scan', { disallowedTools: ['write_file'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { disallowedTools: ['edit', 'write_file'] }),
+    );
+  });
+});

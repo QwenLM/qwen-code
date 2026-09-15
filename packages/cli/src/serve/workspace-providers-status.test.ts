@@ -8,8 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
+import {
+  loadSettings,
+  resetHomeEnvBootstrapForTesting,
+} from '../config/settings.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+import { listModelConfigurations } from './model-configuration.js';
 
 const coreMock = vi.hoisted(() => ({
   throwModelsConfigError: false,
@@ -81,6 +85,43 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', originalSystemDefaults);
     resetHomeEnvBootstrapForTesting();
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('aligns configuration keys for implicit and explicit default endpoints', async () => {
+    const endpoint = 'https://api.openai.com/v1';
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'shared' },
+      modelProviders: {
+        openai: [
+          { id: 'shared', name: 'Implicit default' },
+          { id: 'shared', name: 'Explicit default', baseUrl: endpoint },
+        ],
+      },
+    });
+    const configurations = listModelConfigurations(
+      loadSettings(workspace, { skipLoadEnvironment: true }),
+    );
+    expect(configurations).toHaveLength(2);
+    expect(new Set(configurations.map((model) => model.key)).size).toBe(2);
+    expect(configurations[0]?.baseUrl).toBeUndefined();
+    expect(configurations[1]?.baseUrl).toBe(endpoint);
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    const status = await provider(workspace, false);
+    const models = status.providers
+      .filter((entry) => entry.authType === 'openai')
+      .flatMap((entry) => entry.models)
+      .filter((model) => model.baseModelId === 'shared');
+    expect(models).toHaveLength(2);
+    for (const configuration of configurations) {
+      expect(
+        models.find((model) => model.name === configuration.name),
+      ).toMatchObject({
+        configurationKey: configuration.key,
+        baseUrl: endpoint,
+      });
+    }
   });
 
   it('reads fresh default model settings on every request', async () => {

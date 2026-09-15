@@ -11,6 +11,7 @@ import {
   isReasoningEffortPlaceholder,
   isOpenRouterHostname,
   clampReasoningEffort,
+  reasoningEffortsForCapability,
   type Config,
   type ContentGeneratorConfig,
   type ReasoningEffort,
@@ -323,9 +324,11 @@ export function getReasoningEffortsForConfig(
   config: Config,
 ): readonly ReasoningEffort[] {
   const modelId = config.getModel?.();
-  const reasoning = getConfiguredModelReasoning(config, modelId, false);
-  if (reasoning) return reasoning.toggleOnly ? [] : reasoning.efforts;
-  return REASONING_EFFORT_TIERS;
+  // One tier rule for `/effort` and a workflow agent's per-call effort: this
+  // site keeps its own capability lookup and delegates only the rule.
+  return reasoningEffortsForCapability(
+    getConfiguredModelReasoning(config, modelId, false),
+  );
 }
 
 export function parseReasoningSelection(

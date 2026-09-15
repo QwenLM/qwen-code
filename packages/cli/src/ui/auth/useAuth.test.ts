@@ -13,6 +13,7 @@ import {
   openRouterProvider,
   tokenPlanProvider,
   customProvider,
+  minimaxProvider,
   generateCustomEnvKey as generateCustomApiKeyEnvKey,
   getDefaultModelIds,
   resolveBaseUrl,
@@ -23,6 +24,7 @@ import {
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
@@ -46,18 +48,24 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
-const createSettings = () => ({
-  merged: {
-    modelProviders: {},
-  },
-  setValue: vi.fn(),
-  recomputeMerged: vi.fn(),
-  forScope: vi.fn(() => ({
+const createSettings = () => {
+  const file = {
     path: '/tmp/settings.json',
-    settings: {},
-    originalSettings: {},
-  })),
-});
+    settings: { modelProviders: {} } as Record<string, unknown>,
+    originalSettings: {} as Record<string, unknown>,
+  };
+  return {
+    get merged() {
+      return file.settings;
+    },
+    setValue: vi.fn((_scope: unknown, key: string, value: unknown) => {
+      setNestedPropertySafe(file.settings, key, value);
+      setNestedPropertySafe(file.originalSettings, key, value);
+    }),
+    recomputeMerged: vi.fn(),
+    forScope: vi.fn(() => file),
+  };
+};
 
 const createConfig = (recordSlashCommand = vi.fn()) => {
   const modelsConfig = {
@@ -110,6 +118,36 @@ describe('useAuthCommand', () => {
     });
     expect(result.current.isAuthDialogOpen).toBe(false);
     expect(result.current.authError).toBe(null);
+  });
+
+  it('keeps first-time authentication open after saving only a preset image model', async () => {
+    const settings = createSettings();
+    const config = { ...createConfig(), getAuthType: vi.fn(() => undefined) };
+    const addItem = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    await act(async () => {
+      await result.current.handleProviderSubmit(minimaxProvider, {
+        baseUrl: resolveBaseUrl(minimaxProvider),
+        apiKey: 'test-image',
+        modelIds: ['image-01'],
+      });
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'image-01', imageOnly: true }),
+      ]),
+    );
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(result.current.authError).toBe(
+      'Service models saved. Configure a conversation model to start chatting.',
+    );
+    expect(addItem).not.toHaveBeenCalled();
   });
 
   it('configures DeepSeek via the unified provider submit', async () => {

@@ -272,7 +272,9 @@ describe('OpenTuiFooter', () => {
     expect(text).not.toContain('Auto-edit mode');
     // ink's AutoAcceptIndicator suffixes the mode with the cycle shortcut, and
     // the composer now binds it.
-    expect(text).toContain('auto-accept edits (shift + tab to cycle)');
+    expect(text).toContain(
+      `auto-accept edits (${process.platform === 'win32' ? 'tab' : 'shift + tab'} to cycle)`,
+    );
 
     rerender(
       <OpenTuiFooter
@@ -329,7 +331,7 @@ describe('OpenTuiFooter', () => {
       />,
     );
     expect(container.textContent).toContain(
-      'Enter to steer · Ctrl+Q to queue · Auto mode (shift + tab to cycle) ⏳ 2 queued',
+      `Enter to steer · Ctrl+Q to queue · Auto mode (${process.platform === 'win32' ? 'tab' : 'shift + tab'} to cycle) ⏳ 2 queued`,
     );
   });
 

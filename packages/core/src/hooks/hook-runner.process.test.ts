@@ -5,7 +5,15 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,8 +91,87 @@ const isRunning = (pid: number): boolean => {
 };
 
 describe.skipIf(process.platform === 'win32')(
+  'HookRunner project directory variables',
+  () => {
+    it.each(['CLAUDE_PROJECT_DIR', 'QWEN_PROJECT_DIR'])(
+      'runs a double-quoted "$%s/..." script in a project path with a space',
+      async (variable) => {
+        const projectDir = await mkdtemp(join(tmpdir(), 'qwen hook project-'));
+        try {
+          const hooksDir = join(projectDir, '.qwen', 'hooks');
+          await mkdir(hooksDir, { recursive: true });
+          const scriptPath = join(hooksDir, 'check.sh');
+          await writeFile(scriptPath, '#!/bin/sh\necho project-dir-hook-ran\n');
+          await chmod(scriptPath, 0o755);
+
+          const result = await new HookRunner().executeHook(
+            {
+              type: HookType.Command,
+              command: `"$${variable}/.qwen/hooks/check.sh"`,
+              source: HooksConfigSource.Project,
+            },
+            HookEventName.PreToolUse,
+            {
+              session_id: 'project-dir-test',
+              transcript_path: join(projectDir, 'transcript.jsonl'),
+              cwd: projectDir,
+              hook_event_name: HookEventName.PreToolUse,
+              timestamp: new Date().toISOString(),
+            },
+          );
+
+          expect(result.stderr).toBe('');
+          expect(result.success).toBe(true);
+          expect(result.stdout).toContain('project-dir-hook-ran');
+        } finally {
+          await rm(projectDir, { recursive: true, force: true });
+        }
+      },
+      30_000,
+    );
+  },
+);
+
+describe.skipIf(process.platform === 'win32')(
   'HookRunner process tree cancellation',
   () => {
+    it('reads a small command hook timeout as seconds for a real process', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-seconds-'));
+      try {
+        const runner = new HookRunner();
+        const input: HookInput = {
+          session_id: 'seconds-timeout-test',
+          transcript_path: join(tempDir, 'transcript.jsonl'),
+          cwd: tempDir,
+          hook_event_name: HookEventName.PreToolUse,
+          timestamp: new Date().toISOString(),
+        };
+        const startedAt = Date.now();
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `exec ${JSON.stringify(process.execPath)} -e "setInterval(() => {}, 1000)"`,
+            source: HooksConfigSource.Project,
+            shell: 'bash',
+            timeout: 1,
+          },
+          HookEventName.PreToolUse,
+          input,
+        );
+        const elapsedMs = Date.now() - startedAt;
+
+        expect(result).toMatchObject({
+          success: false,
+          error: { message: 'Hook timed out after 1s' },
+        });
+        // One second, not one millisecond and not a thousand seconds.
+        expect(elapsedMs).toBeGreaterThanOrEqual(900);
+        expect(elapsedMs).toBeLessThan(PROCESS_REAP_TIMEOUT_MS);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
     it('reaps a descendant that ignores SIGTERM before returning', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-tree-'));
       const fixturePath = join(tempDir, 'hook-tree.mjs');
@@ -937,7 +1024,9 @@ setInterval(() => {}, 1000);
         expect(descendantPid).toBeDefined();
         expect(result).toMatchObject({
           success: false,
-          error: { message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS}ms` },
+          error: {
+            message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS / 1000}s`,
+          },
         });
         await waitFor(
           () => !isRunning(descendantPid as number),

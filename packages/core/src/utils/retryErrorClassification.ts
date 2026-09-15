@@ -41,10 +41,12 @@ export interface RetryErrorClassification {
  * Classifies retry-related failures.
  *
  * The result is primarily diagnostic — it labels the observed error shape for
- * logging. It also feeds a single control decision in `retryWithBackoff`: a
- * `'fail-fast'` diagnosis keeps a permanent error (e.g. allocated-quota
- * exhaustion surfacing as HTTP 429) out of the unbounded persistent loop.
- * Beyond that, it does not drive retry, fail-fast, or fallback control.
+ * logging. It also drives control: `isRetryableUpstreamError` below turns a
+ * `'retryable'` diagnosis into the retry verdict for every error an HTTP status
+ * cannot decide, and both retry gates end there; a `'fail-fast'` diagnosis keeps
+ * a permanent error (e.g. allocated-quota exhaustion surfacing as HTTP 429) out
+ * of the unbounded persistent loop; and `isFallbackEligible` reads the status
+ * recorded here to decide model fallback.
  */
 export function classifyRetryError(
   error: unknown,
@@ -64,7 +66,11 @@ export function classifyRetryError(
   const providerCode = details.providerCode ?? providerFields.providerCode;
   const providerMessage =
     details.providerMessage ?? providerFields.providerMessage;
-  const requestId = details.requestId ?? providerFields.requestId;
+  // `||`, not `??`: an empty string is not an identifier. The SDK stamps
+  // `requestID` from `headers.get('x-request-id')`, which yields '' for a
+  // header that is present but empty, and a request id now decides a retry
+  // verdict below — so '' must fall through the same way undefined does.
+  const requestId = details.requestId || providerFields.requestId;
   const common = {
     ...(statusCode !== undefined ? { statusCode } : {}),
     ...(providerCode !== undefined ? { providerCode } : {}),
@@ -218,6 +224,66 @@ export function classifyRetryError(
     };
   }
 
+  // Mirrors the transport-mapping branches above, which label by
+  // `details.transport`. That field records whether raw SSE framing survived
+  // into `.message`, not whether the error came out of a stream: the SDK strips
+  // the framing from a mid-stream APIError, so the canonical gateway error
+  // frame is labelled 'provider' and only a body pasted into the message reads
+  // 'sse-provider'.
+  const statuslessKind: RetryErrorKind =
+    details.transport === 'sse' ? 'sse-provider' : 'provider';
+
+  // With no status left to read, permanence has to come off the provider body:
+  // a moderation rejection necessarily arrives after the 200, and a gateway can
+  // relay a credential, billing or malformed-request rejection the same way.
+  // Nothing above can fail fast on them, and re-sending the identical request
+  // can never succeed.
+  //
+  // `.type` is read from both sources `code` is read from, because a body can
+  // carry a specific `code` beside a class-naming `type` and either may be the
+  // permanent one. On the object route `getProviderFields` reads the instance
+  // property — that is where the SDK puts `invalid_request_error`, with `code`
+  // null. On the message-scraped route the two arrive separately too:
+  // `details.providerCode` is the collapsed `code ?? type`, so a sibling `code`
+  // hides the `type` unless `details.providerType` is consulted as well.
+  if (
+    isPermanentProviderCode(providerCode) ||
+    isPermanentProviderCode(providerFields.providerType) ||
+    isPermanentProviderCode(details.providerType)
+  ) {
+    return {
+      kind: statuslessKind,
+      diagnosis: 'fail-fast',
+      reason: 'permanent-provider-code',
+      ...common,
+    };
+  }
+
+  // An upstream error body that carries the provider's own request id but no
+  // HTTP status. The OpenAI SDK builds exactly this shape when a gateway pushes
+  // `{"error": {...}}` into an already-200 SSE stream —
+  // `new APIError(undefined, data.error, undefined, response.headers)` — so the
+  // status never reaches us, and a server-side failure (observed in the wild as
+  // `code: 'KeyError'`, `message: "'id'"`) would otherwise fall through to
+  // 'unknown' and kill the turn on the first attempt while a socket cut above
+  // is retried. The id can equally arrive inside a provider JSON body embedded
+  // in the message.
+  //
+  // Only a request id opens this gate, and only for a code the list above does
+  // not already know as permanent. Local failures carry a string `code` but no
+  // request id (`MISSING_API_KEY`, `invalid_config`, MCP's numeric JSON-RPC
+  // codes), so they stay unclassified and are not retried. An unrecognised
+  // upstream code stays retryable on purpose: the next gateway bug should not
+  // have to be taught to this file before it stops killing turns.
+  if (requestId !== undefined) {
+    return {
+      kind: statuslessKind,
+      diagnosis: 'retryable',
+      reason: 'upstream-error-without-status',
+      ...common,
+    };
+  }
+
   return {
     kind: 'unknown',
     diagnosis: 'unknown',
@@ -305,8 +371,44 @@ function isAllocatedQuotaExceeded(providerCode?: string): boolean {
   return providerCode === 'Throttling.AllocationQuota';
 }
 
+// Provider codes meaning "re-sending this exact request can never succeed":
+// content moderation, credentials/billing, a malformed request, and a payload
+// refused for its size. Moderation necessarily happens after the provider has
+// already sent 200, so there is no HTTP status to fail fast on, and a gateway
+// can relay the others the same way. The oversized-payload codes belong here
+// for the same reason: their recovery is compaction, and re-sending the
+// identical payload cannot reach it.
+//
+// Separators are optional and case is ignored because one rejection reaches
+// this classifier in several spellings (`data_inspection_failed`,
+// `DataInspectionFailed`, `ResponseDataInspectionFailed`). The anchors are
+// deliberate: under-matching costs a wasted retry ladder, over-matching costs a
+// transient failure that is never retried — the bug this branch exists to fix —
+// so open-ended sub-code qualifiers such as `InvalidParameter.Range` are left
+// out on purpose.
+//
+// The credential, entitlement, missing-model and billing spellings are `type`
+// values the Anthropic SDK maps to 401/403/404 (400 for billing), every one of
+// which the HTTP-status branch above already fails fast on. A gateway relaying
+// one into an already-200 stream loses the status, and this list is what keeps
+// the verdict the same instead of spending the ladder on it. The union's
+// transient members stay out on purpose: `api_error`, `timeout_error` and
+// OpenAI's `server_error` remain retryable through the request-id branch
+// below, while `rate_limit_error` and `overloaded_error` are caught earlier by
+// the rate-limit arm and its Retry-After-aware delay.
+const PERMANENT_PROVIDER_CODE_PATTERN =
+  /^(?:response[_-]?data[_-]?inspection[_-]?failed|data[_-]?inspection[_-]?failed|content[_-]?filter|invalid[_-]?api[_-]?key|arrearage|insufficient[_-]?quota|model[._-]?access[_-]?denied|invalid[_-]?request[_-]?error|authentication[_-]?error|permission[_-]?error|not[_-]?found[_-]?error|billing[_-]?error|invalid[_-]?parameter(?:[_-]?error)?|context[_-]?length[_-]?exceeded|request[_-]?too[_-]?large)$/i;
+
+function isPermanentProviderCode(providerCode?: string): boolean {
+  return (
+    providerCode !== undefined &&
+    PERMANENT_PROVIDER_CODE_PATTERN.test(providerCode)
+  );
+}
+
 interface ProviderFields {
   providerCode?: string;
+  providerType?: string;
   providerMessage?: string;
   requestId?: string;
 }
@@ -318,9 +420,11 @@ function getProviderFields(error: unknown): ProviderFields {
 
   const source = error as {
     code?: unknown;
+    type?: unknown;
     message?: unknown;
     request_id?: unknown;
     requestId?: unknown;
+    requestID?: unknown;
   };
   const rawCode =
     typeof source.code === 'string' || typeof source.code === 'number'
@@ -336,12 +440,15 @@ function getProviderFields(error: unknown): ProviderFields {
     (error instanceof Error && rawCode?.startsWith('ERR_')) || isHttpStatusEcho
       ? undefined
       : rawCode;
-  const requestId =
-    typeof source.request_id === 'string'
-      ? source.request_id
-      : typeof source.requestId === 'string'
-        ? source.requestId
-        : undefined;
+  // `requestID` is the OpenAI SDK's spelling — it stamps the response's
+  // `x-request-id` header onto every APIError, including the status-less ones
+  // built from a mid-stream error event. That header can be present and empty,
+  // and this value now decides a retry verdict, so '' counts as absent.
+  const requestId = firstNonEmptyString(
+    source.request_id,
+    source.requestId,
+    source.requestID,
+  );
   const providerMessage =
     typeof source.message === 'string' &&
     (!(error instanceof Error) ||
@@ -349,9 +456,15 @@ function getProviderFields(error: unknown): ProviderFields {
       requestId !== undefined)
       ? source.message
       : undefined;
+  // `.type` is where the OpenAI SDK puts `invalid_request_error` — for that
+  // body it sets `code` to null — so permanence cannot be read off `code`
+  // alone. Kept out of the classification struct: it feeds the permanence
+  // guard only, and `providerCode` is compared by exact equality elsewhere.
+  const providerType = firstNonEmptyString(source.type);
 
   return {
     ...(providerCode !== undefined ? { providerCode } : {}),
+    ...(providerType !== undefined ? { providerType } : {}),
     ...(providerMessage !== undefined ? { providerMessage } : {}),
     ...(requestId !== undefined ? { requestId } : {}),
   };
@@ -376,4 +489,47 @@ export function isFallbackEligible(
     classification.diagnosis !== 'fail-fast' &&
     classification.diagnosis !== 'unknown'
   );
+}
+
+/**
+ * The retry verdict for everything a caller does not already short-circuit on
+ * an HTTP status of its own: HTTP 429/503 and provider rate-limit codes,
+ * transport failures, 5xx and 529, and status-less upstream bodies the provider
+ * traced with a request id.
+ *
+ * The rate-limit term is not the redundancy it looks like, but neither is it
+ * what keeps throttling retryable: `classifyRetryError` runs the same
+ * `isRateLimitError` with the same `extraRetryErrorCodes`, so a throttle this
+ * term matches already classifies `'retryable'` without it — deleting the term
+ * left the retry, classification and send-loop suites green apart from the one
+ * case below. Its only measurable effect is on an error a branch above the
+ * rate-limit one already owns: DashScope's allocated-quota exhaustion, which
+ * surfaces as HTTP 429 and classifies `fail-fast`. There the term keeps this
+ * verdict retryable, so `retryWithBackoff`'s persistent loop bounds the attempt
+ * count with its own fail-fast check (3 attempts) rather than stopping at the
+ * first. LlmChat's inline predicate short-circuits on its own `status === 429`
+ * line, so none of this applies on that path.
+ *
+ * Both gates end here so the status-less policy is written once. Kept in this
+ * module rather than in `retry.ts` because the package barrel re-exports that
+ * file, and this policy is not public API.
+ */
+export function isRetryableUpstreamError(
+  error: unknown,
+  extraRetryErrorCodes?: readonly number[],
+): boolean {
+  return (
+    isRateLimitError(error, extraRetryErrorCodes) ||
+    classifyRetryError(error, { extraRetryErrorCodes }).diagnosis ===
+      'retryable'
+  );
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value) {
+      return value;
+    }
+  }
+  return undefined;
 }

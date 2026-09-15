@@ -170,10 +170,13 @@ export function matches(cronExpr: string, date: Date): boolean {
 export function nextFireTime(cronExpr: string, after: Date): Date {
   const fields = parseCron(cronExpr);
 
-  // Start at the next whole minute after `after`
-  const candidate = new Date(after.getTime());
-  candidate.setSeconds(0, 0);
-  candidate.setMinutes(candidate.getMinutes() + 1);
+  // Start at the next whole minute after `after`. Use epoch arithmetic
+  // rather than local Date setters: a local `setMinutes`/`setSeconds`
+  // resolves an ambiguous fall-back wall-clock to its earlier occurrence,
+  // which would re-project the candidate up to 59 minutes into the past.
+  const candidate = new Date(
+    Math.floor(after.getTime() / 60000) * 60000 + 60000,
+  );
 
   // Scan up to 4 years (~2.1M minutes) to avoid infinite loops
   const maxIterations = 4 * 366 * 24 * 60;
@@ -193,7 +196,7 @@ export function nextFireTime(cronExpr: string, after: Date): Date {
     if (minuteOk && hourOk && monthOk && dayOk) {
       return candidate;
     }
-    candidate.setMinutes(candidate.getMinutes() + 1);
+    candidate.setTime(candidate.getTime() + 60000);
   }
 
   throw new Error(

@@ -736,6 +736,217 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       temperature: 0.7,
     };
 
+    // DashScope is an aggregating gateway. `metadata` is a platform-private
+    // tracing object that only its own inference path understands; forwarded to a
+    // third-party vendor backend that types `metadata` as a string it fails to
+    // deserialize and the request comes back as a flat 400, which made those
+    // models unusable through Qwen Code entirely.
+    it.each([['qwen-max'], ['qwen3.8-max'], ['coder-model']] as const)(
+      'ships metadata for the qwen-family model %s',
+      (model) => {
+        const result = provider.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it.each([
+      ['ZHIPU/GLM-5.3-Flash'],
+      ['deepseek-v4-pro'],
+      ['moonshot/kimi-k3'],
+    ] as const)('omits metadata for the non-qwen model %s', (model) => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+      // The gate is metadata-only: everything else the provider ships is untouched.
+      expect(result['messages']).toBeDefined();
+      expect(result['preserve_thinking']).toBe(true);
+    });
+
+    it.each([['ZHIPU/GLM-5.3-Flash'], ['glm-5.2']] as const)(
+      'sends metadata for the non-qwen model %s when enableRequestMetadata is true',
+      (model) => {
+        // The client cannot tell a forwarded request from one DashScope serves
+        // itself, so an operator whose first-party non-qwen sessions still need
+        // sessionId/promptId correlation can force the field back on.
+        const generator = new DashScopeOpenAICompatibleProvider(
+          { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+          mockCliConfig,
+        );
+
+        const result = generator.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it('omits metadata even for a qwen model when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    // buildRequest has a second, separate return for vision models with its own
+    // metadata spread. The gate tests above only exercise the non-vision return, so
+    // a regression at the vision call site would ship `metadata` for a non-qwen
+    // vision model while every test above stayed green.
+    it('ships metadata on the vision path for a qwen-family vision model', () => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it('omits metadata on the vision path when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      // Still the vision branch, so the gate is what changed and not the route.
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('gates the vision path on the request model, not the configured model', () => {
+      // resolveWireModel falls back to the configured model when the request
+      // model is missing. A non-qwen configured model with a qwen vision request
+      // model is the one input where the two disagree, so it pins which one the
+      // vision call site hands the gate.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, model: 'ZHIPU/GLM-5.3-Flash' },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    // A side-model generator is built with its own per-model config but shares
+    // the session Config, so the gate reads only the provider's own value. The
+    // session's value must neither override a per-model opt-out nor fill in a
+    // value the cross-provider agent config deliberately cleared.
+    it('prefers the provider config enableRequestMetadata over the session value', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('honours a provider config enableRequestMetadata when the session sets none', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({}),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it('ignores the session enableRequestMetadata when the provider config has none', () => {
+      // buildAgentContentGeneratorConfig clears every generation field for a
+      // cross-provider agent, so undefined here is deliberate and the ambient
+      // session value must not fill it in for a vendor-forwarded model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('ignores a session false when the provider config has none', () => {
+      // Same isolation in the other direction: a session opt-out must not
+      // strip tracing from a cross-provider agent running a first-party model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
     it.each([
       ['gpt-5.4', 'high', 'high'],
       ['gpt-5.4', 'max', 'xhigh'],
