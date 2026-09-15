@@ -204,7 +204,7 @@ index 0000000..745a4ba
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
 diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
-index c4386e4..0e8b60c 100644
+index c4386e4..2611ed1 100644
 --- a/node_modules/ink/build/hooks/use-box-metrics.js
 +++ b/node_modules/ink/build/hooks/use-box-metrics.js
 @@ -1,4 +1,4 @@
@@ -213,22 +213,26 @@ index c4386e4..0e8b60c 100644
  import { addLayoutListener } from '../dom.js';
  import useStdout from './use-stdout.js';
  const emptyMetrics = {
-@@ -7,6 +7,14 @@ const emptyMetrics = {
+@@ -7,6 +7,18 @@ const emptyMetrics = {
      left: 0,
      top: 0,
  };
 +// React throws error #185 once 50 nested updates stack up on a root, so the loop
 +// guard below has to stop a self-sustaining cascade before that. The limit is a
 +// plain count of charged layout-listener invocations, not a function of elapsed
-+// time, so a cascade trips after the same number of them on any machine. It is a
-+// per-commit bound only while the measured element stays mounted: an instance
-+// whose measured ref is detached is unsubscribed for those commits and trips at
-+// up to twice this count.
++// time, so a cascade that keeps re-entering this instance trips after the same
++// number of them on any machine - and only that shape of cascade: because the
++// budget is per hook instance while the cap is per root, a cascade re-entering
++// through a parent's state, or one where two instances in a single component
++// refill each other, never reaches this count and only React stops it (#11858).
++// It is a per-commit bound only while the measured element stays mounted: an
++// instance whose measured ref is detached is unsubscribed for those commits and
++// trips at up to twice this count.
 +const maxSelfDrivenMeasurements = 16;
  // eslint-disable-next-line @typescript-eslint/no-restricted-types
  const findRootNode = (node) => {
      if (!node) {
-@@ -50,18 +58,87 @@ const useBoxMetrics = (
+@@ -50,18 +62,88 @@ const useBoxMetrics = (
  ref) => {
      const [metrics, setMetrics] = useState(emptyMetrics);
      const [hasMeasured, setHasMeasured] = useState(false);
@@ -249,14 +253,15 @@ index c4386e4..0e8b60c 100644
 +    // such an instance is charged for roughly every other one and trips at up to
 +    // twice the count below.
 +    //
-+    // Every refill is an event in React's own update chain, so a cascade trips
-+    // after the same number of charged invocations on any machine. Refilling on
-+    // elapsed wall-clock time does not have that property: it only trips while
-+    // the whole cascade fits inside one window, which stops holding under CPU
-+    // contention or on a slower platform, and then React's 50-update cap fires
-+    // first (#11817). A timer based refill is out for the reason it always was -
-+    // it would leave a pending handle that fake-timer tests never drain, which
-+    // stalls React's act queue.
++    // Every refill is an event in React's own update chain, so a cascade that
++    // keeps re-entering this instance trips after the same number of charged
++    // invocations on any machine - and only that shape of cascade, for the reason
++    // recorded at the count above. Refilling on elapsed wall-clock time does not
++    // have that property: it only trips while the whole cascade fits inside one
++    // window, which stops holding under CPU contention or on a slower platform,
++    // and then React's 50-update cap fires first (#11817). A timer based refill
++    // is out for the reason it always was - it would leave a pending handle that
++    // fake-timer tests never drain, which stalls React's act queue.
 +    const guardRef = useRef({
 +        count: 0,
 +        armed: false,
@@ -324,7 +329,7 @@ index c4386e4..0e8b60c 100644
      // Runs after every render of this component.
      // This keeps metrics fresh when local state/props in this subtree change.
      useEffect(updateMetrics);
-@@ -72,16 +149,22 @@ ref) => {
+@@ -72,16 +154,22 @@ ref) => {
          if (!rootNode) {
              return;
          }
