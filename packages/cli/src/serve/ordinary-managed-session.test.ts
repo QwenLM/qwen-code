@@ -472,6 +472,73 @@ describe('ordinary REST session Managed owner', () => {
     });
   });
 
+  it('restores a cold ordinary Managed session after the daemon app restarts', async () => {
+    await startModelServer();
+    await writeSettings();
+    app = bootApp();
+    const sessionId = await createManagedSession();
+
+    const first = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'say ping' }] });
+    expect(first.status).toBe(202);
+    const firstTurn = await waitForTurn(
+      sessionId,
+      first.body.promptId as string,
+    );
+    expect(firstTurn.state).toBe('completed');
+    expect(JSON.stringify(firstTurn)).toContain(ASSISTANT_TEXT);
+
+    await getServeAppLifecycle(app).close({ timeoutMs: 30_000 });
+    app = bootApp();
+
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      recorded: true,
+      sessionId,
+    });
+
+    spawnHarness.blockLegacySpawn = true;
+    const loaded = await request(app)
+      .post(`/session/${sessionId}/load`)
+      .set('Host', host())
+      .send({});
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.sessionId).toBe(sessionId);
+    expect(loaded.body.attached).toBe(false);
+    expect(JSON.stringify(loaded.body)).toContain(ASSISTANT_TEXT);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+
+    const second = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'say ping again' }] });
+    expect(second.status).toBe(202);
+    const secondTurn = await waitForTurn(
+      sessionId,
+      second.body.promptId as string,
+    );
+    expect(secondTurn.state).toBe('completed');
+    expect(JSON.stringify(secondTurn)).toContain(ASSISTANT_TEXT);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+  });
+
   it('keeps MCP settings on the legacy factory at the same REST entry', async () => {
     vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
     await writeSettings({

@@ -37,8 +37,12 @@ const DEFERRED_SPAWN_SOURCE_TYPES = new Set([
 const ORDINARY_SPAWN_SOURCE_TYPES = new Set(['default', 'api']);
 
 const EXTENSION_CONTROL_FILES = new Set(['extension-enablement.json']);
-const EXTENSION_STORE_FILES = new Set(['state.json', 'state.previous.json']);
-const EXTENSION_STORE_DIRS = new Set(['transactions']);
+const EXTENSION_STORE_FILES = new Set([
+  'state.json',
+  'state.previous.json',
+  'lock',
+]);
+const EXTENSION_STORE_DIRS = new Set(['transactions', 'staging', 'rollback']);
 
 export interface DaemonExecutionEngineOptions {
   workspaceCwd: string;
@@ -293,9 +297,11 @@ function classifyExtensionStore(dir: string): 'empty' | 'unknown' {
       return 'unknown';
     }
   }
-  const transactions = listDirectory(path.join(dir, 'transactions'));
-  if (transactions === 'unknown') return 'unknown';
-  if (transactions !== 'missing' && transactions.length > 0) return 'unknown';
+  for (const name of EXTENSION_STORE_DIRS) {
+    const nested = listDirectory(path.join(dir, name));
+    if (nested === 'unknown') return 'unknown';
+    if (nested !== 'missing' && nested.length > 0) return 'unknown';
+  }
   const statePath = path.join(dir, 'state.json');
   const previousPath = path.join(dir, 'state.previous.json');
   let stateRaw: string | undefined;

@@ -250,11 +250,28 @@ describe('daemon execution engines', () => {
     mkdirSync(path.join(home, 'extension-store', 'transactions'), {
       recursive: true,
     });
+    mkdirSync(path.join(home, 'extension-store', 'staging'), {
+      recursive: true,
+    });
+    mkdirSync(path.join(home, 'extension-store', 'rollback'), {
+      recursive: true,
+    });
+    writeFileSync(path.join(home, 'extension-store', 'lock'), '');
     writeFileSync(
       path.join(home, 'extension-store', 'state.json'),
       JSON.stringify({ version: 2, extensions: {} }),
     );
     await expect(engines().select(spawn())).resolves.toBe('managed');
+    await writeTranscript([
+      record('owner', {
+        type: 'system',
+        subtype: 'session_execution_engine',
+        message: undefined,
+        systemPayload: { version: 1, engine: 'managed' },
+      }),
+      record('user-1'),
+    ]);
+    await expect(engines().select(restore('load'))).resolves.toBe('managed');
   });
 
   it('does not treat a held extension-store lock as empty', async () => {
@@ -262,6 +279,18 @@ describe('daemon execution engines', () => {
       recursive: true,
     });
     await expect(engines().select(spawn())).resolves.toBe('legacy');
+    await writeTranscript([
+      record('owner', {
+        type: 'system',
+        subtype: 'session_execution_engine',
+        message: undefined,
+        systemPayload: { version: 1, engine: 'managed' },
+      }),
+      record('user-1'),
+    ]);
+    await expect(engines().select(restore('load'))).rejects.toThrow(
+      /cannot execute with the current configuration/,
+    );
   });
 
   it('restores verified owners without guessing', async () => {
