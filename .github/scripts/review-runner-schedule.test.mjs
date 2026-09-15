@@ -5,7 +5,11 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { planLabels } from './review-runner-schedule.mjs';
 
@@ -104,3 +108,70 @@ describe('review runner schedule', () => {
     assert.ok(schedule.includes('secrets.RUNNER_ADMIN_PAT'));
   });
 });
+
+it(
+  'adds before deleting and preserves the old pool when adding fails',
+  { skip: process.platform === 'win32' },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-switch-'));
+    try {
+      const log = join(dir, 'calls');
+      writeFileSync(
+        join(dir, 'gh'),
+        `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const method = args[args.indexOf('--method') + 1];
+if (!args.includes('--method')) {
+  console.log(JSON.stringify([{ runners: JSON.parse(process.env.PROBE_RUNNERS) }]));
+} else {
+  fs.appendFileSync(process.env.PROBE_LOG, method + '\\n');
+  if (method === 'POST' && process.env.PROBE_FAIL === 'true') process.exit(1);
+}
+`,
+        { mode: 0o755 },
+      );
+      for (const [labels, fail, expected] of [
+        [['ecs-qwen', 'ecs-agent'], false, ['POST', 'DELETE']],
+        [['ecs-qwen', 'ecs-agent'], true, ['POST']],
+        [['ecs-qwen', 'ecs-review', 'ecs-agent'], false, ['DELETE']],
+      ]) {
+        writeFileSync(log, '');
+        const result = spawnSync(
+          process.execPath,
+          [
+            fileURLToPath(
+              new URL('./review-runner-schedule.mjs', import.meta.url),
+            ),
+            'example/repo',
+            'review',
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: dir + delimiter + process.env.PATH,
+              RUNNER_ADMIN_TOKEN: 'test-only',
+              GITHUB_STEP_SUMMARY: '',
+              PROBE_LOG: log,
+              PROBE_FAIL: String(fail),
+              PROBE_RUNNERS: JSON.stringify([runner(1, labels)]),
+            },
+          },
+        );
+        assert.equal(result.status, fail ? 1 : 0, result.stderr);
+        assert.deepEqual(
+          readFileSync(log, 'utf8').trim().split('\n'),
+          expected,
+        );
+        if (fail)
+          assert.match(
+            result.stderr,
+            /::error::1 runner label change\(s\) failed/,
+          );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
