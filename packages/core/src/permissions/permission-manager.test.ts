@@ -622,16 +622,18 @@ describe('splitCompoundCommand', () => {
     ]);
   });
 
-  it('keeps a line bash runs as one command in one segment', async () => {
-    // The closing quote of `'a\'` is immediately followed by another quote,
-    // which re-opens a string that runs to the end of the line, so the `;` is
-    // inside it and bash traces a single `echo`. This is the one shape where
-    // the corrected scanner produces FEWER segments than before — segmentation
-    // matches bash in both directions, not only towards more segments — and
-    // nothing else pins it, so a later edit that re-split this line would give
-    // a spurious prompt for a command the allow rule does cover.
+  it('keeps a boundary the pre-fix reading found, even inside a string', async () => {
+    // bash traces a single `echo` here: the closing quote of `'a\'` is followed
+    // by another quote, which re-opens a string that holds the `;`. bash's
+    // reading alone agrees, but the escape-everywhere reading closes `'a\''`
+    // at its third quote and splits, and the splitter keeps every boundary
+    // either reading finds. That over-split is deliberate and fail-closed: the
+    // same two readings are what keep the carriers in `regions the scanner
+    // does not model` below split, and a splitter that returned one segment
+    // here would be back to trusting bash's reading alone.
     expect(splitCompoundCommand("echo 'a\\'' ; rm x'")).toEqual([
-      "echo 'a\\'' ; rm x'",
+      "echo 'a\\''",
+      "rm x'",
     ]);
   });
 
@@ -639,15 +641,37 @@ describe('splitCompoundCommand', () => {
   // backslash IS an escape, so the quote after it belongs to the string and
   // `$'a\''` only closes at its third quote — which is why the whole token
   // stays in the first segment below — and the operator after it still
-  // separates two commands. Reading these as plain
-  // single quotes swallows the real closing quote instead and glues the line
-  // back into one segment — the same bypass, entered from the other side.
+  // separates two commands.
+  //
+  // Each carrier appears twice, alone and after a plain `'c\'`. The
+  // escape-everywhere reading splits the first form by itself, so it is the
+  // second form that pins bash's reading: that reading is the only one able to
+  // split it, and if it took `$'…'` for a plain string it would close the word
+  // early and swallow the real closing quote, gluing the line back into one
+  // segment — the same bypass, entered from the other side.
   it.each([
     ["echo $'a\\'' ; touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
     ["echo $'a\\'' && touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
     ["echo $'a\\'' | cat", ["echo $'a\\''", 'cat']],
     ["echo $'a\\'' & touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
     ["echo $'a\\''\ntouch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
+    [
+      "echo 'c\\' $'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $'a\\'' && touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    ["echo 'c\\' $'a\\'' | cat", ["echo 'c\\' $'a\\''", 'cat']],
+    [
+      "echo 'c\\' $'a\\'' & touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $'a\\''\ntouch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
   ])(
     'escapes a backslash inside ANSI-C quotes in %s',
     async (command, parts) => {
@@ -673,11 +697,16 @@ describe('splitCompoundCommand', () => {
     // string, but in `\\$'` the backslashes escape each other, the `$` is live
     // and the string is ANSI-C. bash prints `\a'` here and runs two commands.
     // Reading an even run as escaping the `$` would make this a plain string
-    // whose closing quote is then swallowed, which is the bypass itself.
+    // whose closing quote is then swallowed, which is the bypass itself. The
+    // second line puts a plain `'c\'` first, which only bash's reading can
+    // split.
     expect(splitCompoundCommand("echo \\\\$'a\\'' ; touch /tmp/x")).toEqual([
       "echo \\\\$'a\\''",
       'touch /tmp/x',
     ]);
+    expect(
+      splitCompoundCommand("echo 'c\\' \\\\$'a\\'' ; touch /tmp/x"),
+    ).toEqual(["echo 'c\\' \\\\$'a\\''", 'touch /tmp/x']);
   });
 
   // A line continuation between the `$` and its quote does not change what the
@@ -685,10 +714,24 @@ describe('splitCompoundCommand', () => {
   // strings and the operator after each one still separates two commands.
   // Letting the continuation consume the pending `$` read them as plain `'…'`
   // instead, which swallowed the real closing quote and returned one segment.
+  // As above, the rows that open with a plain `'c\'` are the ones only bash's
+  // reading can split.
   it.each([
     ["echo $\\\n'a\\'' ; touch /tmp/x", ["echo $\\\n'a\\''", 'touch /tmp/x']],
     ["echo $\\\n'a\\'' & touch /tmp/x", ["echo $\\\n'a\\''", 'touch /tmp/x']],
     ["echo $\\\n'a\\''\ntouch /tmp/x", ["echo $\\\n'a\\''", 'touch /tmp/x']],
+    [
+      "echo 'c\\' $\\\n'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\'' & touch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\''\ntouch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
   ])(
     'keeps ANSI-C quoting across a line continuation in %s',
     async (command, parts) => {
@@ -720,6 +763,33 @@ describe('splitCompoundCommand', () => {
   ])('tracks the quote form per string in %s', async (command, parts) => {
     expect(splitCompoundCommand(command)).toEqual(parts);
   });
+
+  // The scanner models no `#` comment, backtick body or heredoc body, and bash
+  // does not read the quote characters inside those as quotes. bash's reading
+  // of the backslash closes `'a\''` at its second quote and re-opens a string
+  // at the third, which swallows the operator after the region; the
+  // escape-everywhere reading closes it at the third and still splits there.
+  // bash runs the `rm` in every one of these, so the boundary has to survive,
+  // and it does only because the splitter keeps both readings' boundaries.
+  it.each([
+    [
+      "echo done # note 'a\\''\nrm -rf /tmp/x",
+      ["echo done # note 'a\\''", 'rm -rf /tmp/x'],
+    ],
+    [
+      "echo `echo 'a\\''` ; rm -rf /tmp/x",
+      ["echo `echo 'a\\''`", 'rm -rf /tmp/x'],
+    ],
+    [
+      "cat <<EOF\necho safe 'a\\''\nEOF\nrm -rf /tmp/x",
+      ['cat <<EOF', "echo safe 'a\\''", 'EOF', 'rm -rf /tmp/x'],
+    ],
+  ])(
+    'keeps the boundary after %s, in regions the scanner does not model',
+    async (command, parts) => {
+      expect(splitCompoundCommand(command)).toEqual(parts);
+    },
+  );
 
   it('trims whitespace around sub-commands', async () => {
     expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
@@ -2530,11 +2600,52 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
-    // The counterpart of the segmentation characterisation above: the re-opened
-    // quote keeps the `;` inside a string, so bash runs one `echo` and the
-    // allow rule legitimately covers the whole line. Pinning the verdict, not
-    // just the segment count, keeps the relaxation deliberate.
-    it('allows a line bash runs as a single covered command', async () => {
+    // In a `#` comment and a heredoc body the quote characters are not quotes
+    // to bash, and bash runs the `rm` after each region. bash's reading of the
+    // backslash alone glues the `rm` into a segment led by a covered command,
+    // where the deny rule never sees it.
+    it.each([
+      "echo done # note 'a\\''\nrm -rf /tmp/x",
+      "cat <<EOF\necho safe 'a\\''\nEOF\nrm -rf /tmp/x",
+    ])('a deny rule still applies past the region in %s', async (command) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)', 'Bash(cat *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('deny');
+    });
+
+    // The same comment carrier reaches the virtual-operation pass: the write
+    // after the newline is only extracted once it is a segment of its own.
+    it('a Write deny rule still applies past a commented carrier', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "echo done # note 'a\\''\necho {} > .qwen/settings.json",
+          cwd: '/repo',
+        }),
+      ).toBe('deny');
+    });
+
+    // bash runs a single `echo` here, but the splitter keeps the boundary the
+    // escape-everywhere reading finds (see the segmentation case above), so
+    // the `rm x'` fragment is checked on its own and the deny rule reaches it.
+    // Pinning the verdict keeps that fail-closed trade deliberate.
+    it('checks the fragment the escape-everywhere reading splits off', async () => {
       pm = new PermissionManager(
         makeConfig({
           permissionsAllow: ['Bash(echo *)'],
@@ -2547,7 +2658,7 @@ describe('PermissionManager', () => {
           toolName: 'run_shell_command',
           command: "echo 'a\\'' ; rm x'",
         }),
-      ).toBe('allow');
+      ).toBe('deny');
     });
 
     it('|| compound: all allowed → allow', async () => {
