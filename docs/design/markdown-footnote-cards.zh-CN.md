@@ -67,7 +67,7 @@ const markdown = {
 
 框架无关的挂载函数接收已连接且可布局的独立 HTML 容器和 `WebShellFootnotePreviewInfo`：完整只读 `footnotes` 列表、当前 `footnote`、从零开始的 `index`、本地化 `title`、已解析的 `sourceLabel`，以及 Qwen 管理的 HTMLElement `sourceLink`。元数据仍不含 AST/React 对象；DOM 元素属于展示句柄，宿主可将其放入布局，但不要替换其子节点。Qwen 通过原有 `components.a` 在该元素内渲染当前来源链接，保留宿主接管和普通安全链接行为。纯文本脚注提供不可跳转的标题。
 
-挂载成功后返回 `WebShellFootnotePreviewHandle`，包含同步的 `update(info)` 与 `dispose()`。浮层打开时挂载，翻页/流式数据变化时更新而不重建宿主视图，关闭/卸载、替换挂载函数或回退时清理。React StrictMode 可能多次挂载/清理，每次成功挂载对应一次清理。宿主应保持挂载函数引用稳定，自行处理异步错误，并在挂载尚未返回句柄就抛错时清理已申请的资源。同步 mount/update/cleanup 错误不会破坏报告；切换页面/数据或更换挂载函数后可以重试。
+挂载成功后返回 `WebShellFootnotePreviewHandle`，包含同步的 `update(info)` 与 `dispose()`。浮层打开时挂载，普通翻页/流式数据变化时更新而不重建宿主视图。返回当前挂载函数曾拒绝的脚注时，先清理活动视图并重新尝试挂载；再次拒绝则恢复默认页。拒绝记录按脚注 ID 保存于本次打开的浮层中，更换挂载函数时重置，重试成功后清除。关闭/卸载、替换挂载函数或回退时清理。React StrictMode 可能多次挂载/清理，每次成功挂载对应一次清理。宿主应保持挂载函数引用稳定，自行处理异步错误，并在挂载尚未返回句柄就抛错时清理已申请的资源。同步 mount/update/cleanup 错误不会破坏报告；切换页面/数据或更换挂载函数后可以重试。
 
 自定义内容保留在 Web Shell Portal 及有高度边界的滚动区域内。原生 DOM/SolidJS 接入不需要创建 React 元素；Solid 宿主按自身需要保留响应式 owner，返回更新和清理方法。此插槽不改变 `components.sup` 退出聚合的优先级，也不用于静态文档脚注。
 

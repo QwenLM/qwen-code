@@ -174,11 +174,12 @@ it('updates a mounted view when report content grows and disposes on message rem
 });
 
 it.each([null, undefined])(
-  'declines to the default page with %s and retries on another page',
+  'restores a declined page with %s after visiting a custom page',
   (value) => {
-    const { mount: custom } = harness();
-    const mount: WebShellFootnotePreviewMount = (element, info) =>
-      info.index === 0 ? value : custom(element, info);
+    const { mount: custom, views } = harness();
+    const mount = vi.fn<WebShellFootnotePreviewMount>((element, info) =>
+      info.footnote.id === 'a' ? value : custom(element, info),
+    );
     render(tree(mount));
     click(container.querySelector(trigger));
     expect(
@@ -186,8 +187,91 @@ it.each([null, undefined])(
     ).toBe('First summary.');
     click(preview().querySelector('[aria-label="Next reference"]'));
     expect(preview().textContent).toContain('Host Plain beta.');
+    click(preview().querySelector('[aria-label="Previous reference"]'));
+    expect(
+      preview().querySelector('[data-web-shell-footnote-summary]')?.textContent,
+    ).toBe('First summary.');
+    expect(preview().querySelector('[data-host-summary]')).toBeNull();
+    expect(
+      preview().querySelector('[data-web-shell-footnote-custom-content]'),
+    ).toHaveProperty('hidden', true);
+    expect(mount.mock.calls.map(([, info]) => info.footnote.id)).toEqual([
+      'a',
+      'b',
+      'a',
+    ]);
+    expect(views[0].update.mock.calls.map(([info]) => info.index)).toEqual([1]);
+    expect(views[0].dispose).toHaveBeenCalledTimes(1);
+    click(preview().querySelector('[aria-label="Next reference"]'));
+    expect(preview().textContent).toContain('Host Plain beta.');
+    close();
+    expect(views.every((view) => view.dispose.mock.calls.length === 1)).toBe(
+      true,
+    );
   },
 );
+
+it('tracks declined footnotes by ID across reordering and forgets a successful retry', () => {
+  const { mount: custom, views } = harness();
+  let decline = true;
+  const mount = vi.fn<WebShellFootnotePreviewMount>((element, info) =>
+    decline && info.footnote.id === 'a' ? null : custom(element, info),
+  );
+  render(tree(mount));
+  click(container.querySelector(trigger));
+  click(preview().querySelector('[aria-label="Next reference"]'));
+  const reordered = report.replace('First[^a][^b].', 'First[^b][^a].');
+  render(tree(mount, reordered));
+  expect(preview().textContent).toContain('Host Plain beta.');
+  expect(preview().textContent).toContain('1 / 2');
+  expect(mount).toHaveBeenCalledTimes(2);
+  click(preview().querySelector('[aria-label="Next reference"]'));
+  expect(preview().querySelector('[data-host-summary]')).toBeNull();
+  expect(views[0].dispose).toHaveBeenCalledTimes(1);
+  expect(mount.mock.calls.at(-1)?.[1].footnote.id).toBe('a');
+  expect(mount.mock.calls.at(-1)?.[1].index).toBe(1);
+
+  click(preview().querySelector('[aria-label="Previous reference"]'));
+  decline = false;
+  click(preview().querySelector('[aria-label="Next reference"]'));
+  expect(preview().textContent).toContain('Host First summary.');
+  expect(views[1].dispose).toHaveBeenCalledTimes(1);
+  const calls = mount.mock.calls.length;
+  click(preview().querySelector('[aria-label="Previous reference"]'));
+  click(preview().querySelector('[aria-label="Next reference"]'));
+  expect(mount).toHaveBeenCalledTimes(calls);
+  expect(views.at(-1)!.dispose).not.toHaveBeenCalled();
+  close();
+  expect(views.every((view) => view.dispose.mock.calls.length === 1)).toBe(
+    true,
+  );
+});
+
+it('does not carry declined pages into a replacement renderer', () => {
+  const first = harness();
+  const second = harness();
+  const mount: WebShellFootnotePreviewMount = (element, info) =>
+    info.footnote.id === 'a' ? null : first.mount(element, info);
+  const notes = ['a', 'b'].map((id, index) => ({
+    id,
+    number: index + 1,
+    summary: `Summary ${id}.`,
+    definitionMarkdown: `[^${id}]: Summary ${id}.`,
+  }));
+  const page = (renderer: WebShellFootnotePreviewMount, index: number) => (
+    <FootnotePreviewContent notes={notes} index={index} mount={renderer} />
+  );
+  render(page(mount, 0));
+  render(page(mount, 1));
+  render(page(second.mount, 1));
+  expect(first.views[0].dispose).toHaveBeenCalledTimes(1);
+  render(page(second.mount, 0));
+  expect(container.textContent).toContain('Host Summary a.');
+  expect(second.mount).toHaveBeenCalledTimes(1);
+  expect(second.views[0].dispose).not.toHaveBeenCalled();
+  render(null);
+  expect(second.views[0].dispose).toHaveBeenCalledTimes(1);
+});
 
 it('falls back after mount failure and recovers on a different page', () => {
   vi.spyOn(console, 'error').mockImplementation(() => {});

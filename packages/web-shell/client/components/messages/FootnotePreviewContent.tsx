@@ -211,6 +211,7 @@ function MountedFootnoteContent({
       }
     | undefined
   >(undefined);
+  const declined = useRef({ mount, ids: new Set<string>() });
   const [linkRoot, setLinkRoot] = useState<HTMLElement | null>();
   const dispose = useCallback(() => {
     const previous = active.current;
@@ -230,7 +231,10 @@ function MountedFootnoteContent({
     const target = container.current!;
     let pendingLink: HTMLElement | undefined;
     try {
+      if (declined.current.mount !== mount)
+        declined.current = { mount, ids: new Set() };
       if (active.current?.mount !== mount) dispose();
+      if (declined.current.ids.has(info.footnote.id)) dispose();
       const existing = active.current;
       if (existing) {
         existing.handle.update({ ...info, sourceLink: existing.link });
@@ -242,6 +246,7 @@ function MountedFootnoteContent({
       pendingLink.dataset['webShellFootnoteSourceLink'] = '';
       const handle = mount(target, { ...info, sourceLink: pendingLink });
       if (handle == null) {
+        declined.current.ids.add(info.footnote.id);
         pendingLink.remove();
         target.replaceChildren();
         target.hidden = true;
@@ -257,6 +262,7 @@ function MountedFootnoteContent({
           'Footnote preview mount must return update and dispose methods',
         );
       }
+      declined.current.ids.delete(info.footnote.id);
       active.current = { mount, handle, container: target, link: pendingLink };
       setLinkRoot(pendingLink);
     } catch (error) {
