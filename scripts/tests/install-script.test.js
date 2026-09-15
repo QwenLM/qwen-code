@@ -1080,22 +1080,30 @@ describe('standalone release packaging', () => {
       .replace(/\/\/[^\n]*/g, '')
       .replace(/\s+/g, ' ');
 
-    // The helper's own tests stay green even when the release path stops
-    // calling it, so pin the wiring and the retry constants by source.
-    expect(releaseScript.match(/await downloadWithRetry\(/g)).toHaveLength(2);
-    expect(releaseScript.match(/await downloadFile\(/g)).toHaveLength(1);
+    // The helpers' own tests stay green even when the release path stops
+    // calling them, so pin the call sites and the retry constants by source.
+    // Every needle avoids `//` and newlines, so all can match against
+    // `normalised`; that transform truncates string literals containing
+    // `//`, so a URL-bearing needle here would silently never match.
+    expect(normalised.match(/await downloadWithRetry\(/g)).toHaveLength(2);
+    expect(normalised.match(/await downloadFile\(/g)).toHaveLength(1);
+    // The archive leg: packageTarget must route through the verifying helper
+    // with the shared checksum map and label: dropping the call or either
+    // argument leaves the helper exercised but the release path unverified.
+    expect(normalised.match(/await downloadRuntimeArchive\(/g)).toHaveLength(1);
+    expect(normalised).toMatch(
+      /await downloadRuntimeArchive\(\{[^;]*checksums,[^;]*label: runtimeLabel\(runtime\)/,
+    );
     // The checksum leg: emptying this derivation (expectedArchives: [])
     // leaves the whole suite green while a truncated SHASUMS256.txt is
     // accepted instead of re-downloaded.
     expect(normalised).toMatch(
       /downloadRuntimeChecksums\(\{[^;]*expectedArchives: RELEASE_TARGETS\.map/,
     );
-    expect(releaseScript).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
-    expect(releaseScript).toContain(
-      'const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;',
-    );
-    expect(releaseScript).toContain('const DOWNLOAD_TIMEOUT_MS = 120_000;');
-    expect(releaseScript).toContain('AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)');
+    expect(normalised).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
+    expect(normalised).toContain('const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;');
+    expect(normalised).toContain('const DOWNLOAD_TIMEOUT_MS = 120_000;');
+    expect(normalised).toContain('AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)');
   });
 
   it('stages the locked clipboard packages for every release target', async () => {
