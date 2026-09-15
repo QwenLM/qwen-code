@@ -172,9 +172,9 @@ bundle、serve bundle 边界及 core 导出检查，全部通过。新的 1,079 
 `.qwen/investigations/issue-11866-completion/` 和
 `.qwen/issues/issue-11866-unrelated-unit-followups.md`。
 
-## 合并更新后的 main
+## 首次发布候选：main 整合
 
-提交候选合并了 main `d47a8fdbae49d6acd4b7b4fb2eb650200e2ae9c8`，比原始
+首次发布的候选 `768e1b194f` 合并了 main `d47a8fdbae49d6acd4b7b4fb2eb650200e2ae9c8`，比原始
 基线新增 16 个提交。相对 rebase 前候选，有五个非文档候选文件发生变化。bridge 仍为
 23 行，控制面现在为 14,465 行，harness 仍为 444 行。更新后 main 的后台回合
 准入、终态等待、取消 epoch、active-work 快照、恢复元数据和忙碌守卫继续留在
@@ -240,3 +240,58 @@ MISMATCH：CLI 版本和两个内置技能正文不同。正文与更新后上�
 子进程消失的观察分开。Rebase 证据由 completion 调查目录内的
 `rebase-e2e-manifest.json` 索引；源码审计及重新构建的产物清单位于
 `.qwen/pr-reviews/`。上文继续保留历史失败及其边界。
+
+## 后续合并渠道输出模式
+
+首次发布后，main 前进到 `473ef4b3e474ddc16d7bd6db32fcc86185a9cac6`。
+其 bridge 改动与抽取产生冲突。新增六行保留在控制面原有的同步请求构造位置：
+先捕获传入的输出模式，无条件清除，再仅为可信 channel-prompt 上下文恢复
+`per_task`。ACP agent 保留独立的可信父进程检查。模式策略和会话 capture
+状态均未移入物理 harness。
+
+合并也保留了上游按会话持有的权限队列，以及完整的 channel-task capture、
+排队、取消、dispose 和结果处理。相关任务通知继续属于正在等待的 RPC，避免
+通过独立后台准入反过来等待同一个 RPC。bridge 仍为 23 行，控制面变为
+14,471 行，harness 仍为 444 行。
+
+两轮独立无方向和反向源码审计没有发现引入缺陷。相对 `768e1b194f`，仅三个
+非文档候选文件不同，其新增内容分别与上游的六行 bridge、六行 ACP 和 42 行
+测试一致。所有其他非候选文件与新 main 精确一致。检查了完整请求构造和 ACP
+prompt 处理，而不只核对行数。重新执行 build、工作区 typecheck、lint、
+bundle、core 导出和 serve bundle 边界检查，全部通过，随后 2,130 项 ACP
+bridge 测试全部通过。
+
+15 个受影响 CLI 文件中的 2,170 项测试也全部通过，包括完整 Session 套件、
+可信/伪造渠道模式过滤和渠道配置。这些命令保留隔离 HOME 及系统设置，同时
+显式取消包装脚本的 `QWEN_RUNTIME_DIR` 和 `QWEN_HOME`，允许测试自行提供
+runtime 和模拟 home fixture。原断言及期限不变，先前包装环境的失败运行
+继续保留在上文。
+
+八个相关 channel-base 文件中的 1,150 项测试全部通过，覆盖两种渠道 bridge、
+会话路由、输出模式、输出回合和后台输出协调。结合上述 CLI 测试，这些检查
+补充了八项普通提示进程场景没有覆盖的可信 `per_task` 及权限行为。
+
+新的八项串行 E2E 均满足各自验收条件。公共生命周期、32 个技能的原生监听和
+活动 writer 关停均测得 daemon 退出 0。两个 writer 封存记录与实际的
+3,609/3,604 字节 transcript 及哈希一致。两个正向 EOF 场景均测得 ACP
+实际退出 0，并交付 1,072,333 字节 stdout，包含完整的 524,288 字节
+fixture。只规范化精确临时根目录和 session UUID 后，两份完整输出彼此一致，
+也分别与首次发布候选的两份样本一致。
+
+停滞读端在 2,028 ms 后测得 ACP 实际退出 1，保留原有 2,000 ms 排空错误。
+关闭读端在 24 ms 后测得 ACP 实际退出 1 并保留 EPIPE。两者都保留原始
+harness FAIL/脚本退出 1；验收通过表示预期失败发生，不代表输出完整。
+进程查询测试在 2,002.45 ms 时测得 SIGTERM，两个输出管道均未被 destroy。
+查询超时和单独退出 7 均拒绝不完整的清理证明，即使已知所属进程退出 0、
+registry 已清空，也不报告完整终止成功。
+
+完整的 1,079 个构建文件和单独导入的 process-registry 构建在 E2E 前后
+一致，全部 34 个非文档候选文件也保持一致。当前 CLI SHA-256 为
+`0d7c5f8757f584b321322da34d1926666b61e6b1b23b57b6a9630c03cda43a69`；
+完整 dist 树摘要为
+`d6ec947a9fdf9c00e97f086d9c4e0cb6ab4dbeea7949768bdc4ec1ec5639e261`。
+每项场景后均独立检查所属 PID/进程组和监听端口。公共子集比较与原基线一致；
+普通提示的原始响应没有新增 task-output/task-result/output-mode 或
+background-turn 元数据。这些普通 fixture 不覆盖经授权的 per-task 后台
+捕获或权限流程。最新证据由 `latest-main-e2e-manifest.json` 索引；
+更早的样本及失败保持原样。

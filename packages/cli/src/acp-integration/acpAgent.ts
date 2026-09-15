@@ -209,6 +209,7 @@ import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable } from 'node:stream';
@@ -6442,6 +6443,7 @@ class QwenAgent implements Agent {
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
@@ -6454,6 +6456,7 @@ class QwenAgent implements Agent {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
     delete meta['qwen.goalProposalApproval'];
     if (
       this.privateParentState === 'trusted' &&
@@ -6481,6 +6484,9 @@ class QwenAgent implements Agent {
       suppliedChannelPrompt === true
     ) {
       meta[CHANNEL_PROMPT_META_KEY] = true;
+      if (suppliedChannelOutputMode === 'per_task') {
+        meta[CHANNEL_OUTPUT_MODE_META_KEY] = suppliedChannelOutputMode;
+      }
     }
     // Channel delivery is a daemon-managed side effect (the prompt route
     // injects it from the trusted context); an untrusted direct-ACP caller

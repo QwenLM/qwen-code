@@ -212,9 +212,9 @@ green. Detailed evidence and separate
 follow-ups are retained in `.qwen/investigations/issue-11866-completion/` and
 `.qwen/issues/issue-11866-unrelated-unit-followups.md`.
 
-## Integration with updated main
+## First published candidate: main integration
 
-The submitted candidate integrates main at
+The first published candidate, `768e1b194f`, integrates main at
 `d47a8fdbae49d6acd4b7b4fb2eb650200e2ae9c8`, 16 commits after the original
 baseline. Five non-document candidate files change relative to the pre-rebase
 candidate.
@@ -297,3 +297,69 @@ ACP exit measurements remain separate from daemon-child absence. Rebase
 evidence is indexed by `rebase-e2e-manifest.json` in the completion investigation
 directory; source audits and the rebuilt artifact manifest are under
 `.qwen/pr-reviews/`. Historical failures and their limits remain above.
+
+## Follow-up integration with channel output modes
+
+After the first publication, main advanced to
+`473ef4b3e474ddc16d7bd6db32fcc86185a9cac6`. Its bridge change conflicted with
+the extraction. The six added lines are preserved at the same synchronous
+control-plane request-building point: capture the supplied output mode, always
+strip it, then restore only `per_task` for trusted channel-prompt context.
+The ACP agent retains its independent trusted-parent check. No mode policy or
+session capture state moves into the physical harness.
+
+The merge also retains upstream's session-owned permission queue and complete
+channel-task capture, queue, cancellation, disposal and result handling. Related
+task notifications remain part of their waiting RPC instead of waiting on that
+same RPC through independent background admission. The bridge remains 23 lines,
+the control plane becomes 14,471 lines, and the harness remains 444 lines.
+
+Two independent open-ended and reverse source audits found no introduced
+defect. Only three non-document candidate files differ from `768e1b194f`;
+their additions match upstream's six bridge lines, six ACP lines and 42 test
+lines. All other non-candidate files match the new main exactly. Complete
+request construction and ACP prompt handling were checked, not only line counts.
+Fresh build, workspace typecheck, lint, bundle, core exports and serve bundle
+boundary checks passed, followed by all 2,130 ACP bridge tests.
+
+All 2,170 tests in 15 affected CLI files also passed, including the complete
+Session suite, trusted/forged channel-mode filtering and channel configuration.
+These commands retain isolated HOME and system settings while explicitly
+unsetting the wrapper's `QWEN_RUNTIME_DIR` and `QWEN_HOME`, allowing each test
+to supply its own runtime and mocked-home fixtures. Original assertions and
+deadlines are unchanged; the earlier failed wrapper runs remain above.
+
+The eight related channel-base files passed all 1,150 tests, including both
+channel bridges, session routing, output modes, output turns and background
+output coordination. Together with the CLI tests, these checks cover trusted
+`per_task` and permission behavior that the eight ordinary-prompt process
+scenarios do not exercise.
+
+All eight fresh serial E2E scenarios met their acceptance conditions. Public
+lifecycle, native watching with 32 skills and active-writer shutdown measured
+daemon exit 0. Both writer seals match their actual 3,609/3,604-byte transcripts
+and hashes. Both positive EOF cases measured actual ACP exit 0 and delivered
+1,072,333 stdout bytes with the complete 524,288-byte fixture. Their complete
+outputs match each other and both first-published-candidate samples after
+normalizing only exact temporary roots and session UUIDs.
+
+The stalled reader measured actual ACP exit 1 after 2,028 ms with the original
+2,000 ms drain error. The closed reader measured actual ACP exit 1 with EPIPE
+after 24 ms. Both retain their original harness FAIL/script exit 1; acceptance
+means the expected failure occurred, not that either output was complete. The
+process-query test measured SIGTERM at 2,002.45 ms with both pipes undestroyed.
+The timeout and separate exit-7 query both reject incomplete cleanup proof,
+even though known owned processes exit 0 and the registry becomes empty.
+
+The full 1,079-file artifact and the separately imported process-registry build
+match before and after E2E; all 34 non-document candidate files also match.
+Current CLI SHA-256 is
+`0d7c5f8757f584b321322da34d1926666b61e6b1b23b57b6a9630c03cda43a69`;
+the full dist tree digest is
+`d6ec947a9fdf9c00e97f086d9c4e0cb6ab4dbeea7949768bdc4ec1ec5639e261`.
+Owned PIDs/process groups and listeners were independently checked after each
+scenario. Public subset comparisons match their original baselines; raw normal
+prompt responses contain no new task-output/task-result/output-mode or
+background-turn metadata. These ordinary fixtures do not exercise authenticated
+per-task background capture or permissions. Latest evidence is indexed by
+`latest-main-e2e-manifest.json`; earlier samples and failures remain unchanged.
