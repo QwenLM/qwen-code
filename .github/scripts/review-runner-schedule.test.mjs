@@ -118,7 +118,11 @@ describe('review runner schedule', () => {
 
 // The planner's own entry path, driven through a fake `gh` that logs every
 // label call and serves PROBE_RUNNERS as the runner listing.
-const writeFakeGh = (dir) =>
+const writeFakeGh = (dir) => {
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ type: 'commonjs' }),
+  );
   writeFileSync(
     join(dir, 'gh'),
     `#!/usr/bin/env node
@@ -134,6 +138,7 @@ if (!args.includes('--method')) {
 `,
     { mode: 0o755 },
   );
+};
 
 const spawnPlanner = (dir, runners, { fail = false } = {}) =>
   spawnSync(
