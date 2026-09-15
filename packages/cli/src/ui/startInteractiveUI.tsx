@@ -25,7 +25,10 @@ import {
   PeerMessagingContext,
 } from '../peerMessaging/PeerMessagingContext.js';
 import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
-import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
+import {
+  isCrossSessionMessagingEnabled,
+  isCrossSessionMessagingOptedIn,
+} from '../peerMessaging/enabled.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -183,7 +186,7 @@ export async function startInteractiveUI(
       ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
       : { restore: () => {}, repaint: () => {} };
 
-  // Cross-session messaging (experimental, off by default). The inbox is
+  // Cross-session messaging (on by default; see peerMessaging/enabled.ts). The inbox is
   // owned outside React — bound once per process by the block at the end of
   // this function — and this promise is how the bound instance (or null,
   // when the feature is off or the socket could not be bound) reaches the
@@ -222,16 +225,16 @@ export async function startInteractiveUI(
         ) {
           const failure = getLastPeerInboxFailure();
           // A different question from the helper above: not "is messaging
-          // on", which an unset key also answers yes, but "did the user
-          // write `true` themselves". The switch is on by default, so a
-          // platform with no inbox transport would otherwise greet every
-          // one of its users with a failure about a feature they never
-          // asked for; that one is said only to a user who opted in by
-          // hand. A bind that failed where it should have worked is said to
-          // everyone: they are unreachable, and this line is the only place
-          // they learn it.
-          const optedInByHand =
-            settings.merged.agents?.crossSessionMessaging === true;
+          // on", which an unset key also answers yes, but "did a person
+          // write `true`" — in their user settings or this workspace's, not
+          // in an operator's defaults, which merged settings cannot tell
+          // apart. The switch is on by default, so a platform with no inbox
+          // transport would otherwise greet every one of its users with a
+          // failure about a feature they never asked for; that one is said
+          // only to someone who opted in by hand. A bind that failed where
+          // it should have worked is said to everyone: they are
+          // unreachable, and this line is the only place they learn it.
+          const optedInByHand = isCrossSessionMessagingOptedIn(settings);
           if (
             failure !== null &&
             (failure.cause !== 'unsupported_platform' || optedInByHand)

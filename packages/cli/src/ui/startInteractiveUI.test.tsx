@@ -259,11 +259,14 @@ describe('startInteractiveUI session registration', () => {
 });
 
 describe('startInteractiveUI cross-session messaging', () => {
+  // Turned on by hand: the user scope wrote it, so the merged value is
+  // true and the opt-in reader sees it too.
   const enabledSettings = {
     merged: {
       ui: { hideWindowTitle: true },
       agents: { crossSessionMessaging: true },
     },
+    user: { settings: { agents: { crossSessionMessaging: true } } },
   } as unknown as LoadedSettings;
 
   beforeEach(() => {
@@ -529,6 +532,24 @@ describe('startInteractiveUI cross-session messaging', () => {
     expect(await observeFailureAfterStart(enabledSettings)).toEqual(
       unsupportedPlatform,
     );
+  });
+
+  it('keeps an unsupported platform quiet when only an operator default turned the switch on', async () => {
+    // The merged value is true, but nobody at this session wrote it: a
+    // fleet's system-defaults file is not an opt-in by hand.
+    lastPeerInboxFailure.value = unsupportedPlatform;
+    peerMessagingStart.mockResolvedValue(null);
+    const operatorOn = {
+      merged: {
+        ui: { hideWindowTitle: true },
+        agents: { crossSessionMessaging: true },
+      },
+      systemDefaults: {
+        settings: { agents: { crossSessionMessaging: true } },
+      },
+    } as unknown as LoadedSettings;
+
+    expect(await observeFailureAfterStart(operatorOn)).toBeNull();
   });
 
   it('says a real bind failure even when nothing set the key', async () => {

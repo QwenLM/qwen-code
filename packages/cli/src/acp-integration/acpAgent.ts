@@ -151,6 +151,7 @@ import {
   qualifySkillName,
   sessionIdContext,
   registerSession,
+  getLastPeerInboxFailure,
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
@@ -4716,7 +4717,16 @@ class QwenAgent implements Agent {
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
-        if (messaging === null) this.peerMessagingStart = null;
+        // Except for a platform with no inbox transport. That refusal is
+        // decided before any filesystem call and holds for every candidate
+        // path, so no later session in this process can succeed; keep the
+        // settled null so the attempt, and its log line, happen once.
+        if (
+          messaging === null &&
+          getLastPeerInboxFailure()?.cause !== 'unsupported_platform'
+        ) {
+          this.peerMessagingStart = null;
+        }
         return messaging;
       } catch (error) {
         debugLogger.error(

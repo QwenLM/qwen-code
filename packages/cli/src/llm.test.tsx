@@ -4053,6 +4053,8 @@ describe('startInteractiveUI', () => {
         ui: {
           hideWindowTitle: false,
         },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        agents: { crossSessionMessaging: false },
       },
     } as LoadedSettings;
 
@@ -4401,7 +4403,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
 
       await startInteractiveUI(
@@ -4432,7 +4438,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
       // An earlier describe's vi.restoreAllMocks() wipes the shared ink
       // render mock's return value in the full run, so re-arm it here.

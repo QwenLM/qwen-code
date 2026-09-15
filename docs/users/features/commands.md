@@ -863,8 +863,10 @@ A repository can make sessions opened in it more cautious, never less:
 a workspace `.qwen/settings.json` may set `agents.crossSessionInbound`
 to `hold` or `refuse`, or `agents.crossSessionMessaging` to `false`, and
 that value wins over a looser one in your user settings. A workspace
-value that would loosen your setting (`accept`, or `true` for the
-switch) is ignored with a warning, and a value the CLI does not
+value that would loosen an operator-set one (`accept`, or `true` for the
+switch when a user or system scope set it to `false`) is ignored with a
+warning; a workspace `true` where nothing else set the switch merely
+repeats the default and is dropped silently. A value the CLI does not
 recognize holds every message whenever it is the effective value.
 System settings override all of this, as they do for every setting.
 

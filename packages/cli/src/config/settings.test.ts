@@ -3966,6 +3966,31 @@ describe('Settings Loading and Merging', () => {
       expect(warning).toContain('would loosen the User value');
     });
 
+    it('warns when a workspace true would reopen a switch the user turned off', () => {
+      // The one warning path left for this key: an operator scope's false
+      // outranks a workspace true. An unset operator scope would not reach
+      // it — a workspace true then repeats the default and drops silently.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionMessaging: false },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ agents: { crossSessionMessaging: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionMessaging).toBe(false);
+      const warning = getSettingsWarnings(settings).find((w) =>
+        w.includes('agents.crossSessionMessaging'),
+      );
+      expect(warning).toContain('would loosen the User value');
+    });
+
     it('lets System scope override a stricter workspace value, with a warning', () => {
       const systemSettingsPath = '/mock/system/settings.json';
       process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;

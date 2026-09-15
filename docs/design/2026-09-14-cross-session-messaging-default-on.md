@@ -60,13 +60,33 @@ on.
 **No first-run notice.** A line in the transcript saying "other sessions
 can now see this one" would need a per-home marker file to show once, and
 would repeat for every scoped home. The documentation and `/peers` carry
-the explanation; the review rules mean a discoverable session still acts
-on nothing its user did not let through.
+the explanation; the review rules hold what another session sends for the
+user to decide, with the two exceptions below.
 
-**Windows stays off.** Automatic inbox paths are not available there, and
-the inbox already degrades to "unsupported platform" without an error.
-Turning the default on changes nothing for those users until named pipes
-land.
+**Two senders are delivered without review, and the default now reaches
+them.** A process this session starts inherits its child token and is
+delivered as the session's own: that is what lets a hook or a build script
+report back, and it is documented as such. Review-class parity compares a
+class the sender asserts, and nothing authenticates that assertion, so a
+same-user process that can read the registry can claim the receiving
+session's own class. Both were already true for anyone who turned
+messaging on; on by default extends them to users who never looked at the
+setting. Neither widens the boundary — both need code already running as
+the same user inside the `0700`/`0600` directories, and such code can do
+anything that user can — so they are recorded here, and in the setting's
+description, rather than gated. Gating the child-token export on an
+explicit opt-in would take a documented hook pattern away from default
+users. A user who wants every such message reviewed sets
+`agents.crossSessionInbound` to `hold`.
+
+**Windows gets no inbox, and says so only when asked.** Automatic inbox
+paths are not available there, and the inbox degrades to "unsupported
+platform". Startup stays quiet unless someone wrote `true` in their user
+settings or this workspace's — an operator's system-defaults file does not
+count. `/peers` answers that messaging is not available on this platform,
+as information rather than an error. An ACP process stops trying to bind
+after its first hosted session learns this, instead of retrying for every
+session. Nothing else changes for those users until named pipes land.
 
 **An unrecognized value is off, not on.** The previous readers treated
 anything but `true` as off, and the workspace ranking already counted an

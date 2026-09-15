@@ -129,12 +129,13 @@ interface Fake {
 
 function makeContext(
   peerMessaging: Fake | null,
-  crossSessionMessaging?: boolean,
+  crossSessionMessaging?: unknown,
+  scopes: Record<string, unknown> = {},
 ): CommandContext {
   return {
     services: {
       peerMessaging,
-      settings: { merged: { agents: { crossSessionMessaging } } },
+      settings: { merged: { agents: { crossSessionMessaging } }, ...scopes },
     },
   } as unknown as CommandContext;
 }
@@ -142,10 +143,11 @@ function makeContext(
 async function run(
   peerMessaging: Fake | null,
   args: string,
-  crossSessionMessaging?: boolean,
+  crossSessionMessaging?: unknown,
+  scopes?: Record<string, unknown>,
 ): Promise<{ messageType: string; content: string }> {
   const result = await peersCommand.action!(
-    makeContext(peerMessaging, crossSessionMessaging),
+    makeContext(peerMessaging, crossSessionMessaging, scopes),
     args,
   );
   if (!result || result.type !== 'message') {
@@ -385,8 +387,9 @@ describe('formatHeldList', () => {
 describe('/peers', () => {
   it('explains how to turn the feature back on when it is off', async () => {
     const result = await run(null, '', false);
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('Cross-session messaging is off');
     expect(result.content).toContain('crossSessionMessaging');
-    expect(result.content).toContain('turned off');
   });
 
   it('does not claim the feature is off when nothing set the key', async () => {
@@ -394,8 +397,49 @@ describe('/peers', () => {
     // and telling the user to enable a setting that is already on sends
     // them nowhere.
     const result = await run(null, '');
-    expect(result.content).not.toContain('turned off');
+    expect(result.content).not.toContain('Cross-session messaging is off');
     expect(result.content).toContain('no inbox');
+  });
+
+  it('names the repository when a workspace false outranks a user true', async () => {
+    // A workspace may only tighten, so writing true in user settings
+    // changes nothing here; the remedy has to point at the repository.
+    const result = await run(null, '', false, {
+      user: { settings: { agents: { crossSessionMessaging: true } } },
+      workspace: { settings: { agents: { crossSessionMessaging: false } } },
+      isTrusted: true,
+      workspaceSettingsActive: true,
+    });
+    expect(result.content).toContain('.qwen/settings.json');
+    expect(result.content).toContain('cannot turn it back on here');
+    expect(result.content).not.toContain('Set it to true');
+  });
+
+  it('does not claim a value it cannot see', async () => {
+    const result = await run(null, '', 'yes', {
+      user: { settings: { agents: { crossSessionMessaging: 'yes' } } },
+    });
+    expect(result.content).toContain('your user settings');
+    expect(result.content).not.toMatch(/: ?false/);
+  });
+
+  it('says an unsupported platform as information, without advice to disable', async () => {
+    inboxFailure.current = {
+      cause: 'unsupported_platform',
+      socketPath: 'C:\\Users\\me\\qwen-socks\\1.sock',
+      detail: 'automatic peer inbox paths are not supported on Windows',
+      hint: 'Disable cross-session messaging for this session.',
+      attempts: 1,
+    };
+    try {
+      const result = await run(null, '');
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('not available on this platform');
+      expect(result.content).not.toContain('failed to bind its socket');
+      expect(result.content).not.toContain('Disable');
+    } finally {
+      inboxFailure.current = null;
+    }
   });
 
   it('does not tell a user to enable a setting they already enabled', async () => {
@@ -405,7 +449,8 @@ describe('/peers', () => {
     const result = await run(null, '', true);
     expect(result.messageType).toBe('error');
     expect(result.content).toContain('failed to register');
-    expect(result.content).not.toContain('Enable it with');
+    expect(result.content).not.toContain('Cross-session messaging is off');
+    expect(result.content).not.toContain('Remove that entry');
   });
 
   it('repeats the bind failure and what to change when the inbox could not bind', async () => {
@@ -425,7 +470,8 @@ describe('/peers', () => {
       // ever existed in this file's stub.
       expect(result.content).toContain('belongs to another user');
       expect(result.content).toContain('XDG_RUNTIME_DIR');
-      expect(result.content).not.toContain('Enable it with');
+      expect(result.content).not.toContain('Cross-session messaging is off');
+      expect(result.content).not.toContain('Remove that entry');
     } finally {
       inboxFailure.current = null;
     }
@@ -910,7 +956,9 @@ describe('/peers controllers', () => {
     ];
     const out = await run(null, 'controllers', false);
     expect(out.content).toContain('c_0123abcd');
-    expect(out.content).not.toContain('Cross-session messaging is off');
+    // The whole off-notice, not one phrasing of it: the listing is served
+    // before the off-check and must not carry it.
+    expect(out.content).not.toContain('Cross-session messaging');
   });
 
   it('reports a registry it cannot read as a line, not a crash', async () => {
