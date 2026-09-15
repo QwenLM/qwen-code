@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
@@ -131,13 +131,22 @@ export const PluginDetailView = ({
     return items;
   }, [isActive, isFavorite, hasUpdateAvailable, showFavorite]);
 
-  // Index of `initialAction` in the rows actually offered right now, or the
-  // first row when it is absent (no request, or the action is gone after the
-  // action settled — e.g. "Update Now" disappearing after a successful update).
-  const initialIndex = useMemo(() => {
+  // Cursor seed, resolved ONCE per mount against the rows offered at that
+  // moment: the index of `initialAction`, or the first row when it is absent
+  // (no request, or the action is already gone — e.g. "Update Now" after a
+  // successful update).
+  //
+  // Deliberately not re-derived from the rows as they are now: a *changed*
+  // `initialIndex` is how the list is told to move the cursor (the INITIALIZE
+  // branch in useSelectionList treats it as an override of the user's cursor).
+  // So re-deriving it when a row disappears mid-mount — e.g. a background
+  // check landing and taking "Update Now" away — would drag the highlight off
+  // the row the user is on and onto the first one ("Disable"), and the next
+  // Enter would run that instead.
+  const [initialIndex] = useState(() => {
     const index = actions.findIndex((item) => item.value === initialAction);
     return index < 0 ? 0 : index;
-  }, [actions, initialAction]);
+  });
 
   return (
     <Box flexDirection="column" gap={1}>

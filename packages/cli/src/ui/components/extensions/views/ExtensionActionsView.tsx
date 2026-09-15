@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
@@ -102,10 +102,17 @@ export const ExtensionActionsView = ({
   // An update re-fetches the source, converts, stages, swaps the artifact and
   // reloads tools; surfaced as a loading line so the action doesn't look
   // ignored — the action list is also replaced while it runs, so a second
-  // Enter cannot start a concurrent update and Escape is ignored too (see the
-  // keypress guard below), which would otherwise unmount this view mid-update
-  // and let the user start a second one from a fresh mount.
+  // Enter cannot start a concurrent update, and Escape cancels the run instead
+  // of leaving (see the keypress guard below); leaving would unmount this view
+  // mid-update and let the user start a second one from a fresh mount.
   const [updateBusy, setUpdateBusy] = useState(false);
+  // Cancellation handle for the update in flight, so the wait below has a
+  // release valve: `updateExtension` takes an optional AbortSignal that reaches
+  // the git fetch underneath, and without one a fetch that stalls rather than
+  // fails would leave this view (and the dialog's keys) inert with no deadline
+  // to break out of. Held in a ref because it must survive the re-render the
+  // busy branch causes, and cleared in the same `finally` that clears the flag.
+  const updateAbortRef = useRef<AbortController | null>(null);
   // The action the user last activated from the detail list. The busy branches
   // unmount that list, so it is remounted when the action settles; without this
   // the cursor would re-seed to the first row — and on a failed update, where
@@ -231,11 +238,15 @@ export const ExtensionActionsView = ({
           case 'update': {
             setLastActivatedAction(action);
             setUpdateBusy(true);
+            const controller = new AbortController();
+            updateAbortRef.current = controller;
             try {
               // The manager's callback is a state transition, not a progress
               // string: it emits UPDATING and then the state the update
               // settled on. Adopting the last emission is what stops the menu
               // offering "Update Now" for an extension that is current again.
+              // An aborted run rejects instead of emitting a terminal state, so
+              // nothing is adopted and the "Update Now" row stays.
               let settledState: ExtensionUpdateState | undefined;
               const result = await manager.updateExtension(
                 extension,
@@ -243,6 +254,12 @@ export const ExtensionActionsView = ({
                 (_extensionName, state) => {
                   settledState = state;
                 },
+                // Passed explicitly: the fifth argument is the signal, and the
+                // reload behaviour this parameter drives is load-bearing (it
+                // decides whether the settled state is UPDATED or
+                // UPDATED_NEEDS_RESTART).
+                true,
+                controller.signal,
               );
               if (settledState) {
                 setCheckedUpdateState(settledState);
@@ -266,6 +283,7 @@ export const ExtensionActionsView = ({
               }
               onReload();
             } finally {
+              updateAbortRef.current = null;
               setUpdateBusy(false);
             }
             break;
@@ -367,15 +385,26 @@ export const ExtensionActionsView = ({
   );
 
   // Escape: from the detail leaves; from a sub-view returns to the detail.
-  // Ignored while a scope change or an update is in flight so neither can be
-  // abandoned midway — leaving would unmount this view while the operation
-  // keeps running and let the user start a second one from a fresh mount.
+  // While an update is in flight Escape cancels the run rather than leaving —
+  // leaving would unmount this view while the operation keeps running and let
+  // the user start a second one from a fresh mount. Cancelling (rather than
+  // ignoring the key) matters because the update can sit in a fetch with no
+  // deadline of its own, and this view can neither bound nor see it: ignoring
+  // Escape would leave every key in the dialog inert while the footer still
+  // promises "Esc to go back". The abort rejects the awaited call, so the catch
+  // below reports it and the `finally` clears the guard.
+  // A scope change is ignored while it runs: it has no cancellation of its own
+  // and is short-lived.
   useKeypress(
     (key) => {
-      if (key.name === 'escape' && !scopeBusy && !updateBusy) {
-        if (sub === 'detail') onExit();
-        else setSub('detail');
+      if (key.name !== 'escape') return;
+      if (updateBusy) {
+        updateAbortRef.current?.abort();
+        return;
       }
+      if (scopeBusy) return;
+      if (sub === 'detail') onExit();
+      else setSub('detail');
     },
     { isActive: isActive && sub !== 'uninstall-confirm' },
   );
