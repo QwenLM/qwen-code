@@ -142,7 +142,11 @@ function createMockConfig(
       getChat?: () => {
         getHistoryShallow?: () => unknown[];
         getHistory?: () => unknown[];
-        setHistory?: (h: unknown[]) => void;
+        setHistory?: (
+          h: unknown[],
+          completedToolCallIds?: readonly string[],
+        ) => void;
+        getCompletedToolCallIds?: () => readonly string[] | undefined;
       };
     } | null;
     clearContextOnIdle?: {
@@ -157,6 +161,7 @@ function createMockConfig(
       ? {
           isInitialized: () => true,
           getChat: () => ({
+            getCompletedToolCallIds: () => undefined,
             getHistoryShallow: () => [],
             getHistory: () => [],
             setHistory: vi.fn(),
@@ -1251,6 +1256,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => false,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => [{ role: 'user' }],
               getHistory: () => [{ role: 'user' }],
               setHistory,
@@ -1275,6 +1281,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => originalHistory,
               getHistory: () => [...originalHistory],
               setHistory,
@@ -1299,6 +1306,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => [],
               getHistory: () => [],
               setHistory,
@@ -1390,11 +1398,30 @@ describe('MemoryPressureMonitor', () => {
           },
         );
       }
+      toolHistory.push(
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'goal-end', name: 'update_goal' } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'goal-end',
+                name: 'update_goal',
+                response: {},
+              },
+            },
+          ],
+        },
+      );
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => ['goal-end'],
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1418,6 +1445,10 @@ describe('MemoryPressureMonitor', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
       const compacted = setHistory.mock.calls[0][0] as Content[];
+      expect(setHistory.mock.calls[0][1]).toEqual(['goal-end']);
+      expect(compacted.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
+        'goal-end',
+      );
       // microcompactHistory blanks old tool responses with a cleared message
       // rather than removing entries — verify some were blanked.
       const blankedResponses = compacted.filter((entry) =>
@@ -1472,6 +1503,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1532,6 +1564,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1592,6 +1625,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),

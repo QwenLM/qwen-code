@@ -139,10 +139,8 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
-import {
-  buildApiHistoryFromConversation,
-  replayUiTelemetryFromConversation,
-} from '../services/sessionService.js';
+import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
+import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
@@ -588,6 +586,7 @@ export class LlmClient {
       );
       await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
+      chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -605,9 +604,10 @@ export class LlmClient {
       );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
-      const resumedHistory = buildApiHistoryFromConversation(
+      const restored = buildSessionHistoryFromConversation(
         resumedSessionData.conversation,
       );
+      const resumedHistory = restored.apiHistory;
       this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
@@ -616,6 +616,7 @@ export class LlmClient {
       );
       await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
+      chat.setCompletedToolCallIds(restored.completedToolCallIds);
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -1667,6 +1668,7 @@ export class LlmClient {
     await this.seedAgentReminderDedupFromCurrent();
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
+      this.getChat().getCompletedToolCallIds(),
     );
   }
 
@@ -1701,7 +1703,10 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
-      this.getChat().setHistory([startupContext, ...currentHistory]);
+      this.getChat().setHistory(
+        [startupContext, ...currentHistory],
+        this.getChat().getCompletedToolCallIds(),
+      );
     }
   }
 
@@ -2811,7 +2816,10 @@ export class LlmClient {
       const changed = m.tokensSaved > 0;
       if (changed) {
         // setHistory conservatively clears loaded-skill tracking.
-        this.getChat().setHistory(mcResult.history);
+        this.getChat().setHistory(
+          mcResult.history,
+          this.getChat().getCompletedToolCallIds(),
+        );
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -5081,6 +5089,9 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      this.getChat().setCompletedToolCallIds(
+        previousChat.getCompletedToolCallIds(),
+      );
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&

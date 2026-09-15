@@ -95,6 +95,7 @@ export * from './core/prompts.js';
 export * from './core/output-styles.js';
 export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
+export { buildSessionHistoryFromConversation } from './services/session-api-history.js';
 export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';

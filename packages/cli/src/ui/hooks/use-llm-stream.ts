@@ -4516,7 +4516,10 @@ export const useLlmStream = (
       };
       const orphanedEntries: Part[][] = [];
       try {
-        const history = llmClient?.getHistoryShallow?.() ?? [];
+        const history =
+          llmClient?.getChat?.()?.getHistoryForRecovery?.() ??
+          llmClient?.getHistoryShallow?.() ??
+          [];
         for (let i = history.length - 1; i >= 0; i--) {
           const entry = history[i];
           if (!entry || entry.role !== 'user') break;
