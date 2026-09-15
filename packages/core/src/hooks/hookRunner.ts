@@ -52,9 +52,10 @@ export function resolvePowerShellExecutable(): string {
   }
   let probeError: Error | undefined;
   for (const name of ['pwsh', 'powershell']) {
-    const { path, error } = resolveCommandPath(name);
+    // `where` searches the cwd before PATH: probe from a neutral directory and
+    // spawn the absolute hit, never a bare name. Only POSIX reports an error.
+    const { path, error } = resolveCommandPath(name, { cwd: tmpdir() });
     if (error) probeError ??= error;
-    // spawn the absolute hit; a bare Windows name searches cwd before PATH
     const resolved = path?.split(/\r?\n/)[0]?.trim();
     if (resolved) {
       cachedPowerShell = resolved;
@@ -77,27 +78,41 @@ export function resolvePowerShellExecutable(): string {
  */
 const MAX_OUTPUT_LENGTH = 1024 * 1024;
 
-/** strip terminal escapes from text promoted to model/transcript;
- * terminalSequence is an escape channel by contract, left intact */
+/** Strip escapes line-wise so newlines survive. */
+function stripPromotedText(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => stripAnsiAndControl(line))
+    .join('\n');
+}
+
+/** Strip escapes from every text field a hook can promote to the model or
+ * transcript; terminalSequence is an escape channel by contract */
 function stripPromotedFields(out: HookOutput): HookOutput {
-  const strip = (s: string) =>
-    s
-      .split('\n')
-      .map((line) => stripAnsiAndControl(line))
-      .join('\n');
   const cleaned: HookOutput = { ...out };
   if (typeof cleaned.reason === 'string') {
-    cleaned.reason = strip(cleaned.reason);
+    cleaned.reason = stripPromotedText(cleaned.reason);
   }
   if (typeof cleaned.systemMessage === 'string') {
-    cleaned.systemMessage = strip(cleaned.systemMessage);
+    cleaned.systemMessage = stripPromotedText(cleaned.systemMessage);
+  }
+  if (typeof cleaned.stopReason === 'string') {
+    cleaned.stopReason = stripPromotedText(cleaned.stopReason);
   }
   const specific = cleaned.hookSpecificOutput;
-  if (specific && typeof specific['additionalContext'] === 'string') {
-    cleaned.hookSpecificOutput = {
-      ...specific,
-      additionalContext: strip(specific['additionalContext'] as string),
-    };
+  if (specific) {
+    const next = { ...specific };
+    if (typeof next['additionalContext'] === 'string') {
+      next['additionalContext'] = stripPromotedText(
+        next['additionalContext'] as string,
+      );
+    }
+    if (typeof next['permissionDecisionReason'] === 'string') {
+      next['permissionDecisionReason'] = stripPromotedText(
+        next['permissionDecisionReason'] as string,
+      );
+    }
+    cleaned.hookSpecificOutput = next;
   }
   return cleaned;
 }
@@ -1266,9 +1281,8 @@ export class HookRunner {
       // statement cannot mask the failure with exit 0.
       if (
         shellConfig.shell === 'powershell' &&
-        // Narrow by design: multi-line commands and names that merely
-        // contain an extension (app.exe.log) opt out; a quoted path
-        // followed by '|' is pipeline input, not a command to invoke.
+        // Narrow by design: multi-line commands, names that merely contain an
+        // extension, and a quoted path piped as input are legitimate usages.
         /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![ \t]*["']\s*\|)(?![\s\S]*\n)/i.test(
           hookConfig.command,
         )
@@ -1279,11 +1293,18 @@ export class HookRunner {
             `Example: & ${stripAnsiAndControl(hookConfig.command)}`,
         );
       }
-      // propagate a failed last native command ($? captured before
-      // Test-Path resets it); explicit exit wins, cmdlet success exits 0
+      // Propagate a failed last native command; $? must be read before
+      // Test-Path resets it. A trailing odd backtick continues the line and
+      // would swallow the tail, so such commands keep only the prefix.
+      const trailingBackticks =
+        hookConfig.command.match(/`+(?=\s*$)/)?.[0].length ?? 0;
+      const exitCodeTail =
+        shellConfig.shell === 'powershell' && trailingBackticks % 2 === 0
+          ? `\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
+          : '';
       const command =
         shellConfig.shell === 'powershell'
-          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
+          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}${exitCodeTail}`
           : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
@@ -1563,14 +1584,14 @@ export class HookRunner {
         }
 
         // Parse output
-        // Exit code 2 is a blocking error - ignore stdout, use stderr only
         let output: HookOutput | undefined;
         const isBlockingError = exitCode === 2;
 
-        // For exit code 2, only use stderr (ignore stdout)
+        // Exit 2 carries its reason on stderr; falling back to stdout keeps an
+        // explicit block from degrading into "no output", which proceeds.
         const stdoutText = stdout.trim();
         const textToParse = isBlockingError
-          ? stderr.trim()
+          ? stderr.trim() || stdoutText
           : stdoutText || stderr.trim();
         // Only stdout is promoted as plain-text context; the stderr fallback
         // stays a system message. JSON on stderr is still parsed as structured
@@ -1635,6 +1656,14 @@ export class HookRunner {
           }
         }
 
+        if (isBlockingError && !output) {
+          // An explicit block must never degrade into "no output" here.
+          output = {
+            decision: 'deny',
+            reason: 'Hook exited with a blocking error (code 2)',
+          };
+        }
+
         const killedBySignal = exitCode === null;
         finish({
           hookConfig,
@@ -1693,11 +1722,8 @@ export class HookRunner {
     stdoutEvent?: HookEventName,
   ): HookOutput {
     // Terminal escapes must not reach the model or transcript through any
-    // promoted field; strip per line so newlines survive.
-    const cleanText = text
-      .split('\n')
-      .map((line) => stripAnsiAndControl(line))
-      .join('\n');
+    // promoted field.
+    const cleanText = stripPromotedText(text);
     if (exitCode === EXIT_CODE_SUCCESS) {
       if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
         return {

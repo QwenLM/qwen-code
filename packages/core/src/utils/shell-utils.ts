@@ -2322,9 +2322,14 @@ export function execCommand(
 /**
  * Resolves the path of a command in the system's PATH.
  * @param {string} command The command name (e.g., 'git', 'grep').
+ * @param {{ cwd?: string }} [opts] Directory the lookup runs from; a lookup
+ * that inherits the process cwd also searches that directory first on Windows.
  * @returns {path: string | null; error?: Error} The path of the command, or null if it is not found and any error that occurred.
  */
-export function resolveCommandPath(command: string): {
+export function resolveCommandPath(
+  command: string,
+  opts?: { cwd?: string },
+): {
   path: string | null;
   error?: Error;
 } {
@@ -2340,6 +2345,7 @@ export function resolveCommandPath(command: string): {
         result = execFileSync(checkCommand, checkArgs, {
           encoding: 'utf8',
           shell: false,
+          cwd: opts?.cwd,
         }).trim();
       } catch {
         return { path: null, error: undefined };
@@ -2355,6 +2361,7 @@ export function resolveCommandPath(command: string): {
         result = execFileSync(shell, checkArgs, {
           encoding: 'utf8',
           shell: false,
+          cwd: opts?.cwd,
         }).trim();
       } catch {
         return { path: null, error: undefined };
