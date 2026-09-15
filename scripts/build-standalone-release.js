@@ -286,9 +286,6 @@ function readClipboardPackageSpecs() {
 // runtime (#11872). Deriving the list from the root manifest keeps it in sync
 // when a platform pin is added (e.g. linux-arm64).
 function readNodePtyPackageSpecs() {
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
-  );
   const rootPackage = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
   );
@@ -297,8 +294,7 @@ function readNodePtyPackageSpecs() {
   ).filter((packageName) => packageName.startsWith('@lydell/node-pty'));
 
   return packageNames.map((packageName) => {
-    const version =
-      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    const version = readPnpmLockedVersion(packageName);
     if (!version) {
       fail(`node-pty package version is not locked for ${packageName}`);
     }
