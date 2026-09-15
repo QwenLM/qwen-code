@@ -62,6 +62,7 @@ import {
   DEFAULT_RING_SIZE,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
+  type LiveReplayMode,
 } from './eventBus.js';
 import {
   JOURNAL_GROWTH_HARD_CAP_BYTES,
@@ -73,6 +74,7 @@ import {
   type JournalGrowthSessionLimit,
 } from './compactionEngine.js';
 import { createJournalGrowthPolicy } from './journalGrowthPolicy.js';
+import { summarizeReplay } from './replay-summary.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -3749,6 +3751,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    */
   function settleActivePromptState(entry: SessionEntry, promptId: string) {
     if (entry.activePromptId !== promptId) return;
+    entry.events.setEventDetailMode('full');
     delete entry.activePromptId;
     delete entry.activePromptOriginatorClientId;
     if (entry.promptActive) {
@@ -8120,6 +8123,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       daemonOwnedStandaloneRestore?: boolean;
     } = {},
   ): Promise<BridgeRestoredSession> {
+    if (
+      req.compactedReplayMode !== undefined &&
+      req.compactedReplayMode !== 'full' &&
+      req.compactedReplayMode !== 'summary'
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid compactedReplayMode; expected full or summary',
+      );
+    }
+    const restored = await restoreSessionWithReplay(action, req, options);
+    return action === 'load' &&
+      req.compactedReplayMode === 'summary' &&
+      restored.compactedReplay
+      ? {
+          ...restored,
+          compactedReplay: summarizeReplay(restored.compactedReplay),
+        }
+      : restored;
+  }
+
+  async function restoreSessionWithReplay(
+    action: 'load' | 'resume',
+    req: BridgeRestoreSessionRequest,
+    options: {
+      skipFreshSessionAdmission?: boolean;
+      suppressRestorePrompt?: boolean;
+      deferRestorePrompt?: boolean;
+      daemonOwnedStandaloneRestore?: boolean;
+    } = {},
+  ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
     }
@@ -9482,6 +9516,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     text: string,
     originatorClientId?: string,
     content?: readonly BridgePromptContentBlock[],
+    eventDetailMode?: LiveReplayMode,
   ) => {
     // Drop references that are already gone BEFORE admission: the admission
     // check throws on the first dead reference, and the fallback would then
@@ -9517,6 +9552,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.sessionId,
         {
           sessionId: entry.sessionId,
+          eventDetailMode,
           prompt: withAttachmentDegradationMarker(
             text ? [{ type: 'text', text } as ContentBlock] : [],
           ),
@@ -9530,6 +9566,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.sessionId,
         {
           sessionId: entry.sessionId,
+          eventDetailMode,
           prompt,
         },
         undefined,
@@ -9582,6 +9619,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         message.text,
         message.originatorClientId,
         message.content,
+        message.eventDetailMode,
       );
     }
   };
@@ -10316,6 +10354,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // Keep this method non-async: admission failures must throw before
     // HTTP routes return 202.
     sendPrompt(sessionId, req, signal, context) {
+      if (
+        req.eventDetailMode !== undefined &&
+        req.eventDetailMode !== 'full' &&
+        req.eventDetailMode !== 'summary'
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid eventDetailMode; expected full or summary',
+        );
+      }
+      const eventDetailMode = req.eventDetailMode ?? 'full';
       opts.onDiagnosticLine?.(
         `qwen serve: bridge sendPrompt for session=${sessionId}`,
         'info',
@@ -10431,6 +10480,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ? '[image]'
               : '');
       const pendingEntry: PendingPromptEntry = {
+        eventDetailMode,
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
@@ -10689,9 +10739,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
-                  } as PromptRequest & { retry?: unknown; delivery?: unknown };
+                  } as PromptRequest & {
+                    retry?: unknown;
+                    delivery?: unknown;
+                    eventDetailMode?: LiveReplayMode;
+                  };
                   delete copy.retry;
                   delete copy.delivery;
+                  delete copy.eventDetailMode;
                   const meta =
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
@@ -10772,6 +10827,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }
                   return copy;
                 })();
+                entry.events.setEventDetailMode(eventDetailMode);
                 entry.backgroundStartsSuspended = false;
                 let resolveTerminal!: () => void;
                 entry.activePromptTerminal = {
@@ -13921,6 +13977,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+      const eventDetailMode = options?.eventDetailMode ?? 'full';
+      if (eventDetailMode !== 'full' && eventDetailMode !== 'summary') {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid eventDetailMode; expected full or summary',
+        );
+      }
       const trimmed = message.trim();
       // Attachment blocks travel with the message through drain and promotion;
       // text blocks are dropped so the drain never duplicates the message text.
@@ -13945,11 +14008,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           const sameMedia =
             JSON.stringify(existing.content ?? []) ===
             JSON.stringify(mediaBlocks);
-          if (existing.text === trimmed && sameMedia) {
+          if (
+            existing.text === trimmed &&
+            sameMedia &&
+            (existing.eventDetailMode ?? 'full') === eventDetailMode
+          ) {
             return { accepted: true, messageId: requestedMessageId };
           }
           writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(requestedMessageId)}: text or content mismatch`,
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(requestedMessageId)}: text, content or mode mismatch`,
           );
           return { accepted: false };
         }
@@ -13966,11 +14033,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             promoted.text === '[image]' && trimmed.length === 0
               ? ''
               : promoted.text;
-          if (promotedText === trimmed && sameMedia) {
+          if (
+            promotedText === trimmed &&
+            sameMedia &&
+            (promoted.eventDetailMode ?? 'full') === eventDetailMode
+          ) {
             return { accepted: true, messageId: requestedMessageId };
           }
           writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text or content mismatch`,
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text, content or mode mismatch`,
           );
           return { accepted: false };
         }
@@ -14045,6 +14116,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           trimmed,
           originatorClientId,
           mediaBlocks.length > 0 ? mediaBlocks : undefined,
+          eventDetailMode,
         );
         return { accepted: true, messageId };
       }
@@ -14056,6 +14128,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return { accepted: false };
       }
       const queuedMessage: MidTurnQueueEntry = {
+        eventDetailMode,
         messageId,
         text: trimmed,
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),

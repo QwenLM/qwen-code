@@ -226,6 +226,7 @@ export interface CreateDaemonSessionActionsArgs {
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getConnection: () => DaemonConnectionState;
+  getEventDetailMode: () => 'full' | 'summary';
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
   restartEventStream: (sessionId: string) => void;
@@ -402,6 +403,7 @@ export function createDaemonSessionActions({
   createDetachedStandaloneSession,
   getDefaultSessionContext,
   getConnection,
+  getEventDetailMode,
   hasSessionActivePrompt,
   resetCurrentSessionActivePrompt,
   restartEventStream,
@@ -1269,6 +1271,7 @@ export function createDaemonSessionActions({
         }
         const promptRequest: Record<string, unknown> = {
           prompt: uploaded.content,
+          eventDetailMode: getEventDetailMode(),
         };
         options?.onAdmissionStarted?.();
         if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
@@ -1590,6 +1593,7 @@ export function createDaemonSessionActions({
       }
       const promptRequest: Record<string, unknown> = {
         prompt: uploaded.content,
+        eventDetailMode: getEventDetailMode(),
       };
       if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
         promptRequest['_meta'] = {
@@ -2801,10 +2805,10 @@ export function createDaemonSessionActions({
       try {
         const { onAdmissionStarted, ...requestOptions } = opts ?? {};
         onAdmissionStarted?.();
-        return await session.enqueueMidTurnMessage(
-          message,
-          opts ? requestOptions : undefined,
-        );
+        return await session.enqueueMidTurnMessage(message, {
+          ...requestOptions,
+          eventDetailMode: getEventDetailMode(),
+        });
       } catch (err) {
         if (opts?.messageId) throw err;
         // An abort is the designed settle-time cancel (the message stays in the

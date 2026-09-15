@@ -1018,112 +1018,121 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('materializes an anchored turn outside the live transcript', async () => {
-    sdkMocks.capabilities.mockResolvedValue({
-      workspaceCwd: '/mock-workspace',
-      features: ['session_turn_navigation'],
-    });
-    const liveOverlapEvent = {
-      v: 1,
-      id: 2,
-      type: 'session_update',
-      data: {
-        update: {
-          sessionUpdate: 'user_message_chunk',
-          content: { type: 'text', text: 'Live prompt' },
-          _meta: {
-            qwenTranscript: { sourceRecordIds: ['live-turn'] },
+  it.each(['full', 'summary'] as const)(
+    'materializes an anchored turn outside the live transcript in %s mode',
+    async (subagentTranscriptMode) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_turn_navigation'],
+      });
+      const liveOverlapEvent = {
+        v: 1,
+        id: 2,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'Live prompt' },
+            _meta: {
+              qwenTranscript: { sourceRecordIds: ['live-turn'] },
+            },
           },
         },
-      },
-    } as DaemonEvent;
-    const session = createMockSession({
-      sessionId: 'session-navigation',
-      replaySnapshot: {
-        compactedReplay: [],
-        liveJournal: [liveOverlapEvent],
-      },
-      getTurnIndexPage: vi.fn(async () => ({
-        v: 1 as const,
+      } as DaemonEvent;
+      const session = createMockSession({
         sessionId: 'session-navigation',
-        snapshot: 'snapshot-1',
-        totalTurns: 1,
-        start: 0,
-        turns: [
-          {
-            ordinal: 0,
-            turnId: 'turn-0',
-            kind: 'prompt' as const,
-            label: 'Historical prompt',
-          },
-        ],
-      })),
-      getTranscriptPage: vi.fn(async () => ({
-        v: 1 as const,
-        sessionId: 'session-navigation',
-        events: [
-          {
-            v: 1,
-            id: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'Historical prompt' },
-                _meta: {
-                  qwenTranscript: { sourceRecordIds: ['turn-0'] },
+        replaySnapshot: {
+          compactedReplay: [],
+          liveJournal: [liveOverlapEvent],
+        },
+        getTurnIndexPage: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-navigation',
+          snapshot: 'snapshot-1',
+          totalTurns: 1,
+          start: 0,
+          turns: [
+            {
+              ordinal: 0,
+              turnId: 'turn-0',
+              kind: 'prompt' as const,
+              label: 'Historical prompt',
+            },
+          ],
+        })),
+        getTranscriptPage: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-navigation',
+          events: [
+            {
+              v: 1,
+              id: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'Historical prompt' },
+                  _meta: {
+                    qwenTranscript: { sourceRecordIds: ['turn-0'] },
+                  },
                 },
               },
             },
-          },
-          liveOverlapEvent,
-        ],
-        hasMore: false,
-        targetRecordId: 'turn-0',
-        hasOlder: false,
-      })),
-    });
-    sdkMocks.sessions.push(session);
-    let navigationStore:
-      | ReturnType<typeof useDaemonTurnNavigationStore>
-      | undefined;
-    let navigation: DaemonTurnNavigationSnapshot | undefined;
+            liveOverlapEvent,
+          ],
+          hasMore: false,
+          targetRecordId: 'turn-0',
+          hasOlder: false,
+        })),
+      });
+      sdkMocks.sessions.push(session);
+      let navigationStore:
+        | ReturnType<typeof useDaemonTurnNavigationStore>
+        | undefined;
+      let navigation: DaemonTurnNavigationSnapshot | undefined;
 
-    function Harness() {
-      navigationStore = useDaemonTurnNavigationStore();
-      navigation = useDaemonTurnNavigationState();
-      return null;
-    }
+      function Harness() {
+        navigationStore = useDaemonTurnNavigationStore();
+        navigation = useDaemonTurnNavigationState();
+        return null;
+      }
 
-    await renderWithProvider(<Harness />, { autoConnect: true });
-    await act(async () => {
-      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
-    });
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        subagentTranscriptMode,
+      });
+      await act(async () => {
+        await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      });
 
-    let location: Awaited<
-      ReturnType<
-        ReturnType<typeof useDaemonTurnNavigationStore>['locateOrdinal']
-      >
-    >;
-    await act(async () => {
-      location = await navigationStore!.locateOrdinal(0);
-    });
+      let location: Awaited<
+        ReturnType<
+          ReturnType<typeof useDaemonTurnNavigationStore>['locateOrdinal']
+        >
+      >;
+      await act(async () => {
+        location = await navigationStore!.locateOrdinal(0);
+      });
 
-    expect(location!).toMatchObject({
-      turnId: 'turn-0',
-      view: 'historical',
-    });
-    expect(navigation?.historicalPages.size).toBe(1);
-    expect(navigation?.historicalRanges).toHaveLength(1);
-    const historicalPage = [...navigation!.historicalPages.values()][0];
-    expect([...historicalPage!.recordIds]).toEqual(['turn-0']);
-    expect(navigation?.historicalRanges[0]?.newer).toEqual({ kind: 'live' });
-    expect(session.getTranscriptPage).toHaveBeenCalledWith({
-      atRecordId: 'turn-0',
-      snapshot: 'snapshot-1',
-      limit: 200,
-    });
-  });
+      expect(location!).toMatchObject({
+        turnId: 'turn-0',
+        view: 'historical',
+      });
+      expect(navigation?.historicalPages.size).toBe(1);
+      expect(navigation?.historicalRanges).toHaveLength(1);
+      const historicalPage = [...navigation!.historicalPages.values()][0];
+      expect([...historicalPage!.recordIds]).toEqual(['turn-0']);
+      expect(navigation?.historicalRanges[0]?.newer).toEqual({ kind: 'live' });
+      expect(session.getTranscriptPage).toHaveBeenCalledWith({
+        atRecordId: 'turn-0',
+        snapshot: 'snapshot-1',
+        limit: 200,
+        ...(subagentTranscriptMode === 'summary'
+          ? { compactedReplayMode: 'summary' }
+          : {}),
+      });
+    },
+  );
 
   it('does not rerender streaming state consumers for equivalent transcript updates', async () => {
     let store: DaemonTranscriptStore | undefined;
@@ -6188,48 +6197,55 @@ describe('DaemonSessionProvider', () => {
     expect(streamingState).toBe('idle');
   });
 
-  it('sends image prompt content through the daemon action', async () => {
-    const turnComplete = createDeferred<void>();
-    const submitPrompt = vi.fn(async () => ({
-      promptId: 'prompt-1',
-      lastEventId: 10,
-    }));
-    const session = createMockSession({
-      submitPrompt,
-      events: createTurnCompleteEvents(turnComplete),
-    });
-    sdkMocks.sessions.push(session);
-    let actions: DaemonSessionActions | undefined;
-
-    function Harness() {
-      actions = useDaemonActions();
-      return null;
-    }
-
-    await renderWithProvider(<Harness />, { autoConnect: true });
-    const providerActions = actions;
-    if (!providerActions) throw new Error('actions were not initialized');
-
-    await act(async () => {
-      const promptResult = providerActions.sendPrompt('describe', {
-        optimisticUserMessage: false,
-        images: [{ data: 'base64-image', mimeType: 'image/png' }],
+  it.each(['full', 'summary'] as const)(
+    'sends image prompt content through the daemon action in %s mode',
+    async (subagentTranscriptMode) => {
+      const turnComplete = createDeferred<void>();
+      const submitPrompt = vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      }));
+      const session = createMockSession({
+        submitPrompt,
+        events: createTurnCompleteEvents(turnComplete),
       });
-      await flushPromises();
-      turnComplete.resolve();
-      await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
-    });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonSessionActions | undefined;
 
-    expect(submitPrompt).toHaveBeenCalledWith(
-      {
-        prompt: [
-          { type: 'text', text: 'describe' },
-          { type: 'image', data: 'base64-image', mimeType: 'image/png' },
-        ],
-      },
-      expect.any(AbortSignal),
-    );
-  });
+      function Harness() {
+        actions = useDaemonActions();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        subagentTranscriptMode,
+      });
+      const providerActions = actions;
+      if (!providerActions) throw new Error('actions were not initialized');
+
+      await act(async () => {
+        const promptResult = providerActions.sendPrompt('describe', {
+          optimisticUserMessage: false,
+          images: [{ data: 'base64-image', mimeType: 'image/png' }],
+        });
+        await flushPromises();
+        turnComplete.resolve();
+        await expect(promptResult).resolves.toEqual({ stopReason: 'end_turn' });
+      });
+
+      expect(submitPrompt).toHaveBeenCalledWith(
+        {
+          eventDetailMode: subagentTranscriptMode,
+          prompt: [
+            { type: 'text', text: 'describe' },
+            { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+          ],
+        },
+        expect.any(AbortSignal),
+      );
+    },
+  );
 
   it('passes retry prompts through the daemon action', async () => {
     const turnComplete = createDeferred<void>();
@@ -6265,6 +6281,7 @@ describe('DaemonSessionProvider', () => {
 
     expect(submitPrompt).toHaveBeenCalledWith(
       {
+        eventDetailMode: 'full',
         prompt: [{ type: 'text', text: 'retry this' }],
         retry: true,
       },
@@ -7869,7 +7886,7 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
-  it('requests summary live replay for summary transcript mode', async () => {
+  it('requests summary live and compacted replay for summary transcript mode', async () => {
     sdkMocks.sessions.push(createMockSession());
 
     await renderWithProvider(null, {
@@ -7883,7 +7900,10 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
-      expect.objectContaining({ liveReplayMode: 'summary' }),
+      expect.objectContaining({
+        liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
+      }),
       expect.any(String),
     );
   });
@@ -18292,6 +18312,7 @@ describe('DaemonSessionProvider', () => {
         workspaceCwd: '/mock-workspace',
         timeoutMs: 70_000,
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
       },
       expect.any(String),
     );
