@@ -19,7 +19,7 @@
 9256 build-and-publish-image.yml
 49610 cd-cua-driver.yml
 2076 cd-mobile-mcp.yml
-134426 ci.yml
+137297 ci.yml
 1482 codeql.yml
 9389 comment-attachment-guard.yml
 1634 desktop-packaging-check.yml
@@ -40,11 +40,11 @@
 5942 qwen-autofix-fork-signal.yml
 469165 qwen-autofix.yml
 7061 qwen-ci-flaky-rerun.yml
-265415 qwen-code-pr-review.yml
+265436 qwen-code-pr-review.yml
 79041 qwen-fleet-shepherd.yml
 22680 qwen-issue-followup-bot.yml
 5760 qwen-pr-safety-precheck.yml
-1958 qwen-review-runner-schedule.yml
+2518 qwen-review-runner-schedule.yml
 27648 qwen-triage-finalize.yml
 350381 qwen-triage.yml
 9657 release-sdk-java.yml
