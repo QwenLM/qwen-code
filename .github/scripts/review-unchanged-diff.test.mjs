@@ -347,8 +347,15 @@ describe('review-unchanged-diff', () => {
       return t.skip('no host sha256sum to stand in as shasum');
     }
     // macOS ships `shasum -a 256`, not sha256sum: read the blob on stdin and
-    // print the same "<hex>  -" as sha256sum would.
-    writeFileSync(join(farm, 'shasum'), `#!/bin/sh\nexec ${coreutils}\n`);
+    // print the same "<hex>  -" as sha256sum would. The stub must PIN the
+    // interface it stands in for: bare `exec $coreutils` discards the
+    // script's own arguments, so a `hasher=(shasum)` regression — bare
+    // shasum is SHA-1 on a real macOS host — kept this case green. Assert
+    // the flag, then forward the remaining arguments.
+    writeFileSync(
+      join(farm, 'shasum'),
+      `#!/bin/sh\n[ "$1" = "-a" ] && [ "$2" = "256" ] || exit 64\nshift 2\nexec "${coreutils}" "$@"\n`,
+    );
     chmodSync(join(farm, 'shasum'), 0o755);
     // Bare, the 127 is reported as `changed no-merge-base` — a missing hasher
     // pointed at git merge-base.
@@ -378,5 +385,63 @@ describe('review-unchanged-diff', () => {
       },
     );
     assert.equal(badBase.stdout.trim(), 'changed bad-base-ref');
+  });
+
+  it('refuses an ambiguous merge base rather than guessing one', () => {
+    // Criss-cross: the PR side and main merge EACH OTHER, leaving two best
+    // common ancestors. A single-pick merge-base then masks a different
+    // file set on each side, so two heads whose PR content genuinely
+    // differs can hash to the same digest — a false skip, the one harm
+    // this script exists to prevent. The check must refuse, not guess.
+    const base = git(work, 'rev-parse', 'main');
+    git(work, 'checkout', '-q', '-b', 'criss-cross', base);
+    const prSide = commit(work, 'cc-pr.txt', 'pr side\n', 'cc: pr side');
+    git(work, 'checkout', '-q', 'main');
+    const mainSide = commit(
+      work,
+      'cc-main.txt',
+      'main side\n',
+      'cc: main side',
+    );
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', prSide);
+    git(work, 'push', '-q', 'origin', 'main');
+    git(work, 'checkout', '-q', 'criss-cross');
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', mainSide);
+    const anchor = git(work, 'rev-parse', 'HEAD');
+    markReviewed(anchor);
+    const head = commit(work, 'cc-r.txt', 'r\n', 'cc: head');
+    // The criss-cross line is no descendant of the previously published
+    // head; the fixture's bare origin stands in for a force-pushed PR.
+    git(work, 'push', '-q', '--force', 'origin', `HEAD:refs/pull/${PR}/head`);
+    const { verdict } = run(head);
+    assert.equal(verdict, 'changed ambiguous-merge-base');
+  });
+
+  it('a reachable diff.external command cannot collapse the fingerprint', () => {
+    // The --no-ext-diff half of the header's config neutralization (the
+    // textconv half is pinned above): with diff.external set and the flag
+    // dropped, `git diff` emits 0 bytes for every pair, every fingerprint
+    // collapses to the empty digest, and any reviewed ancestor anchors a
+    // false skip. Assert on a CHANGED fixture — under a collapse an
+    // `unchanged`-shaped assertion would pass vacuously.
+    git(work, 'checkout', '-q', 'pr');
+    const head = commit(
+      work,
+      'a.txt',
+      'one\ntwo\nthree\nfour\nfive\nsix\n  seven\ntextconv\nexternal\n',
+      'E: external-diff target',
+    );
+    const anchor = git(work, 'rev-parse', 'HEAD~1');
+    // Back on the original PR line, no longer a descendant of the head the
+    // criss-cross case published.
+    git(work, 'push', '-q', '--force', 'origin', `HEAD:refs/pull/${PR}/head`);
+    markReviewed(anchor);
+    git(ci, 'config', 'diff.external', 'true');
+    try {
+      const { verdict } = run(head);
+      assert.equal(verdict, 'changed diff-differs');
+    } finally {
+      git(ci, 'config', '--unset', 'diff.external');
+    }
   });
 });

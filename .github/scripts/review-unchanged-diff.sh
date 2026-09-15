@@ -113,8 +113,14 @@ fi
 # sha256 of the PR's diff against its merge-base with the base branch.
 fingerprint() {
   local sha="$1" mb hasher
-  mb="$("${GIT[@]}" merge-base "$BASE_TIP" "$sha" 2>/dev/null)" || return 1
+  mb="$("${GIT[@]}" merge-base --all "$BASE_TIP" "$sha" 2>/dev/null)" || return 1
   [ -n "$mb" ] || return 1
+  # A criss-cross history (the PR side and the base merging EACH OTHER) has
+  # several best common ancestors, and a single-pick merge-base masks a
+  # different file set on each side — two heads whose PR content genuinely
+  # differs can then hash to the same digest. Refuse the ambiguity (rc 2):
+  # the caller falls back to a full review, never a guessed skip.
+  case "$mb" in *$'\n'*) return 2 ;; esac
   # sha256sum is coreutils; macOS ships shasum instead. Bare, a missing binary
   # exits 127 into `changed no-merge-base` — a missing hasher reported as a
   # missing merge base, sending the reader to the wrong mechanism.
@@ -127,7 +133,12 @@ fingerprint() {
     | "${hasher[@]}" | cut -d' ' -f1
 }
 
-head_fp="$(fingerprint "$HEAD_SHA")" || verdict "changed no-merge-base"
+head_fp="$(fingerprint "$HEAD_SHA")" || {
+  case "$?" in
+    2) verdict "changed ambiguous-merge-base" ;;
+    *) verdict "changed no-merge-base" ;;
+  esac
+}
 [ -n "$head_fp" ] || verdict "changed empty-fingerprint"
 
 # Walk the PR branch's own line (first parent — the second parent of an
@@ -154,7 +165,12 @@ while read -r sha; do
   reviewed="$(printf '%s' "$status_json" | jq -r --arg ctx "$STATUS_CONTEXT" --arg who "$STATUS_CREATOR" \
     '[.[]? | select(.context == $ctx and .state == "success" and (.creator.login // "") == $who)] | length' 2>/dev/null)" || reviewed=0
   if [ "${reviewed:-0}" -gt 0 ]; then
-    anchor_fp="$(fingerprint "$sha")" || verdict "changed anchor-no-merge-base"
+    anchor_fp="$(fingerprint "$sha")" || {
+      case "$?" in
+        2) verdict "changed anchor-ambiguous-merge-base" ;;
+        *) verdict "changed anchor-no-merge-base" ;;
+      esac
+    }
     if [ "$anchor_fp" = "$head_fp" ]; then
       log "head ${HEAD_SHA} has the same diff against ${BASE_REF} as reviewed ${sha}"
       verdict "unchanged ${sha}"
