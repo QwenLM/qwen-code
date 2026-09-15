@@ -10,6 +10,7 @@ import * as fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
+import { privateDirectoryStat } from '../private-directory.js';
 import type { LockOptions } from 'proper-lockfile';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 
@@ -240,17 +241,11 @@ async function inspectDirectory(
   directory: string,
   requirePrivateMode = true,
 ): Promise<LiveDiscoveryDirectory> {
-  const stat = await fs.lstat(directory);
-  if (
-    !stat.isDirectory() ||
-    stat.isSymbolicLink() ||
-    (process.platform !== 'win32' &&
-      ((requirePrivateMode && (stat.mode & 0o777) !== 0o700) ||
-        (typeof process.getuid === 'function' &&
-          stat.uid !== process.getuid())))
-  ) {
-    throw new LiveDiscoveryStateError();
-  }
+  const stat = await privateDirectoryStat(
+    directory,
+    requirePrivateMode ? 'exact-0700' : 'none',
+  );
+  if (!stat) throw new LiveDiscoveryStateError();
   return { directory, dev: stat.dev, ino: stat.ino };
 }
 
@@ -301,22 +296,14 @@ async function ensureDirectory(
 }
 
 async function assertLockShapeIfPresent(lockPath: string): Promise<void> {
-  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  let stat: Awaited<ReturnType<typeof privateDirectoryStat>>;
   try {
-    stat = await fs.lstat(lockPath);
+    stat = await privateDirectoryStat(lockPath, 'none');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
-  if (
-    !stat.isDirectory() ||
-    stat.isSymbolicLink() ||
-    (process.platform !== 'win32' &&
-      typeof process.getuid === 'function' &&
-      stat.uid !== process.getuid())
-  ) {
-    throw new LiveDiscoveryStateError();
-  }
+  if (!stat) throw new LiveDiscoveryStateError();
 }
 
 async function prepareDirectory(

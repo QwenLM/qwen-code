@@ -17,6 +17,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename, resolve } from 'node:path';
+import { privateDirectoryStat } from '../private-directory.js';
 
 export const MONITOR_DEBUG_ROOT = join(tmpdir(), 'qwen-live-monitor-debug');
 const FORMAT = 'qwen-live-monitor-debug-v1';
@@ -38,15 +39,7 @@ export interface MonitorDebugInfo {
 }
 
 async function privateDirectory(path: string): Promise<void> {
-  const stat = await lstat(path);
-  if (
-    !stat.isDirectory() ||
-    stat.isSymbolicLink() ||
-    (process.platform !== 'win32' &&
-      ((stat.mode & 0o077) !== 0 ||
-        (typeof process.getuid === 'function' &&
-          stat.uid !== process.getuid())))
-  )
+  if (!(await privateDirectoryStat(path, 'owner-only')))
     throw new Error('unsafe_directory');
 }
 

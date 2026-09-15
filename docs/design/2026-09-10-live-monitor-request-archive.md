@@ -30,8 +30,11 @@ Existing code/worktree and the audio/position bug fixes are separate concerns.
   write/permission/disk/queue failure disables that recorder and logs an explicit
   error, never interrupts the live model or delays playback. No silent truncation:
   a failed/incomplete recording is clearly marked.
-- Directories use 0700 and files 0600. Retention only deletes validated, owned,
-  marked Monitor directories immediately beneath this managed root; reject
+- Directories use 0700 and files 0600 on POSIX; on Windows the mode bits are
+  synthetic, so privacy relies on the per-user temporary directory's ACLs and
+  the store does not verify them. Retention only deletes validated, marked
+  Monitor directories immediately beneath this managed root, requiring
+  current-user ownership only where the platform exposes it (POSIX); reject
   symlink roots and never traverse unrelated temporary paths. Order by creation
   time, not later inference writes. Evicted active Monitors continue running but
   cannot recreate their deleted archive. State explicitly when no longer retained.
@@ -58,6 +61,8 @@ JSON, JPEG and WAV for each inference, recording content and order actually
 written to the model connection rather than treating queued data as sent. Log
 the paths; normal runs do not save media. Keep only the ten most recently created
 Monitor directories. Older active Monitors continue after eviction but do not
-recreate their records. Files are readable/writable only by the current user;
-safe cleanup covers only directories created by this feature. Archive failure
-must not affect calls.
+recreate their records. Files are readable/writable only by the current user
+on POSIX (on Windows this relies on the per-user temporary directory's ACLs);
+safe cleanup covers only directories created by this feature on POSIX, and on
+Windows any directory beneath the managed root carrying this feature's marker,
+because ownership is not exposed there. Archive failure must not affect calls.

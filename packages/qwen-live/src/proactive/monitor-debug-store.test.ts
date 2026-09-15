@@ -225,6 +225,7 @@ describe('MonitorDebugStore', () => {
       text: 'Reply [redacted]',
       result: 'reply',
     });
+    // Windows reports synthetic mode bits; assert POSIX modes where real.
     if (process.platform !== 'win32') {
       for (const path of [
         root,
@@ -409,6 +410,7 @@ describe('MonitorDebugStore', () => {
   it('rejects shared or symlink archive roots without touching their contents', async () => {
     await mkdir(root, { mode: 0o700 });
     await writeFile(join(root, 'keep.txt'), 'keep');
+    // Windows cannot make a directory shared through mode bits.
     if (process.platform !== 'win32') {
       await chmod(root, 0o755);
       expect(await store.initialize()).toBe(false);
@@ -422,6 +424,18 @@ describe('MonitorDebugStore', () => {
     await symlink(root, linked.root);
     expect(await linked.initialize()).toBe(false);
     expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('keep');
+  });
+
+  it('accepts a private archive root where the filesystem has no POSIX mode bits', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      await mkdir(root, { mode: 0o700 });
+      await chmod(root, 0o777);
+      expect(await store.initialize()).toBe(true);
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform);
+    }
   });
 
   it('does not recreate an active directory pruned by another store', async () => {
