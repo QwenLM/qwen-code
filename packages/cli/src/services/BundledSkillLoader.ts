@@ -112,7 +112,7 @@ export class BundledSkillLoader implements ICommandLoader {
           // Apply the skill's declared side effects — allowedTools and
           // frontmatter hooks — before its body is submitted, matching the
           // Skill tool's model-invocation path (#11067).
-          applySkillSideEffects(this.config, skill);
+          await applySkillSideEffects(this.config, skill);
 
           // Resolve template variables in skill body
           let body = skill.body;

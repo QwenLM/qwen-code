@@ -704,7 +704,9 @@ function filterScenarioSessions(
     ? workspaceSessions.filter(
         (session) =>
           session.sourceType === sourceType ||
-          (sourceType === 'default' && session.sourceType === undefined),
+          (sourceType === 'default' &&
+            (session.sourceType === undefined ||
+              session.sourceType === 'qwen-live')),
       )
     : workspaceSessions;
   return group === 'pinned'
@@ -759,6 +761,7 @@ function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/brand' ||
     path === '/workspace/settings' ||
     path === '/workspace/providers' ||
     path === '/workspace/skills' ||
@@ -819,7 +822,10 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
-  if (method === 'GET' && (path === '/health' || path === '/capabilities')) {
+  if (
+    method === 'GET' &&
+    (path === '/health' || path === '/capabilities' || path === '/brand')
+  ) {
     return true;
   }
   if (
@@ -1058,6 +1064,13 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/capabilities') {
     await json(route, scenario.capabilities);
+    return;
+  }
+  if (method === 'GET' && path === '/brand') {
+    // Always an empty brand, so the mock serves the built-in name and logo and
+    // the visual baselines stay valid. A spec that needs a white-label shell
+    // should give this a scenario field rather than loosening it here.
+    await json(route, {});
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {

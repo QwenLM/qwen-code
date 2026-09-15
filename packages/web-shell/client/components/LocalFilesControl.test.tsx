@@ -6,7 +6,7 @@
 
 // @vitest-environment jsdom
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonCapabilities,
   DaemonClient,
@@ -22,29 +22,57 @@ const capturedHookOptions = vi.hoisted(() => ({
   current: undefined as unknown,
 }));
 
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => ({ sessionId: 'session-1', workspaceCwd: '/primary' }),
-  useWorkspace: () => ({
-    baseUrl: 'https://daemon.example/',
-    token: undefined,
-    capabilities: {
-      qwenCodeVersion: '1.2.3',
-      workspaceCwd: '/primary',
-      features: ['dynamic_workspace_registration'],
-      workspaces: [
-        {
-          id: 'ws-1',
-          cwd: '/primary',
-          kind: 'directory',
-          primary: true,
-          trusted: false,
-        },
-      ],
-    },
-    client: {},
-  }),
-  useWorkspaceActions: () => ({ preheatAcp: vi.fn() }),
+// Per-case capabilities/connection for the single file-level mock factory:
+// the factory runs at module load, so per-test vi.doMock would override the
+// file-level mock and never restore it, leaking the LAST factory into every
+// test appended after it.
+const capsOverride = vi.hoisted(() => ({
+  current: undefined as unknown,
 }));
+// Sentinel for "render with the mock's default capabilities": a bare null
+// override means "capabilities undefined" (pending snapshot), and `??`
+// inside the factory would collapse null into the default.
+const DEFAULT_CAPS = vi.hoisted(() => ({ sentinel: 'default-caps' }));
+const connectionOverride = vi.hoisted(() => ({
+  current: undefined as
+    | { sessionId?: string; workspaceCwd?: string }
+    | undefined,
+}));
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
+  const fallback = {
+    qwenCodeVersion: '1.2.3',
+    workspaceCwd: '/primary',
+    features: ['dynamic_workspace_registration', 'client_mcp_over_ws'],
+    workspaces: [
+      {
+        id: 'ws-1',
+        cwd: '/primary',
+        kind: 'directory',
+        primary: true,
+        trusted: false,
+      },
+    ],
+  };
+  return {
+    useConnection: () => ({
+      sessionId: 'session-1',
+      workspaceCwd: '/primary',
+      ...connectionOverride.current,
+    }),
+    useWorkspace: () => ({
+      baseUrl: 'https://daemon.example/',
+      token: undefined,
+      capabilities:
+        capsOverride.current === undefined ||
+        capsOverride.current === DEFAULT_CAPS
+          ? fallback
+          : capsOverride.current || undefined,
+      client: {},
+    }),
+    useWorkspaceActions: () => ({ preheatAcp: vi.fn() }),
+  };
+});
 
 vi.mock('../local-files/useLocalFilesBridge', () => ({
   useLocalFilesBridge: (options: unknown) => {
@@ -87,9 +115,9 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
       workspaceCwd: '/locked',
       sessionId: 'session-1',
     };
-    // The bare snapshot lacks the locked entry: both sibling voice call sites
-    // pass the merged list for exactly this reason.
-    expect(resolveLocalFilesWorkspaceRoute(base)).toBeUndefined();
+    // The bare snapshot lacks the locked entry: judgement waits (pending)
+    // until the merged list (or a refreshed snapshot) arrives.
+    expect(resolveLocalFilesWorkspaceRoute(base)).toEqual({ kind: 'pending' });
     expect(
       resolveLocalFilesWorkspaceRoute({
         ...base,
@@ -125,12 +153,25 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
       cwd: '/live',
       kind: 'live',
     } as unknown as DaemonWorkspaceCapability;
+    const noTrustField = {
+      ...locked,
+      id: 'notrust-ws',
+      cwd: '/notrust',
+      trusted: undefined,
+    } as unknown as DaemonWorkspaceCapability;
     const base = { capabilities, sessionId: 'session-1' };
     expect(
       resolveLocalFilesWorkspaceRoute({
         ...base,
         workspaces: [primary, untrusted],
         workspaceCwd: '/untrusted',
+      }),
+    ).toEqual({ kind: 'none' });
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        ...base,
+        workspaces: [primary, noTrustField],
+        workspaceCwd: '/notrust',
       }),
     ).toEqual({ kind: 'none' });
     expect(
@@ -169,13 +210,28 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
       ...primary,
       kind: 'live',
     } as unknown as DaemonWorkspaceCapability;
-    for (const entry of [untrustedPrimary, livePrimary]) {
+    const noTrustFieldPrimary = {
+      ...primary,
+      trusted: undefined,
+    } as unknown as DaemonWorkspaceCapability;
+    for (const entry of [untrustedPrimary, livePrimary, noTrustFieldPrimary]) {
       expect(
         resolveLocalFilesWorkspaceRoute({
           capabilities,
           workspaces: [entry],
           workspaceCwd: '/primary',
           sessionId: 'session-1',
+        }),
+      ).toEqual({ kind: 'none' });
+      // No session yet: the shared resolver matched the primary by the cwd
+      // it derived itself, so keying the trust lookup on the undefined
+      // workspaceCwd would miss and fail open.
+      expect(
+        resolveLocalFilesWorkspaceRoute({
+          capabilities,
+          workspaces: [entry],
+          workspaceCwd: undefined,
+          sessionId: undefined,
         }),
       ).toEqual({ kind: 'none' });
     }
@@ -188,7 +244,7 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
         workspaceCwd: '/primary',
         sessionId: 'session-1',
       }),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'pending' });
     expect(
       resolveLocalFilesWorkspaceRoute({
         capabilities,
@@ -196,7 +252,40 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
         workspaceCwd: '/not-in-snapshot-yet',
         sessionId: 'session-1',
       }),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'pending' });
+  });
+
+  it('resolves legacy for a single-workspace daemon without a registry', () => {
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        capabilities: {
+          ...capabilities,
+          features: [],
+          workspaces: undefined,
+        } as unknown as DaemonCapabilities,
+        workspaces: [],
+        workspaceCwd: '/primary',
+        sessionId: 'session-1',
+      }),
+    ).toEqual({ kind: 'legacy' });
+  });
+
+  it('withholds while a registration-advertising daemon bootstraps', () => {
+    // Bootstrap envelope: the features are advertised but the workspaces
+    // array has not been published yet, so the trust verdict has not landed
+    // and answering eligible would dial the bare mount without its check.
+    expect(
+      resolveLocalFilesWorkspaceRoute({
+        capabilities: {
+          ...capabilities,
+          features: ['dynamic_workspace_registration', 'client_mcp_over_ws'],
+          workspaces: undefined,
+        } as unknown as DaemonCapabilities,
+        workspaces: [],
+        workspaceCwd: '/primary',
+        sessionId: 'session-1',
+      }),
+    ).toEqual({ kind: 'pending' });
   });
 });
 
@@ -261,10 +350,15 @@ describe('createLocalFilesRewarm', () => {
 });
 
 describe('LocalFilesControl wiring', () => {
-  it('passes the withheld blocker into the bridge hook for an untrusted primary', async () => {
-    // The resolver's decision is pinned above; this pins its APPLICATION -
-    // without the wiring line the hook never sees the blocker and the trust
-    // fix never reaches the bridge.
+  // `caps === undefined` keeps the file-level mock's default capabilities;
+  // `caps === null` renders a pending snapshot (capabilities undefined).
+  const renderCaptured = async (
+    caps: unknown,
+    connection?: { sessionId?: string; workspaceCwd?: string },
+  ) => {
+    capsOverride.current = caps === undefined ? DEFAULT_CAPS : caps;
+    connectionOverride.current = connection;
+    capturedHookOptions.current = undefined;
     const { act } = await import('react');
     const { createRoot } = await import('react-dom/client');
     const { I18nProvider } = await import('../i18n');
@@ -280,11 +374,87 @@ describe('LocalFilesControl wiring', () => {
         </I18nProvider>,
       );
     });
-    const options = capturedHookOptions.current as {
-      withheldBlocker?: string;
-    };
-    expect(options.withheldBlocker).toBe('workspace-ineligible');
+    const options = capturedHookOptions.current as
+      | {
+          withheldBlocker?: string;
+          workspaceSelector?: { kind: string; value: string };
+        }
+      | undefined;
     act(() => root.unmount());
     container.remove();
+    // Without this a render that never reached the hook would read as
+    // "no blocker" and the positive control would pass vacuously.
+    if (options === undefined) throw new Error('hook never ran');
+    return options;
+  };
+
+  afterEach(() => {
+    capsOverride.current = undefined;
+    connectionOverride.current = undefined;
+    capturedHookOptions.current = undefined;
+  });
+
+  it('passes the withheld blocker into the bridge hook for an untrusted primary', async () => {
+    // The resolver's decision is pinned above; this pins its APPLICATION -
+    // without the wiring line the hook never sees the blocker and the trust
+    // fix never reaches the bridge. Default mock caps: untrusted primary.
+    expect((await renderCaptured(undefined)).withheldBlocker).toBe(
+      'workspace-ineligible',
+    );
+    // The same verdict with no session at all: the resolver matched the
+    // primary by its own derived cwd, so the trust lookup must not key on
+    // the undefined workspaceCwd either.
+    expect(
+      (
+        await renderCaptured(undefined, {
+          sessionId: undefined,
+          workspaceCwd: undefined,
+        })
+      ).withheldBlocker,
+    ).toBe('workspace-ineligible');
+  });
+
+  it('withholds when the daemon lacks the feature or the snapshot is pending', async () => {
+    // Daemon without the reverse channel: no point offering Connect.
+    expect((await renderCaptured({ ...capabilities })).withheldBlocker).toBe(
+      'unsupported-daemon',
+    );
+
+    // Capabilities without a features array at all (version skew): the
+    // preflight must withhold instead of throwing during render. Both cases
+    // derive from one fixture, so they differ by exactly the `features` key.
+    const noFeatures: Partial<DaemonCapabilities> = { ...capabilities };
+    delete noFeatures.features;
+    expect((await renderCaptured(noFeatures)).withheldBlocker).toBe(
+      'unsupported-daemon',
+    );
+
+    // Snapshot pending: starting now would fail open onto the primary mount.
+    expect((await renderCaptured(null)).withheldBlocker).toBe(
+      'workspace-resolving',
+    );
+  });
+
+  it('withholds nothing for eligible routes (positive control)', async () => {
+    const capable = {
+      ...capabilities,
+      features: ['dynamic_workspace_registration', 'client_mcp_over_ws'],
+    };
+    // A mutation that maps an eligible route onto a blocker would silently
+    // turn the feature off for everyone: legacy is the most common shape.
+    const legacy = await renderCaptured(capable);
+    expect(legacy.withheldBlocker).toBeUndefined();
+    // The other half of the wiring: the qualified route must forward the
+    // resolver's selector, or the bridge dials the wrong mount.
+    expect(legacy.workspaceSelector).toBeUndefined();
+    const qualified = await renderCaptured(
+      { ...capable, workspaces: [primary, locked] },
+      { workspaceCwd: '/locked' },
+    );
+    expect(qualified.withheldBlocker).toBeUndefined();
+    expect(qualified.workspaceSelector).toEqual({
+      kind: 'id',
+      value: 'locked-ws',
+    });
   });
 });

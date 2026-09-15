@@ -49,6 +49,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_metadata_updated',
   'session_recording_degraded',
   'artifact_changed',
+  'source_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
@@ -302,6 +303,17 @@ export interface DaemonSessionMetadataUpdatedData {
   prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
+
+export interface DaemonSourceChangedData {
+  sessionId: string;
+  revision: number;
+  [key: string]: unknown;
+}
+
+export type DaemonSourceChangedEvent = DaemonEventEnvelope<
+  'source_changed',
+  DaemonSourceChangedData
+>;
 
 export interface DaemonArtifactChangedData {
   sessionId: string;
@@ -653,6 +665,7 @@ export interface DaemonAuthDeviceFlowCancelledData {
  */
 export interface DaemonApprovalModeChangedData {
   sessionId: string;
+  planExecutionMode?: string;
   previous: string;
   next: string;
   persisted: boolean;
@@ -928,6 +941,9 @@ export type DaemonMcpServerChangedEvent = DaemonEventEnvelope<
 export interface DaemonExtensionsChangedData {
   readonly refreshed: number;
   readonly failed: number;
+  // Daemons advertising `extension_activation_explicit_refresh` commit
+  // activation without broadcasting it; `enabled`/`disabled` statuses arrive
+  // only from older daemons, newer ones converge via a status-less broadcast.
   readonly status?:
     | 'installed'
     | 'enabled'
@@ -951,6 +967,7 @@ export interface DaemonSessionSnapshotData {
   sessionId: string;
   currentModelId: string | null;
   currentApprovalMode: string | null;
+  planExecutionMode?: string;
   recordingDegraded?: boolean;
   [key: string]: unknown;
 }
@@ -1271,6 +1288,7 @@ export type DaemonTurnEvent = DaemonTurnCompleteEvent | DaemonTurnErrorEvent;
 
 export type KnownDaemonEvent =
   | DaemonSessionEvent
+  | DaemonSourceChangedEvent
   | DaemonControlEvent
   | DaemonStreamLifecycleEvent
   | DaemonMcpGuardrailEvent
@@ -1369,6 +1387,7 @@ export interface DaemonSessionViewState {
    * toggled N times this session". Non-terminal.
    */
   approvalMode?: string;
+  planExecutionMode?: string;
   approvalModeChangedCount: number;
   lastApprovalModeChange?: DaemonApprovalModeChangedData;
   /**
@@ -1553,6 +1572,7 @@ export function createDaemonSessionViewState(
     lastWorkspaceMutation: seed.lastWorkspaceMutation,
     lastWorkspaceMutationType: seed.lastWorkspaceMutationType,
     approvalMode: seed.approvalMode,
+    planExecutionMode: seed.planExecutionMode,
     approvalModeChangedCount: seed.approvalModeChangedCount ?? 0,
     lastApprovalModeChange: seed.lastApprovalModeChange,
     toolToggleCount: seed.toolToggleCount ?? 0,
@@ -1673,6 +1693,13 @@ export function asKnownDaemonEvent(
     case 'session_recording_degraded':
       return isSessionRecordingDegradedData(event.data)
         ? (event as DaemonSessionRecordingDegradedEvent)
+        : undefined;
+    case 'source_changed':
+      return isRecord(event.data) &&
+        typeof event.data['sessionId'] === 'string' &&
+        Number.isInteger(event.data['revision']) &&
+        Number(event.data['revision']) >= 0
+        ? (event as DaemonSourceChangedEvent)
         : undefined;
     case 'artifact_changed':
       return isArtifactChangedData(event.data)
@@ -2152,6 +2179,8 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         approvalMode: event.data.next,
+        planExecutionMode:
+          event.data.next === 'plan' ? event.data.planExecutionMode : undefined,
         approvalModeChangedCount: base.approvalModeChangedCount + 1,
         lastApprovalModeChange: mergeOriginator(event.data, event),
       };
@@ -2216,6 +2245,7 @@ export function reduceDaemonSessionEvent(
     case 'settings_reloaded':
     case 'extensions_changed':
     case 'artifact_changed':
+    case 'source_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
@@ -2236,7 +2266,13 @@ export function reduceDaemonSessionEvent(
           ? { currentModelId: event.data.currentModelId }
           : {}),
         ...(event.data.currentApprovalMode != null
-          ? { approvalMode: event.data.currentApprovalMode }
+          ? {
+              approvalMode: event.data.currentApprovalMode,
+              planExecutionMode:
+                event.data.currentApprovalMode === 'plan'
+                  ? event.data.planExecutionMode
+                  : undefined,
+            }
           : {}),
         ...(event.data.recordingDegraded !== undefined
           ? { recordingDegraded: event.data.recordingDegraded }
@@ -3015,6 +3051,8 @@ function isApprovalModeChangedData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['previous']) &&
     isNonEmptyString(value['next']) &&
+    (value['planExecutionMode'] === undefined ||
+      isNonEmptyString(value['planExecutionMode'])) &&
     typeof value['persisted'] === 'boolean'
   );
 }
@@ -3352,6 +3390,8 @@ function isSessionSnapshotData(
   return (
     (model === null || typeof model === 'string') &&
     (mode === null || typeof mode === 'string') &&
+    (value['planExecutionMode'] === undefined ||
+      isNonEmptyString(value['planExecutionMode'])) &&
     (recordingDegraded === undefined || typeof recordingDegraded === 'boolean')
   );
 }

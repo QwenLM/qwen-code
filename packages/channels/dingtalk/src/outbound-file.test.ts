@@ -63,6 +63,18 @@ describe('OutboundFileProjector', () => {
       paths: [],
       invalidMarkers: 1,
     },
+    {
+      input: 'answer ends here [',
+      text: 'answer ends here [',
+      paths: [],
+      invalidMarkers: 0,
+    },
+    {
+      input: 'answer ends here [FI',
+      text: 'answer ends here [FI',
+      paths: [],
+      invalidMarkers: 0,
+    },
   ])('projects $input without repairing it', ({ input, ...expected }) => {
     expect(projectFileText(input)).toMatchObject(expected);
   });

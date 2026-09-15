@@ -21,8 +21,12 @@ import type {
   BridgeStandaloneRestoreSessionRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
-import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
+  isScheduledTaskRunSource,
+  STANDALONE_SESSION_SOURCE_TYPE,
+} from '@qwen-code/acp-bridge/sessionSource';
+import {
+  createDebugLogger,
   readSessionPrs,
   SessionIdCaseConflictError,
   SessionStorageEntryError,
@@ -38,6 +42,10 @@ import {
   type SessionWriterErrorKind,
   type SessionWriterLease,
 } from '@qwen-code/qwen-code-core';
+import {
+  AcpChildCapacityExceededError,
+  type AcpChildCapacity,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   parseCallerSuppliedSessionId,
   normalizeSessionIdForLookup,
@@ -73,6 +81,8 @@ import {
   type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
 
+const debugLogger = createDebugLogger('STANDALONE_SESSION_SERVICE');
+
 export type StandaloneSessionServiceErrorCode =
   | 'invalid_request'
   | 'standalone_session_not_found'
@@ -80,6 +90,7 @@ export type StandaloneSessionServiceErrorCode =
   | 'standalone_session_operation_failed'
   | 'session_archived'
   | 'session_busy'
+  | 'model_selection_failed'
   | 'standalone_creation_rolled_back'
   | 'standalone_creation_outcome_unknown'
   | 'working_directory_missing'
@@ -97,6 +108,7 @@ export class StandaloneSessionServiceError extends Error {
     readonly sessionId: string | undefined,
     message: string,
     readonly retryable = false,
+    readonly capacity?: AcpChildCapacity,
   ) {
     super(message);
   }
@@ -112,6 +124,8 @@ export interface CreateStandaloneChildSessionRequest
   extends CreateStandaloneSessionRequest {
   parentSessionId: string;
   promptId: string;
+  sourceType?: string;
+  sourceId?: string;
 }
 
 export interface CreatedStandaloneSession {
@@ -239,6 +253,7 @@ export interface StandaloneSessionServiceOptions {
     ConversationWorkspace,
     | 'assertExactRoot'
     | 'prepareStandaloneDirectory'
+    | 'discardEmptyConversationDirectory'
     | 'inspectStandaloneDirectory'
     | 'ensureStandaloneDirectory'
     | 'inspectStandaloneDeletionPaths'
@@ -326,6 +341,8 @@ function serviceError(
       'The standalone session operation failed.',
     session_archived: 'The standalone session is archived.',
     session_busy: 'The standalone session is busy.',
+    model_selection_failed:
+      'The selected model could not be applied to the standalone session.',
     standalone_creation_rolled_back:
       'Standalone session creation failed before durable source persistence and was rolled back.',
     standalone_creation_outcome_unknown:
@@ -423,6 +440,11 @@ function mergeLiveStandaloneSummary(
     updatedAt: laterTimestamp(live.updatedAt, persisted.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    ...(live.activeWorkState !== undefined
+      ? { activeWorkState: live.activeWorkState }
+      : {}),
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     ...(live.isWaitingForPermission !== undefined
       ? { isWaitingForPermission: live.isWaitingForPermission }
       : {}),
@@ -2616,7 +2638,10 @@ export class StandaloneSessionService {
   private async createUnderExclusive(
     runtime: WorkspaceRuntime,
     sessionId: string,
-    request: CreateStandaloneSessionRequest,
+    request: CreateStandaloneSessionRequest & {
+      sourceType?: string;
+      sourceId?: string;
+    },
     prompt: string | undefined,
     promptId: string,
     parentSessionId?: string,
@@ -2651,7 +2676,25 @@ export class StandaloneSessionService {
         } catch {
           this.beginTerminalQuarantine(runtime);
         }
-        throw serviceError('standalone_creation_rolled_back', sessionId, true);
+        const outcome = serviceError(
+          'standalone_creation_rolled_back',
+          sessionId,
+          true,
+        );
+        if (error.cause instanceof AcpChildCapacityExceededError) {
+          throw new StandaloneSessionServiceError(
+            outcome.code,
+            sessionId,
+            outcome.message,
+            outcome.retryable,
+            {
+              code: error.cause.code,
+              maxConcurrentChildren: error.cause.maxConcurrentChildren,
+              committedAcpChildren: error.cause.committedAcpChildren,
+            },
+          );
+        }
+        throw outcome;
       }
       this.beginTerminalQuarantine(runtime);
     }
@@ -2686,6 +2729,24 @@ export class StandaloneSessionService {
       this.beginTerminalQuarantine(runtime);
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
+    if (
+      isScheduledTaskRunSource(request) &&
+      request.modelServiceId !== undefined &&
+      session.modelApplied === false
+    ) {
+      await this.cleanRollbackBeforePersistence(runtime, sessionId);
+      try {
+        await this.options.workspace.discardEmptyConversationDirectory(
+          sessionId,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      this.directoryStates.delete(sessionId);
+      throw serviceError('model_selection_failed', sessionId, true);
+    }
     let initialPrompt:
       | CreatedStandaloneChildSession['initialPrompt']
       | undefined;

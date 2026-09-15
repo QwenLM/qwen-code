@@ -56,6 +56,7 @@ fn def() -> &'static ToolDef {
                 "element_index": cua_driver_core::tool_schema::element_index_schema(),
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
                 "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),
+                "app_context": { "type": "boolean", "description": "Use app-bound native click routing." },
                 "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema()
             },
             "additionalProperties": false
@@ -75,6 +76,12 @@ impl Tool for DoubleClickTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        if args.bool_or("app_context", false) {
+            let mut args = args;
+            args["button"] = serde_json::json!("left");
+            args["count"] = serde_json::json!(2);
+            return super::click::invoke_app_click(Arc::clone(&self.state), args).await;
+        }
         let pid = match args.require_i32("pid") {
             Ok(v) => v,
             Err(e) => return e,

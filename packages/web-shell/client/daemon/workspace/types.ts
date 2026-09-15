@@ -83,6 +83,7 @@ import type {
   DaemonSkillMutationResult,
   DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
+  DaemonBrand,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonModelDeleteRequest,
@@ -153,6 +154,29 @@ export interface DaemonWorkspaceContextValue {
   status: DaemonWorkspaceStatus;
   error?: Error;
   capabilities?: DaemonCapabilities;
+  /**
+   * Web Shell branding resolved by the daemon from the operator settings scopes
+   * (system defaults, user, system). Fetched once per client instance beside
+   * capabilities; stays `undefined` while the fetch is in flight and on a
+   * daemon too old to have the route (whose 404 settles the fetch). A daemon
+   * that answered "no brand configured" resolves to an empty object `{}` —
+   * read that as "use the built-in brand", not as "still loading" (the SDK
+   * publishes the same contract). See
+   * {@link DaemonWorkspaceContextValue.brandSettled} to tell "no value yet"
+   * from "the definitive answer arrived" — consumers that clear cached
+   * branding must key on that flag rather than on `brand === undefined`, or
+   * they never fire on the most common deployment.
+   */
+  brand?: DaemonBrand;
+  /**
+   * True once this client's brand fetch has reached a definitive outcome:
+   * the daemon answered (with a brand or `{}`), or answered 404 (no route,
+   * so no brand will ever exist there). A retryable failure — a 503 while
+   * the runtime starts, a 429, a transport error — is unknown rather than
+   * absent and leaves this false, so cached chrome survives a blip.
+   * Per-client: resets to false when the client instance changes.
+   */
+  brandSettled?: boolean;
   getCapabilities?: () => Promise<DaemonCapabilities>;
   /**
    * Force a fresh `/capabilities` fetch and push the result into the
@@ -164,6 +188,17 @@ export interface DaemonWorkspaceContextValue {
    * shows without a full page reload.
    */
   refreshCapabilities?: () => Promise<DaemonCapabilities>;
+  /**
+   * Re-issue the brand fetch for the current client, for the recovery path.
+   * A retryable failure (503, 429, transport) leaves the brand unsettled —
+   * without a re-ask, the in-app chrome renders built-in for the page's
+   * lifetime while the tab keeps the cached white-label. A no-op unless the
+   * brand is genuinely missing (`brand === undefined && !brandSettled`), so
+   * an already-resolved brand is never blanked mid-session and a definitive
+   * 404 outcome is not turned back into "loading". The same 404-only settle
+   * rule applies to the retry.
+   */
+  refreshBrand?: () => void;
   actions: DaemonWorkspaceActions;
 }
 
@@ -263,6 +298,10 @@ export interface DaemonScheduledTask {
   /** `persistent` reuses the task's bound session; `per_run` creates a fresh
    * child session for every scheduled or manual fire. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for each fresh per-run session. */
+  modelServiceId?: string | null;
+  /** Named group assigned to each fresh per-run session. */
+  groupId?: string | null;
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -288,6 +327,10 @@ export interface DaemonCreateScheduledTaskRequest {
   sessionId?: string | null;
   /** Defaults to `persistent` when omitted. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service for fresh per-run sessions. */
+  modelServiceId?: string;
+  /** Named group for fresh per-run sessions. */
+  groupId?: string;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -299,6 +342,10 @@ export interface DaemonUpdateScheduledTaskRequest {
   recurring?: boolean;
   enabled?: boolean;
   sessionMode?: 'persistent' | 'per_run';
+  /** Null clears the selected model. */
+  modelServiceId?: string | null;
+  /** Null clears the selected group. */
+  groupId?: string | null;
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -311,9 +358,8 @@ export interface DaemonAddWorkspaceResult {
 }
 
 /**
- * One session's active `/goal`. Goals live in the owning session's memory and
- * only advance while it is resident, so this list covers exactly the goals that
- * are actually running — a session that isn't loaded contributes nothing.
+ * One resident session's incomplete `/goal`, read from its persisted Goal
+ * runtime. Paused and blocked goals are included; unloaded sessions are not.
  */
 export interface DaemonGoal {
   /** The session driving this goal; its transcript is the goal's history. */
@@ -321,10 +367,10 @@ export interface DaemonGoal {
   /** The session's label, or null — the UI falls back to the id. */
   displayName: string | null;
   condition: string;
-  /** Judge turns completed; 0 before the first stop-hook evaluation. */
+  /** Canonical Goal turns completed so far. */
   iterations: number;
   setAt: number;
-  /** The judge's verdict on the most recent turn, when it has run. */
+  /** Why the Goal last stopped, or the verifier's most recent reason. */
   lastReason?: string;
   /**
    * The owning session is mid-turn. For a goal session that is almost always
@@ -380,9 +426,10 @@ export interface DaemonWorkspaceActions {
   listSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage>;
-  listSessionGroups(): Promise<DaemonSessionGroupCatalog>;
+  listSessionGroups(workspaceCwd?: string): Promise<DaemonSessionGroupCatalog>;
   createSessionGroup(
     input: DaemonSessionGroupInput,
+    workspaceCwd?: string,
   ): Promise<DaemonSessionGroup>;
   updateSessionGroup(
     groupId: string,
@@ -583,7 +630,7 @@ export interface DaemonWorkspaceActions {
   clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
   // Providers / env (read-only diagnostics)
-  loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;
+  loadProviders(workspaceCwd?: string): Promise<DaemonWorkspaceProvidersStatus>;
   loadEnv(): Promise<DaemonWorkspaceEnvStatus>;
   loadPreflight(): Promise<DaemonWorkspacePreflightStatus>;
 

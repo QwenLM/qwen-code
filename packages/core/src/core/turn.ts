@@ -37,7 +37,7 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
-import type { ActiveGoal } from '../goals/activeGoalStore.js';
+import type { ActiveGoal } from '../goals/goal-legacy-projection.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
@@ -76,6 +76,7 @@ export enum LlmEventType {
   Citation = 'citation',
   Retry = 'retry',
   HookSystemMessage = 'hook_system_message',
+  GoalSettlementFailed = 'goal_settlement_failed',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   GoalState = 'goal_state',
@@ -149,6 +150,11 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   goalContext?: GoalTurnPermit;
+  /** Parent model tool call for a programmatically dispatched child call. */
+  parentCallId?: string;
+  source?: 'model' | 'code_mode';
+  /** Exact tools an exec call may dispatch for a restricted agent. */
+  codeModeAllowedToolNames?: readonly string[];
 }
 
 export type ToolExecutionStatus =
@@ -168,6 +174,13 @@ export interface ToolCallResponseInfo {
   persistedOutputFiles?: string[];
   modelOverride?: string;
   terminateTurn?: boolean;
+  /**
+   * Set only when the call was denied because it needed user approval and the
+   * session had no way to ask for it (non-interactive mode). Headless front
+   * ends use it to suggest an approval mode; every other denial, such as a
+   * hook block or a deny rule, reports its own reason instead.
+   */
+  approvalRequired?: true;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
   boundaryArtifact?: ToolResultBoundaryArtifact;
@@ -244,6 +257,14 @@ export function createDuplicateProviderToolCallResponse(
 ): ToolCallResponseInfo {
   const providerCallId = request.providerCallId ?? request.callId;
   const message = duplicateProviderToolCallMessage(providerCallId);
+  return createNotStartedToolErrorResponse(request, message);
+}
+
+export function createNotStartedToolErrorResponse(
+  request: ToolCallRequestInfo,
+  message: string,
+  errorType: ToolErrorType = ToolErrorType.EXECUTION_FAILED,
+): ToolCallResponseInfo {
   return {
     callId: request.callId,
     responseParts: [
@@ -257,7 +278,7 @@ export function createDuplicateProviderToolCallResponse(
     ],
     resultDisplay: message,
     error: new Error(message),
-    errorType: ToolErrorType.EXECUTION_FAILED,
+    errorType,
     executionStatus: 'not_started',
   };
 }
@@ -481,6 +502,11 @@ export type ServerLlmHookSystemMessageEvent = {
   value: string;
 };
 
+export type ServerLlmGoalSettlementFailedEvent = {
+  type: LlmEventType.GoalSettlementFailed;
+  value: string;
+};
+
 export type ServerLlmUserPromptSubmitBlockedEvent = {
   type: LlmEventType.UserPromptSubmitBlocked;
   value: {
@@ -518,6 +544,7 @@ export type ServerLlmStreamEvent =
   | ServerLlmContentEvent
   | ServerLlmErrorEvent
   | ServerLlmFinishedEvent
+  | ServerLlmGoalSettlementFailedEvent
   | ServerLlmHookSystemMessageEvent
   | ServerLlmUserPromptSubmitBlockedEvent
   | ServerLlmStopHookLoopEvent

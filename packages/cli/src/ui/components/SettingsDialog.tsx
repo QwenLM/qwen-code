@@ -27,6 +27,7 @@ import {
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
+  nextBooleanSettingValue,
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 import {
@@ -49,6 +50,7 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import {
+  isNumericSettingType,
   type SettingsValue,
   TOGGLE_TYPES,
 } from '../../config/settingsSchema.js';
@@ -182,7 +184,7 @@ export function SettingsDialog({
   );
 
   // Preserve pending changes across scope switches
-  type PendingValue = boolean | number | string;
+  type PendingValue = boolean | number | string | undefined;
   const [globalPendingChanges, setGlobalPendingChanges] = useState<
     Map<string, PendingValue>
   >(new Map());
@@ -201,10 +203,12 @@ export function SettingsDialog({
     const newModified = new Set<string>();
     for (const [key, value] of globalPendingChanges.entries()) {
       const def = getSettingDefinition(key);
-      if (def?.type === 'boolean' && typeof value === 'boolean') {
+      if (value === undefined) {
+        updated = setPendingSettingValueAny(key, value, updated);
+      } else if (def?.type === 'boolean' && typeof value === 'boolean') {
         updated = setPendingSettingValue(key, value, updated);
       } else if (
-        (def?.type === 'number' && typeof value === 'number') ||
+        (isNumericSettingType(def?.type) && typeof value === 'number') ||
         (def?.type === 'string' && typeof value === 'string') ||
         (def?.type === 'enum' &&
           (typeof value === 'string' || typeof value === 'number'))
@@ -247,7 +251,10 @@ export function SettingsDialog({
           const currentValue = getEffectiveValue(key, pendingSettings, {});
           let newValue: SettingsValue;
           if (definition?.type === 'boolean') {
-            newValue = !(currentValue as boolean);
+            newValue = nextBooleanSettingValue(
+              currentValue,
+              definition.default,
+            );
             setPendingSettings((prev) =>
               setPendingSettingValue(key, newValue as boolean, prev),
             );
@@ -476,7 +483,7 @@ export function SettingsDialog({
     const definition = getSettingDefinition(key);
     const type = definition?.type;
 
-    if (editBuffer.trim() === '' && type === 'number') {
+    if (editBuffer.trim() === '' && isNumericSettingType(type)) {
       // Nothing entered for a number; cancel edit
       setEditingKey(null);
       setEditBuffer('');
@@ -485,7 +492,7 @@ export function SettingsDialog({
     }
 
     let parsed: string | number | undefined;
-    if (type === 'number') {
+    if (isNumericSettingType(type)) {
       const numParsed = Number(editBuffer.trim());
       if (Number.isNaN(numParsed)) {
         // Invalid number; cancel edit
@@ -803,7 +810,7 @@ export function SettingsDialog({
 
           if (key.paste && key.sequence) {
             let pasted = key.sequence;
-            if (type === 'number') {
+            if (isNumericSettingType(type)) {
               pasted = key.sequence.replace(/[^0-9\-+.]/g, '');
             }
             if (pasted) {
@@ -845,7 +852,7 @@ export function SettingsDialog({
 
           let ch = key.sequence;
           let isValidChar = false;
-          if (type === 'number') {
+          if (isNumericSettingType(type)) {
             // Allow digits, minus, plus, and dot.
             isValidChar = /[0-9\-+.]/.test(ch);
           } else {
@@ -945,7 +952,7 @@ export function SettingsDialog({
             return;
           }
           if (
-            currentItem?.type === 'number' ||
+            isNumericSettingType(currentItem?.type) ||
             currentItem?.type === 'string'
           ) {
             startEditing(currentItem.value);
@@ -965,7 +972,7 @@ export function SettingsDialog({
           }
         } else if (/^[0-9]$/.test(key.sequence || '') && !editingKey) {
           const currentItem = items[activeSettingIndex];
-          if (currentItem?.type === 'number') {
+          if (isNumericSettingType(currentItem?.type)) {
             startEditing(currentItem.value, key.sequence);
           } else {
             // Non-number setting: route the digit into the search box instead
@@ -979,18 +986,16 @@ export function SettingsDialog({
           if (currentSetting) {
             const defaultValue = getDefaultValue(currentSetting.value);
             const defType = currentSetting.type;
-            if (defType === 'boolean') {
-              const booleanDefaultValue =
-                typeof defaultValue === 'boolean' ? defaultValue : false;
+            if (defType === 'boolean' || defaultValue === undefined) {
               setPendingSettings((prev) =>
-                setPendingSettingValue(
+                setPendingSettingValueAny(
                   currentSetting.value,
-                  booleanDefaultValue,
+                  defaultValue,
                   prev,
                 ),
               );
             } else if (
-              defType === 'number' ||
+              isNumericSettingType(defType) ||
               defType === 'string' ||
               defType === 'enum'
             ) {
@@ -1008,28 +1013,34 @@ export function SettingsDialog({
               }
             }
 
-            // Remove from modified settings since it's now at default
+            const scopeSettings = settings.forScope(selectedScope).settings;
+            const resetChangesValue =
+              !isDefaultValue(currentSetting.value, scopeSettings) &&
+              getEffectiveValue(currentSetting.value, scopeSettings, {}) !==
+                defaultValue;
             setModifiedSettings((prev) => {
               const updated = new Set(prev);
-              updated.delete(currentSetting.value);
+              if (resetChangesValue) updated.add(currentSetting.value);
+              else updated.delete(currentSetting.value);
               return updated;
             });
 
-            // Remove from restart-required settings if it was there
             setRestartRequiredSettings((prev) => {
               const updated = new Set(prev);
-              updated.delete(currentSetting.value);
+              if (resetChangesValue && requiresRestart(currentSetting.value)) {
+                updated.add(currentSetting.value);
+              } else {
+                updated.delete(currentSetting.value);
+              }
               return updated;
             });
 
             // If this setting doesn't require restart, save it immediately
-            if (!requiresRestart(currentSetting.value)) {
+            if (resetChangesValue && !requiresRestart(currentSetting.value)) {
               const immediateSettings = new Set([currentSetting.value]);
               const toSaveValue =
                 currentSetting.type === 'boolean'
-                  ? typeof defaultValue === 'boolean'
-                    ? defaultValue
-                    : false
+                  ? defaultValue
                   : typeof defaultValue === 'number' ||
                       typeof defaultValue === 'string'
                     ? defaultValue
@@ -1072,25 +1083,23 @@ export function SettingsDialog({
                 next.delete(currentSetting.value);
                 return next;
               });
-            } else {
+            } else if (
+              resetChangesValue &&
+              requiresRestart(currentSetting.value)
+            ) {
               // Track default reset as a pending change if restart required
-              if (
-                (currentSetting.type === 'boolean' &&
-                  typeof defaultValue === 'boolean') ||
-                (currentSetting.type === 'number' &&
-                  typeof defaultValue === 'number') ||
-                (currentSetting.type === 'string' &&
-                  typeof defaultValue === 'string')
-              ) {
-                setGlobalPendingChanges((prev) => {
-                  const next = new Map(prev);
-                  next.set(currentSetting.value, defaultValue as PendingValue);
-                  return next;
-                });
-              }
-              setRestartRequiredSettings((prev) =>
-                new Set(prev).add(currentSetting.value),
-              );
+              setGlobalPendingChanges((prev) => {
+                const next = new Map(prev);
+                next.set(currentSetting.value, defaultValue as PendingValue);
+                return next;
+              });
+            } else {
+              setGlobalPendingChanges((prev) => {
+                if (!prev.has(currentSetting.value)) return prev;
+                const next = new Map(prev);
+                next.delete(currentSetting.value);
+                return next;
+              });
             }
           }
         } else if (isDeletionKey(key) && searchQuery.length > 0) {
@@ -1258,7 +1267,10 @@ export function SettingsDialog({
                 // Cursor not visible
                 displayValue = editBuffer;
               }
-            } else if (item.type === 'number' || item.type === 'string') {
+            } else if (
+              isNumericSettingType(item.type) ||
+              item.type === 'string'
+            ) {
               // Settings that open a sub-dialog on Enter
               const isSubDialogSetting =
                 item.value === 'ui.theme' ||

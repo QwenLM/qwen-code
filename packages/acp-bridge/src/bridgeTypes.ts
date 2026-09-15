@@ -6,10 +6,15 @@
 
 import type {
   ApprovalMode,
+  BackgroundNotificationTurn,
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
   SessionGroupPresetColor,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   TurnResultCode,
   TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
@@ -183,6 +188,55 @@ export interface BridgeStandaloneSpawnRequest {
   approvalMode?: ApprovalMode;
 }
 
+export type { BackgroundNotificationTurn } from '@qwen-code/qwen-code-core';
+
+export function parseBackgroundNotificationTurn(
+  value: unknown,
+): BackgroundNotificationTurn | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const { turnId, taskId, kind, startedAt } = record;
+  if (
+    typeof turnId !== 'string' ||
+    !turnId ||
+    turnId.length > 256 ||
+    typeof taskId !== 'string' ||
+    !taskId ||
+    taskId.length > 256 ||
+    (kind !== 'agent' &&
+      kind !== 'monitor' &&
+      kind !== 'shell' &&
+      kind !== 'workflow') ||
+    typeof startedAt !== 'number' ||
+    !Number.isFinite(startedAt) ||
+    startedAt < 0
+  )
+    return undefined;
+  for (const key of ['toolUseId', 'sourceTurnId', 'label']) {
+    if (
+      record[key] !== undefined &&
+      (typeof record[key] !== 'string' || (record[key] as string).length > 4096)
+    )
+      return undefined;
+  }
+  return {
+    turnId,
+    taskId,
+    kind,
+    startedAt,
+    ...(record['toolUseId'] !== undefined
+      ? { toolUseId: record['toolUseId'] as string }
+      : {}),
+    ...(record['sourceTurnId'] !== undefined
+      ? { sourceTurnId: record['sourceTurnId'] as string }
+      : {}),
+    ...(record['label'] !== undefined
+      ? { label: record['label'] as string }
+      : {}),
+  };
+}
+
 export interface BridgeSession {
   sessionId: string;
   /**
@@ -204,6 +258,8 @@ export interface BridgeSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   /**
    * Only present when this spawn carried a `parentSessionId`. `true` iff the
    * parent lineage was durably written to the child's transcript (survives a
@@ -291,6 +347,8 @@ export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
   'qwen.daemon.sessionInitializationDeadlineMs';
 export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
   'session_initialization_timeout';
+export const SESSION_MODEL_PERSIST_DEFAULT_META_KEY =
+  'qwen.session.modelPersistDefault';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
@@ -376,14 +434,14 @@ export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 /**
- * Work categories a child reports holds for. Monitors and cron remain outside
- * `activeWork`'s declared scope. The category travels on every
+ * Work categories a child reports holds for. The category travels on every
  * hold so peers can negotiate coverage explicitly when the scope widens.
  */
 export type ActiveWorkHoldCategory =
   | 'agent'
   | 'notification'
   | 'shell'
+  | 'session'
   | 'workflow';
 
 /** Categories understood by active-work v1 before category negotiation was
@@ -395,6 +453,7 @@ export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
   'agent',
   'notification',
   'shell',
+  'session',
   'workflow',
 ];
 
@@ -455,6 +514,8 @@ export interface ActiveWorkHoldV1 {
 export interface ActiveWorkSessionSnapshotV1 {
   sessionId: string;
   holds: ActiveWorkHoldV1[];
+  hasRunningBackgroundTasks?: boolean;
+  finishedBackgroundTurnId?: string;
 }
 
 /**
@@ -622,6 +683,7 @@ export interface BridgeBranchSessionRequest {
 }
 
 export interface BridgePersistedBranchedSession {
+  sourceWarnings?: string[];
   sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
@@ -640,6 +702,7 @@ export interface BridgeSideTaskSessionRequest {
 }
 
 export interface BridgeSideTaskSession extends BridgeRestoredSession {
+  sourceWarnings?: string[];
   displayName: string;
   parentSessionId: string;
 }
@@ -813,6 +876,11 @@ export interface BridgeSessionSummary {
   sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Per-session active-work observation. `idle` is emitted only from a
+   * fresh snapshot that covers every negotiated hold category. */
+  activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   /** True while a non-question permission request awaits a response. */
   isWaitingForPermission?: boolean;
   /** True while an ask_user_question request awaits a response. */
@@ -872,7 +940,7 @@ export interface BridgeSessionGoal {
     /** Canonical Goal turns completed so far. */
     iterations: number;
     setAt: number;
-    /** The judge's verdict on the most recent turn, when it has run. */
+    /** Why the Goal last stopped, or the verifier's most recent reason. */
     lastReason?: string;
   } | null;
 }
@@ -946,9 +1014,10 @@ export interface BridgeClientRequestContext {
   promptId?: string;
   /**
    * Internal originator for a daemon-owned mid-turn message promoted into the
-   * normal prompt FIFO. It was authenticated when the message was enqueued,
-   * so promotion must not revalidate it after that client has detached.
-   * Transport routes never populate this field from request input.
+   * normal prompt FIFO. It was authenticated when the message was enqueued, so
+   * promotion may still deliver it after that client detaches; turn capabilities
+   * that require a live client must re-check attachment. Transport routes never
+   * populate this field from request input.
    */
   promotedMidTurn?: { originatorClientId?: string };
   /**
@@ -963,6 +1032,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** Original text explicitly declared by a supported submission producer. */
+  submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
   promptDisplayText?: string;
   /**
@@ -1042,11 +1113,15 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
+export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
+
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
 // dependency path between them, so a cross-package test pins the value.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -1095,7 +1170,8 @@ export const MID_TURN_RECONCILIATION_RING_SIZE = 200;
 /**
  * Child-to-parent request that atomically assigns the next Todo Stop Guard
  * model send to the current daemon FIFO owner. `promptId`, when present, is
- * the trusted bridge invocation id rather than the provider-facing prompt id.
+ * the trusted bridge invocation id or admitted background execution id,
+ * rather than the provider-facing prompt id.
  */
 export const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
@@ -1297,10 +1373,14 @@ export interface BridgeDaemonSessionDiagnostic {
   pendingPromptCount: number;
   pendingPermissionCount: number;
   hasActivePrompt: boolean;
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   lastEventId: number;
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /** Selected execution policy while the session is in Plan. */
+  planExecutionMode?: string;
   /**
    * The session's EFFECTIVE live-journal caps right now — the configured
    * baseline, or higher when adaptive growth raised them mid-turn. One
@@ -1571,6 +1651,49 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     worktree: { slug: string; path: string; branch: string },
   ): void;
 
+  /**
+   * Clear the in-memory worktree association of a live session. Used by the
+   * worktree-reset transfer after the marker moved to the replacement
+   * session, so the superseded session's runtime view matches the disk
+   * state. No-op when the session is not live or carries no worktree.
+   */
+  clearSessionWorktree?(sessionId: string): void;
+
+  /**
+   * Arm the worktree-reset admission barrier for a session id: while armed,
+   * `sendPrompt` and the other writers that reach the session's checkout or
+   * cwd (`rewindSession`, `launchSessionForkAgent`, `branchSession`,
+   * `changeSessionCwd`, `executeShellCommand`, `controlSessionWorkflowTask`,
+   * `controlSessionGoal`) throw `SessionResetPendingError` synchronously at
+   * admission. Returns whether a live entry currently exists for the id — a
+   * dormant session counts as quiescent but is still fenced against
+   * re-admission. Optional so lightweight fakes may omit it.
+   */
+  setSessionResetPending?(sessionId: string): boolean;
+
+  /**
+   * Disarm the worktree-reset admission barrier. Idempotent; the reset route
+   * calls it on every transfer outcome up to the marker flip. Past the flip
+   * only a completed severance clears it, so a post-commit failure leaves the
+   * barrier armed for the retry that finishes the transfer.
+   */
+  clearSessionResetPending?(sessionId: string): void;
+
+  /**
+   * Detach every client registered on a live session. The last detach runs
+   * the normal idle-close path (transcript and persisted record survive).
+   * No-op for unknown ids. Used by the worktree-reset transfer to sever the
+   * superseded session's residual attaches after the ownership flip.
+   *
+   * Resolves whether the session entry is gone from the registry once the
+   * detach drain finishes. `false` means the child refused the conditional
+   * idle close because it holds work (a background shell inside the worktree,
+   * for example), so the superseded session is still live, re-attachable and
+   * — once the barrier is cleared — promptable. Callers must not read a
+   * resolved call as "severed" without checking this.
+   */
+  severSessionClients?(sessionId: string): Promise<boolean>;
+
   /** Admit a restore question deferred by the daemon's integrity gate. */
   fireDeferredRestoreAskUserQuestionPrompt?(
     sessionId: string,
@@ -1723,6 +1846,23 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * storage-agnostic. Optional so lightweight fakes may omit it.
    */
   setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  getSessionSources(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionSourcesResult>;
+
+  upsertSessionSource(
+    sessionId: string,
+    input: SessionSourceInput,
+    context: BridgeClientRequestContext,
+  ): Promise<SessionSourceUpsertResult>;
+
+  removeSessionSource(
+    sessionId: string,
+    sourceId: string,
+    context: BridgeClientRequestContext,
+  ): Promise<SessionSourceRemoveResult>;
 
   /**
    * List the structured artifacts registered for a live session. Throws
@@ -2155,13 +2295,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionApprovalMode(
     sessionId: string,
     mode: ApprovalMode,
-    opts: { persist: boolean },
+    opts: { persist: boolean; planMode?: boolean },
     context?: BridgeClientRequestContext,
   ): Promise<{
     sessionId: string;
     mode: ApprovalMode;
     previous: ApprovalMode;
     persisted: boolean;
+    planExecutionMode?: ApprovalMode;
   }>;
 
   /**
@@ -2243,7 +2384,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       onSettledWithoutDrain?: () => void;
       content?: readonly BridgePromptContentBlock[];
     },
-  ): { accepted: boolean; messageId?: string };
+  ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
 
   storeSessionAttachment(
     sessionId: string,
@@ -2467,11 +2608,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
-  /**
-   * Whether an accepted prompt, a running background Agent, an Agent terminal
-   * notification, or Session-managed background shell work is unsettled.
-   * Monitors, workflows, and cron are deliberately outside this.
-   */
+  /** Whether daemon-owned or child-reported Session work is unsettled. */
   readonly activeWork: boolean;
 
   /**

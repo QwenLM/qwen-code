@@ -145,6 +145,7 @@ export default {
   'from {{marketplace}}': '來自 {{marketplace}}',
   installed: '已安裝',
   '{{count}} Agents': '{{count}} 個智能體',
+  '{{count}} Workflows': '{{count}} 個工作流程',
   '{{count}} Commands': '{{count}} 個命令',
   '{{count}} MCP': '{{count}} 個 MCP',
   '{{count}} Skills': '{{count}} 個技能',
@@ -168,6 +169,7 @@ export default {
   // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
   // verbatim inside an otherwise-translated label.
   // ============================================================================
+  'toolDisplayName.Exec': '執行程式碼',
   'toolDisplayName.Edit': '編輯',
   'toolDisplayName.WriteFile': '寫入檔案',
   'toolDisplayName.ReadFile': '讀取檔案',
@@ -184,6 +186,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.RecordSource': '記錄來源',
   'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
@@ -335,11 +338,10 @@ export default {
   'Search:': '搜尋：',
   'type to filter…': '輸入以篩選…',
   'No skills are currently available.': '目前沒有可用的技能。',
-  'All available skills are locked at a higher scope (see below).':
-    '所有可用技能都被更高範圍鎖定（詳見下方）。',
   'No skills match the search.': '沒有符合搜尋條件的技能。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '被更高範圍設定鎖定（此處無法切換）：',
+  'Locked by settings entries you cannot toggle here:':
+    '被無法在此切換的設定條目鎖定：',
+  '{{count}} locked not shown': '{{count}} 個已鎖定技能未顯示',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',
@@ -681,6 +683,7 @@ export default {
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
+  'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
@@ -849,6 +852,10 @@ export default {
   'This extension will install the following skills:': '此擴展將安裝以下技能：',
   'This extension will install the following subagents:':
     '此擴展將安裝以下子智能體：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此擴展將安裝以下工作流程（可啟動子智能體的 JavaScript 腳本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流程腳本與已安裝版本相比有變更：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安裝 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安裝來自 {{originSource}} 的擴展。某些功能可能無法完美兼容 Qwen Code。',
@@ -920,6 +927,7 @@ export default {
   'Context files:': '上下文檔案：',
   'Skills:': '技能：',
   'Agents:': '智能體：',
+  'Workflows:': '工作流程：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '連結擴展安裝失敗。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1019,6 +1027,20 @@ export default {
   'No hook config selected': '未選擇 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或刪除此 Hook，請直接編輯 settings.json 或詢問 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已開啟，本會話不會執行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精簡模式已開啟，本會話不會執行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 設定停用。',
+  'Timeout:': '逾時：',
+  'Status message:': '狀態訊息：',
+  'Condition:': '條件：',
+  'Options:': '選項：',
+  'Skill:': '技能：',
+  'runs in background': '在背景執行',
+  'runs once': '只執行一次',
+  sequential: '依序執行',
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
     '所有 Hook 當前已禁用。您有 {{count}} 未運行。',
@@ -1063,8 +1085,8 @@ export default {
     '命令輸入為包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令輸入為包含通知消息和類型的 JSON。',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    '命令輸入為 JSON，其中包含 "prompt"（目前模型側提示）以及選用的 "submitted_prompt"（受支援互動式 TUI 的提交文字投影）。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    '命令輸入為 JSON，其中包含 "prompt"（目前模型側提示）以及選用的 "submitted_prompt"（在受支援的提交邊界擷取的文字投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令輸入為包含 command_name、command_args 和展開後提示文本的 JSON。',
   'Input to command is JSON with session start source.':
@@ -2032,8 +2054,6 @@ export default {
     '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已儲存，但此工作區不受信任時不會生效。',
-  'Set a goal — keep working until the condition is met':
-    '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
@@ -2139,6 +2159,11 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'Large workflow': '大型工作流程',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流程：已排定 {{agents}} 個 agent（警示門檻 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流程：預計輸出 ~{{tokens}} 個 token（警示門檻 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
@@ -2347,6 +2372,8 @@ export default {
   '{{count}} skills': '{{count}} 個技能',
   '{{count}} agent': '{{count}} 個代理',
   '{{count}} agents': '{{count}} 個代理',
+  '{{count}} workflow': '{{count}} 個工作流程',
+  '{{count}} workflows': '{{count}} 個工作流程',
   '{{count}} hook': '{{count}} 個鉤子',
   '{{count}} hooks': '{{count}} 個鉤子',
   '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',
@@ -2434,6 +2461,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
   'Kept model as {{model}}': '模型保持為 {{model}}',
-  'Review messages held from other Qwen Code sessions (accept | deny)':
-    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny）',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
 };

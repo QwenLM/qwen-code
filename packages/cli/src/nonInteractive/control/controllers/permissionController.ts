@@ -328,7 +328,9 @@ export class PermissionController extends BaseController {
   ): Promise<void> {
     try {
       if (this.context.abortSignal.aborted) {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: `The host approval request for "${event.toolName}" was aborted.`,
+        });
         return;
       }
 
@@ -336,7 +338,9 @@ export class PermissionController extends BaseController {
       if (inputFormat !== InputFormat.STREAM_JSON) {
         // Should not happen under the current wiring; cancel
         // safely rather than silently auto-proceeding.
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: this.getInteractionUnavailableMessage(event.toolName),
+        });
         return;
       }
 
@@ -358,7 +362,9 @@ export class PermissionController extends BaseController {
       );
 
       if (response.subtype !== 'success') {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: this.getInteractionUnavailableMessage(event.toolName),
+        });
         return;
       }
 
@@ -392,9 +398,7 @@ export class PermissionController extends BaseController {
             : undefined;
         await event.respond(
           ToolConfirmationOutcome.Cancel,
-          cancelMessage
-            ? ({ cancelMessage } as ToolConfirmationPayload)
-            : undefined,
+          cancelMessage ? { cancelMessage } : undefined,
         );
       }
     } catch (error) {
@@ -409,7 +413,11 @@ export class PermissionController extends BaseController {
       // an escaped rejection here is an unhandledRejection that can
       // take down an SDK session.
       try {
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        await event.respond(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: `The host approval request for "${event.toolName}" failed: ${errorMessage}`,
+        });
       } catch (cancelError) {
         this.debugLogger.error(
           '[PermissionController] Teammate approval cancel failed:',
@@ -505,10 +513,9 @@ export class PermissionController extends BaseController {
   ): Promise<void> {
     const requiresUserInteraction =
       toolCall.invocation?.requiresUserInteraction?.() === true;
-    const interactionUnavailableMessage =
-      toolCall.request.name === ToolNames.EXIT_PLAN_MODE
-        ? 'The host could not present plan-exit approval. Use the host mode selector or /plan exit to leave plan mode.'
-        : `The host could not present the required approval for "${toolCall.request.name}".`;
+    const interactionUnavailableMessage = this.getInteractionUnavailableMessage(
+      toolCall.request.name,
+    );
     try {
       // Check if already aborted
       if (signal.aborted) {
@@ -581,7 +588,8 @@ export class PermissionController extends BaseController {
         // that channel carries the user's answers.
         if (
           requiresUserInteraction &&
-          toolCall.request.name === ToolNames.EXIT_PLAN_MODE
+          toolCall.request.name === ToolNames.EXIT_PLAN_MODE &&
+          toolCall.invocation?.canAutoApproveOnAllow?.() !== false
         ) {
           await toolCall.confirmationDetails.onConfirm(
             ToolConfirmationOutcome.ProceedOnce,
@@ -664,5 +672,11 @@ export class PermissionController extends BaseController {
     } finally {
       this.pendingOutgoingRequests.delete(toolCall.request.callId);
     }
+  }
+
+  private getInteractionUnavailableMessage(toolName: string): string {
+    return toolName === ToolNames.EXIT_PLAN_MODE
+      ? 'The host could not present plan-exit approval. Use the host mode selector or /plan exit to leave plan mode.'
+      : `The host could not present the required approval for "${toolName}".`;
   }
 }

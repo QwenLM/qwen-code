@@ -17,6 +17,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   formatVisionBridgeNoticeDisplay,
+  createNotStartedToolErrorResponse,
   LlmEventType,
   isVisionBridgeNoticeDisplay,
   ToolErrorType,
@@ -118,6 +119,10 @@ export interface MessageEmitter {
  */
 export interface JsonOutputAdapterInterface extends MessageEmitter {
   startAssistantMessage(): void;
+  restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void;
   processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): void;
@@ -602,6 +607,57 @@ export abstract class BaseJsonOutputAdapter {
    */
   startAssistantMessage(): void {
     this.startAssistantMessageInternal(this.mainAgentMessageState);
+  }
+
+  /**
+   * Starts a replacement provider attempt. Continuation retries keep the
+   * already-delivered text; fresh retries and fallbacks discard the pending
+   * assistant state. Streaming adapters override this to pair any tool_use
+   * frames that are already on the wire before resetting.
+   */
+  restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    if (preserveText) {
+      const discardedIds = new Set(
+        discardedToolCalls.map((request) => request.callId),
+      );
+      if (discardedIds.size > 0) {
+        const state = this.mainAgentMessageState;
+        const retainedBlocks: ContentBlock[] = [];
+        const retainedOpenBlocks = new Set<number>();
+        for (const [index, block] of state.blocks.entries()) {
+          if (block.type === 'tool_use' && discardedIds.has(block.id)) {
+            continue;
+          }
+          const retainedIndex = retainedBlocks.length;
+          retainedBlocks.push(block);
+          if (state.openBlocks.has(index)) {
+            retainedOpenBlocks.add(retainedIndex);
+          }
+        }
+        state.blocks = retainedBlocks;
+        state.openBlocks = retainedOpenBlocks;
+        state.currentBlockType = retainedBlocks.at(-1)?.type ?? null;
+        state.messageStarted = retainedBlocks.length > 0;
+      }
+      return;
+    }
+    this.startAssistantMessageInternal(this.mainAgentMessageState);
+  }
+
+  protected emitDiscardedAttemptToolResults(
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    const message =
+      'Skipped because the provider attempt was retried before execution.';
+    for (const request of discardedToolCalls) {
+      this.emitToolResult(
+        request,
+        createNotStartedToolErrorResponse(request, message),
+      );
+    }
   }
 
   /**

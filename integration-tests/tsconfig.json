@@ -63,6 +63,9 @@
       "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
         "../packages/core/src/utils/conversations-runtime-marker.ts"
       ],
+      "@qwen-code/qwen-code-core/subagentRuntime": [
+        "../packages/core/src/subagent-runtime.ts"
+      ],
       "@qwen-code/qwen-code-core/storage": [
         "../packages/core/src/config/storage.ts"
       ],
@@ -117,6 +120,9 @@
       ],
       "@qwen-code/acp-bridge/channelControlTimeouts": [
         "../packages/acp-bridge/src/channel-control-timeouts.ts"
+      ],
+      "@qwen-code/acp-bridge/processRegistry": [
+        "../packages/acp-bridge/src/process-registry.ts"
       ],
       "@qwen-code/acp-bridge/childHeapPolicy": [
         "../packages/acp-bridge/src/child-heap-policy.ts"
