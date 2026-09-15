@@ -1001,7 +1001,7 @@ describe('repo-context providers and trust boundary', () => {
     );
   });
 
-  it('rejects plan/out aliases and preserves the plan on artifact failure', () => {
+  it('rejects plan/out aliases and preserves the plan on artifact failure', (ctx) => {
     const root = temp();
     const worktree = join(root, 'worktree');
     mkdirSync(worktree);
@@ -1014,6 +1014,16 @@ describe('repo-context providers and trust boundary', () => {
 
     const alias = join(root, 'alias.json');
     linkSync(planPath, alias);
+    // On a volume whose ids exceed the safe-integer range (NTFS) the alias
+    // guard this asserts is INERT, not untestable: `isSameFile` stats without
+    // `bigint`, so the comparison degrades to `realpathSync.native`, which
+    // cannot resolve a hard link, and the plan would be overwritten through
+    // the alias. Tracked in #11848 rather than left as a bare skip.
+    const inode = statSync(planPath).ino;
+    if (!Number.isSafeInteger(inode) || inode <= 0) {
+      ctx.skip();
+      return;
+    }
     expect(() =>
       runRepoContext({ plan: planPath, worktree, out: alias }, [
         { provide: () => context() },

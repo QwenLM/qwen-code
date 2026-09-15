@@ -974,6 +974,11 @@ export default {
   'No tasks currently running': '現在実行中のタスクはありません',
   'No entry to show.': '表示するエントリはありません。',
   'needs approval': '承認待ち',
+  'Large workflow': '大規模なワークフロー',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大規模なワークフロー：{{agents}} 個のエージェントを予定（警告しきい値 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大規模なワークフロー：出力トークン ~{{tokens}} の見込み（警告しきい値 {{cap}}）。',
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
@@ -1702,6 +1707,10 @@ export default {
     'この拡張機能は次のスキルをインストールします:',
   'This extension will install the following subagents:':
     'この拡張機能は次のサブエージェントをインストールします:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'この拡張機能は次のワークフローをインストールします（サブエージェントを起動できる JavaScript スクリプト）:',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'インストール済みのバージョンから次のワークフロースクリプトが変更されています: {{names}}。',
   'Installation cancelled for "{{name}}".':
     '"{{name}}" のインストールをキャンセルしました。',
   '--ref and --auto-update are not applicable for marketplace extensions.':
@@ -1760,6 +1769,7 @@ export default {
   'Context files:': 'コンテキストファイル:',
   'Skills:': 'スキル:',
   'Agents:': 'エージェント:',
+  'Workflows:': 'ワークフロー:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'リンク拡張機能のインストールに失敗しました。',
@@ -2021,6 +2031,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

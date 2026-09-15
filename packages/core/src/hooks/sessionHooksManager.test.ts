@@ -307,6 +307,40 @@ describe('SessionHooksManager', () => {
       expect(matching.length).toBe(1);
     });
 
+    it('matches Claude Code tool names against runtime tool ids', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash|Write',
+        callback,
+        'Test error',
+      );
+
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'run_shell_command',
+        ).length,
+      ).toBe(1);
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'write_file',
+        ).length,
+      ).toBe(1);
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'monitor',
+        ).length,
+      ).toBe(0);
+    });
+
     it('matches pipe-separated display names against runtime tool ids', () => {
       const callback = vi.fn().mockResolvedValue({ continue: true });
 
