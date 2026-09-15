@@ -61,8 +61,12 @@ import {
 import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import { trailingReattachPartCount } from '../../services/image-payload-references.js';
-import type { ModelReasoningCapabilities } from '../../models/types.js';
-import { parseModelReasoningCapabilities } from '../reasoning-effort.js';
+import type { ResolvedReasoning } from '../reasoning-overrides.js';
+import { ensureReasoningContentOnAssistantMessage } from './provider/utils.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../reasoning-overrides.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 const OPENAI_STRICT_SCHEMA_KEYS = new Set([
@@ -89,10 +93,52 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function profileReasoning(
+  profile: NonNullable<ResolvedReasoning['profile']>,
+  reasoning: ContentGeneratorConfig['reasoning'],
+): Record<string, unknown> {
+  if (reasoning === undefined) return {};
+  const enabled = reasoning !== false;
+  const effort = reasoning && reasoning.effort;
+  switch (profile) {
+    case 'openai-reasoning':
+      return { reasoning: enabled ? reasoning : { enabled: false } };
+    case 'openai-effort':
+    case 'dashscope-effort':
+      return effort || !enabled
+        ? { reasoning_effort: enabled ? effort : 'none' }
+        : {};
+    case 'deepseek-openai':
+      return {
+        thinking: { type: enabled ? 'enabled' : 'disabled' },
+        ...(effort ? { reasoning_effort: effort } : {}),
+      };
+    case 'dashscope-thinking':
+      return { enable_thinking: enabled };
+    case 'qwen-chat-template':
+      return { chat_template_kwargs: { enable_thinking: enabled } };
+    default:
+      return {};
+  }
+}
+
 function applyConfiguredReasoningEffort(
   request: OpenAI.Chat.ChatCompletionCreateParams,
-  capabilities: ModelReasoningCapabilities | undefined,
+  capabilities: ResolvedReasoning | undefined,
 ): OpenAI.Chat.ChatCompletionCreateParams {
+  if (capabilities?.profile) {
+    const loose = request as unknown as Record<string, unknown>;
+    const { reasoning, ...rest } = loose;
+    const { effort: _effort, ...siblings } = asObject(reasoning) ?? {};
+    return {
+      ...(Object.keys(siblings).length ? { reasoning: siblings } : {}),
+      ...profileReasoning(
+        capabilities.profile,
+        reasoning as ContentGeneratorConfig['reasoning'],
+      ),
+      ...rest,
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
   if (
     !capabilities ||
     capabilities.toggleOnly ||
@@ -970,10 +1016,19 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     isStreaming: boolean,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
-    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
+    const reasoningCapabilities = resolveReasoningForModel(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      context.model,
+    );
+    const convertedMessages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       context,
     );
+    const messages =
+      reasoningCapabilities?.profile === 'deepseek-openai'
+        ? convertedMessages.map(ensureReasoningContentOnAssistantMessage)
+        : convertedMessages;
 
     // Apply provider-specific enhancements
     let baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
@@ -995,24 +1050,19 @@ export class ContentGenerationPipeline {
       ).stream = false;
     }
 
-    const authType = this.contentGeneratorConfig.authType;
-    const reasoningCapabilities = authType
-      ? parseModelReasoningCapabilities(
-          this.config.cliConfig.getResolvedModelConfig?.(
-            authType,
-            context.model,
-            this.contentGeneratorConfig.baseUrl,
-          )?.capabilities.reasoning,
-        )
-      : undefined;
+    const effectiveReasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      reasoningCapabilities,
+    );
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
-      this.contentGeneratorConfig.reasoning
+      effectiveReasoning &&
+      request.config?.thinkingConfig?.includeThoughts !== false
     ) {
       baseRequest = {
         ...baseRequest,
-        reasoning: this.contentGeneratorConfig.reasoning,
+        reasoning: effectiveReasoning,
       } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
     }
     // A `reasoning` object the user put in `samplingParams` ships verbatim (the
@@ -1020,7 +1070,10 @@ export class ContentGenerationPipeline {
     // mapping must leave it for the provider hook to translate.
     if (
       this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
-      !isOpenRouterHostname(this.contentGeneratorConfig)
+      (!reasoningCapabilities?.profile ||
+        this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined) &&
+      (reasoningCapabilities?.profile ||
+        !isOpenRouterHostname(this.contentGeneratorConfig))
     ) {
       baseRequest = applyConfiguredReasoningEffort(
         baseRequest,
@@ -1090,13 +1143,51 @@ export class ContentGenerationPipeline {
     const explicitThinkingMandatory =
       reasoningCapabilities?.canDisable === false ||
       this.requiresThinking(model);
+    const profile = reasoningCapabilities?.profile;
     const thinkingMandatory =
       explicitThinkingMandatory ||
-      getGptReasoningCapabilities(model)?.thinkingMandatory === true;
+      (!profile &&
+        getGptReasoningCapabilities(model)?.thinkingMandatory === true);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
-    if (reasoningDisabled) {
+    if (
+      (profile === 'openai-effort' || profile === 'dashscope-effort') &&
+      isReasoningEffortPlaceholder(providerRequest.reasoning_effort) &&
+      effectiveReasoning &&
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined
+    )
+      providerRequest.reasoning_effort =
+        effectiveReasoning.effort as typeof providerRequest.reasoning_effort;
+    if (reasoningDisabled && profile) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      if (
+        !thinkingMandatory ||
+        request.config?.thinkingConfig?.includeThoughts === false
+      ) {
+        delete typed['reasoning'];
+        delete typed['reasoning_effort'];
+      }
+      if (!thinkingMandatory) {
+        if (isDashScope && profile === 'dashscope-effort') {
+          delete typed['thinking_budget'];
+          delete typed['enable_thinking'];
+        }
+        const template = asObject(typed['chat_template_kwargs']);
+        Object.assign(typed, profileReasoning(profile, false));
+        if (profile === 'qwen-chat-template') {
+          delete typed['enable_thinking'];
+          typed['chat_template_kwargs'] = {
+            ...template,
+            enable_thinking: false,
+          };
+        } else if (reasoningCapabilities?.disableField === 'enable_thinking') {
+          delete typed['reasoning_effort'];
+          typed['enable_thinking'] = false;
+        }
+      }
+    } else if (reasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       // Provider buildRequest doesn't auto-inject `enable_thinking`, so a
       // guarded `in typed` check would never fire for default qwen3 configs.
@@ -1461,7 +1552,14 @@ export class ContentGenerationPipeline {
       return {};
     }
 
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const reasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      resolveReasoningForModel(
+        this.config.cliConfig,
+        this.contentGeneratorConfig,
+        request.model,
+      ),
+    );
 
     if (reasoning === false || reasoning === undefined) {
       return {};

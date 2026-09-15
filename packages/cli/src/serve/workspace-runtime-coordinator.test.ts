@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
+  AcpChildCapacityExceededError,
   WorkspaceDrainingError,
   type AcpSessionBridge,
   type BridgeWorkspaceRuntimeLifecycleSnapshot,
@@ -555,6 +556,17 @@ describe('WorkspaceRuntimeCoordinator', () => {
         async () => ({ accepted: true }),
       ),
     ).rejects.toBeInstanceOf(WorkspaceRuntimeInitializationError);
+  });
+
+  it('preserves capacity rejection when MCP needs a cold runtime', async () => {
+    const harness = makeRuntime();
+    const error = new AcpChildCapacityExceededError(1, 1);
+    harness.preheat.mockRejectedValueOnce(error);
+    await expect(
+      getWorkspaceRuntimeCoordinator(harness.runtime).runMcpRuntimeMutation(
+        async () => ({ accepted: true }),
+      ),
+    ).rejects.toBe(error);
   });
 
   it('rechecks MCP readiness after a rejected runtime mutation', async () => {

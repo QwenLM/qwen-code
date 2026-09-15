@@ -395,6 +395,45 @@ describe('ResponsesPipeline', () => {
   });
 
   describe('reasoning request shape', () => {
+    it.each([undefined, { effort: 'high' }])(
+      'applies default below an existing raw override %j',
+      async (raw) => {
+        mockResponse(
+          sseEvent('response.completed', { response: { status: 'completed' } }),
+        );
+        const config = makeCliConfig();
+        config.getResolvedModelConfig = vi.fn().mockReturnValue({
+          capabilities: {
+            reasoning: {
+              profile: 'openai-reasoning',
+              efforts: ['low', 'medium', 'high'],
+              defaultEffort: 'medium',
+            },
+          },
+        });
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig({
+            model: 'company-alias',
+            authType: 'openai-responses' as ContentGeneratorConfig['authType'],
+            ...(raw ? { extra_body: { reasoning: raw } } : {}),
+          }),
+          config,
+        );
+        for await (const _ of pipeline.executeStream(
+          { ...textRequest('hi'), model: 'company-alias' },
+          'p1',
+        )) {
+          // drain
+        }
+        const body = JSON.parse(
+          fetchMock.mock.calls[0]![1].body,
+        ) as ResponsesApiRequest;
+        expect(body.reasoning).toEqual(
+          raw ?? { effort: 'medium', summary: 'auto' },
+        );
+      },
+    );
+
     it('passes the effort straight through with no clamping, plus include + summary auto', async () => {
       mockResponse(
         sseEvent('response.completed', { response: { status: 'completed' } }),
