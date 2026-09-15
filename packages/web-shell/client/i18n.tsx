@@ -1274,6 +1274,8 @@ const EN: Messages = {
   'workflowRuns.user': 'User',
   'workflowRuns.projectDescription': 'Available in this project',
   'workflowRuns.userDescription': 'Available across projects',
+  'workflowRuns.extension': 'Extension',
+  'workflowRuns.extensionDescription': 'Provided by an installed extension',
   'workflowRuns.detail.toggle': (v) => `Show details for ${v?.name ?? ''}`,
   'workflowRuns.detail.loading': 'Loading workflow definition…',
   'workflowRuns.detail.unavailable':
@@ -5036,6 +5038,8 @@ const ZH: Messages = {
   'workflowRuns.user': '用户',
   'workflowRuns.projectDescription': '仅在当前项目中可用',
   'workflowRuns.userDescription': '在所有项目中可用',
+  'workflowRuns.extension': '扩展',
+  'workflowRuns.extensionDescription': '由已安装的扩展提供',
   'workflowRuns.detail.toggle': (v) => `查看 ${v?.name ?? ''} 的详情`,
   'workflowRuns.detail.loading': '正在加载工作流定义…',
   'workflowRuns.detail.unavailable': '这个工作流定义已不可用。',

@@ -1031,6 +1031,8 @@ export class ComputerUse {
       }
       if (
         !retriedIncompleteCapture &&
+        !capture.incompleteDetails.some((detail) =>
+          detail === "walk_deadline_reached" || detail === "element_bounds_timeout") &&
         capture.complete === false &&
         (!capture.truncated || capture.readComplete === false) &&
         envelope?.stable_element_ids !== true &&
