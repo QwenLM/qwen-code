@@ -166,9 +166,11 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   await expect.poll(() => markerOffsetRatio(page)).toBeLessThan(0.15);
   await expect.poll(() => railScrollTop(page)).toBe(0);
 
-  // Scrolling back down moves it to newer turns again.
+  // Scrolling back down moves it to newer turns again, and the rail
+  // edge-scrolls down to keep the marker visible.
   await scrollTranscriptTo(page, 0.9);
   await expect.poll(() => ariaOrdinal(page)).toBeGreaterThan(inMiddle + 3);
+  await expect.poll(() => railScrollTop(page)).toBeGreaterThan(0);
 
   // Narrowing below the rail threshold hides the rail; scrolling there must
   // not corrupt its window — widening brings the marker back inside the band.
