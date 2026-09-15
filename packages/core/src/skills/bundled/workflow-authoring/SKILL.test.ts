@@ -32,6 +32,13 @@ import {
   MAX_WORKFLOW_STALL_MS_ENV,
 } from '../../../agents/runtime/workflow-stall.js';
 import { WorkflowAgentFailedError } from '../../../agents/runtime/workflow-agent-failure.js';
+import {
+  DEFAULT_WORKFLOW_SIZE_GUIDELINE,
+  DEFAULT_WORKFLOW_SIZE_WARNING_AGENTS,
+  DEFAULT_WORKFLOW_SIZE_WARNING_TOKENS,
+  WORKFLOW_SIZE_GUIDELINE_AGENTS,
+  WORKFLOW_SIZE_GUIDELINE_SETTING_LABEL,
+} from '../../../agents/runtime/workflow-size.js';
 import type { WorkflowAgentDispatch } from '../../../agents/runtime/workflow-orchestrator.js';
 import {
   buildWorkflowToolDescription,
@@ -170,6 +177,7 @@ describe('bundled workflow-authoring skill', () => {
     // Determinism: all of Date, and the workaround.
     ['so does all of `Date`'],
     ['`new Date()`'],
+    ['`Date()`, `new Date()`'],
     ['stamp the result after the workflow returns'],
     // pipeline(): null drops the item and skips its later stages.
     ['its remaining stages are skipped'],
@@ -407,5 +415,39 @@ describe('the worked example', () => {
 
     expect(result.error?.message).toContain('args.target is required');
     expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+// The size guideline and the large-run thresholds are stated in prose here and
+// enforced in `workflow-size.ts`. Each sentence is built from the constant the
+// runtime uses, so moving a threshold without the reference turns this red.
+describe('bundled workflow-authoring skill — workflow size', () => {
+  it('states the guideline sizes the tool description offers', () => {
+    expect(DEFAULT_WORKFLOW_SIZE_GUIDELINE).toBe('medium');
+    expect(skillProse()).toContain(
+      `small (${WORKFLOW_SIZE_GUIDELINE_AGENTS.small} agents), medium (${WORKFLOW_SIZE_GUIDELINE_AGENTS.medium}, the default) or large (${WORKFLOW_SIZE_GUIDELINE_AGENTS.large})`,
+    );
+  });
+
+  it('states the large-run thresholds the runner checks', () => {
+    expect(skillProse()).toContain(
+      `(${DEFAULT_WORKFLOW_SIZE_WARNING_AGENTS} when unrestricted) or projects past ~${DEFAULT_WORKFLOW_SIZE_WARNING_TOKENS / 1_000_000}M output tokens`,
+    );
+    expect(skillProse()).toContain('it is not stopped');
+  });
+
+  it('names the setting by its label and says a mid-session change is announced', () => {
+    expect(skillProse()).toContain(
+      `the ${WORKFLOW_SIZE_GUIDELINE_SETTING_LABEL} setting`,
+    );
+    expect(skillProse()).toContain(
+      'arrives as a reminder that replaces the guideline in the description',
+    );
+  });
+
+  it('says a non-deterministic script is refused before it starts', () => {
+    expect(skillProse()).toContain(
+      'is refused before it starts, so none of its agents runs first',
+    );
   });
 });

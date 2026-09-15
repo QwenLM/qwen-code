@@ -6,6 +6,14 @@
 
 import type { SessionSourceService } from '../services/session-sources.js';
 
+import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import {
+  captureReasoningSnapshot,
+  validateReasoningCapabilities,
+  resolveReasoningForModel,
+  type ReasoningSnapshot,
+} from '../core/reasoning-overrides.js';
+
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -143,6 +151,12 @@ import { BackgroundAgentResumeService } from '../agents/background-agent-resume.
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { TurnBudget } from '../core/turn-budget.js';
+import {
+  isWorkflowSizeGuideline,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuideline,
+  type WorkflowSizeGuidelineSetting,
+} from '../agents/runtime/workflow-size.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -1193,6 +1207,11 @@ export interface ConfigParameters {
    * even when unset it fires at most once per process.
    */
   skipWorkflowUsageWarning?: boolean;
+  /**
+   * Advisory size guideline for dynamic workflows
+   * (`tools.workflowSizeGuideline`). Unset or unrecognised means the default.
+   */
+  workflowSizeGuideline?: string;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -2823,6 +2842,7 @@ export class Config {
   private goalProposalHostSupported = false;
   private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
+  private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -2915,6 +2935,8 @@ export class Config {
   private readonly webSearchSessionUsage = { calls: 0 };
   private visionModel?: string;
   private compactionModel?: string;
+  private reasoningSnapshot?: ReasoningSnapshot;
+  private latestReasoningSnapshot?: ReasoningSnapshot;
   private imageModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
@@ -3182,6 +3204,11 @@ export class Config {
     this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
+    this.workflowSizeGuideline = isWorkflowSizeGuideline(
+      params.workflowSizeGuideline,
+    )
+      ? params.workflowSizeGuideline
+      : undefined;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -4822,7 +4849,104 @@ export class Config {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.captureLatestReasoning();
     this.baseLlmClient?.clearPerModelGeneratorCache();
+  }
+
+  getReasoningSnapshot(): ReasoningSnapshot {
+    return (this.reasoningSnapshot ??= captureReasoningSnapshot(
+      this.getAllConfiguredModels(),
+    ));
+  }
+
+  stageReasoningOverrides(
+    providers: ModelProvidersConfig | undefined,
+    protocols: ProviderProtocolConfig = {},
+  ): string | undefined {
+    const previous =
+      this.latestReasoningSnapshot ?? this.getReasoningSnapshot();
+    const models = this.getAllConfiguredModels().map((model) => {
+      const prior = previous.find(
+        (row) =>
+          row.id === model.id &&
+          row.authType === model.authType &&
+          row.registryBaseUrl === model.registryBaseUrl,
+      );
+      const configured = Object.entries(providers ?? {})
+        .flatMap(([provider, entries]) =>
+          model.authType !== AuthType.QWEN_OAUTH &&
+          resolveProviderProtocol(provider, protocols) === model.authType &&
+          Array.isArray(entries)
+            ? entries
+            : [],
+        )
+        .find(
+          (entry) =>
+            entry?.id === model.id && entry.baseUrl === model.registryBaseUrl,
+        );
+      return {
+        ...model,
+        capabilities: {
+          ...model.capabilities,
+          reasoning: configured
+            ? configured.capabilities?.reasoning
+            : prior
+              ? prior.reasoning
+              : model.capabilities?.reasoning,
+        },
+      };
+    });
+    return this.captureLatestReasoning(models);
+  }
+
+  private captureLatestReasoning(
+    models = this.getAllConfiguredModels(),
+  ): string | undefined {
+    try {
+      const next = captureReasoningSnapshot(models);
+      for (const row of next) {
+        if (row.authType !== AuthType.QWEN_OAUTH || row.reasoning?.profile) {
+          validateReasoningCapabilities(
+            { model: row.id, authType: row.authType, baseUrl: row.baseUrl },
+            row.reasoning,
+          );
+        }
+      }
+      const generation = this.getContentGeneratorConfig();
+      if (generation)
+        resolveReasoningForModel(
+          this,
+          {
+            ...generation,
+            reasoningSnapshot: next,
+          },
+          generation.model,
+          true,
+        );
+      this.latestReasoningSnapshot = next;
+      return undefined;
+    } catch (error) {
+      const message = `Reasoning settings not applied; keeping the previous configuration. ${getErrorMessage(error)}`;
+      // eslint-disable-next-line no-console -- configuration rejection must be visible without debug logging
+      console.warn(message);
+      return message;
+    }
+  }
+
+  applyReasoningOverrides(): boolean {
+    if (!this.latestReasoningSnapshot) this.captureLatestReasoning();
+    const next = this.latestReasoningSnapshot;
+    if (
+      !next ||
+      JSON.stringify(next) === JSON.stringify(this.reasoningSnapshot)
+    )
+      return false;
+    this.reasoningSnapshot = next;
+    const generation = this.getContentGeneratorConfig();
+    if (generation) generation.reasoningSnapshot = next;
+    this.baseLlmClient?.clearPerModelGeneratorCache();
+    this.notifyModelChangeListeners();
+    return true;
   }
 
   /**
@@ -5828,10 +5952,7 @@ export class Config {
       return undefined;
     }
 
-    const configuredReasoning = cfg.authType
-      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
+    const configuredReasoning = resolveReasoningForModel(this, cfg);
     const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
     if (!tieredModel) return undefined;
 
@@ -6102,6 +6223,8 @@ export class Config {
       // setReasoningEffort() below. Do not add `reasoning` here — that would
       // overwrite the live tier with the new model's default and make the
       // restore a no-op.
+      this.contentGeneratorConfig.reasoningRouteBaseUrl =
+        config.reasoningRouteBaseUrl;
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
@@ -8867,6 +8990,25 @@ export class Config {
    */
   getSkipWorkflowUsageWarning(): boolean {
     return this.skipWorkflowUsageWarning;
+  }
+
+  /**
+   * The dynamic-workflow size guideline in effect: stated in the Workflow tool
+   * description, and the agent threshold of the large-run warning.
+   */
+  getWorkflowSizeGuideline(): WorkflowSizeGuidelineSetting {
+    return resolveWorkflowSizeGuidelineSetting(this.workflowSizeGuideline);
+  }
+
+  /**
+   * Apply a guideline the user changed mid-session. Runs started afterwards use
+   * it; the tool description keeps its startup value, so the caller also tells
+   * the model.
+   */
+  setWorkflowSizeGuideline(size: WorkflowSizeGuideline | undefined): void {
+    this.workflowSizeGuideline = isWorkflowSizeGuideline(size)
+      ? size
+      : undefined;
   }
 
   /**

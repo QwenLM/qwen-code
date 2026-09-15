@@ -910,6 +910,8 @@ export default {
     'This extension will install the following subagents:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     'This extension will install the following workflows (JavaScript scripts that can start subagents):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'These workflow scripts changed since the installed version: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation cancelled for "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -2075,6 +2077,11 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'Large workflow': 'Large workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
   'rejected — edit config to re-approve':
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
@@ -2526,8 +2533,6 @@ export default {
     'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
   'It is saved but does not apply while this workspace is untrusted.':
     'It is saved but does not apply while this workspace is untrusted.',
-  'Set a goal — keep working until the condition is met':
-    'Set a goal — keep working until the condition is met',
   'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',

@@ -1814,7 +1814,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         description:
-          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -3113,6 +3113,24 @@ const SETTINGS_SCHEMA = {
           'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
         showInDialog: true,
       },
+      workflowSizeGuideline: {
+        type: 'enum',
+        label: 'Dynamic Workflow Size',
+        category: 'Tools',
+        // Read on the next prompt: the change is announced to the model then,
+        // and runs started afterwards use the new agent threshold.
+        requiresRestart: false,
+        default: 'medium',
+        description:
+          'Advisory size guideline for the dynamic workflows the model writes: "small" aims for fewer than 5 agents, "medium" (the default) fewer than 15, "large" fewer than 50, and "unrestricted" sends no guideline. It is a guideline, not an enforced limit. It also sets the agent count at which a running workflow is flagged as large (QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS overrides that threshold). A change takes effect from your next message.',
+        showInDialog: true,
+        options: [
+          { value: 'small', label: 'Small (under 5 agents)' },
+          { value: 'medium', label: 'Medium (under 15 agents)' },
+          { value: 'large', label: 'Large (under 50 agents)' },
+          { value: 'unrestricted', label: 'Unrestricted (no guideline)' },
+        ],
+      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',
@@ -3534,9 +3552,9 @@ const SETTINGS_SCHEMA = {
         label: 'Cross-Session Messaging',
         category: 'Advanced',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.',
+          'Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session\'s own review class, which nothing authenticates. Set to false to keep this session invisible and unreachable.',
         showInDialog: false,
       },
       crossSessionInbound: {

@@ -57,16 +57,16 @@ export function DeleteSessionDialog({
 
   const filtered = useMemo(
     () =>
-      filterQuery
-        ? sessions.filter((s) => {
-            const q = filterQuery.toLowerCase();
-            return (
-              (s.displayName || '').toLowerCase().includes(q) ||
-              s.sessionId.toLowerCase().includes(q) ||
-              sessionMatchesGitQuery(s, q)
-            );
-          })
-        : sessions,
+      sessions.filter((session) => {
+        if (session.sourceType === 'qwen-live') return false;
+        const q = filterQuery.toLowerCase();
+        return (
+          !q ||
+          (session.displayName || '').toLowerCase().includes(q) ||
+          session.sessionId.toLowerCase().includes(q) ||
+          sessionMatchesGitQuery(session, q)
+        );
+      }),
     [sessions, filterQuery],
   );
 
