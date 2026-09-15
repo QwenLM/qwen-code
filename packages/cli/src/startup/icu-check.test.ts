@@ -7,9 +7,13 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 
 import { assertFullIcuAvailable, icuSmallNeedsProbe } from './icu-check.js';
+import { scrubNodeOptionsLoaderFlags } from '../config/shared-env-keys.js';
 
-const okProbe = () => ({ status: 0 });
-const segfaultProbe = () => ({ status: 139 });
+const okProbe = () => ({ status: 0, signal: null });
+const segfaultProbe = () => ({
+  status: null,
+  signal: 'SIGSEGV' as NodeJS.Signals,
+});
 
 describe('icuSmallNeedsProbe', () => {
   it('skips the probe on builds that record full ICU', () => {
@@ -53,6 +57,30 @@ describe('assertFullIcuAvailable', () => {
     return { exitMock, written };
   }
 
+  function withIcuSmall(value: unknown, fn: () => void) {
+    // needsProbe() reads process.config.variables; the variables object is
+    // frozen, but process.config itself is reconfigurable. Pin the branch
+    // instead of asserting a property of the runner's Node build.
+    const original = Object.getOwnPropertyDescriptor(process, 'config')!;
+    const variables = {
+      ...(original.value as { variables: Record<string, unknown> }).variables,
+    };
+    if (value === undefined) {
+      delete variables['icu_small'];
+    } else {
+      variables['icu_small'] = value;
+    }
+    Object.defineProperty(process, 'config', {
+      ...original,
+      value: { ...(original.value as object), variables },
+    });
+    try {
+      fn();
+    } finally {
+      Object.defineProperty(process, 'config', original);
+    }
+  }
+
   function withoutSegmenter(fn: () => void) {
     // force the needs-probe path by hiding Intl.Segmenter from this test's view
     const original = Intl.Segmenter;
@@ -66,11 +94,28 @@ describe('assertFullIcuAvailable', () => {
     }
   }
 
-  it('skips the probe entirely on this full-icu dev runtime', () => {
-    // dev/CI Node reports icu_small=false, so the gate is closed here
-    const probe = vi.fn(okProbe);
-    assertFullIcuAvailable(probe);
-    expect(probe).not.toHaveBeenCalled();
+  it('skips the probe on builds that record full ICU', () => {
+    withIcuSmall(false, () => {
+      const probe = vi.fn(okProbe);
+      assertFullIcuAvailable(probe);
+      expect(probe).not.toHaveBeenCalled();
+    });
+  });
+
+  it('probes on small-icu builds even when Intl.Segmenter exists', () => {
+    withIcuSmall(true, () => {
+      const probe = vi.fn(okProbe);
+      assertFullIcuAvailable(probe);
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('probes when the build does not record icu_small', () => {
+    withIcuSmall(undefined, () => {
+      const probe = vi.fn(okProbe);
+      assertFullIcuAvailable(probe);
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('exits with an actionable message when the probe child segfaults', () => {
@@ -89,14 +134,20 @@ describe('assertFullIcuAvailable', () => {
     });
   });
 
-  it('treats a probe that cannot even spawn as missing ICU', () => {
-    captureFailure();
-    const throwingProbe = () => {
-      throw new Error('spawn failed');
-    };
-    withoutSegmenter(() => {
-      expect(() => assertFullIcuAvailable(throwingProbe)).toThrow('exit:1');
+  it('warns and continues when the probe process cannot even start', () => {
+    // A spawn-level failure is not an ICU verdict: the host may be fine, and
+    // refusing it would be a wrong diagnosis.
+    const { exitMock, written } = captureFailure();
+    const spawnErrorProbe = () => ({
+      status: null,
+      signal: null,
+      error: new Error('spawn failed'),
     });
+    withoutSegmenter(() => {
+      assertFullIcuAvailable(spawnErrorProbe);
+    });
+    expect(exitMock).not.toHaveBeenCalled();
+    expect(written.join('')).toContain('failed to start');
   });
 
   it('probes when the Intl binding itself is absent', () => {
@@ -125,13 +176,13 @@ describe('assertFullIcuAvailable', () => {
       withoutSegmenter(() => {
         assertFullIcuAvailable((command, args) => {
           captured = args;
-          return { status: 0 };
+          return { status: 0, signal: null };
         });
       });
       expect(captured).toEqual([
         '--icu-data-dir=/tmp/fake-icu',
         '-e',
-        expect.any(String),
+        expect.stringContaining('.segment('),
       ]);
 
       process.execArgv = ['--icu-data-dir', '/tmp/fake-icu'];
@@ -139,14 +190,14 @@ describe('assertFullIcuAvailable', () => {
       withoutSegmenter(() => {
         assertFullIcuAvailable((command, args) => {
           captured = args;
-          return { status: 0 };
+          return { status: 0, signal: null };
         });
       });
       expect(captured).toEqual([
         '--icu-data-dir',
         '/tmp/fake-icu',
         '-e',
-        expect.any(String),
+        expect.stringContaining('.segment('),
       ]);
     } finally {
       process.execArgv = original;
@@ -178,5 +229,33 @@ describe('assertFullIcuAvailable', () => {
         delete process.env['NODE_OPTIONS'];
       }
     }
+  });
+
+  it('keeps --icu-data-dir in NODE_OPTIONS while dropping its loader hooks', () => {
+    // NODE_OPTIONS is a documented carrier of the ICU data path: the probe
+    // child must keep that flag even while the bogus --require is scrubbed.
+    const hadOptions = 'NODE_OPTIONS' in process.env;
+    const originalOptions = process.env['NODE_OPTIONS'];
+    process.env['NODE_OPTIONS'] =
+      '--require /nonexistent-icu-test-module --icu-data-dir=/tmp/ignored-on-full-icu';
+    try {
+      withoutSegmenter(() => {
+        assertFullIcuAvailable();
+      });
+    } finally {
+      if (hadOptions) {
+        process.env['NODE_OPTIONS'] = originalOptions;
+      } else {
+        delete process.env['NODE_OPTIONS'];
+      }
+    }
+  });
+
+  it('drops only loader hooks from a NODE_OPTIONS value', () => {
+    expect(
+      scrubNodeOptionsLoaderFlags(
+        '--require /bogus --icu-data-dir=/icu --max-old-space-size=4096 --import=./spy.mjs',
+      ),
+    ).toBe('--icu-data-dir=/icu --max-old-space-size=4096');
   });
 });

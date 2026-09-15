@@ -6,7 +6,11 @@
 
 import { spawnSync } from 'node:child_process';
 
-import { writeStderrLine } from './stdioHelpers.js';
+import {
+  scrubInheritedLoaderEnv,
+  scrubNodeOptionsLoaderFlags,
+} from '../config/shared-env-keys.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 /**
  * The interactive UI creates an `Intl.Segmenter` at module load
@@ -31,13 +35,31 @@ const ICU_ERROR_MESSAGE = [
   'with full-icu, then run qwen again.',
 ].join(' ');
 
-type Probe = (command: string, args: string[]) => { status: number | null };
+type ProbeResult = {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error?: Error;
+};
+
+type Probe = (command: string, args: string[]) => ProbeResult;
 
 const defaultProbe: Probe = (command, args) => {
   // An inherited NODE_OPTIONS with a failing --require/--import would crash
-  // the child for reasons unrelated to ICU and produce a wrong diagnosis.
+  // the child for reasons unrelated to ICU and produce a wrong diagnosis, so
+  // the child gets the canonical loader-env scrub; NODE_OPTIONS itself is
+  // restored after a hook-only scrub because it also carries --icu-data-dir,
+  // which a host repaired that way still needs in the child.
   const env = { ...process.env };
-  delete env['NODE_OPTIONS'];
+  scrubInheritedLoaderEnv(env);
+  for (const key of ['NODE_OPTIONS', 'npm_config_node_options']) {
+    const inherited = process.env[key];
+    if (inherited) {
+      const kept = scrubNodeOptionsLoaderFlags(inherited);
+      if (kept) {
+        env[key] = kept;
+      }
+    }
+  }
   return spawnSync(command, args, { stdio: 'ignore', env });
 };
 
@@ -87,13 +109,22 @@ export function assertFullIcuAvailable(probe: Probe = defaultProbe): void {
   if (!needsProbe()) {
     return;
   }
-  let status: number | null;
+  let result: ProbeResult;
   try {
-    status = probe(process.execPath, probeArgs()).status;
+    result = probe(process.execPath, probeArgs());
   } catch {
-    status = null;
+    result = { status: null, signal: null, error: new Error('probe threw') };
   }
-  if (status !== 0) {
+  if (result.error) {
+    // A child that never started is not a verdict on this host's ICU data:
+    // warn and continue rather than refuse a healthy host.
+    writeStderrLine(
+      'Qwen Code could not probe the Node.js ICU runtime (the probe process ' +
+        'failed to start); continuing without the check.',
+    );
+    return;
+  }
+  if (result.signal || result.status !== 0) {
     writeStderrLine(ICU_ERROR_MESSAGE);
     process.exit(1);
   }
