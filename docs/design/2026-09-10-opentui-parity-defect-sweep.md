@@ -1097,6 +1097,19 @@ beside the ctrl+E one, the wizard's base-URL case pasting a two-line value and
 landing a character inside its first line, and a mutation that returns the bare
 key to the value-end jump — it fails both.
 
+A second review-round finding was a spelling rather than a behaviour: the key
+that erases the word left of the caret. ink binds ctrl+W, and this port erases
+a word for that and for a backspace carrying a modifier, which is what a
+terminal that reports modifiers sends. A terminal that reports none sends the
+bare byte 0x1f instead, and that byte reached a dialog field and did nothing —
+not inserted, since a control character is not printable, and not handled,
+since only the composer had been taught the byte. Both field paths now ask the
+composer's own predicate, so the one spelling they had not shared is shared.
+The mutation that takes it back out fails the single assertion that feeds the
+byte and leaves the ctrl+W arm of the same case green, which is what makes that
+case say the byte travels on its own rather than merely that word deletion
+works.
+
 Three rendering differences stand. ink windows a field to a fixed column count
 and shows only the line the caret is on, so a pasted multi-line value hides
 everything off that line, while these rows render the whole value. ink paints its
@@ -1127,12 +1140,13 @@ shape before the caret existed at all — ink showing a value its flow has alrea
 discarded is recorded as a follow-up rather than reproduced here.
 
 Coverage is twenty-two new unit tests in three suites — thirteen of them the
-model compared against ink, the rest the fields that use it — plus eight
+model compared against ink, the rest the fields that use it — plus nine
 mutations, each failing the tests that own the behaviour taken away: a left
 arrow that moves nothing, the context-window field's typing branch, the two
 end-of-line jumps, forward delete, a modified Delete that erases a character
-instead of passing through, ctrl+W, a row that stops re-mounting, and a bare End
-folded back into the ctrl+E jump. On a machine, a new scenario answers one
+instead of passing through, ctrl+W, a row that stops re-mounting, a bare End
+folded back into the ctrl+E jump, and the legacy word-erase byte handed back to
+the dialog. On a machine, a new scenario answers one
 question from its free-text row on both legs, with a single question so that
 neither the tab clamp nor the double-fire recorded under Decision 21 can be what
 produced the frame: six characters typed, the caret taken back two cells, one

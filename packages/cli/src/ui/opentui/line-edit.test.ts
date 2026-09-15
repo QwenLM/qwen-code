@@ -389,11 +389,12 @@ describe('line-edit', () => {
       );
     });
 
-    it('deletes a word from ctrl+W and a modified backspace', () => {
+    it('deletes a word from ctrl+W, a modified backspace, and the byte a legacy terminal sends for it', () => {
       for (const k of [
         key('w', { ctrl: true }),
         key('backspace', { ctrl: true }),
         key('backspace', { meta: true }),
+        key('unknown', { sequence: '\x1f' }),
       ]) {
         expect(applyLineKey({ text: 'https://openai', cursor: 14 }, k)).toEqual(
           {

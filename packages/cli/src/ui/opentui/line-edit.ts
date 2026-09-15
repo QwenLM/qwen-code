@@ -48,6 +48,7 @@ import {
   stripUnsafeCharacters,
   toCodePoints,
 } from '../utils/textUtils.js';
+import { isDeleteWordBackwardSequence } from './input-prompt-key.js';
 
 export interface LineState {
   /** The field's whole value, line breaks included. */
@@ -240,7 +241,10 @@ export function applyLineKey(
   if (name === 'end') return moveCaretLineEnd(next);
   if (ctrl && name === 'e') return moveCaretEnd(next);
   if (ctrl && name === 'w') return deleteWordLeftAtCaret(next);
-  if (modified && (name === 'backspace' || sequence === '\x7f')) {
+  if (
+    isDeleteWordBackwardSequence(sequence) ||
+    (modified && (name === 'backspace' || sequence === '\x7f'))
+  ) {
     return deleteWordLeftAtCaret(next);
   }
   if (name === 'backspace' || sequence === '\x7f' || (ctrl && name === 'h')) {
