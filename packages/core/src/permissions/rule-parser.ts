@@ -959,13 +959,15 @@ export function splitCompoundCommandSegments(
   // Reading that `#` as a comment swallowed the `;` and folded both commands
   // into one allow-covered segment.
   let paramDepth = 0;
-  // Nesting depth of the substitutions whose body is scanned without honouring
-  // a `}`: `$( … )` and backtick substitutions. bash parses a substitution body
-  // before it looks for the `}` that closes an enclosing `${ … }`, so a brace
-  // inside one must not close the expansion — `bash -xc 'x=""; echo
-  // ${x:-$(echo }) #c} ; touch m ; echo SECOND'` traces `+ touch m` and runs the
-  // tail, while counting that `}` as the closer dropped the depth early and the
-  // literal `#` after it then swallowed the real `;`.
+  // Nesting depth of `$( … )` command substitutions only — backtick bodies are
+  // tracked separately by `backtickDepth` below. A substitution body is
+  // scanned without honouring a `}`: bash parses the body before it looks for
+  // the `}` that closes an enclosing `${ … }`, so a brace inside one must not
+  // close the expansion — `bash -xc 'x=""; echo ${x:-$(echo }) #c} ; touch m ;
+  // echo SECOND'` traces `+ touch m` and runs the tail, while counting that
+  // `}` as the closer dropped the depth early and the literal `#` after it
+  // then swallowed the real `;`. Both counters suppress the `}` closer, which
+  // is why the `}` guard below consults both.
   let commandSubDepth = 0;
   // 0 or 1: whether the scanner is inside a backtick body. It is the only place
   // a `#`-comment ends at a backtick rather than at the physical newline, so the
@@ -1069,6 +1071,7 @@ export function splitCompoundCommandSegments(
       isCommentStart(command, i)
     ) {
       const stopAtBacktick = backtickDepth > 0;
+      const commentStart = i;
       while (
         i < command.length &&
         command[i] !== '\n' &&
@@ -1079,6 +1082,16 @@ export function splitCompoundCommandSegments(
         )
       ) {
         i++;
+      }
+      // A comment that is the whole pending text (a full-line comment, the
+      // common case in a multi-line command) produces no segment of its own:
+      // emitting one would match no Bash(...) rule and drag the most
+      // restrictive aggregation to ask although bash runs only the real
+      // commands around it. When the skip stopped at a newline the operator
+      // scan then emits an empty segment, which is not pushed; when it ran to
+      // the end of input the final segment is empty and is not pushed either.
+      if (command.slice(lastSplit, commentStart).trim() === '') {
+        lastSplit = i;
       }
       i--; // -1 because the loop will i++, landing back on the delimiter
       continue;

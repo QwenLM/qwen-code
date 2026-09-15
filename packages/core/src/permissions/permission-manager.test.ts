@@ -27,6 +27,7 @@ import {
   buildHumanReadableRuleLabel,
   TOOL_NAME_ALIASES,
 } from './rule-parser.js';
+import { stripHeredocBodies } from './shell-semantics.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -798,12 +799,11 @@ describe('splitCompoundCommand', () => {
 
   // A word starts after an operator as well as after whitespace:
   // `bash -xc "echo a;#c ; rm -rf /tmp/x"` traces a single `+ echo a`. The
-  // leftover `#c …` segment is pre-existing behaviour — bash runs one command
-  // here, not two — and is harmless in the fail-closed direction.
+  // comment is the only pending text after the `;`, so it is dropped rather
+  // than emitted as a segment of its own.
   it('reads a # straight after an operator as a comment', async () => {
     expect(splitCompoundCommand('echo a;#c ; rm -rf /tmp/x')).toEqual([
       'echo a',
-      '#c ; rm -rf /tmp/x',
     ]);
   });
 
@@ -833,13 +833,42 @@ describe('splitCompoundCommand', () => {
     },
   );
 
-  // `#` at index 0 is at a word start, so a shebang line is a comment and the
-  // newline after it still bounds the real command.
+  // `#` at index 0 is at a word start, so a shebang line is a comment; being
+  // the whole pending text it is dropped, and the newline after it still
+  // bounds the real command.
   it('treats a leading # as a comment', async () => {
-    expect(splitCompoundCommand('#!/bin/sh\necho hi')).toEqual([
-      '#!/bin/sh',
-      'echo hi',
+    expect(splitCompoundCommand('#!/bin/sh\necho hi')).toEqual(['echo hi']);
+  });
+
+  // A full-line comment is the whole pending text between two boundaries, so
+  // it is dropped from the output rather than emitted as its own segment —
+  // the most common comment placement in a multi-line command (#11815).
+  it('drops a full-line comment between two commands', async () => {
+    expect(splitCompoundCommand('npm install\n# run the tests\nnpm test')).toEqual([
+      'npm install',
+      'npm test',
     ]);
+  });
+
+  // The composition the Bash-rule paths use: heredoc bodies are stripped
+  // before the split, so body text — here a stray backtick — cannot drive the
+  // comment or quote state, and the real tail keeps its own segment.
+  it('keeps the tail its own segment after a heredoc with a stray backtick', async () => {
+    expect(
+      splitCompoundCommand(
+        stripHeredocBodies("cat <<'EOF'\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x"),
+      ),
+    ).toEqual(['cat <<\'EOF\'', "echo a # x'` y'", 'rm -rf /tmp/x']);
+  });
+
+  // A commented-out `<<EOF` opens no heredoc, so the following line is a real
+  // command and must survive the strip.
+  it('does not strip real commands after a commented heredoc marker', async () => {
+    expect(
+      splitCompoundCommand(
+        stripHeredocBodies('echo hi # note <<EOF\nrm -rf /tmp/x'),
+      ),
+    ).toEqual(['echo hi # note <<EOF', 'rm -rf /tmp/x']);
   });
 
   // The comment ends at the *physical* newline, and that newline stays a
@@ -892,6 +921,16 @@ describe('splitCompoundCommand', () => {
     [
       'echo } ${x:- a #b} ; rm -rf /tmp/x',
       ['echo } ${x:- a #b}', 'rm -rf /tmp/x'],
+    ],
+    // The `commandSubDepth > 0` clamp on the `)` decrement is load-bearing:
+    // the stray `)` of a bare subshell must not drive the depth negative, or
+    // the `}` guard's `commandSubDepth === 0` conjunct would fail, the
+    // expansion would stay open, the `#` would read as literal, and the `;`
+    // inside the comment bash hides would become a boundary — a false deny on
+    // an `rm` bash never runs. Removing the clamp turns this row red.
+    [
+      '( ls ) ; echo ${x} # c ; rm -rf /tmp/x',
+      ['( ls )', 'echo ${x} # c ; rm -rf /tmp/x'],
     ],
   ])(
     'keeps the # semantics of %s around a parameter expansion',
@@ -2850,13 +2889,13 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
-    // Only `walkCompoundCommand` strips heredoc bodies; the Bash-rule paths
-    // split the raw command, so this `#` line reaches the comment state. bash
-    // hands that line to `cat` as data and never runs the `rm` —
-    // `bash -xc $'cat <<EOF\n# hi ; rm -rf /\nEOF'` traces only `+ cat` — so the
-    // deny that fired before this change was a false positive on text that is
-    // never executed. Making these paths heredoc-aware is #9417's job, not
-    // this change's.
+    // The Bash-rule paths strip heredoc bodies before splitting (the same
+    // entry point `walkCompoundCommand` already uses), so the `#` line never
+    // reaches the comment state and only `cat <<EOF` is evaluated. bash hands
+    // the body to `cat` as data and never runs the `rm` —
+    // `bash -xc $'cat <<EOF\n# hi ; rm -rf /\nEOF'` traces only `+ cat` — and a
+    // bare `cat` is read-only, so the verdict is allow. The deny that fired
+    // before this change was a false positive on text that is never executed.
     it('heredoc body comment line: no deny on text bash never runs', async () => {
       pm = new PermissionManager(
         makeConfig({
@@ -2871,7 +2910,87 @@ describe('PermissionManager', () => {
           toolName: 'run_shell_command',
           command: 'cat <<EOF\n# hi ; rm -rf /\nEOF',
         }),
+      ).toBe('allow');
+    });
+
+    // Recorded decision: `xargs rm` turns the heredoc body into argv and
+    // really runs it, and once the body is stripped a `Bash(rm *)` deny can no
+    // longer catch that — argument-level awareness for a non-shell consumer is
+    // #9417's scope. Until then the bare `xargs rm` head matches no rule and
+    // the command resolves to ask, so the user is still prompted; it must
+    // never resolve to allow.
+    it('heredoc body feeding a non-shell consumer: ask, not allow', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'xargs rm <<EOF\n# hi ; rm -rf /tmp/x\nEOF',
+        }),
       ).toBe('ask');
+    });
+
+    // A commented-out `<<EOF` opens no heredoc, so the following line is a
+    // real command bash runs — the strip must not read the comment as a
+    // heredoc marker and hide that command from the deny.
+    it('commented heredoc marker opens no heredoc: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hi # note <<EOF\nrm -rf /tmp/x',
+        }),
+      ).toBe('deny');
+    });
+
+    // A backtick in a heredoc body is data bash never parses, so it must not
+    // reach the splitter's `backtickDepth`: left counted, it stranded the
+    // depth at 1, the genuine comment on the later line stopped at the
+    // backtick inside it, and the re-scanned apostrophe opened a quote that
+    // never closed, folding the final `rm` into the comment segment — allow,
+    // while bash runs the rm. Stripping the body before the split keeps it
+    // from driving any scanner state.
+    it('a backtick in a heredoc body does not corrupt the comment state: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(*)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cat <<'EOF'\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x",
+        }),
+      ).toBe('deny');
+    });
+
+    // The full-line comment used to survive as its own segment, match no
+    // Bash(...) rule, and drag the most-restrictive aggregation to ask although
+    // bash runs exactly the two allowed commands (#11815).
+    it('full-line comment between two allowed commands: no false prompt', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(npm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npm install\n# run the tests\nnpm test',
+        }),
+      ).toBe('allow');
     });
 
     // The comment state reads a `#` literal wherever bash does not tokenize a
