@@ -5227,16 +5227,23 @@ describe('MessageList — turn collapse (DOM)', () => {
   });
 
   it('scrollToMessage auto-expands the collapsed turn that holds the target', () => {
+    vi.useFakeTimers();
     const ref = createRef<MessageListHandle>();
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')], ref);
+    const onSettled = vi.fn();
     expect(isCollapsed(c, 'g1')).toBe(true);
     let found = false;
     act(() => {
-      found = ref.current!.scrollToMessage('g1', 'call-g1');
+      found = ref.current!.scrollToMessage('g1', 'call-g1', onSettled);
     });
     expect(found).toBe(true);
     expect(has(c, 'g1')).toBe(true);
     expect(isCollapsed(c, 'g1')).toBe(false);
+    expect(onSettled).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(150));
+
+    expect(onSettled).toHaveBeenCalledOnce();
   });
 
   it('smooth-scrolls the page when a new chat prompt appears', async () => {

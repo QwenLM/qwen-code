@@ -104,6 +104,7 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
+  const restoreOwner = useRef<symbol | undefined>(undefined);
   const restoredScrollTop = useRef<number | undefined>(undefined);
   const loadFrame = useRef<number | undefined>(undefined);
   useLayoutEffect(
@@ -256,8 +257,8 @@ export const TranscriptViewport = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
-      scrollToMessage: (id, callId) =>
-        list.current?.scrollToMessage(id, callId) ?? false,
+      scrollToMessage: (id, callId, onSettled) =>
+        list.current?.scrollToMessage(id, callId, onSettled) ?? false,
       scrollToBottom: (behavior) => {
         if (historical || loading) returnToLive();
         if (!historical) list.current?.scrollToBottom(behavior);
@@ -267,9 +268,9 @@ export const TranscriptViewport = forwardRef<
   );
 
   const restoreReadingAnchor = useCallback(
-    (saved: ReadingAnchor) => {
+    (saved: ReadingAnchor, onSettled: () => void) => {
       const scroll = scroller();
-      if (!scroll) return;
+      if (!scroll) return true;
       const child = saved.callId
         ? [
             ...(root.current?.querySelectorAll<HTMLElement>(
@@ -297,17 +298,58 @@ export const TranscriptViewport = forwardRef<
           scroll.getBoundingClientRect().top -
           saved.offset;
         restoredScrollTop.current = scroll.scrollTop;
-        return;
+        return true;
       }
       const message = messages.find((candidate) =>
         candidate.sourceBlockIds?.includes(saved.source),
       );
-      if (message) {
-        list.current?.scrollToMessage(message.id, saved.callId);
-        restoredScrollTop.current = scroll.scrollTop;
-      }
+      return message &&
+        list.current?.scrollToMessage(message.id, saved.callId, onSettled)
+        ? 'pending'
+        : true;
     },
     [messages, rows, scroller],
+  );
+
+  const restoreOverFrames = useCallback(
+    (step: (onSettled: () => void) => boolean | 'pending') => {
+      const owner = Symbol();
+      restoreOwner.current = owner;
+      restoring.current = true;
+      const intent = scrollIntent.current;
+      let frame = 0;
+      let remaining = 8;
+      const finish = (updateFollow = true) => {
+        if (restoreOwner.current !== owner) return;
+        restoreOwner.current = undefined;
+        restoring.current = false;
+        if (updateFollow) updateFollowRef.current();
+      };
+      const restore = () => {
+        if (restoreOwner.current !== owner || intent !== scrollIntent.current) {
+          finish();
+          return;
+        }
+        const result = step(finish);
+        if (restoreOwner.current !== owner || intent !== scrollIntent.current) {
+          finish();
+          return;
+        }
+        if (result === 'pending') return;
+        if (!result) {
+          finish();
+          return;
+        }
+        if (--remaining > 0) frame = requestAnimationFrame(restore);
+        else finish();
+      };
+      restore();
+      return () => {
+        cancelAnimationFrame(frame);
+        finish(false);
+      };
+    },
+    [],
   );
 
   useLayoutEffect(() => {
@@ -323,14 +365,9 @@ export const TranscriptViewport = forwardRef<
     if (!changedView && !changedMessages && !targetBlockId) return;
     if (changedView) anchor.current = undefined;
     if (!historical && !targetBlockId) return;
-    restoring.current = true;
-    let frame = 0;
-    let remaining = 8;
-    const intent = scrollIntent.current;
-    const restore = () => {
-      if (intent !== scrollIntent.current) return;
+    return restoreOverFrames((onSettled) => {
       const scroll = scroller();
-      if (!scroll) return;
+      if (!scroll) return false;
       const saved = anchor.current;
       const target =
         targetBlockId &&
@@ -338,25 +375,18 @@ export const TranscriptViewport = forwardRef<
           message.sourceBlockIds?.includes(targetBlockId),
         );
       if (target) {
-        list.current?.scrollToMessage(target.id);
+        anchor.current = undefined;
+        if (list.current?.scrollToMessage(target.id, undefined, onSettled))
+          return 'pending';
       } else if (saved) {
-        restoreReadingAnchor(saved);
+        return restoreReadingAnchor(saved, onSettled);
       } else if (changedView) {
         scroll.scrollTop =
           entryDirection.current === 'newer' ? 0 : scroll.scrollHeight;
       }
       capture();
-      if (--remaining > 0) frame = requestAnimationFrame(restore);
-      else {
-        restoring.current = false;
-        updateFollowRef.current();
-      }
-    };
-    restore();
-    return () => {
-      cancelAnimationFrame(frame);
-      restoring.current = false;
-    };
+      return true;
+    });
   }, [
     messages,
     viewKey,
@@ -364,6 +394,7 @@ export const TranscriptViewport = forwardRef<
     viewport.target,
     capture,
     restoreReadingAnchor,
+    restoreOverFrames,
     scroller,
   ]);
 
@@ -373,25 +404,38 @@ export const TranscriptViewport = forwardRef<
     const content = scroll?.firstElementChild;
     if (!scroll || !content) return;
     let frame = 0;
+    let cancelRestore: (() => void) | undefined;
     const observer = new ResizeObserver(() => {
       if (!anchor.current || restoring.current || frame) return;
       const intent = scrollIntent.current;
       frame = requestAnimationFrame(() => {
         frame = 0;
         const saved = anchor.current;
-        if (!saved || intent !== scrollIntent.current) return;
-        restoring.current = true;
-        restoreReadingAnchor(saved);
-        capture();
-        restoring.current = false;
+        if (!saved || restoring.current || intent !== scrollIntent.current)
+          return;
+        cancelRestore = restoreOverFrames((onSettled) => {
+          const current = anchor.current;
+          if (!current || intent !== scrollIntent.current) return false;
+          const result = restoreReadingAnchor(current, onSettled);
+          capture();
+          return result;
+        });
       });
     });
     observer.observe(content);
     return () => {
       observer.disconnect();
       cancelAnimationFrame(frame);
+      cancelRestore?.();
     };
-  }, [capture, historical, restoreReadingAnchor, scroller, viewKey]);
+  }, [
+    capture,
+    historical,
+    restoreReadingAnchor,
+    restoreOverFrames,
+    scroller,
+    viewKey,
+  ]);
 
   const load = (direction: 'older' | 'newer') => {
     if (loadFrame.current !== undefined) return;
@@ -429,6 +473,7 @@ export const TranscriptViewport = forwardRef<
     loadFrame.current = undefined;
     viewport.cancelSelection();
     if (!loading) anchor.current = undefined;
+    restoreOwner.current = undefined;
     restoring.current = false;
   };
   const loadAtEdge = (direction?: 'older' | 'newer') => {
