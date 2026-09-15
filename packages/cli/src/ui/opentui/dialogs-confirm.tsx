@@ -794,10 +794,11 @@ function AskUserQuestionFlow(props: {
     [],
   );
 
-  // ink sizes the chip row against the width a tool confirmation gets in the
-  // transcript — the terminal minus 4 for the history item, minus 2 more for
-  // the confirmation's own padding — and reserves every cell the row spends
-  // outside the header text. Recomputed per render so answering re-fits it.
+  // The overheads below are ink's, taken line for line; the width they come off
+  // is not. ink draws its row in the box a tool confirmation gets inside the
+  // transcript, while this one spends two columns of margin, plus the padding
+  // already charged inside `rowOverhead`. Recomputed per render so answering
+  // re-fits it.
   const answeredHeaders = questions.filter(
     (_, idx) => answerFor(idx) !== undefined,
   ).length;
@@ -810,7 +811,7 @@ function AskUserQuestionFlow(props: {
     2 * answeredHeaders; // " ✓" after each answered header
   const headerCap = computeHeaderCap(
     questions.map((q) => getCachedStringWidth(q.header)),
-    width - 6 - rowOverhead,
+    width - 2 - rowOverhead,
   );
 
   useKeyboard((key) => {

@@ -516,6 +516,44 @@ describe('OpenTuiToolConfirmation', () => {
       vi.useRealTimers();
     });
 
+    it('fits headers that fill the chip row, and still clips ones that cannot fit', () => {
+      const wide = (tag: string) => tag.padEnd(30, '-');
+      const twoWideHeaders = (
+        onConfirm: (
+          outcome: ToolConfirmationOutcome,
+          payload?: ToolConfirmationPayload,
+        ) => Promise<void>,
+      ): ToolCallConfirmationDetails => ({
+        type: 'ask_user_question',
+        title: 'Two questions',
+        questions: [
+          {
+            question: 'Pick a deploy target?',
+            header: wide('deploy'),
+            options: [{ label: 'staging', description: 'the staging target' }],
+          },
+          {
+            question: 'Pick a region?',
+            header: wide('region'),
+            options: [{ label: 'eu', description: 'the eu region' }],
+          },
+        ],
+        onConfirm,
+      });
+
+      // Eighty columns leaves this row room for both headers, and it is this arm
+      // that fails when ink's transcript indent is charged to it as well.
+      mocks.state.dimensions = { width: 80, height: 40 };
+      const room = mount(twoWideHeaders(async () => {})).textContent ?? '';
+      expect(room).toContain(wide('deploy'));
+      expect(room).toContain(wide('region'));
+
+      // Forty columns less leaves no room, so the cap still bites.
+      mocks.state.dimensions = { width: 40, height: 40 };
+      const tight = mount(twoWideHeaders(async () => {})).textContent ?? '';
+      expect(tight).not.toContain(wide('deploy'));
+    });
+
     it('numbers each option and renders its description and the free-text row', () => {
       const text = mount(multiAskDetails(async () => {})).textContent ?? '';
       expect(text).toContain('1. staging');

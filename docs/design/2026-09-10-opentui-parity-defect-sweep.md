@@ -557,13 +557,24 @@ renderers printed the same settled card word for word.
 Everything ink draws is now drawn here, and the geometry was derived rather
 than guessed. The chip row that names each question and marks the answered
 ones is capped by a water-filling helper imported from ink's own dialog rather
-than reimplemented, fed the width a confirmation actually gets — the terminal
-minus the four columns the transcript item spends, minus the two the
-confirmation spends inside it — and then reduced by every cell the row spends
-outside the header text: the padding, the active-tab marker, the submit chip,
-one gap per chip, two columns of prefix per header, and two more for each
-answered mark. It is recomputed on every render, because answering changes the
-marks.
+than reimplemented, and reduced by every cell the row spends outside the header
+text: the padding, the active-tab marker, the submit chip, one gap per chip,
+two columns of prefix per header, and two more for each answered mark. It is
+recomputed on every render, because answering changes the marks.
+
+ink's overhead terms were taken line for line. The width they are subtracted
+from was carried over too, and a review round found that second number wrong:
+it belongs to the box ink draws the row in, and this row sits in another one,
+which spends two columns of margin and one of padding on each side — the
+padding already being one of the overheads above. Charging that padding twice
+and ink's transcript indent besides took eight columns off a row that spends
+four, so a header was ellipsized where the row still had room. That the
+corrected base is the row's real width, and not merely a larger number, was
+settled against a laid-out frame rather than the JSX props it came from: three
+twelve-cell headers in a fifty-eight-column terminal print whole here across 52
+of the 54 cells the box leaves, and no row reaches the terminal's last column.
+ink ellipsizes all three at the same width; that window is recorded below, and
+matching it would mean clipping text this row has room for.
 
 Two divergences are deliberate, and they are of different kinds. The first is a
 defect ink has and this port does not. ink answers a typed free-text entry twice
@@ -1771,6 +1782,12 @@ What was verified, and how far the verification reaches:
   row moving, on top of the three each side already loses to the wrap break at
   the same checkpoint. Decision 22 fixed what the inline confirmation draws;
   this is where it is mounted, which is a separate change.
+- The question dialog's chip row clips two columns later here than in ink.
+  Decision 21 charges it against the box this row is drawn in, and that box is
+  two columns wider than ink's, so over a band of terminal widths the headers
+  print whole here where ink has already reached for the ellipsis — measured at
+  fifty-eight columns with three twelve-cell headers, on both legs. Matching
+  ink's number would clip text this row has room for.
 - A dialog field ports the one-line slice of ink's buffer, not all of it. Four
   key families ink's text input binds are not ported: word jumps
   (ctrl/alt+←/→, alt+b/f), delete-word-right (alt+d, ctrl/alt+Delete), kill-line
