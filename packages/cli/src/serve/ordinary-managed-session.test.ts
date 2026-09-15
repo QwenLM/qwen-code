@@ -61,7 +61,10 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 
-const spawnHarness = vi.hoisted(() => ({ blockLegacySpawn: false }));
+const spawnHarness = vi.hoisted(() => ({
+  blockLegacySpawn: false,
+  blockManagedSpawn: false,
+}));
 
 vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
   const actual =
@@ -79,6 +82,30 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
         return inner(cwd, env, signal);
       };
       actual.markChannelFactoryForwardsChildEnv(factory);
+      return factory;
+    },
+  };
+});
+
+vi.mock('./managed-agent-channel.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-agent-channel.js')>();
+  const { markChannelFactoryForwardsChildEnv } = await import(
+    '@qwen-code/acp-bridge/spawnChannel'
+  );
+  return {
+    ...actual,
+    createManagedAgentChannelFactory: (
+      options: Parameters<typeof actual.createManagedAgentChannelFactory>[0],
+    ) => {
+      const inner = actual.createManagedAgentChannelFactory(options);
+      const factory: ChannelFactory = (cwd, env, signal) => {
+        if (spawnHarness.blockManagedSpawn) {
+          return Promise.reject(new Error('managed-spawn-blocked'));
+        }
+        return inner(cwd, env, signal);
+      };
+      markChannelFactoryForwardsChildEnv(factory);
       return factory;
     },
   };
@@ -109,6 +136,7 @@ describe('ordinary REST session Managed owner', () => {
 
   beforeEach(async () => {
     spawnHarness.blockLegacySpawn = false;
+    spawnHarness.blockManagedSpawn = false;
     modelHold = undefined;
     modelReply = 'text';
     modelRequests = [];
@@ -413,6 +441,36 @@ describe('ordinary REST session Managed owner', () => {
     return sessionId;
   }
 
+  function transcriptRecord(
+    sessionId: string,
+    uuid: string,
+    fields: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      uuid,
+      parentUuid: 'root',
+      sessionId,
+      cwd: workspace,
+      timestamp: '2026-09-15T00:00:00.000Z',
+      version: 'test',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: uuid }] },
+      ...fields,
+    };
+  }
+
+  async function writeTranscript(
+    sessionId: string,
+    records: unknown[],
+  ): Promise<void> {
+    const file = sessionService().getSessionTranscriptPath(sessionId);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      records.map((value) => JSON.stringify(value)).join('\n') + '\n',
+    );
+  }
+
   async function waitForTurn(
     sessionId: string,
     promptId: string,
@@ -537,6 +595,8 @@ describe('ordinary REST session Managed owner', () => {
   it('persists a verified managed owner through POST /session', async () => {
     vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
     await writeSettings();
+    expect(serveOptions()).not.toHaveProperty('experimentalManagedAgents');
+    spawnHarness.blockLegacySpawn = true;
     app = bootApp();
     await createManagedSession();
   });
@@ -1170,6 +1230,129 @@ describe('ordinary REST session Managed owner', () => {
     expect(res.status).not.toBe(200);
     expect(JSON.stringify(res.body)).toContain('legacy-spawn-blocked');
     expect(res.body?.sessionId).toBeUndefined();
+  });
+
+  it('keeps ordinary user hooks on the legacy factory at the same REST entry', async () => {
+    vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
+    await writeSettings({
+      hooks: { BeforeTool: [] },
+    });
+    spawnHarness.blockLegacySpawn = true;
+    app = bootApp();
+
+    const res = await request(app)
+      .post('/session')
+      .set('Host', host())
+      .send({});
+
+    expect(res.status).not.toBe(200);
+    expect(JSON.stringify(res.body)).toContain('legacy-spawn-blocked');
+    expect(res.body?.sessionId).toBeUndefined();
+  });
+
+  it('loads a complete old session without owner on the legacy factory', async () => {
+    vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
+    await writeSettings();
+    spawnHarness.blockLegacySpawn = true;
+    app = bootApp();
+
+    const legacyId = randomUUID();
+    await writeTranscript(legacyId, [transcriptRecord(legacyId, 'user-1')]);
+    await expect(
+      sessionService().readExecutionEngine(legacyId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'legacy',
+      recorded: false,
+      sessionId: legacyId,
+    });
+
+    const loaded = await request(app)
+      .post(`/session/${legacyId}/load`)
+      .set('Host', host())
+      .send({});
+    expect(loaded.status).not.toBe(200);
+    expect(JSON.stringify(loaded.body)).toContain('legacy-spawn-blocked');
+    await expect(
+      sessionService().readExecutionEngine(legacyId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'legacy',
+      recorded: false,
+      sessionId: legacyId,
+    });
+
+    const created = await createManagedSession();
+    expect(created).not.toBe(legacyId);
+  });
+
+  it('fails incompatible Managed restore without retrying the legacy factory', async () => {
+    vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
+    await writeSettings({
+      mcpServers: { demo: { command: 'false' } },
+    });
+    spawnHarness.blockLegacySpawn = true;
+    app = bootApp();
+
+    const sessionId = randomUUID();
+    await writeTranscript(sessionId, [
+      transcriptRecord(sessionId, 'owner', {
+        type: 'system',
+        subtype: 'session_execution_engine',
+        message: undefined,
+        systemPayload: { version: 1, engine: 'managed' },
+      }),
+      transcriptRecord(sessionId, 'user-1'),
+    ]);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      recorded: true,
+      sessionId,
+    });
+
+    const loaded = await request(app)
+      .post(`/session/${sessionId}/load`)
+      .set('Host', host())
+      .send({});
+    expect(loaded.status).not.toBe(200);
+    expect(JSON.stringify(loaded.body)).toContain(
+      'cannot execute with the current configuration',
+    );
+    expect(JSON.stringify(loaded.body)).not.toContain('legacy-spawn-blocked');
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      recorded: true,
+      sessionId,
+    });
+  });
+
+  it('does not retry the legacy factory when Managed spawn fails', async () => {
+    vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
+    await writeSettings();
+    spawnHarness.blockLegacySpawn = true;
+    spawnHarness.blockManagedSpawn = true;
+    app = bootApp();
+
+    const sessionId = randomUUID();
+    const failed = await request(app)
+      .post('/session')
+      .set('Host', host())
+      .send({ sessionId });
+    expect(failed.status).not.toBe(200);
+    expect(JSON.stringify(failed.body)).toContain('managed-spawn-blocked');
+    expect(JSON.stringify(failed.body)).not.toContain('legacy-spawn-blocked');
+    expect(failed.body?.sessionId).toBeUndefined();
+
+    const leftover = await sessionService()
+      .readExecutionEngine(sessionId)
+      .catch(() => undefined);
+    expect(leftover).toBeUndefined();
   });
 });
 
