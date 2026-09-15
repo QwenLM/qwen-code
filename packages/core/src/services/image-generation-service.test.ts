@@ -332,7 +332,7 @@ describe('generateImage', () => {
 
   it('accepts a data URL reference and a base64 image response', async () => {
     const base64Png = Buffer.from(PNG_BYTES).toString('base64');
-    const referenceImage = `data:image/png;base64,${base64Png}`;
+    const referenceImage = `data:image/png;base64,${base64Png.slice(0, 4)} \n${base64Png.slice(4)}`;
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -355,7 +355,9 @@ describe('generateImage', () => {
     expect(result.bytes).toEqual(Buffer.from(PNG_BYTES));
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toMatchObject({
-      subject_reference: [{ type: 'character', image_file: referenceImage }],
+      subject_reference: [
+        { type: 'character', image_file: `data:image/png;base64,${base64Png}` },
+      ],
     });
   });
 

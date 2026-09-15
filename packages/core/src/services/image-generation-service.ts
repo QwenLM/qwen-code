@@ -344,7 +344,7 @@ function findGeneratedImageUrl(payload: unknown): string | undefined {
   return undefined;
 }
 
-function isMiniMaxImageGenerationBaseUrl(baseUrl: string): boolean {
+export function isMiniMaxImageGenerationBaseUrl(baseUrl: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(baseUrl);
@@ -397,7 +397,7 @@ function normalizeReferenceImage(value: string): string {
         'Reference image data must be a valid PNG or JPEG smaller than 10 MB.',
       );
     }
-    return referenceImage;
+    return referenceImage.replace(/\s/g, '');
   }
 
   let parsed: URL;

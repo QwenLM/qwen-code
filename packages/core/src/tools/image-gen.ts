@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
   generateImage as generateConfiguredImage,
+  isMiniMaxImageGenerationBaseUrl,
   type GenerateImage,
 } from '../services/image-generation-service.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -227,6 +228,10 @@ export class ImageGenTool extends BaseDeclarativeTool<
       params.referenceImage = params.referenceImage.trim();
       if (!params.referenceImage) {
         return 'The reference image must be non-empty.';
+      }
+      const imageConfig = this.config.getImageGenerationConfig();
+      if (!isMiniMaxImageGenerationBaseUrl(imageConfig?.baseUrl ?? '')) {
+        return 'Reference images are not supported by the configured image endpoint.';
       }
     }
     if (!params.size) {
