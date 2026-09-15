@@ -979,21 +979,33 @@ text appears on screen only once it runs. ink has a single queue and shows both.
 Listing them together is one change with the key that would make a queue durable:
 badge and rows have to move together, or the two counts disagree on the screen.
 
+One asymmetry is recorded rather than fixed. The rows mount inside the
+composer's branch, and this renderer gives that branch's slot to a parked tool
+confirmation — its first awaiting call opens as a modal dialog — so the branch
+swaps whole and the rows leave the screen, the hint's counter with them, until
+the call settles. ink keeps its composer mounted through the same state: a
+parked call is an inline card in its transcript, and its dialog gate lists the
+popups the user is answering, never the tool queue. A dialog does unmount the
+composer on both sides, so a completed count resets the same way here and there.
+Keeping the rows through a confirmation would mean mounting them one level up,
+in the chrome box, at the price of setting them above the waiting row where ink
+draws them under the spinner.
+
 Coverage is unit-level across three layers: five component tests (nothing when
 the queue is empty, one row per prompt with whitespace flattened, the three-row
 cap with its overflow row, the hint that shows on three fills and not the
 fourth, a row cut to the terminal width minus ink's indent), the hook's
 assertions on the queued texts at each of those sites, and a shell test that
-fixes the placement — rows in the persistent chrome between the loading
-indicator and the composer, not in the scroll region. Eleven mutations — one at
-each component behaviour, one at each mirror site and one at the mount — each
-fail at least one test, with one limitation: the mount is caught as containment
-and not as order, because the shell test asserts the rows land in the persistent
-chrome rather than which side of the composer. The five component rows fail their
-own and no other; the mirror sites do not map one to one, because a list never
-given its first entry, or never emptied, is still being asserted turns later:
-draining without mirroring fails one assertion, pushing without it fails four,
-popping for editing two.
+fixes the placement — the rows share the non-scrolling chrome with the composer
+instead of scrolling away with the conversation. Eleven mutations — one at each
+component behaviour, one at each mirror site and one at the mount — each fail at
+least one test, with one limitation: the mount is caught as containment and not
+as order, because the shell test asserts the rows land in the chrome beside the
+composer rather than which side of it. The five component rows fail their own and
+no other; the mirror sites do not map one to one, because a list never given its
+first entry, or never emptied, is still being asserted turns later: draining
+without mirroring fails one assertion, pushing without it fails four, popping for
+editing two.
 
 ## Decision 31 — a model dialog outcome is recorded as well as shown
 
@@ -1059,6 +1071,21 @@ for that key to port — and a field whose value another keystroke replaced
 wholesale has its caret pulled back inside the string rather than left pointing
 past it.
 
+Where a key's natural reading and ink's binding disagree, ink's binding is kept,
+and one review-round finding came from holding that rule to the letter. The port
+sent the bare End key and ctrl+E to the same value-end jump. ink separates
+them: only ctrl+E is its END binding, whose handler dispatches the line-end move
+and then walks to the end of the whole buffer, while a bare End falls past that
+binding into the reducer, which stops at the line. So a caret parked on an
+earlier line of a pasted value by ← sent the next character to the end of the
+string instead of where the user left it. The fold is now split, with the bare
+key taking the line-scoped move Home already used; one caveat travels with it,
+because ink's line is a _visual_ row and a value wide enough to wrap splits it,
+where this model has no wrapping to consult. Coverage is one differential step
+beside the ctrl+E one, the wizard's base-URL case pasting a two-line value and
+landing a character inside its first line, and a mutation that returns the bare
+key to the value-end jump — it fails both.
+
 Three rendering differences stand. ink windows a field to a fixed column count
 and shows only the line the caret is on, so a pasted multi-line value hides
 everything off that line, while these rows render the whole value. ink paints its
@@ -1089,15 +1116,16 @@ shape before the caret existed at all — ink showing a value its flow has alrea
 discarded is recorded as a follow-up rather than reproduced here.
 
 Coverage is twenty-two new unit tests in three suites — thirteen of them the
-model compared against ink, the rest the fields that use it — plus seven
+model compared against ink, the rest the fields that use it — plus eight
 mutations, each failing the tests that own the behaviour taken away: a left
 arrow that moves nothing, the context-window field's typing branch, the two
 end-of-line jumps, forward delete, a modified Delete that erases a character
-instead of passing through, ctrl+W, and a row that stops re-mounting. On a
-machine, a new scenario answers one question from its free-text row on both
-legs, with a single question so that neither the tab clamp nor the double-fire
-recorded under Decision 21 can be what produced the frame: six characters
-typed, the caret taken back two cells, one character inserted. Both legs show
+instead of passing through, ctrl+W, a row that stops re-mounting, and a bare End
+folded back into the ctrl+E jump. On a machine, a new scenario answers one
+question from its free-text row on both legs, with a single question so that
+neither the tab clamp nor the double-fire recorded under Decision 21 can be what
+produced the frame: six characters typed, the caret taken back two cells, one
+character inserted. Both legs show
 `> abcdXef` at the same column of the same row and both record `abcdXef` as
 the answer. The styled capture pins the cell itself. At the two checkpoints
 where ink draws it, the cell sits over the same character in the same column on

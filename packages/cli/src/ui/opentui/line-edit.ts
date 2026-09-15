@@ -177,10 +177,23 @@ export function moveCaretHome(state: LineState): LineState {
 }
 
 /**
- * Past the last code point of the value. ink's END binding does that rather
- * than the line-end jump its reducer would make: TextInput moves to the line
- * end and then to `cpLen(text)`, so the two differ only after a paste has left
- * the caret on an earlier line.
+ * Past the last code point of the caret's line. ink's bare End key falls
+ * through to its reducer, whose `end` move is to the end of the line.
+ */
+export function moveCaretLineEnd(state: LineState): LineState {
+  const clamped = clampCaret(state);
+  return {
+    text: clamped.text,
+    cursor: lineBounds(clamped.text, clamped.cursor).end,
+  };
+}
+
+/**
+ * Past the last code point of the value. ink reaches this only through its
+ * ctrl+E binding: `TextInput` dispatches the line-end move and then jumps to
+ * `cpLen(text)`, so the two differ once a paste leaves the caret on an earlier
+ * line. The bare End key stops at the line end instead — see
+ * {@link moveCaretLineEnd}.
  */
 export function moveCaretEnd(state: LineState): LineState {
   const clamped = clampCaret(state);
@@ -224,7 +237,8 @@ export function applyLineKey(
   if (name === 'right' && !modified) return moveCaretRight(next);
   if (ctrl && name === 'f') return moveCaretRight(next);
   if (name === 'home' || (ctrl && name === 'a')) return moveCaretHome(next);
-  if (name === 'end' || (ctrl && name === 'e')) return moveCaretEnd(next);
+  if (name === 'end') return moveCaretLineEnd(next);
+  if (ctrl && name === 'e') return moveCaretEnd(next);
   if (ctrl && name === 'w') return deleteWordLeftAtCaret(next);
   if (modified && (name === 'backspace' || sequence === '\x7f')) {
     return deleteWordLeftAtCaret(next);

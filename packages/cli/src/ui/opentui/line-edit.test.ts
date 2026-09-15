@@ -25,6 +25,7 @@ import {
   moveCaretEnd,
   moveCaretHome,
   moveCaretLeft,
+  moveCaretLineEnd,
   moveCaretRight,
   type LineState,
 } from './line-edit.js';
@@ -112,6 +113,12 @@ const moveEnd: Op = {
     }),
   line: moveCaretEnd,
 };
+// ink's bare End key is not that binding: it falls through to the reducer's
+// own line-end move, so it stops at the caret's line.
+const bareEnd: Op = {
+  ink: (state) => step(state, { type: 'move', payload: { dir: 'end' } }),
+  line: moveCaretLineEnd,
+};
 const stepLeft: Op = {
   ink: (state) => step(state, { type: 'move', payload: { dir: 'left' } }),
   line: moveCaretLeft,
@@ -191,10 +198,14 @@ describe('line-edit', () => {
     ]);
   });
 
-  it('follows ink in jumping End past a line break but Home only to its own', () => {
+  it('follows ink in jumping ctrl+E past a line break, Home and bare End only to their own', () => {
     expect(moveCaretEnd({ text: 'ab\ncd', cursor: 0 })).toEqual({
       text: 'ab\ncd',
       cursor: 5,
+    });
+    expect(moveCaretLineEnd({ text: 'ab\ncd', cursor: 0 })).toEqual({
+      text: 'ab\ncd',
+      cursor: 2,
     });
     expect(moveCaretHome({ text: 'ab\ncd', cursor: 5 })).toEqual({
       text: 'ab\ncd',
@@ -209,6 +220,24 @@ describe('line-edit', () => {
       eraseBack,
       eraseBack,
     ]);
+    // A paste that leaves the caret on an earlier line is where the two
+    // readings of End part: the bare key takes the caret to its own line end,
+    // and the next character lands there rather than at the value's.
+    agreesWithInk('ab\ncd', [
+      moveHome,
+      stepLeft,
+      stepLeft,
+      bareEnd,
+      typed('z'),
+      eraseBack,
+    ]);
+    expect(
+      applyLineKey({ text: 'ab\ncd', cursor: 0 }, key('end'))?.cursor,
+    ).toEqual(
+      inkOffset(
+        step(inkState('ab\ncd', 0), { type: 'move', payload: { dir: 'end' } }),
+      ),
+    );
   });
 
   it('agrees with ink over code points ink weighs as one cell or two', () => {

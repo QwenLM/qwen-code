@@ -32,9 +32,10 @@ export const OpenTuiQueuedMessageDisplay = ({
 }: OpenTuiQueuedMessageDisplayProps) => {
   const { width } = useTerminalDimensions();
   // Counts how many times the edit hint has been shown, so it stops after a
-  // few. ink keys this on the empty → non-empty transition, and its counter
-  // resets whenever the composer unmounts — which happens for a dialog here
-  // too, since the composer branch is swapped out the same way.
+  // few. ink keys this on the empty → non-empty transition and resets the count
+  // whenever its Composer unmounts — which a dialog does in both renderers. A
+  // parked tool confirmation unmounts it here and not in ink, and that asymmetry
+  // is recorded as a divergence under Decision 30.
   const hintSeenCountRef = useRef(0);
   const wasEmptyRef = useRef(true);
 

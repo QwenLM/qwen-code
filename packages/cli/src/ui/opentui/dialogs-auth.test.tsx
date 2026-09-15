@@ -793,17 +793,30 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(screen.getByText(/Step 3\/6 · API Key/)).toBeTruthy();
   });
 
-  it('sends End past the line break a paste leaves behind', async () => {
+  it('sends ctrl+E to the end of a pasted value and bare End to its own line', async () => {
     await runToBaseUrlStep();
     await pasteText('https://one.test\nhttps://two.test');
     await press('a', { ctrl: true, sequence: '\x01' });
     expect(focusedField().cell).toBe('h');
     await press('e', { ctrl: true, sequence: '\x05' });
     await typeText('s');
-    // ink's End is the end of the value, not of the caret's own line
+    // ink's ctrl+E binding is the end of the value, not of the caret's line
     expect(focusedField()).toEqual({
       text: 'https://one.test\nhttps://two.tests ',
       cell: ' ',
+    });
+    // The bare key is ink's reducer move, which stops at the line the caret is
+    // on. Park the caret inside the first line — ctrl+A after the ctrl+E jump
+    // lands on the second line's start — and End takes it to that line's end,
+    // so the next character lands before the break rather than at the value's.
+    await press('a', { ctrl: true, sequence: '\x01' });
+    await press('left');
+    await press('left');
+    await press('end');
+    await typeText('X');
+    expect(focusedField()).toEqual({
+      text: 'https://one.testX\nhttps://two.tests',
+      cell: '\n',
     });
   });
 
