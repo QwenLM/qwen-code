@@ -9,7 +9,10 @@ export const BASE_URL =
   process.env.DASHSCOPE_BASE_URL ??
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 export const MODEL = process.env.BATCH_MODEL ?? 'qwen-plus';
-export const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'out');
+export const OUT = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'out',
+);
 fs.mkdirSync(OUT, { recursive: true });
 
 const TERMINAL = new Set(['completed', 'failed', 'expired', 'cancelled']);
@@ -28,7 +31,12 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** One JSONL request line in the shape /batches expects. */
 export function line(customId, body) {
-  return { custom_id: String(customId), method: 'POST', url: '/v1/chat/completions', body };
+  return {
+    custom_id: String(customId),
+    method: 'POST',
+    url: '/v1/chat/completions',
+    body,
+  };
 }
 
 export function writeJsonl(name, lines) {
@@ -64,7 +72,13 @@ export async function waitFor(oa, id, { every = 30_000, quiet = false } = {}) {
   for (;;) {
     const b = await oa.batches.retrieve(id);
     if (!quiet) {
-      console.log(ts(), id, b.status, JSON.stringify(b.request_counts ?? {}), phase(b));
+      console.log(
+        ts(),
+        id,
+        b.status,
+        JSON.stringify(b.request_counts ?? {}),
+        phase(b),
+      );
     }
     if (TERMINAL.has(b.status)) return b;
     await sleep(every);
@@ -75,7 +89,8 @@ export async function waitFor(oa, id, { every = 30_000, quiet = false } = {}) {
 export function phase(b) {
   const now = Math.floor(Date.now() / 1000);
   if (!b.in_progress_at) return `queued ${now - b.created_at}s`;
-  if (!b.completed_at) return `queued ${b.in_progress_at - b.created_at}s, running ${now - b.in_progress_at}s`;
+  if (!b.completed_at)
+    return `queued ${b.in_progress_at - b.created_at}s, running ${now - b.in_progress_at}s`;
   return `queued ${b.in_progress_at - b.created_at}s, ran ${b.completed_at - b.in_progress_at}s`;
 }
 
@@ -103,11 +118,17 @@ export async function collect(oa, batch) {
 export const bodyOf = (r) => r?.response?.body;
 export const usageOf = (r) => bodyOf(r)?.usage;
 export const cachedOf = (r) =>
-  usageOf(r)?.prompt_tokens_details?.cached_tokens ?? usageOf(r)?.cached_tokens ?? 0;
+  usageOf(r)?.prompt_tokens_details?.cached_tokens ??
+  usageOf(r)?.cached_tokens ??
+  0;
 
 /** Delete input/output/error files once results are on disk (see plan §8.1 D). */
 export async function cleanup(oa, batch) {
-  for (const id of [batch.input_file_id, batch.output_file_id, batch.error_file_id]) {
+  for (const id of [
+    batch.input_file_id,
+    batch.output_file_id,
+    batch.error_file_id,
+  ]) {
     if (!id) continue;
     try {
       await oa.files.delete(id);

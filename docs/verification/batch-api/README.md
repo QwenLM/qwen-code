@@ -20,12 +20,12 @@ export DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
 ## 脚本
 
-| 脚本 | 回答的问题 | 通过标准 | 耗时 |
-| --- | --- | --- | --- |
-| `00-plumbing.mjs` | JSONL 格式、状态流转、结果下载是否通 | `status=completed`，3 行全在 output，0 行在 error | 分钟级 |
-| `01-tools.mjs` | `tools` / `tool_calls` / 带 assistant+tool 历史的 `messages[]` 是否直通（§6 问题 1） | L1 `finish_reason=tool_calls` 且工具名 `get_time`；L2 回答含 `10:30`；L3 有内容；error 为空 | 等一次 batch |
-| `02-cache.mjs` | batch 内能否命中 context cache（§6 问题 2） | 对照组实时 `cached_tokens>0`；看两个 batch 臂是否也 >0；`cost_vs_realtime` <1 才是真省 | 等两次 batch（并行） |
-| `03-queue-timing.mjs` | 1 行 batch 的排队 / 执行时长分布（§6 问题 3，§7 经验 ETA 的种子） | 无 pass/fail，看 `queue_s` / `total_s` 的 p50 / p90 | 24h 后台 |
+| 脚本                  | 回答的问题                                                                           | 通过标准                                                                                    | 耗时                 |
+| --------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- | -------------------- |
+| `00-plumbing.mjs`     | JSONL 格式、状态流转、结果下载是否通                                                 | `status=completed`，3 行全在 output，0 行在 error                                           | 分钟级               |
+| `01-tools.mjs`        | `tools` / `tool_calls` / 带 assistant+tool 历史的 `messages[]` 是否直通（§6 问题 1） | L1 `finish_reason=tool_calls` 且工具名 `get_time`；L2 回答含 `10:30`；L3 有内容；error 为空 | 等一次 batch         |
+| `02-cache.mjs`        | batch 内能否命中 context cache（§6 问题 2）                                          | 对照组实时 `cached_tokens>0`；看两个 batch 臂是否也 >0；`cost_vs_realtime` <1 才是真省      | 等两次 batch（并行） |
+| `03-queue-timing.mjs` | 1 行 batch 的排队 / 执行时长分布（§6 问题 3，§7 经验 ETA 的种子）                    | 无 pass/fail，看 `queue_s` / `total_s` 的 p50 / p90                                         | 24h 后台             |
 
 ```sh
 node docs/verification/batch-api/00-plumbing.mjs
@@ -77,8 +77,8 @@ TUI 下 `--batch` 会被 `.check()` 拒绝；QWEN_OAUTH 下会在第一次请求
 
 ## 判定
 
-| 01 | 02 | 结论 |
-| --- | --- | --- |
-| 通 | 通 | 值得做 §6 的 headless `--batch` 置换 |
-| 通 | 不通 | 置换技术可行但主循环账是亏的，只做 §3 形态 A（扇出） |
-| 不通 | — | agent 没有工具，放弃置换，只做形态 A |
+| 01   | 02   | 结论                                                 |
+| ---- | ---- | ---------------------------------------------------- |
+| 通   | 通   | 值得做 §6 的 headless `--batch` 置换                 |
+| 通   | 不通 | 置换技术可行但主循环账是亏的，只做 §3 形态 A（扇出） |
+| 不通 | —    | agent 没有工具，放弃置换，只做形态 A                 |

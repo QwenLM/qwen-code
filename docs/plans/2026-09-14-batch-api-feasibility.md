@@ -5,19 +5,20 @@
 
 ## 1. Batch API 的硬约束（百炼 OpenAI 兼容批量接口）
 
-| 约束 | 值 | 对 agent 的影响 |
-| --- | --- | --- |
-| `completion_window` | 最短 24h，最长 14d | agent 一跳要秒级，差 4~5 个数量级 |
-| 流式 | 不支持 | TUI 流式渲染、`streamingToolCallParser.ts` 的增量工具调用解析全部失效 |
-| 工具调用 / 多轮 | 文档未列出 function calling，且不支持多轮会话 | agent loop 本质是"模型 → 工具 → 模型"的多跳；即使单跳能跑，10 跳任务 = 10 天 |
-| 同质性 | 同一文件内必须同模型、同 thinking 配置 | 一个 session 里模型/effort 会切换，无法整包提交 |
-| 规模 | 单行 ≤6MB，单文件 ≤500MB / 5 万条；1000 并发作业 | 对批量场景足够宽裕 |
-| 上下文 | batch 场景下封顶 256K | 长上下文会话会被截断 |
-| 计价 | 成功请求按实时价 **5 折**，失败不计费 | 唯一的卖点 |
+| 约束                | 值                                               | 对 agent 的影响                                                              |
+| ------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `completion_window` | 最短 24h，最长 14d                               | agent 一跳要秒级，差 4~5 个数量级                                            |
+| 流式                | 不支持                                           | TUI 流式渲染、`streamingToolCallParser.ts` 的增量工具调用解析全部失效        |
+| 工具调用 / 多轮     | 文档未列出 function calling，且不支持多轮会话    | agent loop 本质是"模型 → 工具 → 模型"的多跳；即使单跳能跑，10 跳任务 = 10 天 |
+| 同质性              | 同一文件内必须同模型、同 thinking 配置           | 一个 session 里模型/effort 会切换，无法整包提交                              |
+| 规模                | 单行 ≤6MB，单文件 ≤500MB / 5 万条；1000 并发作业 | 对批量场景足够宽裕                                                           |
+| 上下文              | batch 场景下封顶 256K                            | 长上下文会话会被截断                                                         |
+| 计价                | 成功请求按实时价 **5 折**，失败不计费            | 唯一的卖点                                                                   |
 
 ## 2. 算一笔账：主循环用 batch 反而更贵
 
 关键两个数字：
+
 - **Batch：input / output 双双 5 折**（0.5x）。
 - **Context Cache：命中的 input 按 `cached_token` 计价，百炼自部署模型大多是 input 单价的 20%**（0.2x）。
 
@@ -25,10 +26,10 @@
 
 设 input 缓存命中率为 h（以标准 input 单价为 1 计）：
 
-| | input 单价 | output 单价 |
-| --- | --- | --- |
-| 实时 + 缓存 | `1 - 0.8h` | 1.0 |
-| Batch | 0.5 | 0.5 |
+|             | input 单价 | output 单价 |
+| ----------- | ---------- | ----------- |
+| 实时 + 缓存 | `1 - 0.8h` | 1.0         |
+| Batch       | 0.5        | 0.5         |
 
 - 只看 input：`1 - 0.8h < 0.5` → **h > 62.5% 时，实时调用比 batch 更便宜**。
 - 只看 output：batch 恒赢（output 没有缓存可吃）。
@@ -72,11 +73,13 @@ agent 生成作业、提交、第二天回收，自己全程保持交互式。
 （若将来做代码语义索引）全仓 embedding 首次构建。
 
 实现成本很低，因为依赖已经在仓库里：
+
 - `packages/core/package.json:86` 已依赖 `openai@5.11.0` → `client.files` / `client.batches` 开箱可用；
 - DashScope 就是 OpenAI 兼容端点，`core/openaiContentGenerator/provider/dashscope.ts` 已识别官方 host 与鉴权；
 - 请求体可直接复用 `openaiContentGenerator/converter.ts` 的 Content → ChatCompletion 转换。
 
 三步即可：
+
 1. 生成 JSONL（`custom_id` + `method` + `url: /v1/chat/completions` + `body`）；
 2. `files.create({ purpose: 'batch' })` → `batches.create({ completion_window: '24h' })`；
 3. 轮询 `batches.retrieve`，取 `output_file_id` 下载，按 `custom_id` 回写。
@@ -153,11 +156,11 @@ docs 翻译流水线、weekly report、issue/PR 分类（`.github/workflows/auto
 
 ### 三个必须先测的问题（决定做不做）
 
-| # | 问题 | 不通的后果 |
-| --- | --- | --- |
-| 1 | batch body 里 `tools` / `tool_calls` / 含 assistant+tool 历史的 `messages[]` 是否直通 | 不通则 agent 没有工具，"置换"无从谈起，回到形态 A |
-| 2 | batch 内是否命中 context cache（返回 `cached_tokens` 非零） | 决定 §2 的成本结论是否翻转 |
-| 3 | 实际排队时长分布（空闲时几分钟？高峰时几小时？） | 决定 headless 体验是"喝杯咖啡"还是"明天见" |
+| #   | 问题                                                                                  | 不通的后果                                        |
+| --- | ------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| 1   | batch body 里 `tools` / `tool_calls` / 含 assistant+tool 历史的 `messages[]` 是否直通 | 不通则 agent 没有工具，"置换"无从谈起，回到形态 A |
+| 2   | batch 内是否命中 context cache（返回 `cached_tokens` 非零）                           | 决定 §2 的成本结论是否翻转                        |
+| 3   | 实际排队时长分布（空闲时几分钟？高峰时几小时？）                                      | 决定 headless 体验是"喝杯咖啡"还是"明天见"        |
 
 "不支持多轮"大概率指没有服务端会话，而非拒绝带历史的 `messages[]`——但必须实测。
 三条都是几十行脚本 + 一个 key 的事。
@@ -165,6 +168,7 @@ docs 翻译流水线、weekly report、issue/PR 分类（`.github/workflows/auto
 ### 建议
 
 先测 1/2/3，**不要先写 BatchContentGenerator**。
+
 - 1 通 + 2 通：值得做"置换"，形态是 headless `--batch` + 持久化 `batch_id` + channel 通知，
   改动点就是 `pipeline.ts:475/519` 那一处 + session recovery 一种新 kind。
 - 1 不通：回到 §3 的形态 A（agent 指挥 batch 做扇出），主循环不动。
@@ -173,20 +177,22 @@ docs 翻译流水线、weekly report、issue/PR 分类（`.github/workflows/auto
 
 `GET /batches/{id}` 能给的全部信号：
 
-| 信号 | 内容 | 对进度的意义 |
-| --- | --- | --- |
-| `status` | `validating → in_progress → finalizing → completed`，分支 `failed / expired / cancelling / cancelled` | 阶段机，没有百分比 |
-| `request_counts` | `{ total, completed, failed }` | **扇出型有真进度**（95/100）；置换型 total=1，退化成 0/1 |
-| 时间戳 | `created_at / in_progress_at / finalizing_at / completed_at / expires_at` | `in_progress_at` 出现 = 排队结束、开始执行；`expires_at` = 最晚回来的死线 |
-| `output_file_id` | 完成后才可下载，**没有部分结果** | 扇出型"完成 95%"也拿不到那 95 条 |
-| 排队位置 / ETA | **没有** | — |
+| 信号             | 内容                                                                                                  | 对进度的意义                                                              |
+| ---------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `status`         | `validating → in_progress → finalizing → completed`，分支 `failed / expired / cancelling / cancelled` | 阶段机，没有百分比                                                        |
+| `request_counts` | `{ total, completed, failed }`                                                                        | **扇出型有真进度**（95/100）；置换型 total=1，退化成 0/1                  |
+| 时间戳           | `created_at / in_progress_at / finalizing_at / completed_at / expires_at`                             | `in_progress_at` 出现 = 排队结束、开始执行；`expires_at` = 最晚回来的死线 |
+| `output_file_id` | 完成后才可下载，**没有部分结果**                                                                      | 扇出型"完成 95%"也拿不到那 95 条                                          |
+| 排队位置 / ETA   | **没有**                                                                                              | —                                                                         |
 
 配套：
+
 - 查询限额 1000 次/分钟，30~60s 轮询一次绰绰有余。
 - 不想轮询：metadata 里的 `ds_batch_finish_callback`（仅北京 region）或 EventBridge。
   只在完成时通知一次，不是进度；本地 CLI 没有公网地址收不到回调，只有 serve / Web Shell 常驻时才用得上。
 
 能自己补的两样：
+
 1. **阶段感**：用 `in_progress_at` 区分"排队中"和"执行中"，比一个转圈有信息量得多。
 2. **经验 ETA**：本地记录每个 batch 的 `created_at → completed_at`，按模型/时段取中位数，
    显示"通常 X 分钟，最晚 `expires_at`"。这是唯一能给用户的时间感，也是 §6 问题 3 的数据来源。
@@ -198,6 +204,7 @@ docs 翻译流水线、weekly report、issue/PR 分类（`.github/workflows/auto
 ### 8.1 剩下的问题清单
 
 **A. 与现有语义碰撞**
+
 1. **重试 / 超时体系不兼容**。管线的 `executeWithErrorHandling` 有限流重试、SDK `timeout`、
    `streamIdleTimeoutMs`、`streamMaxLifetimeMs`。batch 调用要么被这些误杀，要么绕过它们。
    需要一套独立的等待策略：轮询间隔、上限 = `expires_at`，以及"重试"的定义
@@ -208,26 +215,20 @@ docs 翻译流水线、weekly report、issue/PR 分类（`.github/workflows/auto
 4. **thinking 默认开启**。新模型在 batch 下默认开 thinking，必须显式发 `enable_thinking`，
    否则 5 折被 thinking token 吃回去。
 
-**B. 生命周期**
-5. **孤儿作业**。`batches.create` 成功但进程在持久化 `batch_id` 前崩溃 → 花了钱、丢了结果。
-   顺序必须是 create → 立刻落盘 → 再轮询；resume 时用 `batches.list` 对账，回收无主作业。
-6. **子 agent 继承策略**。fleet / team / subagent 在 batch 会话里是否也走 batch？
-   默认继承会让"快问一句"的子任务也变成小时级；需要显式策略（建议：子 agent 一律实时）。
+**B. 生命周期** 5. **孤儿作业**。`batches.create` 成功但进程在持久化 `batch_id` 前崩溃 → 花了钱、丢了结果。
+顺序必须是 create → 立刻落盘 → 再轮询；resume 时用 `batches.list` 对账，回收无主作业。6. **子 agent 继承策略**。fleet / team / subagent 在 batch 会话里是否也走 batch？
+默认继承会让"快问一句"的子任务也变成小时级；需要显式策略（建议：子 agent 一律实时）。
 
-**C. 范围与门禁**
-7. **只有 DashScope 官方 host + API key 支持**。QWEN_OAUTH 走的是门户 token，
-   第三方 OpenAI 兼容端点（OpenRouter 等）没有 `/batches`。开关必须在
-   `DashScopeOpenAICompatibleProvider.isDashScopeProvider` 且非 OAuth 时才生效，否则启动即报错。
-8. **流式路径上的附属校验被跳过**。`pipeline.ts:519` 之后的 `withResponse()` SSE content-type 检查、
-   `streamingToolCallParser` / `taggedThinkingParser` 的增量路径在"一次 yield 完整 chunk"下是未测过的形状。
+**C. 范围与门禁** 7. **只有 DashScope 官方 host + API key 支持**。QWEN_OAUTH 走的是门户 token，
+第三方 OpenAI 兼容端点（OpenRouter 等）没有 `/batches`。开关必须在
+`DashScopeOpenAICompatibleProvider.isDashScopeProvider` 且非 OAuth 时才生效，否则启动即报错。8. **流式路径上的附属校验被跳过**。`pipeline.ts:519` 之后的 `withResponse()` SSE content-type 检查、
+`streamingToolCallParser` / `taggedThinkingParser` 的增量路径在"一次 yield 完整 chunk"下是未测过的形状。
 
-**D. 数据与合规**
-9. **prompt 变成了云上文件**。实时请求是瞬态的，batch 要先 `files.create` 把整段上下文（含代码）
-   上传成可列举的文件，且输出文件也留在账号里。企业用户会在意；完成后要 `files.delete` 输入和输出。
+**D. 数据与合规** 9. **prompt 变成了云上文件**。实时请求是瞬态的，batch 要先 `files.create` 把整段上下文（含代码）
+上传成可列举的文件，且输出文件也留在账号里。企业用户会在意；完成后要 `files.delete` 输入和输出。
 
-**E. 计量**
-10. **成本与延迟指标失真**。首 token 延迟等指标无意义；footer / status line 的费用估算要按 0.5x 记，
-    telemetry 打 `execution_mode=batch` 标签，否则 batch 会话的数据会污染实时基线。
+**E. 计量** 10. **成本与延迟指标失真**。首 token 延迟等指标无意义；footer / status line 的费用估算要按 0.5x 记，
+telemetry 打 `execution_mode=batch` 标签，否则 batch 会话的数据会污染实时基线。
 
 ### 8.2 最关键的一条：开关必须在请求上，不能在生成器上
 
@@ -241,6 +242,7 @@ subagent-generator / vision-bridge / web-fetch / arena-approach-summary / p`。
 UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度。
 
 所以：
+
 - 开关放在 `GenerateContentParameters.config` 上（例如 `executionMode: 'batch'`），
   **只有主循环那一次 `generateContent` 设置它**；side-call 一行不改就天然留在实时通道。
 - 管线里只有一处分支：`pipeline.ts:475` 处 `if (executionMode === 'batch') return this.executeBatch(...)`。
@@ -248,12 +250,12 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 
 ### 8.3 四层圈住影响面
 
-| 层 | 措施 | 效果 |
-| --- | --- | --- |
-| 入口 | 只在 headless（`qwen -p ... --batch`）接受该 flag；交互式 TUI 直接拒绝并给出原因 | TUI 代码路径零改动 |
-| 门禁 | provider 必须是 DashScope 官方 host + API key，否则启动即 fail-fast | 第三方端点、OAuth 用户完全不受影响 |
-| 请求 | 8.2 的请求级开关；子 agent、压缩、side-call 一律实时 | 17 种 side-call 与现状比特级一致 |
-| 默认 | flag 默认关闭、标记 experimental；telemetry 打标签 | 关掉 = 代码不可达，回滚就是删 flag |
+| 层   | 措施                                                                             | 效果                               |
+| ---- | -------------------------------------------------------------------------------- | ---------------------------------- |
+| 入口 | 只在 headless（`qwen -p ... --batch`）接受该 flag；交互式 TUI 直接拒绝并给出原因 | TUI 代码路径零改动                 |
+| 门禁 | provider 必须是 DashScope 官方 host + API key，否则启动即 fail-fast              | 第三方端点、OAuth 用户完全不受影响 |
+| 请求 | 8.2 的请求级开关；子 agent、压缩、side-call 一律实时                             | 17 种 side-call 与现状比特级一致   |
+| 默认 | flag 默认关闭、标记 experimental；telemetry 打标签                               | 关掉 = 代码不可达，回滚就是删 flag |
 
 测试面：现有 `pipeline.test.ts` 不动；新增一个小文件 mock `client.files` / `client.batches`，
 覆盖 create→persist→poll→fetch、abort→cancel、resume 对账三条路径。CI 本来就慢，测试文件保持最小。
@@ -265,13 +267,13 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 
 ### 9.1 现在有什么
 
-| 物件 | 位置 | 状态 |
-| --- | --- | --- |
-| 本评估 | `docs/plans/2026-09-14-batch-api-feasibility.md` | §1-§8 完成 |
-| 探测脚本 + README | `docs/verification/batch-api/` | 语法检查过，无 key 路径跑过，**未对线上运行** |
-| 草稿 PR | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`） | 等测试结果 |
-| `qwen batch` 命令（形态 A） | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`） | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖 |
-| headless `--batch` 置换（§6）v1 | `core/openaiContentGenerator/batch.ts`（运行器）、`pipeline.ts` 两处分支、`contentGenerator.ts` 的 `executionMode`、`llm-chat.ts` 主循环设置、`Config.getBatchMode()`、CLI `--batch` flag + `.check()` 门禁 | 已实现 v1；**未对线上跑，01 探测是验收标准** |
+| 物件                            | 位置                                                                                                                                                                                                        | 状态                                                               |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 本评估                          | `docs/plans/2026-09-14-batch-api-feasibility.md`                                                                                                                                                            | §1-§8 完成                                                         |
+| 探测脚本 + README               | `docs/verification/batch-api/`                                                                                                                                                                              | 语法检查过，无 key 路径跑过，**未对线上运行**                      |
+| 草稿 PR                         | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`）                                                                                          | 等测试结果                                                         |
+| `qwen batch` 命令（形态 A）     | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`）                                                                                                                               | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖 |
+| headless `--batch` 置换（§6）v1 | `core/openaiContentGenerator/batch.ts`（运行器）、`pipeline.ts` 两处分支、`contentGenerator.ts` 的 `executionMode`、`llm-chat.ts` 主循环设置、`Config.getBatchMode()`、CLI `--batch` flag + `.check()` 门禁 | 已实现 v1；**未对线上跑，01 探测是验收标准**                       |
 
 ### 9.2 立刻要做的事（按顺序）
 
@@ -291,11 +293,11 @@ nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
 
 ### 9.3 结果怎么用
 
-| 01 工具直通 | 02 batch 内缓存 | 方向 | 接下来开什么 |
-| --- | --- | --- | --- |
-| 通 | 通 | §6 置换：headless `qwen -p ... --batch` | 开 issue，按 9.4 的改动点实施 |
-| 通 | 不通 | §3 形态 A：`qwen batch` 扇出命令 | 开 issue，`commands/batch.ts` + 同名工具，主循环不动 |
-| 不通 | — | 只做形态 A | 同上；置换永久搁置 |
+| 01 工具直通 | 02 batch 内缓存 | 方向                                    | 接下来开什么                                         |
+| ----------- | --------------- | --------------------------------------- | ---------------------------------------------------- |
+| 通          | 通              | §6 置换：headless `qwen -p ... --batch` | 开 issue，按 9.4 的改动点实施                        |
+| 通          | 不通            | §3 形态 A：`qwen batch` 扇出命令        | 开 issue，`commands/batch.ts` + 同名工具，主循环不动 |
+| 不通        | —               | 只做形态 A                              | 同上；置换永久搁置                                   |
 
 03 不改变方向，只决定 §7 的经验 ETA 数值和产品文案里怎么描述等待。
 
@@ -331,6 +333,7 @@ v1 落地了第 1、2、4、5（入口门禁 + OAuth 拒绝）、6（自动成�
 ### 9.5 扇出（形态 A）——已实现，剩余项
 
 已落地（`packages/cli/src/commands/batch.ts`）：
+
 - `submit <file> [--window]`：每行可以是完整 batch 请求行，也可以是裸的 chat-completions body（自动补 `custom_id` / `url` / 默认模型）；上传后打印 batch id。
 - `status <id> [--json]`：一行输出 status、`completed/total`、按时间戳推出的 queued / running / ran 阶段、`expires_at` 死线（§7）。
 - `fetch <id> [--out dir] [--delete]`：未 settle 直接拒绝；写 `<id>.output.jsonl` / `<id>.error.jsonl`；`--delete` 顺手删远端输入/输出/错误文件（§8.1 D）。
@@ -339,6 +342,7 @@ v1 落地了第 1、2、4、5（入口门禁 + OAuth 拒绝）、6（自动成�
 - 用原生 `fetch` + `FormData`，没有给 cli 加 `openai` 依赖（避免动 lockfile）。
 
 没做、刻意留着的：
+
 - 不做同名工具——模型通过 shell 调 `qwen batch` 即可。
 - 不自动生成 JSONL、不按 `custom_id` 回写工作区——agent 用 `custom_id` 自己映射。
 - 不显式发 `enable_thinking`——由写 body 的一方决定（9.4 第 7 条仍适用，README 里提醒）。
