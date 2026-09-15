@@ -11,6 +11,7 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
+import { readWorkflowBatches } from './lib/workflow-batch.js';
 import { SHELL_TOOL_MAX_TIMEOUT_MS } from './lib/build-budget.js';
 import {
   describe,
@@ -33,6 +34,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { createTwoFilesPatch } from 'diff';
+import { isStaticDocsNavDiff } from './lib/docs-nav-profile.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
@@ -48,7 +51,6 @@ import {
   DEADLINE_ENV,
   RESERVE_ENV,
   COMPOSE_FLOOR_ENV,
-  TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   readRoundStamps,
   stampRound,
@@ -64,6 +66,7 @@ import {
 } from './agent-prompt.js';
 import {
   BRIEFS,
+  DOCS_NAV_CAUSAL_SCOPE,
   ENUMERATION_TRAP_LENS,
   MODELED_SYSTEM_EXECUTION_LENS,
 } from './lib/agent-briefs.js';
@@ -426,6 +429,59 @@ describe('agent-prompt (command boundary)', () => {
       }),
     ).toThrow(/cannot read the plan/);
   });
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'stops reverse audit for focused navigation without recording a prompt (allChunks=%s, batch=%s)',
+    (allChunks, batch) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ap-nav-'));
+      const savedExit = process.exitCode;
+      const savedDeadline = process.env[DEADLINE_ENV];
+      try {
+        process.exitCode = undefined;
+        delete process.env[DEADLINE_ENV];
+        const plan = join(dir, 'plan.json');
+        const findings = join(dir, 'findings.md');
+        writeFileSync(findings, '');
+        writeFileSync(
+          plan,
+          JSON.stringify({ ...PLAN, reviewProfile: 'docs-nav' }),
+        );
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          findings,
+          round: 1,
+          'all-chunks': allChunks,
+          batch,
+        });
+        expect(process.exitCode).toBe(4);
+        expect(writeStdoutLine).not.toHaveBeenCalled();
+        expect(readRecordedPrompts(plan).size).toBe(0);
+        expect(readBudgetStop(plan)).toBeNull();
+        expect(writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'PROFILE SKIP: focused navigation review skips reverse audit',
+          ),
+        );
+        expect(writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'no marker is recorded and no unreviewedDimensions entry is owed',
+          ),
+        );
+        expect(agentPromptCommand.describe).toContain('PROFILE SKIP');
+      } finally {
+        process.exitCode = savedExit;
+        if (savedDeadline === undefined) delete process.env[DEADLINE_ENV];
+        else process.env[DEADLINE_ENV] = savedDeadline;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
   it('injects the project rules the review loaded', () => {
     // They were loaded, written to a file, and dropped: `buildChunkAgentPrompt`
     // took a `rules` argument that the CLI had no flag to supply. The review
@@ -1090,8 +1146,8 @@ describe('--round — the CLI bakes the round into the identity line and the key
   it('takes the round cap from the CLOCK as well, on a sized huge plan', () => {
     // Every other cap test here uses the unsized `PLAN` fixture, whose tier is
     // the LARGE fallback whatever the clock says, or forces a cap by storing
-    // one — so the `hasReviewDeadline(process.env)` argument at all four call
-    // sites was mutation-invisible: hardcoding it to either constant left the
+    // one — so the `hasReviewDeadline(process.env, plan, report)` argument at
+    // the cap sites was mutation-invisible: hardcoding it to either constant left the
     // whole suite green. A SIZED huge plan is the only shape where the flag
     // decides anything.
     const dir = mkdtempSync(join(tmpdir(), 'ap-clock-tier-'));
@@ -2792,6 +2848,167 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
   };
   const absTmp = resolve('/abs/tmp');
 
+  it.each(['docs-nav', 'verify'] as const)(
+    'keeps %s inside the causal navigation scope',
+    (role) => {
+      const brief = buildRoleBrief(
+        {
+          ...PR_PLAN,
+          reviewProfile: 'docs-nav',
+          fetchedSha: 'a'.repeat(40),
+          files: [{ path: 'docs/developers/_meta.ts' }],
+        },
+        role,
+        { planPath: join(absTmp, 'plan.json') },
+      );
+      expect(brief).toContain('causal base/head difference');
+      expect(brief).toContain('discoverability alone does not establish that');
+      expect(brief).toContain('Do not audit unchanged example implementations');
+      expect(brief.split(DOCS_NAV_CAUSAL_SCOPE)).toHaveLength(2);
+      expect(BRIEFS['docs-nav'].brief).toContain(DOCS_NAV_CAUSAL_SCOPE);
+      if (role === 'docs-nav') {
+        expect(brief).toContain(join(absTmp, 'qwen-review-pr-6766-context.md'));
+        // The finder's brief carries no `### Incidental findings` channel and
+        // Step 4's single verification pass DOES rule on its candidates, so
+        // the withdrawal clause — written for the verifier, whose incidentals
+        // no later round carries — must not be welded in here.
+        expect(brief).not.toContain('channel above is withdrawn');
+        expect(brief).toContain('Do not file incidental findings');
+        expect(brief).toContain(
+          `read the complete captured base with \`git show ${PR_PLAN.mergeBaseSha}:docs/developers/_meta.ts\` ` +
+            `and head with \`git show ${'a'.repeat(40)}:docs/developers/_meta.ts\``,
+        );
+        expect(brief).not.toContain('do not guess the context path');
+      }
+      if (role === 'verify') {
+        // The verify brief carries the `### Incidental findings` channel two
+        // lines above the weld; the weld must name what it supersedes, or a
+        // verifier obeying the earlier instruction files an incidental this
+        // profile has no later round to carry.
+        expect(brief).toContain('### Incidental findings');
+        expect(brief).toContain('channel above is withdrawn');
+        expect(brief).not.toContain(
+          join(absTmp, 'qwen-review-pr-6766-context.md'),
+        );
+        expect(brief).not.toContain('do not guess the context path');
+      }
+    },
+  );
+
+  it.each(['1a', 'verify', '6a', 'reverse-audit'] as const)(
+    'keeps the focused scope out of an ordinary %s review',
+    (role) => {
+      const brief = buildRoleBrief(PR_PLAN, role, {
+        planPath: join(absTmp, 'plan.json'),
+      });
+      expect(brief).not.toContain('causal base/head difference');
+      expect(brief).not.toContain('Do not file incidental findings');
+    },
+  );
+
+  it.each([
+    { mergeBaseSha: 'HEAD~1' },
+    { fetchedSha: '$(touch /tmp/unsafe)' },
+    { files: [{ path: 'docs/$(touch unsafe)/_meta.ts' }] },
+    { files: [] },
+  ])(
+    'does not invent navigation reads for invalid captured input: %j',
+    (invalid) => {
+      const brief = buildRoleBrief(
+        {
+          ...PR_PLAN,
+          reviewProfile: 'docs-nav',
+          fetchedSha: 'a'.repeat(40),
+          files: [{ path: 'docs/developers/_meta.ts' }],
+          ...invalid,
+        },
+        'docs-nav',
+      );
+      expect(brief).toContain('do not guess a base revision');
+      expect(brief).not.toContain('read the complete captured base with');
+    },
+  );
+
+  it.each([
+    ['docs/_meta.ts', true],
+    ['docs/developers/_meta.ts', true],
+    ['docs/a_b/c-d/_meta.ts', true],
+    ['docs/x/_meta.json', false],
+    ['docs/a.b/_meta.ts', false],
+    ['docs/a b/_meta.ts', false],
+    ['docs/$(touch unsafe)/_meta.ts', false],
+    ['docs/_meta.ts\n', false],
+  ] as const)(
+    'keeps classification and navigation reads aligned for %j',
+    (path, expected) => {
+      const base = "export default { examples: 'Old' };\n";
+      const head = "export default { examples: 'New' };\n";
+      const beforePath = JSON.stringify(`a/${path}`);
+      const afterPath = JSON.stringify(`b/${path}`);
+      const patch = createTwoFilesPatch(beforePath, afterPath, base, head);
+      const diff = `diff --git ${beforePath} ${afterPath}\nindex aaaaaaa..bbbbbbb 100644\n${patch.slice(patch.indexOf('---'))}`;
+      const eligible = isStaticDocsNavDiff(diff, (side) =>
+        side === 'base' ? base : head,
+      );
+      const brief = buildRoleBrief(
+        {
+          ...PR_PLAN,
+          reviewProfile: 'docs-nav',
+          fetchedSha: 'a'.repeat(40),
+          files: [{ path }],
+        },
+        'docs-nav',
+        { planPath: join(absTmp, 'plan.json') },
+      );
+      const read = 'read the complete captured base with';
+      expect(brief.includes(read)).toBe(eligible);
+      expect(eligible).toBe(expected);
+      if (eligible) {
+        expect(brief).toContain(
+          `${read} \`git show ${PR_PLAN.mergeBaseSha}:${path}\` and head with \`git show ${'a'.repeat(40)}:${path}\``,
+        );
+        expect(brief).not.toContain('do not guess a base revision');
+      } else {
+        expect(brief).toContain('do not guess a base revision');
+      }
+    },
+  );
+
+  it.each([
+    // '007' passes `isPositivePrNumber` but fails the no-leading-zero shape
+    // conjunct. The remaining three pass both shape conjuncts and are refused
+    // by the safe-integer bound alone — without it they weld a junk-row
+    // context pointer into the sole reviewer's brief.
+    '007',
+    '9007199254740993',
+    Number.MAX_SAFE_INTEGER + 2,
+    '123456789012345678901',
+  ])(
+    'welds no context pointer for a malformed plan identity %s',
+    (prNumber) => {
+      // The same tampered-plan family role 0's and 6d's welds refuse. The
+      // pointer is omitted, not welded; the causal scope paragraph still
+      // rides.
+      const brief = buildRoleBrief(
+        { ...PR_PLAN, prNumber, reviewProfile: 'docs-nav' },
+        'docs-nav',
+        { planPath: join(absTmp, 'plan.json') },
+      );
+      expect(brief).not.toContain('-context.md');
+      expect(brief).toContain('causal base/head difference');
+      expect(brief).toContain('do not guess the context path');
+    },
+  );
+
+  it('discloses a missing plan path for the focused PR context', () => {
+    const brief = buildRoleBrief(
+      { ...PR_PLAN, reviewProfile: 'docs-nav' },
+      'docs-nav',
+    );
+    expect(brief).not.toContain('-context.md');
+    expect(brief).toContain('do not guess the context path');
+  });
+
   it.each([
     '1a',
     '1b',
@@ -2808,6 +3025,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     '6b',
     '6c',
     'test-matrix',
+    'docs-nav',
     // The conditionally-owed role welds the diff like every other reader; a
     // role-keyed branch in buildRoleBrief that breaks welding for it alone
     // must not ship green (6d needs a PR-bearing plan, so its diff weld is
@@ -4776,6 +4994,182 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
   });
 });
 
+describe('the plan-recorded wall — a local run has a clock too', () => {
+  // Step 2 of the termination roadmap: without `QWEN_REVIEW_DEADLINE_EPOCH`
+  // the gates used to be inert, so a local loop that stopped converging had
+  // no bound but the round cap — and the cap counts rounds, not time. The
+  // capture now records a wall in the plan; these drive the real handler
+  // against such plans with NO env clock.
+  const dirs: string[] = [];
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+  });
+  afterEach(() => {
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    process.exitCode = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Write `plan` captured `agoSeconds` ago and run the handler on it. */
+  function callOn(
+    plan: Record<string, unknown>,
+    agoSeconds: number,
+    role: string,
+    extra: Record<string, unknown> = {},
+  ): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-wall-'));
+    dirs.push(dir);
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify(plan));
+    const capturedMs = Date.now() - agoSeconds * 1000;
+    utimesSync(planPath, capturedMs / 1000, capturedMs / 1000);
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '- x.test.ts:3 — off-by-one in retry cap\n');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan: planPath,
+      role,
+      findings,
+      ...extra,
+    });
+    return planPath;
+  }
+  const stderr = () =>
+    (writeStderrLine as unknown as Mock).mock.calls.map((c) => c[0]).join('\n');
+
+  it('refuses a reverse-audit round the plan’s default wall no longer holds — no env clock at all', () => {
+    // A 3,600s wall captured 1,000s ago: 2,600s remain, under the 1,200s
+    // reserve a wall that short implies plus the 1,800s round-1 estimate.
+    const planPath = callOn(
+      { ...PLAN, deadlineSeconds: 3600, deadlineSource: 'default' },
+      1000,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('BUDGET:');
+    expect(stderr()).toContain(
+      '`reverse audit — stopped before round 2 by the review time budget`',
+    );
+    expect(readBudgetStop(planPath)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    expect(readRoundStamps(planPath)).toHaveLength(0);
+  });
+
+  it('admits the round while the wall holds, and a `--deadline none` plan is unclocked', () => {
+    // 8 hours of wall captured an hour ago: plenty.
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      3600,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+
+    // No wall recorded (`--deadline none`) and no env: the gate is inert even
+    // for a plan captured long ago.
+    (writeStdoutLine as unknown as Mock).mockClear();
+    callOn({ ...PLAN }, 48 * 3600, 'reverse-audit', { round: 2 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('the env clock still wins over the plan’s wall when both are present', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      0,
+      'reverse-audit',
+      { round: 2 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect(stderr()).toContain('BUDGET:');
+  });
+
+  it('the default wall does not flip the huge tier; an explicit --deadline does', () => {
+    // A huge plan at the 3B cap of 5. Under the default wall round 4 is
+    // inside the cap; under a flag wall the cap is the huge tier's 3 and
+    // round 4 is past it — refused as a ROUND CAP, not a budget stop.
+    const huge = {
+      ...PLAN,
+      srcDiffLines: 9000,
+      diffLines: 9000,
+      budget: { reverseAuditRounds: 5 },
+    };
+    callOn(
+      { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: 'default' },
+      60,
+      'reverse-audit',
+      { round: 4 },
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    const flagged = callOn(
+      { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: 'flag' },
+      60,
+      'reverse-audit',
+      { round: 4 },
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('ROUND CAP:');
+    expect(readBudgetStop(flagged)?.cause).toBe('round-cap');
+
+    // The --all-chunks round builder and the per-chunk build each read the
+    // cap at their own site; pin all three.
+    for (const [source, exit] of [
+      ['default', undefined],
+      ['flag', 4],
+    ] as const) {
+      for (const form of [{ 'all-chunks': true }, { chunk: 13 }]) {
+        (writeStdoutLine as unknown as Mock).mockClear();
+        (writeStderrLine as unknown as Mock).mockClear();
+        process.exitCode = undefined;
+        callOn(
+          { ...huge, deadlineSeconds: 16 * 3600, deadlineSource: source },
+          60,
+          'reverse-audit',
+          { ...form, round: 4 },
+        );
+        expect(process.exitCode).toBe(exit);
+        if (exit === 4) expect(stderr()).toContain('ROUND CAP:');
+        else expect(stderr()).not.toContain('ROUND CAP:');
+      }
+    }
+  });
+
+  it('the verifier’s compose floor reads the plan’s wall too', () => {
+    // 2,000s of wall captured 1,000s ago: 1,000s remain, under the 1,200s
+    // compose floor.
+    callOn(
+      { ...PLAN, deadlineSeconds: 2000, deadlineSource: 'default' },
+      1000,
+      'verify',
+    );
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(stderr()).toContain('VERIFY BUDGET:');
+
+    (writeStderrLine as unknown as Mock).mockClear();
+    process.exitCode = undefined;
+    callOn(
+      { ...PLAN, deadlineSeconds: 8 * 3600, deadlineSource: 'default' },
+      1000,
+      'verify',
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+});
+
 describe('the reverse-audit budget gate — the loop must end by reporting', () => {
   // Measured on CI run #8368 (+1699 lines): the audit loop ran to the 5-round
   // cap, spent 3.5 of the job's 4 budgeted hours, and the outer kill arrived
@@ -4790,7 +5184,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   afterEach(() => {
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
-    delete process.env[TOOL_CONCURRENCY_ENV];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     process.exitCode = undefined;
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
@@ -5244,7 +5638,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // round runs two waves and the pair three, so round 2 pays 3/2 of the
     // round estimate — and the gate refuses it when the reserve plus that
     // does not fit, even though round 1 (one estimate) just admitted.
-    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
     process.env[RESERVE_ENV] = '600';
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
     const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
@@ -5263,7 +5657,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   });
 
   it('admits the 3B pair when the reserve plus the pair wall fits', () => {
-    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
     process.env[RESERVE_ENV] = '600';
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3400);
     const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
@@ -5349,7 +5743,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       // carries (#9259), on the describe that actually needs it.
       DEADLINE_ENV,
       RESERVE_ENV,
-      TOOL_CONCURRENCY_ENV,
+      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
     ]) {
       SAVED[k] = process.env[k];
     }
@@ -5357,7 +5751,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
-    delete process.env[TOOL_CONCURRENCY_ENV];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
   afterEach(() => {
@@ -5776,6 +6170,40 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(clocked).toContain('certificate final');
     expect(clocked).toContain('3-round cap leaves');
     expect(clocked).not.toContain('next cold check round 4');
+
+    // The plan's own wall, no env: a `--deadline` flag is an explicit clock
+    // and closes the certificate; the default wall is not, and does not.
+    delete process.env[DEADLINE_ENV];
+    for (const [source, closes] of [
+      ['flag', true],
+      ['default', false],
+    ] as const) {
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          srcDiffLines: 5000,
+          diffLines: 5000,
+          deadlineSeconds: 16 * 3600,
+          deadlineSource: source,
+        }),
+      );
+      // Recent, so the wall has hours left, but before the round records.
+      const recent = new Date(Date.now() - 60_000);
+      utimesSync(plan, recent, recent);
+      answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+      answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+      const walled = runRound(3);
+      expect(process.exitCode).toBeUndefined();
+      expect(walled).toContain('chunk 13 — retired: dry in rounds 1 and 2');
+      if (closes) {
+        expect(walled).toContain('3-round cap leaves');
+        expect(walled).not.toContain('next cold check round 4');
+      } else {
+        expect(walled).toContain('next cold check round 4');
+        expect(walled).not.toContain('certificate final');
+      }
+    }
   });
 
   it('huge cap: a non-converging loop is refused past the reduced 3-round cap', () => {
@@ -7186,7 +7614,7 @@ describe('the verify gate — compose survives a budget stop', () => {
     expect(readRecordedPrompts(plan).size).toBe(1);
   });
 
-  it('builds the verifier when there is no deadline at all — every local run', () => {
+  it('builds the verifier when no clock resolves at all — no env epoch and no plan wall', () => {
     verifyCall();
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
@@ -7669,5 +8097,79 @@ describe('incremental-scope briefs', () => {
       'Changed since the last round (full review): src/changed.ts.',
     );
     expect(p).toContain('src/caller.ts (imports src/changed.ts)');
+  });
+});
+
+describe('agent-prompt --batch', () => {
+  let dir: string;
+  let plan: string;
+  let findings: string;
+  const run = (args: Record<string, unknown>) =>
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      batch: true,
+      ...args,
+    });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv(DEADLINE_ENV, '');
+    dir = mkdtempSync(join(tmpdir(), 'agent-prompt-batch-'));
+    plan = join(dir, 'plan.json');
+    findings = join(dir, 'findings.md');
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 1000, diffLines: 1200 }),
+    );
+    writeFileSync(findings, '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    process.exitCode = 0;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  function selected() {
+    const calls = vi.mocked(writeStdoutLine).mock.calls;
+    expect(calls).toHaveLength(1);
+    const file = join(dir, 'batch.json');
+    writeFileSync(file, calls[0][0]);
+    return readWorkflowBatches(plan, [file]);
+  }
+  it('emits the recorded verifier with its findings pointer intact', () => {
+    writeFileSync(findings, 'A candidate finding to verify');
+    run({ role: 'verify', findings });
+    const agents = selected();
+    expect(agents).toHaveLength(1);
+    expect(agents[0].key).toMatch(/^verify--/);
+    expect(agents[0].prompt).toContain('.findings.md');
+    expect(agents[0].prompt).toBe(readRecordedPrompts(plan).get(agents[0].key));
+  });
+  it('emits all admitted audit chunks and preserves the round stamp', () => {
+    run({ role: 'reverse-audit', 'all-chunks': true, findings, round: 1 });
+    const agents = selected();
+    expect(agents.map((a) => a.key)).toHaveLength(3);
+    expect(agents.every((a) => a.key.startsWith('reverse-audit--chunk-'))).toBe(
+      true,
+    );
+    expect(readRoundStamps(plan)).toHaveLength(1);
+  });
+  it('emits the whole initial roster without selecting older records', () => {
+    run({ roster: true });
+    const agents = selected();
+    expect(agents.length).toBeGreaterThan(3);
+    expect(new Set(agents.map((a) => a.key))).toEqual(
+      new Set(readRecordedPrompts(plan).keys()),
+    );
+  });
+  it('emits no manifest when the verifier budget refuses admission', () => {
+    writeFileSync(findings, 'A candidate finding to verify');
+    vi.stubEnv(DEADLINE_ENV, String(Math.floor(Date.now() / 1000) + 1));
+    run({ role: 'verify', findings });
+    expect(process.exitCode).toBe(4);
+    expect(writeStdoutLine).not.toHaveBeenCalled();
+    expect(readRecordedPrompts(plan).size).toBe(0);
+  });
+  it('rejects incomplete custom specialist blocks', () => {
+    expect(() => run({ 'whole-diff': true })).toThrow(/complete role/);
+    expect(writeStdoutLine).not.toHaveBeenCalled();
   });
 });

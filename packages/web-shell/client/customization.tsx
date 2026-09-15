@@ -131,22 +131,28 @@ export interface WebShellChatHeaderOptions {
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask' | 'terminal';
+export type WebShellRightPanelItem =
+  | 'review'
+  | 'sideTask'
+  | 'terminal'
+  | 'webPreview';
 
 export interface WebShellRightPanelOptions {
-  /** Empty-state actions to show. Defaults to all actions. */
+  /** Empty-state actions to show. Defaults to review and sideTask. */
   items?: readonly WebShellRightPanelItem[];
 }
 
 export type WebShellEnvironmentPanelItem =
   | 'environment'
+  | 'sources'
   | 'subagents'
   | 'backgroundTasks'
+  /** Legacy attachment-only view in the Sources section. */
   | 'attachments'
   | 'artifacts';
 
 export interface WebShellEnvironmentPanelOptions {
-  /** Sections to show. Defaults to all sections. */
+  /** Sections to show. Sources includes attachments; both keys render one section. */
   items?: readonly WebShellEnvironmentPanelItem[];
 }
 

@@ -188,6 +188,11 @@ describe('inspectConversationBranches', () => {
         'session_artifact_snapshot',
       ),
       system('turn-result', 'conversation-leaf', 'turn_result'),
+      system(
+        'sources-snapshot',
+        'conversation-leaf',
+        'session_sources_snapshot',
+      ),
     ];
 
     expect(
@@ -202,6 +207,7 @@ describe('inspectConversationBranches', () => {
       'custom_title',
       'session_artifact_event',
       'session_artifact_snapshot',
+      'session_sources_snapshot',
       'turn_result',
     ] as const;
 

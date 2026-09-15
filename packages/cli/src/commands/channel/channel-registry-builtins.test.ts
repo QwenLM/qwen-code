@@ -42,6 +42,18 @@ describe('built-in channel registry', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     const catalog = await supportedChannelCatalog();
+    expect(
+      catalog
+        .find((entry) => entry.type === 'dws')
+        ?.fields.find((field) => field.key === 'dmPolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    });
 
     expect(catalog.find((entry) => entry.type === 'dingtalk')).toEqual({
       type: 'dingtalk',
@@ -121,7 +133,6 @@ describe('built-in channel registry', () => {
     });
     expect(entry?.fields.map((field) => field.key)).toEqual([
       'settings',
-      'messagePrefix',
       'senderPolicy',
       'allowedUsers',
       'groupPolicy',

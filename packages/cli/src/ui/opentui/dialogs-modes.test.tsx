@@ -185,7 +185,7 @@ describe('OpenTuiOutputStyleDialog', () => {
     await waitFor(() => expect(screen.queryByText('Reviewer')).not.toBeNull());
     await waitFor(() =>
       expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
-        '● Reviewer',
+        '› Reviewer',
       ),
     );
     // Labelled with its source, as the ink picker does.
@@ -194,7 +194,7 @@ describe('OpenTuiOutputStyleDialog', () => {
     );
     expect(
       screen.getByText('default').parentElement?.textContent,
-    ).not.toContain('● default');
+    ).not.toContain('› default');
   });
 
   it('labels a project style with its own source and leaves built-ins unlabelled', async () => {
@@ -248,7 +248,7 @@ describe('OpenTuiOutputStyleDialog', () => {
 
     await waitFor(() =>
       expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-        '● Concise',
+        '› Concise',
       ),
     );
     press('return');
@@ -305,7 +305,7 @@ describe('OpenTuiOutputStyleDialog', () => {
 
     await waitFor(() =>
       expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-        '● Concise',
+        '› Concise',
       ),
     );
     press('return');
@@ -336,7 +336,16 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    // Wait for the selection marker, not just the row: the catalog text
+    // renders with the mount-time selection (index 0) and the pre-selection
+    // of the active style lands in a later passive-effect commit. Pressing
+    // keys on text presence alone can interleave as up-then-derive-then-
+    // return, which picks Concise instead of default.
+    await waitFor(() =>
+      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+        '› Concise',
+      ),
+    );
     press('up');
     press('return');
 
@@ -406,7 +415,7 @@ describe('OpenTuiOutputStyleDialog', () => {
 
     await waitFor(() =>
       expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
-        '● Reviewer',
+        '› Reviewer',
       ),
     );
     expect(harness.setOutputStyle).not.toHaveBeenCalled();
@@ -478,7 +487,7 @@ describe('OpenTuiOutputStyleDialog', () => {
     await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
     press('down');
     expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '● Concise',
+      '› Concise',
     );
 
     await act(async () => {
@@ -496,7 +505,7 @@ describe('OpenTuiOutputStyleDialog', () => {
 
     expect(mocks.loadSessionOutputStyles).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '● Concise',
+      '› Concise',
     );
     press('return');
     await waitFor(() =>
@@ -530,12 +539,12 @@ describe('OpenTuiOutputStyleDialog', () => {
 
     await waitFor(() =>
       expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
-        '● Reviewer',
+        '› Reviewer',
       ),
     );
     expect(
       screen.getByText('default').parentElement?.textContent,
-    ).not.toContain('● default');
+    ).not.toContain('› default');
 
     press('return');
     await waitFor(() =>
@@ -576,7 +585,7 @@ describe('OpenTuiOutputStyleDialog', () => {
 
     await waitFor(() =>
       expect(screen.getByText('reviewer').parentElement?.textContent).toContain(
-        '● reviewer',
+        '› reviewer',
       ),
     );
     expect(screen.getAllByText('reviewer')).toHaveLength(1);
@@ -622,7 +631,7 @@ describe('OpenTuiEffortDialog', () => {
     expect(screen.queryByText('medium')).toBeNull();
     expect(screen.queryByText('xhigh')).toBeNull();
     expect(screen.getByText('high').parentElement?.textContent).toContain(
-      '\u25cf high',
+      '\u203a high',
     );
   });
 

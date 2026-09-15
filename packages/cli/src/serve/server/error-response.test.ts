@@ -7,12 +7,14 @@
 import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  AcpChildCapacityExceededError,
   McpAuthenticationInProgressError,
   SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   InvalidSessionTranscriptTurnAnchorError,
   SessionIdCaseConflictError,
+  SessionSourceError,
   SessionTranscriptChangedError,
   SessionWriterConflictError,
   SessionWriterLostError,
@@ -48,7 +50,124 @@ function responseMock(): {
   return { response: response as unknown as Response, set, status, json };
 }
 
+describe('child capacity errors', () => {
+  it.each([false, true])(
+    'preserves capacity through runtime wrapper=%s',
+    (wrapped) => {
+      const capacity = new AcpChildCapacityExceededError(6, 6);
+      const { response, status, json, set } = responseMock();
+      sendBridgeError(
+        response,
+        wrapped ? new WorkspaceRuntimeInitializationError(capacity) : capacity,
+      );
+      expect(status).toHaveBeenCalledWith(503);
+      expect(json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: capacity.code,
+          maxConcurrentChildren: 6,
+          committedAcpChildren: 6,
+        }),
+      );
+      expect(set).not.toHaveBeenCalled();
+    },
+  );
+  it('retains a verified standalone rollback and its capacity cause without Retry-After', () => {
+    const capacity = {
+      code: 'acp_child_capacity_exhausted' as const,
+      maxConcurrentChildren: 1,
+      committedAcpChildren: 1,
+    };
+    const { response, status, json, set } = responseMock();
+    sendBridgeError(
+      response,
+      new StandaloneSessionServiceError(
+        'standalone_creation_rolled_back',
+        'session-1',
+        'rolled back',
+        true,
+        capacity,
+      ),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'standalone_creation_rolled_back',
+        capacity,
+        sessionId: 'session-1',
+        retryable: true,
+      }),
+    );
+    expect(set).not.toHaveBeenCalled();
+  });
+});
+
 describe('sendBridgeError session writer errors', () => {
+  it.each(['local', 'rpc'] as const)(
+    'records %s source failures with request context',
+    (transport) => {
+      for (const [code, statusCode, level] of [
+        ['invalid_source', 400, 'warn'],
+        ['source_persistence_unavailable', 503, 'error'],
+      ] as const) {
+        const { response, status, json } = responseMock();
+        const daemonLog = {
+          warn: vi.fn(),
+          error: vi.fn(),
+        } as unknown as DaemonLogger;
+        const error =
+          transport === 'local'
+            ? new SessionSourceError(code, 'Source operation failed')
+            : Object.assign(new Error('Source operation failed'), {
+                data: { errorKind: code },
+              });
+        const context = {
+          route: 'POST /session/:id/sources',
+          sessionId: 'session-1',
+        };
+
+        sendBridgeError(response, error, context, daemonLog);
+
+        expect(status).toHaveBeenCalledWith(statusCode);
+        expect(json).toHaveBeenCalledWith({
+          error: 'Source operation failed',
+          code,
+        });
+        if (level === 'error') {
+          expect(daemonLog.error).toHaveBeenCalledWith(
+            error.message,
+            error,
+            context,
+          );
+        } else {
+          expect(daemonLog.warn).toHaveBeenCalledWith(error.message, {
+            ...context,
+            errorType: error.name,
+          });
+        }
+      }
+    },
+  );
+
+  it('logs unavailable source persistence to stderr without a daemon logger', () => {
+    const { response } = responseMock();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      sendBridgeError(
+        response,
+        new SessionSourceError(
+          'source_persistence_unavailable',
+          'Source persistence is unavailable',
+        ),
+        { route: 'POST /session/:id/sources', sessionId: 'session-1' },
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('POST /session/:id/sources session=session-1'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('maps concurrent MCP authentication to conflict', () => {
     const { response, status, json } = responseMock();
 

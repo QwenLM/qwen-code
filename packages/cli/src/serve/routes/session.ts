@@ -38,17 +38,21 @@ import {
   toSessionPrInfo,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
+  type SessionSourceInput,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
   type SessionArchiveState,
   type WorktreeSession,
   parseGoalControlRequest,
+  readArtifactSnapshot,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_SUBMITTED_PROMPT_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
@@ -6302,6 +6306,75 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/sources',
+    withOwnerReadSession(
+      'GET /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.getSessionSources(
+              sessionId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/sources',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.upsertSessionSource(
+          sessionId,
+          req.body as SessionSourceInput,
+          { clientId },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/sources/:sourceId',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'DELETE /session/:id/sources/:sourceId',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.removeSessionSource(
+          sessionId,
+          req.params['sourceId']!,
+          { clientId },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/artifacts',
     withOwnerReadSession(
       'GET /session/:id/artifacts',
@@ -6316,6 +6389,48 @@ export function registerSessionRoutes(
               clientId !== undefined ? { clientId } : undefined,
             ),
           );
+      },
+      { cwdBound: true },
+    ),
+  );
+
+  app.get(
+    '/session/:id/artifacts/:artifactId/content',
+    withOwnerReadSession(
+      'GET /session/:id/artifacts/:artifactId/content',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const { artifacts } = await runtime.bridge.getSessionArtifacts(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        const artifact = artifacts.find(
+          (item) => item.id === req.params['artifactId'],
+        );
+        let content: string;
+        try {
+          if (!artifact) throw new Error('Snapshot not registered');
+          content = await readArtifactSnapshot(
+            artifact,
+            runtime.sessionRuntimeBaseDir,
+          );
+        } catch {
+          res.status(404).json({
+            error: 'artifact_snapshot_unavailable',
+            message: 'Saved webpage version is missing or has changed.',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .set({
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="saved-webpage.html"',
+            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'private, no-store',
+          })
+          .send(content);
       },
       { cwdBound: true },
     ),
@@ -6831,6 +6946,7 @@ export function registerSessionRoutes(
           !Array.isArray(forwardedBody['_meta'])
             ? { ...(forwardedBody['_meta'] as Record<string, unknown>) }
             : undefined;
+        const submittedPrompt = forwardedMeta?.[SUBMITTED_PROMPT_META_KEY];
         const promptAuthorization =
           forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
         const promptDisplayText =
@@ -6839,6 +6955,8 @@ export function registerSessionRoutes(
         if (forwardedMeta) {
           delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
           delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          delete forwardedMeta[SUBMITTED_PROMPT_META_KEY];
+          delete forwardedMeta[DAEMON_SUBMITTED_PROMPT_META_KEY];
           delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
           if (Object.keys(forwardedMeta).length > 0) {
             forwardedBody['_meta'] = forwardedMeta;
@@ -6908,6 +7026,12 @@ export function registerSessionRoutes(
                 : {}),
               ...(trustedPromptDisplayText !== undefined
                 ? { promptDisplayText: trustedPromptDisplayText }
+                : {}),
+              ...(typeof submittedPrompt === 'string' &&
+              channelPrompt === undefined &&
+              promptAuthorization === undefined &&
+              promptDisplayText === undefined
+                ? { submittedPrompt }
                 : {}),
               ...(trustedChannelPrompt ? { channelPrompt: true } : {}),
               ...(delivery !== undefined
@@ -8493,6 +8617,10 @@ export function registerSessionRoutes(
           ...(session.activeWorkState !== undefined
             ? { activeWorkState: session.activeWorkState }
             : {}),
+          hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
+          ...(session.backgroundTurn
+            ? { backgroundTurn: session.backgroundTurn }
+            : {}),
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
           // Bridge-local activity watermark, absent until a running prompt in
@@ -8718,9 +8846,26 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted, messageId? }`. Accepted requests are owned by the
-  // daemon; rejected requests were not admitted. Synchronous — the bridge only
-  // mutates its in-memory session queues.
+  // Returns `{ accepted, messageId?, reason? }`; `reason` is `'session_idle'`
+  // when an open session has no prompt admitted to its prompt FIFO and no
+  // active Goal turn, which lets a client resubmit as an ordinary prompt
+  // instead of reporting a failure. The verdict describes only what can drain
+  // a mid-turn message, not everything the session may hold (a session
+  // snapshot can still report `hasActivePrompt: true`). Every other rejection
+  // cause — closing, attachment budget, mismatched `messageId`, full queue —
+  // omits it, and a kept mismatched payload is not a delivery promise: a
+  // removed promoted message disappears from snapshots at once — one that had
+  // not started is dropped where it stands, one already running is hidden
+  // until its aborted turn settles — so the removal response is the only
+  // `removed = true` a client ever observes.
+  // For a new admission, a `content` reference the session no longer holds
+  // (or an invalid one) is declined before the idle/queue verdicts: the
+  // bridge throws and the error mapping answers 410/400 with an
+  // `{ error, code }` body — no `accepted`, no `reason`. A same-`messageId`
+  // retry whose payload matches acks idempotently first, and a closing
+  // session is refused reasonless first. Accepted requests are owned by the
+  // daemon; rejected requests were not admitted. Synchronous — the bridge
+  // only mutates its in-memory session queues.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
   // only the global 10 MB body limit applies. It bounds how much a single

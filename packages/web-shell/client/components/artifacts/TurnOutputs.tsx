@@ -1,4 +1,7 @@
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonBackgroundTurn,
+  DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import { DownloadIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
@@ -66,6 +69,14 @@ export function visibleTurnOutputs<T>(
 }
 
 export type TurnOutputOpenRequest = (
+  | {
+      id: string;
+      kind: 'background_task';
+      title: string;
+      turnId: string;
+      backgroundTurn: DaemonBackgroundTurn;
+      workspaceCwd?: string;
+    }
   | {
       id: 'review';
       kind: 'review';
@@ -460,7 +471,14 @@ function ArtifactCard({
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[getArtifactTypeLabel(artifact), size].filter(Boolean).join(' · ')}
+            {[
+              artifact.metadata?.['artifactType'] === 'web_preview_snapshot'
+                ? t('webPreview.saved')
+                : getArtifactTypeLabel(artifact),
+              size,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
           </div>
         </div>
         <div className={styles.actions}>

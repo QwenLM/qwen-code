@@ -1324,7 +1324,7 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
-      'Token budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+      'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
     );
   });
 
@@ -1504,7 +1504,7 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
-      'The autonomous token budget for this Goal window is spent.',
+      'An autonomous budget for this Goal window is spent',
     );
   });
 
@@ -4940,6 +4940,83 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
 
+  it.each([
+    {
+      label: 'a call denied for approval',
+      approvalRequired: true as const,
+      reason:
+        'Qwen Code requires permission to use "run_shell_command", but that permission was declined (non-interactive mode cannot prompt for confirmation).',
+      expected: 'use the -y flag (YOLO mode)',
+      unexpected: 'was not run',
+    },
+    {
+      label: 'a call blocked by a hook',
+      approvalRequired: undefined,
+      reason: 'no shell today',
+      expected: 'Warning: Tool "run_shell_command" was not run: no shell today',
+      unexpected: 'requires user approval',
+    },
+  ])(
+    'tells the headless user why $label did not run',
+    async ({ approvalRequired, reason, expected, unexpected }) => {
+      setupMetricsMock();
+      const toolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-denied',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-denied',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: 'tool-denied',
+        error: new Error(reason),
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'tool-denied',
+              name: 'run_shell_command',
+              response: { error: reason },
+            },
+          },
+        ],
+        resultDisplay: reason,
+        ...(approvalRequired ? { approvalRequired } : {}),
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Done.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 10 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Run ls',
+        'prompt-id-denied',
+      );
+
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(expected);
+      expect(stderr).not.toContain(unexpected);
+    },
+  );
+
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
     const apiError = new Error('API connection failed: token=secret');
@@ -5756,6 +5833,47 @@ describe('runNonInteractive', () => {
     const errorOutput = stderrCalls.map((call) => call[0]).join('');
     expect(errorOutput).toContain('401');
     expect(errorOutput).toContain('Incorrect API key provided');
+  });
+
+  it('fails stream-json runs when the model stream emits an API error', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const apiErrorEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.Error,
+      value: {
+        error: {
+          message: '429 Too Many Requests',
+          status: 429,
+        },
+      },
+    };
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]).trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { [key: string]: unknown });
+    const results = messages.filter((message) => message['type'] === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('429 Too Many Requests') },
+    });
   });
 
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
@@ -9305,6 +9423,62 @@ describe('formatGoalState', () => {
     ).toBe(
       'Goal paused: ship the release notes\nUsage: 3 turns · 1,234 of 30,000,000 tokens\nReason: Paused with /goal pause.',
     );
+  });
+
+  it('writes no control sequence from a stop reason to stdout', () => {
+    // A pause reason can embed a raw provider error.
+    const output = formatGoalState(
+      goalSnapshot({
+        status: 'paused',
+        lastReason: 'paused\r\u001b]52;c;ZXh0cmFjdGVk\u0007 by user',
+      }),
+      'status',
+    );
+
+    expect(output).toContain('Reason: paused');
+    expect(output).not.toContain('\r');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('\u0007');
+  });
+
+  it('names the checkpoint failure below the stop reason', () => {
+    // The stop reason names the kind of checkpoint failure; only this line
+    // says which one it was.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'usage_limited',
+          lastReason: 'Checkpoints stalled.',
+          checkpointStalls: 3,
+          lastCheckpointFailure:
+            'Error: Goal checkpoint verifier timed out after 30000ms',
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal usage limited: ship the release notes\nReason: Checkpoints stalled.\nCheckpoint: 3/3 stalled · Error: Goal checkpoint verifier timed out after 30000ms',
+    );
+  });
+
+  it('shows checkpoint health under the rule the interactive cards use', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ lastCheckpointFailure: 'Error: provider failed' }),
+        'status',
+      ),
+    ).toBe(
+      'Goal active: ship the release notes\nCheckpoint: last check failed · Error: provider failed',
+    );
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'complete',
+          checkpointStalls: 1,
+          lastCheckpointFailure: 'Error: provider failed',
+        }),
+        'status',
+      ),
+    ).not.toContain('Checkpoint');
   });
 
   it('has no usage to report for a cleared Goal', () => {

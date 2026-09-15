@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from 'react';
+import { act, createRef, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonWorkspaceGitStatus,
@@ -151,6 +151,10 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   imageDragActive: false,
+  navigatePrevHistory: vi.fn(),
+  navigateNextHistory: vi.fn(),
+  shellMode: false,
+  setShellMode: vi.fn(),
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
@@ -268,8 +272,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         clear: vi.fn(),
         retryLast: vi.fn(),
         replaceEditorText: vi.fn(),
-        shellMode: false,
-        setShellMode: vi.fn(),
+        shellMode: composerCoreState.shellMode,
+        setShellMode: composerCoreState.setShellMode,
         toggleShellMode: vi.fn(),
         currentMode: 'default',
         sessionName: undefined,
@@ -287,8 +291,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           handleSearchInput: vi.fn(),
           handleSearchCompositionEnd: vi.fn(),
         },
-        navigatePrevHistory: vi.fn(),
-        navigateNextHistory: vi.fn(),
+        navigatePrevHistory: composerCoreState.navigatePrevHistory,
+        navigateNextHistory: composerCoreState.navigateNextHistory,
         showShortcutHints: false,
         followupState: { isVisible: false, suggestion: '' },
         disabled: false,
@@ -346,6 +350,10 @@ afterEach(() => {
   composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
+  composerCoreState.navigatePrevHistory.mockReset();
+  composerCoreState.navigateNextHistory.mockReset();
+  composerCoreState.setShellMode.mockReset();
+  composerCoreState.shellMode = false;
   composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
@@ -362,7 +370,11 @@ afterEach(() => {
   latestComposerCoreOptions.current = null;
 });
 
-interface ChatEditorRenderProps {
+interface ChatEditorRenderProps
+  extends Pick<
+    ComponentProps<typeof ChatEditor>,
+    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+  > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
   pastedFiles?: Array<{
@@ -383,6 +395,7 @@ interface ChatEditorRenderProps {
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   isRunning?: boolean;
+  onCancel?: () => void;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
   sessionWorkflowEnabled?: boolean;
@@ -409,6 +422,10 @@ interface ChatEditorRenderProps {
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
@@ -913,6 +930,10 @@ describe('ChatEditor context usage ring', () => {
     const button = ring(container)!;
     expect(button).not.toBeNull();
     expect(button.getAttribute('aria-label')).toBe('34.3% context used');
+    expect(button.textContent).toBe('34.3%');
+    expect(
+      button.querySelector('[data-level]')?.getAttribute('data-level'),
+    ).toBe('normal');
     const liveVoice = container.querySelector(
       '[data-testid="live-voice-button"]',
     )!;
@@ -947,6 +968,70 @@ describe('ChatEditor context usage ring', () => {
     expect(ring(noWindow)).toBeNull();
   });
 
+  it('discards a pending hover when the owning session changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        sessionId: 'session-a',
+        tokenCount: 100,
+        contextWindow: 1000,
+        onShowContextUsage: vi.fn(),
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        ring(container)!.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true }),
+        ),
+      );
+      rerenderChatEditor(container, { ...props, sessionId: 'session-b' });
+      expect(ring(container)).not.toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(350));
+      expect(
+        document.querySelector('[data-web-shell-context-popover]'),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps live hover actions available for an always-visible ring with unknown counts', async () => {
+    const compress = vi.fn().mockResolvedValue(undefined);
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const getContextUsage = vi.fn();
+    const container = renderChatEditor({
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage,
+      onShowContextUsage,
+      contextUsageControls: {
+        sessionId: 'session-1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage,
+      },
+    });
+    await act(async () => ring(container)!.focus());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')).toBeNull();
+    expect(ring(container)!.hasAttribute('aria-describedby')).toBe(false);
+    expect(container.querySelector('[id$="-description"]')).toBeNull();
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const compression = buttons.find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compression.disabled).toBe(false);
+    await act(async () => compression.click());
+    expect(compress).toHaveBeenCalledOnce();
+    await act(async () =>
+      buttons.find((button) => button.textContent === 'View details')!.click(),
+    );
+    expect(onOpenContextUsage).toHaveBeenCalledOnce();
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+  });
+
   it('opens the context breakdown when clicked', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
@@ -964,7 +1049,7 @@ describe('ChatEditor context usage ring', () => {
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
   });
 
-  it('shows the used/total detail in a tooltip on focus', async () => {
+  it('shows the used/total detail in the hover card on focus', async () => {
     const container = renderChatEditor({
       tokenCount: 53_600,
       contextWindow: 1_000_000,
@@ -975,18 +1060,72 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
 
-    expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
-    const arrow = document.querySelector<SVGElement>(
-      '[data-slot="tooltip-arrow"]',
-    );
-    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
-    expect(arrow?.style.transform).toBe(
-      'translateY(var(--floating-arrow-offset))',
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).toContain('5.4%');
+    expect(tooltip.textContent).toContain('53,600 tokens');
+    expect(tooltip.textContent).toContain('1,000,000 tokens');
+    expect(tooltip.textContent).toContain('Remaining946,400 tokens');
+    expect(tooltip.textContent).toContain(
+      'Click to view the breakdown in the conversation.',
     );
     expect(
-      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
-    ).toContain('[--floating-arrow-offset:-1px]');
+      tooltip.querySelector<HTMLElement>('[data-level]')?.style.width,
+    ).toBe('5.36%');
+    expect(
+      document
+        .getElementById(ring(container)!.getAttribute('aria-controls')!)
+        ?.getAttribute('aria-label'),
+    ).toBe('Context Usage');
+    expect(
+      document.getElementById(
+        ring(container)!.getAttribute('aria-describedby')!,
+      )?.textContent,
+    ).toBe('53,600 of 1,000,000 tokens used');
   });
+
+  it('shows zero remaining capacity when usage exceeds the context window', async () => {
+    const container = renderChatEditor({
+      tokenCount: 120_000,
+      contextWindow: 100_000,
+      onShowContextUsage: vi.fn(),
+    });
+    await act(async () => {
+      ring(container)!.focus();
+    });
+    expect(
+      document.querySelector('[data-web-shell-context-popover]')?.textContent,
+    ).toContain('Remaining0 tokens');
+  });
+
+  it.each([
+    [60, 'normal'],
+    [61, 'warning'],
+    [80, 'warning'],
+    [81, 'error'],
+  ] as const)(
+    'uses %s percent severity in the visible label and focused tooltip',
+    async (tokenCount, level) => {
+      const container = renderChatEditor({
+        tokenCount,
+        contextWindow: 100,
+        onShowContextUsage: vi.fn(),
+      });
+      await act(async () => {
+        ring(container)!.focus();
+      });
+      expect(
+        ring(container)!
+          .querySelector('[data-level]')
+          ?.getAttribute('data-level'),
+      ).toBe(level);
+      expect(
+        document
+          .querySelector('[data-web-shell-context-popover] [data-level]')
+          ?.getAttribute('data-level'),
+      ).toBe(level);
+    },
+  );
 
   it('escalates the arc color at the /context panel thresholds', () => {
     const arcClass = (container: HTMLElement) =>
@@ -1016,6 +1155,10 @@ describe('ChatEditor context usage ring', () => {
 
     const button = ring(container)!;
     expect(button.getAttribute('aria-label')).toBe('150.0% context used');
+    expect(button.textContent).toBe('150.0%');
+    expect(
+      button.querySelector('[data-level]')?.getAttribute('data-level'),
+    ).toBe('error');
     const arc = button.querySelectorAll('circle')[1];
     expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
   });
@@ -2002,6 +2145,91 @@ describe('ChatEditor toolbar popovers', () => {
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
 
+  it.each([
+    [
+      {
+        enabled: false,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+      },
+      'medium',
+    ],
+    [{ enabled: false, effort: 'default', efforts: [] }, 'default'],
+    [
+      {
+        enabled: false,
+        effort: 'default',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      undefined,
+    ],
+    [
+      { enabled: false, effort: 'default', efforts: [], canEnable: false },
+      undefined,
+    ],
+    [
+      {
+        enabled: true,
+        effort: 'high',
+        efforts: ['low', 'high'],
+        canEnable: false,
+      },
+      'none',
+    ],
+    [
+      {
+        enabled: false,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        enableValue: 'default',
+        efforts: ['medium'],
+      },
+      'default',
+    ],
+    [
+      {
+        enabled: true,
+        effort: 'medium',
+        defaultEffort: 'medium',
+        efforts: ['medium'],
+      },
+      'none',
+    ],
+  ] as const)(
+    'toggles thinking only when the requested direction is available for %j',
+    async (reasoning, expected) => {
+      const onSelectReasoningEffort = vi.fn();
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: 'gpt-5.4',
+        availableModels: [{ id: 'gpt-5.4', label: 'GPT-5.4' }],
+        reasoning: { ...reasoning, efforts: [...reasoning.efforts] },
+        onSelectReasoningEffort,
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+          ?.click(),
+      );
+      const toggle = document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-thinking-toggle]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle?.click());
+      expect(toggle?.disabled).toBe(expected === undefined);
+      if (expected === undefined) {
+        expect(onSelectReasoningEffort).not.toHaveBeenCalled();
+      } else {
+        expect(onSelectReasoningEffort).toHaveBeenCalledWith(
+          expected,
+          'toggle',
+        );
+      }
+    },
+  );
+
   it('localizes every fixed effort tier after a runtime language change', () => {
     const props: ChatEditorRenderProps = {
       visibleToolbarActions: ['model'],
@@ -2174,6 +2402,75 @@ describe('ChatEditor toolbar popovers', () => {
 });
 
 describe('ChatEditor slash command popovers', () => {
+  it('keeps Skill status messages out of populated local command menus', () => {
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 3,
+      query: 'th',
+      selectedIndex: 0,
+      items: [{ id: 'theme', label: '/theme', apply: '/theme ' }],
+    };
+    const container = renderChatEditor({ skillsLoading: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('/theme');
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Loading skills...');
+    rerenderChatEditor(container, { skillsLoadError: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Failed to load results');
+  });
+
+  it('requests Skills when slash suggestions open and shows loading and failure states', () => {
+    const onSkillsOpenChange = vi.fn();
+    const props = { onSkillsOpenChange, skillsLoading: true };
+    const container = renderChatEditor(props);
+    expect(onSkillsOpenChange).not.toHaveBeenCalledWith(true);
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 7,
+      query: 'review',
+      selectedIndex: 0,
+      items: [],
+    };
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Loading...');
+    expect(
+      document
+        .querySelector('[data-web-shell-slash-menu]')
+        ?.getAttribute('role'),
+    ).toBeNull();
+    rerenderChatEditor(container, {
+      ...props,
+      skillsLoading: false,
+      skillsLoadError: true,
+    });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Failed to load results');
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: false });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    // A settled catalog renders no status row: the composed app closes an
+    // empty panel via allowEmptySlashMenu, so a "no results" arm would only
+    // ever flash for one frame.
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    composerCoreState.slashMenu = null;
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('uses shadcn popovers for the command panel and hover detail', () => {
     composerCoreState.slashMenu = {
       kind: 'command',
@@ -2267,7 +2564,7 @@ describe('ChatEditor mobile composer quick actions', () => {
       textareaRef: createRef<HTMLTextAreaElement>(),
       value: '',
       onChange: vi.fn(),
-      onPaste: vi.fn(),
+      onBlur: vi.fn(),
       placeholder: '',
     };
   }
@@ -2296,7 +2593,7 @@ describe('ChatEditor mobile composer quick actions', () => {
     });
   });
 
-  it('hides the keyboard shortcut hints grid on the mobile composer', () => {
+  it('shows the keyboard shortcut hints grid on the mobile composer', () => {
     withTouchDevice(() => {
       composerCoreState.mobileComposer = mobileComposerStub();
       const mobileContainer = renderChatEditor({});
@@ -2305,7 +2602,7 @@ describe('ChatEditor mobile composer quick actions', () => {
         Array.from(mobileContainer.querySelectorAll('button')).some(
           (button) => button.textContent === 'Tab',
         ),
-      ).toBe(false);
+      ).toBe(true);
 
       composerCoreState.mobileComposer = null;
       const desktopContainer = renderChatEditor({});
@@ -2315,6 +2612,98 @@ describe('ChatEditor mobile composer quick actions', () => {
           (button) => button.textContent === 'Tab',
         ),
       ).toBe(true);
+    });
+  });
+
+  it('walks prompt history from the hint arrows on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      openQuickActions(container);
+      const pressHint = (label: string) => {
+        const button = Array.from(container.querySelectorAll('button')).find(
+          (candidate) => candidate.textContent === label,
+        );
+        expect(button).not.toBeUndefined();
+        act(() => button!.click());
+      };
+
+      pressHint('↑');
+      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
+      pressHint('↓');
+      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
+
+      // Tab has no completion target on the textarea backend.
+      pressHint('Tab');
+      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
+      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('cancels the running turn from the Esc hint on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const onCancel = vi.fn();
+      const container = renderChatEditor({ isRunning: true, onCancel });
+      openQuickActions(container);
+      const escButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Esc',
+      );
+      expect(escButton).not.toBeUndefined();
+      act(() => escButton!.click());
+      expect(onCancel).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('moves the textarea caret from the cursor hints on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+      expect(textarea).not.toBeNull();
+      openQuickActions(container);
+      // Setting the value after the panel opens keeps React's controlled
+      // state from resetting it on the panel re-render.
+      textarea!.value = 'abcd';
+      textarea!.setSelectionRange(1, 3);
+      const pressHint = (label: string) => {
+        const button = Array.from(container.querySelectorAll('button')).find(
+          (candidate) => candidate.textContent === label,
+        );
+        expect(button).not.toBeUndefined();
+        act(() => button!.click());
+      };
+
+      // An existing selection collapses to its far edge first.
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(3);
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(4);
+      pressHint('←');
+      expect(textarea!.selectionStart).toBe(3);
+
+      // Movement skips whole code points so an emoji is never split.
+      textarea!.value = 'a😀b';
+      textarea!.setSelectionRange(1, 1);
+      pressHint('→');
+      expect(textarea!.selectionStart).toBe(3);
+      pressHint('←');
+      expect(textarea!.selectionStart).toBe(1);
+    });
+  });
+
+  it('exits shell mode from the Esc hint on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      composerCoreState.shellMode = true;
+      const container = renderChatEditor({ isRunning: true });
+      openQuickActions(container);
+      const escButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Esc',
+      );
+      expect(escButton).not.toBeUndefined();
+      act(() => escButton!.click());
+      expect(composerCoreState.setShellMode).toHaveBeenCalledWith(false);
     });
   });
 

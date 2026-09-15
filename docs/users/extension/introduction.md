@@ -282,6 +282,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
   "commands": "commands",
   "skills": "skills",
   "agents": "agents",
+  "workflows": "workflows",
   "settings": [
     {
       "name": "API Key",
@@ -302,6 +303,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 - `commands`: The directory containing custom commands (default: `commands`). Commands are `.md` files that define prompts.
 - `skills`: The directory containing custom skills (default: `skills`). Skills are discovered automatically and become available via the `/skills` command.
 - `agents`: The directory containing custom subagents (default: `agents`). Subagents are `.yaml` or `.md` files that define specialized AI assistants.
+- `workflows`: A directory, or a list of directories and `.js` files, containing workflow scripts (default: `workflows`). See [Custom workflows](#custom-workflows).
 - `settings`: An array of settings that the extension requires. When installing, users will be prompted to provide values for these settings. The values are stored securely and passed to MCP servers as environment variables.
   - Each setting has the following properties:
     - `name`: Display name for the setting
@@ -364,15 +366,21 @@ Extensions can provide custom skills by placing skill files in a `skills/` subdi
 
 **Example**
 
+An extension named `gcp` with the following structure:
+
 ```
-.qwen/extensions/my-extension/
+.qwen/extensions/gcp/
 ├── qwen-extension.json
 └── skills/
     └── pdf-processor/
-        └── SKILL.md
+        └── SKILL.md   # frontmatter: name: pdf-processor
 ```
 
-The skill will be available via the `/skills` command when the extension is active.
+provides one skill, registered as `gcp:pdf-processor` — the extension's `name`, a colon, then the name the `SKILL.md` authors. Run it with `/gcp:pdf-processor`; `/skills` lists it and labels it with the extension's display name, falling back to its `name` when the manifest declares none.
+
+Unlike the extension's custom commands, which are named after their files (`/deploy` and `/gcs:sync` above, and prefixed only when one collides — see Conflict resolution below), an extension skill always carries its owner: two extensions that both ship a `pdf-processor` give you two skills instead of one shadowing the other. The prefix is added as the skill loads, so the `name` in your `SKILL.md` is never rewritten on disk.
+
+Settings that name skills treat the two spellings asymmetrically: `skills.disabled` blocks a skill under either name, while `skills.enabled` opts it in under the prefixed name only. See [Extension Skills](../features/skills.md#extension-skills).
 
 ### Custom subagents
 
@@ -388,6 +396,38 @@ Extensions can provide custom subagents by placing agent configuration files in 
 ```
 
 Extension subagents appear in the subagent manager dialog under "Extension Agents" section.
+
+### Custom workflows
+
+Extensions can ship workflow scripts by placing `.js` files in a `workflows/` subdirectory, or in the directories and files the manifest lists in `workflows`. They appear only when Workflows are enabled with the [`tools.workflowsEnabled`](../configuration/settings.md) setting, which is off by default; the install consent prompt lists them either way.
+
+**Example**
+
+An extension named `gcp` with the following structure:
+
+```
+.qwen/extensions/gcp/
+├── qwen-extension.json
+└── workflows/
+    └── deep-research.js
+```
+
+provides one workflow when its script declares a static `meta` object with `name: 'deep-research'`, registered as `gcp:deep-research` — the extension's `name`, a colon, then `meta.name`. Run it with `/gcp:deep-research`, call it from another workflow with `workflow('gcp:deep-research')`, or let the model run it by name with `Workflow({ name: 'gcp:deep-research' })`. Like an extension skill, an extension workflow always carries its owner, so it never shadows one of your project or user workflows. If the same extension also ships a skill with that name, the skill keeps `/gcp:deep-research` and the workflow's slash command is renamed to `/gcp.gcp:deep-research`, as for any colliding extension command; a `slashCommands.disabled` entry written as `gcp:deep-research` still removes both. A user or project custom command with the same name (for example `commands/gcp/deep-research.md`) loads last and takes the slash command, and the workflow then stays reachable through `workflow('gcp:deep-research')`.
+
+Each script must declare a static `export const meta = { name, description }` block. The `description` is shown in the install consent prompt and in the command list. The file name may differ from `meta.name`; calls always use the metadata name. If multiple scripts declare the same `meta.name`, the first discovered script is kept. A `description` longer than 500 characters is shortened wherever it is shown.
+
+Discovery is deliberately narrow:
+
+- Only `.js` files directly inside each directory are read; subdirectories are ignored.
+- `meta.name` must use lower-case letters, digits, and hyphens, start with a letter, and contain at most 41 characters.
+- Every declared path must stay inside the extension directory. A linked extension (`qwen extensions link`) skips symlinked workflow files and directories; an installed extension is a copy in which each symlink has already been replaced by the file it points to.
+- Scripts larger than 256 KiB, or without a valid `meta` block, are skipped with a warning.
+
+Installing an extension lists its workflows in the consent prompt. An update asks again when it adds or removes a workflow, changes a workflow's name or description, or changes a script's code; when only code changed, the prompt names the changed scripts. Extension workflows follow the same rules as your own saved workflows: they are hidden in untrusted folders and in bare mode, and each run goes through the usual workflow approval, which shows the start of the script. An "always allow" for a workflow run by name or path is saved as a rule pinned to the script's content, such as `Workflow(name:gcp:deep-research,sha256:3f2a9c1d0b4e5f67)`, so it stops applying once the script changes. A rule you write without `sha256`, such as `Workflow(name:gcp:deep-research)`, allows every version of the script.
+
+Edits to files in the default `workflows/` directory are picked up automatically. Changes under other declared paths take effect after `/reload-plugins` or a restart.
+
+Claude Code plugins that ship workflows are converted on install. A plugin that declares no `workflows` keeps its `workflows/` directory, which is discovered as the default. When the plugin declares `workflows`, the declared files retain their relative paths and are listed explicitly in the converted extension's manifest, and only those files are discovered: files with the same basename in different directories stay distinct under their `meta.name` values, and a `workflows/` directory the plugin also ships is copied but not read. A symlink inside a declared directory is copied as a regular file when its target stays inside the plugin.
 
 ### Conflict resolution
 

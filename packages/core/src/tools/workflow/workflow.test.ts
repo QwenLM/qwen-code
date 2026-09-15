@@ -23,12 +23,63 @@ import {
 import { Storage } from '../../config/storage.js';
 import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
+import { TurnBudget } from '../../core/turn-budget.js';
+import { uiTelemetryService } from '../../telemetry/uiTelemetry.js';
+import { EVENT_API_RESPONSE } from '../../telemetry/constants.js';
+import { randomUUID } from 'node:crypto';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
+import { computeWorkflowScriptDigest } from '../../agents/runtime/workflow-saved.js';
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
+import { WORKFLOW_AUTHORING_SKILL_NAME } from '../../skills/workflow-authoring-skill.js';
 
+/**
+ * The tool description has two shapes, chosen at construction: it points at
+ * the `workflow-authoring` skill when the model can load it, and inlines the
+ * whole reference when it cannot. A bare `{}` would take the inline branch,
+ * so the default fixture models the ordinary session: skills on, Skill tool
+ * registered. `workflow-description.test.ts` covers the other shape.
+ */
 function fakeConfig(): Config {
-  return {} as unknown as Config;
+  return {
+    getSkillManager: () => ({ getCachedSkills: () => null }),
+    getToolRegistry: () => ({
+      getAllToolNames: () => [ToolNames.SKILL, ToolNames.WORKFLOW],
+      getTool: () => undefined,
+    }),
+    isSkillEnabled: () => true,
+  } as unknown as Config;
+}
+
+/**
+ * Whether an "always allow" rule the tool emitted would let a later call
+ * through, checked the way the permission flow checks it: after the default
+ * permission (which loads the script) and against the derived match params.
+ */
+async function grantMatches(
+  rule: string,
+  config: Config,
+  params: Record<string, unknown>,
+): Promise<boolean> {
+  const invocation = new WorkflowTool(config).build(params as never);
+  await invocation.getDefaultPermission();
+  return matchesRule(
+    parseRule(rule),
+    ToolNames.WORKFLOW,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    invocation.getPermissionMatchParams!(),
+  );
+}
+
+function paramDescription(tool: WorkflowTool, name: string): string {
+  const schema = tool.schema.parametersJsonSchema as {
+    properties: Record<string, { description: string }>;
+  };
+  return schema.properties[name].description;
 }
 
 /**
@@ -77,11 +128,12 @@ describe('WorkflowTool', () => {
     );
   });
 
-  // The description is what makes the model pick pipeline() over a barrier
-  // and verify a finding before reporting it. A refactor that drops the
-  // policy prose leaves a runtime nobody drives well, and no other test
-  // would notice — so anchor the load-bearing claims.
-  it('description carries both the runtime facts and the orchestration policy', () => {
+  // The description is what makes the model call this tool for the right
+  // request and plan around the right limits. The authoring contract moved
+  // to the `workflow-authoring` skill — see SKILL.test.ts for the anchors
+  // that live there now, and the `not.toMatch` block below for the ones
+  // that must NOT come back here.
+  it('description carries the opt-in rule and the runtime facts', () => {
     const { description } = new WorkflowTool(fakeConfig());
     // Every env knob the description names is anchored. The four that the
     // orchestrator exports are anchored *through the exported constant*, so
@@ -91,7 +143,7 @@ describe('WorkflowTool', () => {
     // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
     // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
     for (const anchor of [
-      'min(16, cpus-2)',
+      'min(16, availableParallelism()-2)',
       MAX_WORKFLOW_AGENTS_ENV,
       MAX_WORKFLOW_CONCURRENCY_ENV,
       WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
@@ -103,22 +155,9 @@ describe('WorkflowTool', () => {
     ]) {
       expect(description).toContain(anchor);
     }
-    // The per-call options this half of the description advertises are
-    // anchored too — a refactor that drops their sentences leaves the
-    // capabilities undiscoverable from the tool surface and no other test
-    // would notice.
-    expect(description).toContain('workingDir');
-    expect(description).toMatch(/no-progress stall watchdog/);
-    // One anchor per policy section — dropping any whole section has to
-    // turn this test red, which is the regression it exists to catch.
+    // Why a workflow at all — the one line of policy that stays, because it
+    // is what stops the model reaching for orchestration by reflex.
     expect(description).toMatch(/Parallelism on its own is not a reason/);
-    expect(description).toMatch(/only before the orchestration step/);
-    expect(description).toMatch(/Common single-phase shapes/);
-    expect(description).toMatch(/Default to `pipeline\(\)`/);
-    expect(description).toMatch(/A barrier is right only when/);
-    expect(description).toMatch(/refute/);
-    expect(description).toMatch(/against everything already seen/);
-    expect(description).toMatch(/log\(\)` what was dropped/);
     // Limits the model has to plan around rather than discover from a
     // mid-run failure — the numbers themselves, not just the knob names.
     // Anchored *through* the exported constant rather than as a literal:
@@ -131,8 +170,6 @@ describe('WorkflowTool', () => {
     // `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
     // this one is still a hand-synced literal on both sides.
     expect(description).toMatch(/30-minute wall-clock cap/);
-    expect(description).toMatch(/nests one level only/);
-    expect(description).toMatch(/read `budget\.total`/);
     // The `/workflows` capability list is the one part of the description
     // that trails the runtime: #8320 added cooperative pause/resume to the
     // dialog while this branch was moving the description into a constant,
@@ -149,25 +186,27 @@ describe('WorkflowTool', () => {
     // path back, and resumes by re-sending the whole source.
     expect(description).toMatch(/Every run hands back its runId/);
     expect(description).toMatch(/read it before diagnosing/);
-    // The null/throw split is the contract a script is written against: a
-    // model that does not know `agent()` can resolve to `null` writes code
-    // that treats a failed agent's absence as a value.
+    // The journal writes a `started` line per dispatch and a `result` or
+    // `failed` line after it, so any per-agent count here would be wrong. The
+    // skill states the line taxonomy; the description only says to read it.
+    expect(description).not.toMatch(/journal holds one/);
+    // The null/throw split stays here rather than moving to the skill: it
+    // governs how the model READS a result, which every turn that touches a
+    // workflow result needs, not just the turn that writes the script.
     expect(description).toMatch(
       /`agent\(\)` resolves to `null` when that admitted agent fails on its own/,
     );
     expect(description).toMatch(/exhausted stall retries/);
     expect(description).not.toMatch(/user stopped it/);
-    expect(description).toMatch(/Call-shape validation failures/);
     expect(description).toMatch(
-      /Run-level rejections no later call could survive/,
-    );
-    expect(description).toMatch(
-      /named, with its error, in the run's failures list/,
-    );
-    expect(description).toMatch(
-      /a `null` returned by an ordinary thunk or stage is not an agent dispatch/,
+      /run-level rejections no later call could survive/i,
     );
   });
+
+  // Which guidance left this description for the `workflow-authoring` skill is
+  // pinned in one two-way table in `skills/bundled/workflow-authoring/
+  // SKILL.test.ts`: every anchor is asserted present in the skill and absent
+  // from this description, with whitespace collapsed on both sides.
 
   // Both parameter descriptions describe the same persisted file — the one
   // `resumeFromRunId` tells the model to edit. A change on one side that
@@ -386,37 +425,66 @@ await agent('scan package.json')
       expect(details.permissionRules).toEqual([]);
     });
 
-    it('scopes a saved-workflow grant to the path that was approved', async () => {
+    it('scopes a saved-workflow grant to the path and content that were approved', async () => {
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-grant-'));
+      const runtimeDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'wf-grant-rt-'),
+      );
+      try {
+        const storage = new Storage(projectDir, runtimeDir);
+        const config = { storage } as unknown as Config;
+        const savedDir = storage.getProjectWorkflowsDir();
+        await fs.mkdir(savedDir, { recursive: true });
+        const scriptPath = path.join(savedDir, 'audit.js');
+        const otherPath = path.join(savedDir, 'other.js');
+        await fs.writeFile(scriptPath, 'return 1;');
+        await fs.writeFile(otherPath, 'return 1;');
+
+        const details = (await detailsFor({ scriptPath }, config)) as {
+          hideAlwaysAllow?: boolean;
+          permissionRules?: string[];
+        };
+        expect(details.hideAlwaysAllow).toBeFalsy();
+        expect(details.permissionRules).toHaveLength(1);
+
+        // Behavioural, not textual: a rule that reads plausibly but never
+        // matches would make "always allow" silently do nothing, which is a
+        // worse affordance than not offering it.
+        const rule = details.permissionRules![0];
+        expect(await grantMatches(rule, config, { scriptPath })).toBe(true);
+        expect(
+          await grantMatches(rule, config, { scriptPath: otherPath }),
+        ).toBe(false);
+        expect(await grantMatches(rule, config, { script: 'return 1;' })).toBe(
+          false,
+        );
+        // The model cannot restore a stale grant by supplying the digest.
+        const digest = computeWorkflowScriptDigest('return 1;');
+        await fs.writeFile(scriptPath, 'return 2;');
+        expect(await grantMatches(rule, config, { scriptPath })).toBe(false);
+        expect(
+          await grantMatches(rule, config, { scriptPath, sha256: digest }),
+        ).toBe(false);
+      } finally {
+        await fs.rm(projectDir, { recursive: true, force: true });
+        await fs.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    // With nothing loaded there is no content to pin a grant to, and a bare
+    // path rule would approve whatever the file later holds.
+    it('offers no grant for a scriptPath that cannot be loaded', async () => {
       const details = (await detailsFor(
         { scriptPath: '/home/u/.qwen/workflows/audit.js' },
         configWithStorage().config,
-      )) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
-      expect(details.hideAlwaysAllow).toBeFalsy();
-      expect(details.permissionRules).toHaveLength(1);
-
-      // Behavioural, not textual: a rule that reads plausibly but never
-      // matches would make "always allow" silently do nothing, which is a
-      // worse affordance than not offering it. Parse the rule the tool
-      // emitted and check it resolves the same path and only that path.
-      const rule = parseRule(details.permissionRules![0]);
-      const wouldAllow = (toolParams: Record<string, unknown>) =>
-        matchesRule(
-          rule,
-          ToolNames.WORKFLOW,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          toolParams,
-        );
-      expect(
-        wouldAllow({ scriptPath: '/home/u/.qwen/workflows/audit.js' }),
-      ).toBe(true);
-      expect(
-        wouldAllow({ scriptPath: '/home/u/.qwen/workflows/other.js' }),
-      ).toBe(false);
-      expect(wouldAllow({ script: 'await agent("x")' })).toBe(false);
+      )) as {
+        prompt: string;
+        hideAlwaysAllow?: boolean;
+        permissionRules?: string[];
+      };
+      expect(details.hideAlwaysAllow).toBe(true);
+      expect(details.permissionRules).toEqual([]);
+      expect(details.prompt).toContain('Cannot load the script:');
     });
 
     // A generated-root script is a throwaway artifact a tool emitted for this
@@ -635,36 +703,95 @@ await agent('scan package.json')
     expect(text).not.toContain('Workflow failed');
   });
 
-  // The tool description is not the only model-visible copy of the caps —
-  // the `script` parameter description states them a second time, and a
-  // model reading one tool call sees both. Anchoring only the tool
-  // description lets a maintainer raise a cap, watch the test above go
-  // green again, and stop while `script` still advertises the old number.
-  it('script parameter description states the same caps as the tool description', () => {
+  // The caps used to be stated twice — once in the tool description and
+  // again in `script` — and a maintainer raising one could leave the other
+  // advertising the old number. There is now exactly one model-visible copy
+  // in the tool surface, and the detail lives in the skill. This pins that:
+  // the second copy must not grow back, and the one that remains must be
+  // the interpolated constant.
+  it('states each cap once, in the tool description only', () => {
     const tool = new WorkflowTool(fakeConfig());
     const schema = tool.schema.parametersJsonSchema as {
       properties: { script: { description: string } };
     };
     const scriptDescription = schema.properties.script.description;
-    expect(scriptDescription).toContain(
-      `At most ${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run`,
+
+    expect(tool.description).toContain(
+      `up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
     );
-    expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
-    expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
-    expect(scriptDescription).toContain('it resolves to null');
-    expect(scriptDescription).toContain(
-      'subagent completed without calling StructuredOutput (after 2 in-conversation nudges)',
+    for (const cap of [
+      String(DEFAULT_MAX_AGENTS_PER_RUN),
+      MAX_WORKFLOW_AGENTS_ENV,
+      MAX_WORKFLOW_CONCURRENCY_ENV,
+    ]) {
+      expect(scriptDescription).not.toContain(cap);
+    }
+    // The per-option error strings a script has to check for moved with the
+    // options themselves; the skill's test asserts they are there.
+    expect(scriptDescription).not.toContain(
+      'subagent completed without calling StructuredOutput',
     );
-    expect(scriptDescription).toContain('run-level token/agent-cap refusal');
+    expect(scriptDescription).not.toContain('agent type');
+    // Regression pins from the throw-to-null settlement change (#11196): a
+    // resurrected "throws" claim would contradict the description beside it.
     expect(scriptDescription).not.toContain('Unresolved names throw');
     expect(scriptDescription).not.toContain("'remote' throws");
+    // What `script` still owns: the shape of the source itself, and where
+    // to go for the rest.
+    expect(scriptDescription).toContain('async IIFE');
     expect(scriptDescription).toContain(
-      'Unresolved names make the admitted agent() resolve to null',
+      'Pass THUNKS to parallel(), not eager calls',
     );
-    // Both halves must agree on the agent cap, whatever it is.
-    expect(tool.description).toContain(
-      `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    expect(scriptDescription).toContain('all of `Date`');
+    expect(scriptDescription).toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+  });
+
+  // Every model-visible string in the tool surface is paid for on every turn,
+  // so each has a budget. The headroom is a paragraph, not a sentence: one
+  // legitimate clause fits, a block of option prose pasted back does not.
+  it.each([
+    ['the description', (tool: WorkflowTool) => tool.description, 4_500],
+    ['script', (tool: WorkflowTool) => paramDescription(tool, 'script'), 900],
+    [
+      'scriptPath',
+      (tool: WorkflowTool) => paramDescription(tool, 'scriptPath'),
+      950,
+    ],
+    ['name', (tool: WorkflowTool) => paramDescription(tool, 'name'), 400],
+    ['args', (tool: WorkflowTool) => paramDescription(tool, 'args'), 250],
+    [
+      'resumeFromRunId',
+      (tool: WorkflowTool) => paramDescription(tool, 'resumeFromRunId'),
+      850,
+    ],
+    [
+      'run_in_background',
+      (tool: WorkflowTool) => paramDescription(tool, 'run_in_background'),
+      450,
+    ],
+  ])('keeps %s within its per-turn budget', (_name, read, budget) => {
+    expect(read(new WorkflowTool(fakeConfig())).length).toBeLessThanOrEqual(
+      budget,
     );
+  });
+
+  // The inline fallback is large by construction — it carries the whole
+  // reference — and grows whenever the reference does. It still needs a
+  // ceiling, or growth passes every other assertion about its size. Raised
+  // from 24,000 when the reference gained the turn token budget: the
+  // fallback already stood at 23,973, so no description of the budget fits
+  // under the old figure, and the new one leaves a paragraph of headroom.
+  it('keeps the inline fallback description within its budget', () => {
+    const tool = new WorkflowTool({
+      ...fakeConfig(),
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.WORKFLOW],
+        getTool: () => undefined,
+      }),
+    } as unknown as Config);
+
+    expect(tool.authoringSurface).toBe('inline');
+    expect(tool.description.length).toBeLessThanOrEqual(25_000);
   });
 
   it('rejects build() when script is missing', () => {
@@ -753,6 +880,60 @@ await agent('scan package.json')
         run_in_background: true,
       }),
     ).toThrow(/interactive TUI/i);
+  });
+
+  // A retry of a saved workflow whose file is no longer readable falls back to
+  // the run's inline source and passes no name — the ACP retry path. The runner
+  // still resolves the name from the resumed run, so the notice says to copy
+  // the saved workflow, and must not also say "fix the script". The same
+  // holds for a foreground resume, whose trailer carries the same advice.
+  it('keeps the authoring hint off a saved workflow resumed from its inline source', async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-session-hint-'),
+    );
+    const registry = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const config = {
+      ...fakeConfig(),
+      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    const script = 'throw new Error("boom");';
+
+    try {
+      const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
+      expect(tool.authoringSurface).toBe('pointer');
+      const first = (await tool
+        .buildSessionOwnedBackground({ script }, 'review-and-fix')
+        .execute(new AbortController().signal)) as { workflowRunId?: string };
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
+      const runId = first.workflowRunId;
+      expect(runId).toMatch(/^wf_/);
+
+      await tool
+        .buildSessionOwnedBackground({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(2));
+      const retryText = completion.mock.calls[1][1] as string;
+      expect(retryText).toContain(
+        'This reads the saved /review-and-fix workflow',
+      );
+      expect(retryText).not.toContain('hint:');
+
+      const foreground = await tool
+        .build({ script, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+      const trailer = (foreground.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(trailer).toContain('this reads the saved workflow');
+      expect(trailer).not.toContain('hint:');
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
   });
 
   it('starts a session-owned background run outside the interactive TUI', async () => {
@@ -1692,6 +1873,36 @@ await agent('scan package.json')
     expect(registry.list()[1]!.status).toBe('completed');
   });
 
+  it('names the turn target, not a per-run cap, when the message set one', async () => {
+    const { config } = configWithRegistry();
+    const turns = new TurnBudget();
+    turns.beginTurn({
+      promptId: 'turn',
+      sessionId: 'banner-turn',
+      budget: 500_000,
+      directiveText: '+500k',
+      outputTokensAtTurnStart: 0,
+    });
+    Object.assign(config, {
+      getSessionId: () => 'banner-turn',
+      getTurnBudget: () => turns,
+    });
+
+    const result = await new WorkflowTool(config, {
+      dispatch: async () => 'ok',
+    })
+      .build({ script: 'return 1' })
+      .execute(new AbortController().signal);
+    const display = result.returnDisplay as string;
+
+    expect(display).toContain(
+      "This turn's output-token target is 500000 (set by `+500k` in your message)",
+    );
+    expect(display).not.toMatch(
+      /Workflows have no per-run token cap|Workflow token cap is/,
+    );
+  });
+
   it('P5 R1 #10: capped banner shape (`total !== null`) — was untested', async () => {
     const { config } = configWithRegistry();
     const originalEnv = process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'];
@@ -1758,6 +1969,15 @@ await agent('scan package.json')
         storage,
         getWorkflowRunRegistry: () => registry,
         getSkipWorkflowUsageWarning: () => true,
+        // Same shape as `fakeConfig()`: an ordinary session where the
+        // authoring reference is a skill the model can load, which is what
+        // the failure hint tells it to do.
+        getSkillManager: () => ({ getCachedSkills: () => null }),
+        getToolRegistry: () => ({
+          getAllToolNames: () => [ToolNames.SKILL, ToolNames.WORKFLOW],
+          getTool: () => undefined,
+        }),
+        isSkillEnabled: () => true,
       } as unknown as Config;
       return { config, storage };
     }
@@ -1786,7 +2006,7 @@ await agent('scan package.json')
       );
       expect(trailer).toContain('tokens: 0 spent (no cap)');
       expect(trailer).toContain(
-        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "${runId}" })`,
+        `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "${runId}" })`,
       );
       // Named paths are real files, not a format the runtime never wrote.
       await expect(fs.readFile(result.scriptPath!, 'utf8')).resolves.toBe(
@@ -1960,6 +2180,95 @@ await agent('scan package.json')
       expect(parts[1].text).toContain('logs (last ');
       expect(parts[1].text).toContain('about to fail');
       expect(result.error?.message).toContain('--- workflow run ---');
+      // A script that threw is a script to rewrite, and the description only
+      // points at the reference — the model may never have read it.
+      expect(parts[1].text).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
+    // Telling the model to load a skill it cannot reach is worse than saying
+    // nothing: the reference is already inlined in the description it read.
+    // Both halves are asserted on the same tool, so the hint and the shape of
+    // the description cannot drift apart.
+    it('points at the inlined reference when the skill is unreachable', async () => {
+      const { config } = storedConfig();
+      Object.assign(config, {
+        getToolRegistry: () => ({
+          getAllToolNames: () => [ToolNames.WORKFLOW],
+          getTool: () => undefined,
+        }),
+      });
+      const tool = new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      });
+      const result = await tool
+        .build({ script: 'throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(tool.description).toContain('# Workflow authoring reference');
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain(
+        "hint: See the authoring reference in this tool's description",
+      );
+      expect(trailer).not.toContain('hint: Load the');
+    });
+
+    // The description is fixed when the tool is built. A `/skills` toggle
+    // after that must not flip the hint into describing a different
+    // description than the one the model is holding.
+    it('keeps the hint consistent with the description after a mid-session toggle', async () => {
+      const { config } = storedConfig();
+      const tool = new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      });
+      Object.assign(config, { isSkillEnabled: () => false });
+
+      const result = await tool
+        .build({ script: 'throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(tool.description).toContain(
+        `load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
+    // A script that never compiled is the earliest and most common
+    // first-attempt failure, and it returns no trailer — the hint has to ride
+    // on the message itself.
+    it('carries the hint on a script that fails to compile', async () => {
+      const result = await new WorkflowTool(fakeConfig())
+        .build({ script: "const target: string = 'x';\nawait agent(target);" })
+        .execute(new AbortController().signal);
+
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      expect(text).toContain('was not launched');
+      expect(text).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+      expect(result.error?.message).toContain('hint:');
+    });
+
+    // The hint belongs to a failure, not to every run: a successful trailer
+    // that told the model to go read the reference would be noise on the
+    // path that needs it least.
+    it('adds no authoring hint to a successful run', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'fine',
+      })
+        .build({ script: "return await agent('x');" })
+        .execute(new AbortController().signal);
+
+      expect(
+        (result.llmContent as Array<{ text: string }>)[1].text,
+      ).not.toContain('hint:');
     });
 
     it('does not offer to restart a user-cancelled foreground run', async () => {
@@ -1989,7 +2298,50 @@ await agent('scan package.json')
       expect(text).toContain('Workflow cancelled');
       expect(text).toContain('1 cancelled');
       expect(text).not.toContain('resume: Workflow(');
+      expect(text).not.toContain('hint:');
       expect(result.error).toBeDefined();
+    });
+
+    it("advises copying an extension's workflow file before changing it", async () => {
+      const { config, storage } = storedConfig();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        '..',
+        'extensions',
+        'gcp',
+        'workflows',
+        'audit.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, 'throw new Error("boom")', 'utf8');
+      const realScriptPath = await fs.realpath(scriptPath);
+      Object.assign(config, {
+        getActiveExtensions: () => [
+          {
+            name: 'gcp',
+            workflows: [
+              {
+                name: 'gcp:audit',
+                extensionName: 'gcp',
+                scriptPath: realScriptPath,
+                description: 'Audits the project',
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await new WorkflowTool(config)
+        .build({ scriptPath: realScriptPath })
+        .execute(new AbortController().signal);
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+
+      expect(text).toContain(
+        "this reads an extension's workflow file; copy it into .qwen/workflows",
+      );
+      expect(text).not.toContain('this reads the saved workflow');
     });
 
     it('does not advise editing a saved workflow to resume one run', async () => {
@@ -2008,6 +2360,9 @@ await agent('scan package.json')
 
       expect(trailer).toContain('this reads the saved workflow');
       expect(trailer).not.toContain('edit that file first');
+      // "Fix the script, and retry" would contradict the resume advice to
+      // copy the saved workflow before changing it.
+      expect(trailer).not.toContain('hint:');
     });
 
     it('does not promise replay when the journal path is unavailable', async () => {
@@ -2080,6 +2435,72 @@ await agent('scan package.json')
       expect(trailer).toContain('tokens: 0 / 1000 spent');
     });
 
+    // A `+500k` turn in a session already charged 400k before the turn began.
+    // The script reads the turn's figures rather than the run's; the trailer
+    // keeps this run's own spend apart from the turn's; the registry records
+    // no per-run cap; and once the turn has spent its target, the next
+    // agent() is refused without dispatching.
+    it('measures a +500k directive against the whole turn', async () => {
+      const { config } = storedConfig();
+      const sessionId = `turn-budget-${randomUUID()}`;
+      const turns = new TurnBudget();
+      Object.assign(config, {
+        getSessionId: () => sessionId,
+        getTurnBudget: () => turns,
+      });
+      const charge = (outputTokens: number) =>
+        uiTelemetryService.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'qwen-main',
+            prompt_id: 'main',
+            duration_ms: 1,
+            input_token_count: 1,
+            output_token_count: outputTokens,
+            total_token_count: outputTokens + 1,
+            cached_content_token_count: 0,
+            thoughts_token_count: 0,
+          } as unknown as Parameters<typeof uiTelemetryService.addEvent>[0],
+          sessionId,
+        );
+      charge(400_000);
+      turns.beginTurn({
+        promptId: 'main',
+        sessionId,
+        budget: 500_000,
+        directiveText: '+500k',
+        outputTokensAtTurnStart:
+          uiTelemetryService.getTotalOutputTokens(sessionId),
+      });
+      charge(150_000);
+
+      const dispatch = vi.fn(async () => 'unused');
+      const measured = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return [budget.total, budget.spent(), budget.remaining()];',
+        })
+        .execute(new AbortController().signal);
+      const parts = measured.llmContent as Array<{ text: string }>;
+
+      expect(JSON.parse(parts[0].text)).toEqual([500_000, 150_000, 350_000]);
+      expect(parts[1].text).toContain(
+        'tokens: 0 spent by this run · 150000 / 500000 this turn (+500k directive)',
+      );
+      expect(
+        config.getWorkflowRunRegistry().list()[0]!.tokenBudgetTotal,
+      ).toBeNull();
+
+      charge(350_000);
+      const refused = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'await agent("one"); return "done";' })
+        .execute(new AbortController().signal);
+
+      expect((refused.llmContent as Array<{ text: string }>)[0].text).toContain(
+        'token budget exceeded (500000 / 500000 output tokens)',
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
     it('names the script and journal on a background launch', async () => {
       const { config, storage } = storedConfig();
       Object.assign(config, { isInteractive: () => true });
@@ -2147,6 +2568,28 @@ await agent('scan package.json')
         '1 cached',
       );
     });
+    // The trailer tells the model to resume by passing the generated copy
+    // back as `scriptPath`. That copy is still the model's script, so a
+    // failure there keeps the hint the first run had.
+    it('keeps the hint when a generated script is re-run by path and fails', async () => {
+      const { config } = storedConfig();
+      const dispatch = async () => 'unused';
+      const first = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'throw new Error("first");' })
+        .execute(new AbortController().signal);
+      expect(first.scriptPath).toBeDefined();
+
+      const second = await new WorkflowTool(config, { dispatch })
+        .build({ scriptPath: first.scriptPath! })
+        .execute(new AbortController().signal);
+
+      const trailer = (second.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain('edit that generated copy first');
+      expect(trailer).toContain(
+        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+      );
+    });
+
     it('carries the original args in the resume call', async () => {
       const { config } = storedConfig();
       const result = await new WorkflowTool(config, {
@@ -2162,7 +2605,7 @@ await agent('scan package.json')
       // A resume without the original args still runs — it just misses every
       // journal key, because the script bakes args into the agent prompts.
       expect(trailer).toContain(
-        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "`,
+        `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "`,
       );
       expect(trailer).toContain('args: {"who":"world"}');
       expect(trailer).not.toContain('too large to inline');
@@ -2224,5 +2667,315 @@ await agent('scan package.json')
         /^Workflow failed: boom\n--- workflow run ---/,
       );
     });
+  });
+});
+
+describe('WorkflowTool — extension workflow labels', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-ext-label-')),
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function extensionScript(): Promise<string> {
+    const scriptPath = path.join(dir, 'gcp', 'workflows', 'audit.js');
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.writeFile(scriptPath, 'return 1;\n', 'utf8');
+    return scriptPath;
+  }
+
+  function configWithExtensionWorkflow(scriptPath: string, active: boolean) {
+    const { config } = configWithStorage();
+    Object.assign(config, {
+      getActiveExtensions: () =>
+        active
+          ? [
+              {
+                name: 'gcp',
+                workflows: [
+                  {
+                    name: 'gcp:audit',
+                    extensionName: 'gcp',
+                    scriptPath,
+                    description: 'Audits the project',
+                  },
+                ],
+              },
+            ]
+          : [],
+    });
+    return config;
+  }
+
+  it('names an active extension workflow instead of calling it saved', async () => {
+    const scriptPath = await extensionScript();
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, true),
+    );
+    const invocation = tool.build({ scriptPath });
+
+    expect(invocation.getDescription()).toBe(
+      'Run extension workflow (gcp:audit)',
+    );
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string; permissionRules?: string[] };
+    expect(details.prompt).toContain('Extension workflow: gcp:audit');
+    expect(details.prompt).toContain('Audits the project');
+    expect(details.prompt).toContain(`Loaded from: ${scriptPath}`);
+    expect(details.prompt).not.toContain('Saved workflow');
+    // Same path-scoped pre-approval as any other saved script.
+    expect(details.permissionRules).toHaveLength(1);
+  });
+
+  it('runs an active extension workflow by its qualified name', async () => {
+    const scriptPath = await extensionScript();
+    const config = configWithExtensionWorkflow(scriptPath, true);
+    const invocation = new WorkflowTool(config).build({ name: 'gcp:audit' });
+
+    expect(invocation.getDescription()).toBe(
+      'Run extension workflow (gcp:audit)',
+    );
+    expect(await invocation.getDefaultPermission()).toBe('ask');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string; permissionRules?: string[] };
+    const digest = computeWorkflowScriptDigest('return 1;\n');
+    expect(details.prompt).toContain('Extension workflow: gcp:audit');
+    expect(details.prompt).toContain('Audits the project');
+    expect(details.prompt).toContain(`Loaded from: ${scriptPath}`);
+    expect(details.prompt).toContain(`Script (sha256 ${digest}):`);
+    expect(details.prompt).toContain('return 1;');
+    expect(details.permissionRules).toHaveLength(1);
+    const rule = details.permissionRules![0];
+    // The colon inside the qualified name stays part of the value.
+    expect(rule).toMatch(new RegExp(`\\(name:gcp:audit,sha256:${digest}\\)$`));
+    expect(await grantMatches(rule, config, { name: 'gcp:audit' })).toBe(true);
+    // Once the extension is disabled the name no longer loads, so the grant
+    // has no content to match.
+    expect(
+      await grantMatches(rule, configWithExtensionWorkflow(scriptPath, false), {
+        name: 'gcp:audit',
+      }),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'names an extension workflow reached through a symlinked ancestor',
+    async () => {
+      const scriptPath = await extensionScript();
+      // Discovery records real paths; the call spells the path through a
+      // symlink, the way macOS `/var` resolves to `/private/var`.
+      const alias = path.join(dir, 'alias');
+      await fs.symlink(path.join(dir, 'gcp'), alias);
+      const aliasedPath = path.join(alias, 'workflows', 'audit.js');
+      const tool = new WorkflowTool(
+        configWithExtensionWorkflow(scriptPath, true),
+      );
+
+      expect(tool.build({ scriptPath: aliasedPath }).getDescription()).toBe(
+        'Run extension workflow (gcp:audit)',
+      );
+      // The approval dialog labels the same call the same way.
+      const details = (await tool
+        .build({ scriptPath: aliasedPath })
+        .getConfirmationDetails(new AbortController().signal)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain('Extension workflow: gcp:audit');
+      expect(details.prompt).not.toContain('Saved workflow');
+    },
+  );
+
+  it("keeps the saved-workflow label for the user's own script while an extension is active", async () => {
+    const scriptPath = await extensionScript();
+    const ownScript = path.join(
+      dir,
+      'project',
+      '.qwen',
+      'workflows',
+      'deploy.js',
+    );
+    await fs.mkdir(path.dirname(ownScript), { recursive: true });
+    await fs.writeFile(ownScript, 'return 1;\n', 'utf8');
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, true),
+    );
+    const invocation = tool.build({ scriptPath: ownScript });
+
+    expect(invocation.getDescription()).toBe('Run saved workflow (deploy.js)');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string };
+    expect(details.prompt).toContain(`Saved workflow: ${ownScript}`);
+    expect(details.prompt).not.toContain('Extension workflow');
+  });
+
+  it('falls back to the saved-workflow label once the extension is inactive', async () => {
+    const scriptPath = await extensionScript();
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, false),
+    );
+    const invocation = tool.build({ scriptPath });
+
+    expect(invocation.getDescription()).toBe('Run saved workflow (audit.js)');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string };
+    expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+  });
+});
+
+describe('WorkflowTool — saved workflows by name', () => {
+  let projectDir: string;
+  let runtimeDir: string;
+  let storage: Storage;
+
+  beforeEach(async () => {
+    projectDir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'wf-name-')),
+    );
+    runtimeDir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'wf-name-rt-')),
+    );
+    storage = new Storage(projectDir, runtimeDir);
+    await fs.mkdir(storage.getProjectWorkflowsDir(), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(projectDir, { recursive: true, force: true });
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  const APPROVED = `export const meta = { name: 'nightly-audit', description: 'Audits the tree' };\nreturn 'approved-v1';\n`;
+
+  async function saveWorkflow(name: string, script: string): Promise<string> {
+    const scriptPath = path.join(
+      storage.getProjectWorkflowsDir(),
+      `${name}.js`,
+    );
+    await fs.writeFile(scriptPath, script, 'utf8');
+    return scriptPath;
+  }
+
+  function nameConfig(): Config {
+    return Object.assign(configWithRegistry().config, { storage });
+  }
+
+  it('accepts exactly one of script, scriptPath and name', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    expect(() =>
+      tool.build({ name: 'nightly-audit', script: 'return 1;' } as never),
+    ).toThrow('provide exactly one of `script`, `scriptPath` or `name`');
+    expect(() =>
+      tool.build({ name: 'nightly-audit', scriptPath: '/w/a.js' } as never),
+    ).toThrow('provide exactly one of `script`, `scriptPath` or `name`');
+    expect(() => tool.build({} as never)).toThrow('`name` (a saved workflow)');
+    expect(tool.build({ name: 'nightly-audit' }).getDescription()).toBe(
+      'Run saved workflow (nightly-audit)',
+    );
+  });
+
+  it('shows the script it loaded and pins the grant to it', async () => {
+    const scriptPath = await saveWorkflow('nightly-audit', APPROVED);
+    const config = nameConfig();
+    const invocation = new WorkflowTool(config).build({
+      name: 'nightly-audit',
+    });
+
+    expect(await invocation.getDefaultPermission()).toBe('ask');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as {
+      prompt: string;
+      hideAlwaysAllow?: boolean;
+      permissionRules?: string[];
+    };
+    const digest = computeWorkflowScriptDigest(APPROVED);
+    expect(details.prompt).toContain('Saved workflow: nightly-audit');
+    expect(details.prompt).toContain('Audits the tree');
+    expect(details.prompt).toContain(`Loaded from: ${scriptPath}`);
+    expect(details.prompt).toContain(`Script (sha256 ${digest}):`);
+    expect(details.prompt).toContain("return 'approved-v1';");
+    expect(details.hideAlwaysAllow).toBeFalsy();
+    expect(details.permissionRules).toHaveLength(1);
+
+    const rule = details.permissionRules![0];
+    expect(rule).toMatch(
+      new RegExp(`\\(name:nightly-audit,sha256:${digest}\\)$`),
+    );
+    expect(await grantMatches(rule, config, { name: 'nightly-audit' })).toBe(
+      true,
+    );
+    await saveWorkflow('other-audit', APPROVED);
+    expect(await grantMatches(rule, config, { name: 'other-audit' })).toBe(
+      false,
+    );
+    await saveWorkflow('nightly-audit', APPROVED.replace('v1', 'v2'));
+    expect(await grantMatches(rule, config, { name: 'nightly-audit' })).toBe(
+      false,
+    );
+    expect(
+      await grantMatches(rule, config, {
+        name: 'nightly-audit',
+        sha256: digest,
+      }),
+    ).toBe(false);
+  });
+
+  it('runs the content that was approved, not a later edit', async () => {
+    await saveWorkflow('nightly-audit', APPROVED);
+    const invocation = new WorkflowTool(nameConfig()).build({
+      name: 'nightly-audit',
+    });
+    await invocation.getDefaultPermission();
+    await invocation.getConfirmationDetails(new AbortController().signal);
+
+    await saveWorkflow(
+      'nightly-audit',
+      APPROVED.replace('approved-v1', 'edited-v2'),
+    );
+    const result = await invocation.execute(new AbortController().signal);
+
+    const text = JSON.stringify(result.llmContent);
+    expect(result.error).toBeUndefined();
+    expect(text).toContain('approved-v1');
+    expect(text).not.toContain('edited-v2');
+  });
+
+  // A typo should come back to the model with the names it can use, not as
+  // an approval prompt for a run that cannot start.
+  it('fails an unknown name without asking and never retries the lookup', async () => {
+    await saveWorkflow('nightly-audit', APPROVED);
+    const config = nameConfig();
+    const invocation = new WorkflowTool(config).build({
+      name: 'nightly-audti',
+    });
+
+    expect(await invocation.getDefaultPermission()).toBe('allow');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as {
+      prompt: string;
+      hideAlwaysAllow?: boolean;
+      permissionRules?: string[];
+    };
+    expect(details.prompt).toContain('Cannot load the script:');
+    expect(details.hideAlwaysAllow).toBe(true);
+    expect(details.permissionRules).toEqual([]);
+
+    // A file that appears after the check must not run unapproved.
+    await saveWorkflow('nightly-audti', APPROVED);
+    await expect(
+      invocation.execute(new AbortController().signal),
+    ).rejects.toThrow(
+      /no workflow with that name\. Available: .*nightly-audit/,
+    );
   });
 });

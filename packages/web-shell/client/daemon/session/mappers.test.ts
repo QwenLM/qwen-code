@@ -168,6 +168,53 @@ describe('session title metadata', () => {
 });
 
 describe('mapReasoningControls', () => {
+  it.each(['default', 'max', null, false, undefined])(
+    'accepts only the explicit reset enable value %j',
+    (enableValue) => {
+      const result = mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'none',
+          options: [{ value: 'none' }, { value: 'medium' }],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'medium', enableValue },
+          },
+        },
+      ]);
+      expect(result).toEqual({
+        enabled: false,
+        effort: 'medium',
+        efforts: ['medium'],
+        defaultEffort: 'medium',
+        ...(enableValue === 'default' ? { enableValue: 'default' } : {}),
+      });
+    },
+  );
+
+  it.each([false, true, 'false', null, undefined])(
+    'preserves only an explicit cannot-enable capability %j for tiered and toggle-only controls',
+    (canEnable) => {
+      for (const toggleOnly of [false, true]) {
+        const result = mapReasoningControls([
+          {
+            id: 'reasoning_effort',
+            currentValue: 'none',
+            options: [
+              { value: 'none' },
+              { value: 'default' },
+              ...(toggleOnly ? [] : [{ value: 'low' }, { value: 'high' }]),
+            ],
+            _meta: { 'qwenCode/reasoning': { canEnable, toggleOnly } },
+          },
+        ]);
+        expect(result?.enabled).toBe(false);
+        if (canEnable === false)
+          expect(result).toHaveProperty('canEnable', false);
+        else expect(result).not.toHaveProperty('canEnable');
+      }
+    },
+  );
+
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
       mapReasoningControls([
@@ -968,6 +1015,136 @@ describe('updateConnectionFromDaemonEvent', () => {
     });
   });
 
+  it.each(['turn_budget', 'time_budget'])(
+    'carries a %s limitKind through from the wire',
+    (limitKind) => {
+      // The mapper enumerates the kinds by value, so a kind it does not name
+      // is dropped on the live path even though the daemon sent it.
+      const next = applyEvent(
+        { status: 'connected', workspaceCwd: '/workspace' },
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-1',
+                    revision: 3,
+                    objective: 'ship it',
+                    status: 'usage_limited',
+                    evidenceCursor: { recordId: 'record-1' },
+                    turnCount: 20,
+                    activeTimeMs: 1_800_000,
+                    turnBudget: 20,
+                    activeTimeBudgetMs: 1_800_000,
+                    createdAt: 1,
+                    updatedAt: 2,
+                    limitKind,
+                  },
+                },
+              },
+            },
+          },
+        } as DaemonEvent,
+      );
+
+      expect(next.goalState?.goal).toMatchObject({
+        limitKind,
+        turnBudget: 20,
+        activeTimeBudgetMs: 1_800_000,
+      });
+    },
+  );
+
+  it('leaves out the cadence ceilings when the daemon omits them', () => {
+    // Spreading them in unconditionally would leave `turnBudget: undefined` on
+    // the record, which renders the same but does not compare the same.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'running',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    const goal = next.goalState?.goal;
+    expect(goal).toBeDefined();
+    expect(Object.keys(goal!)).not.toContain('turnBudget');
+    expect(Object.keys(goal!)).not.toContain('activeTimeBudgetMs');
+  });
+
+  it('carries checkpoint health through from the wire', () => {
+    // Same pin as limitKind: the field-by-field rebuild must not drop the
+    // stall streak or the failure the Goals dialog shows before a stop.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  checkpointStalls: 2,
+                  lastCheckpointFailure: 'Error: provider failed',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 2,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+  });
+
   it('drops an unknown limitKind rather than passing it through', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
@@ -1362,4 +1539,92 @@ describe('Plan connection state', () => {
     context.state.modes.currentModeId = 'default';
     expect(getPlanExecutionMode(context)).toBeUndefined();
   });
+});
+
+describe('background execution state', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 10,
+  };
+  it('starts explicitly and ignores another execution terminal', () => {
+    const started = applyEvent(
+      { status: 'connected' },
+      {
+        v: 1,
+        id: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Continue' },
+            _meta: {
+              source: 'background_notification_turn_started',
+              backgroundTurn,
+            },
+          },
+        },
+      },
+    );
+    expect(started.backgroundTurn).toEqual(backgroundTurn);
+    const stale = applyEvent(started, {
+      ...turnComplete,
+      data: { promptId: 'older-turn' },
+    });
+    expect(stale).toBe(started);
+    expect(
+      applyEvent(stale, { ...turnComplete, data: { promptId: 'auto-1' } })
+        .backgroundTurn,
+    ).toBeUndefined();
+  });
+  it('does not infer running state from arbitrary persisted reply metadata', () => {
+    expect(
+      applyEvent(
+        { status: 'connected' },
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'background_notification_response',
+                backgroundTurn,
+              },
+            },
+          },
+        },
+      ).backgroundTurn,
+    ).toBeUndefined();
+  });
+});
+
+it('does not revive a completed background turn from its repeated start', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const finished = applyEvent(
+    { status: 'connected', backgroundTurn },
+    { ...turnComplete, data: { promptId: 'auto-1' } },
+  );
+  const replayed = applyEvent(finished, {
+    v: 1,
+    id: 100,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn,
+        },
+      },
+    },
+  });
+  expect(replayed.backgroundTurn).toBeUndefined();
 });

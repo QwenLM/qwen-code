@@ -18,6 +18,12 @@ import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
@@ -63,6 +69,15 @@ export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
   'enum',
 ]);
 
+/**
+ * Setting types edited as a number in the settings dialogs. `integer` is a
+ * number the write-time validator also requires to be whole; handling it as
+ * anything else leaves the setting uneditable.
+ */
+export function isNumericSettingType(type: SettingsType | undefined): boolean {
+  return type === 'number' || type === 'integer';
+}
+
 export interface SettingEnumOption {
   value: string | number;
   label: string;
@@ -88,6 +103,8 @@ export interface SettingDefinition {
   minimum?: number;
   /** Maximum value for number/integer-type settings. */
   maximum?: number;
+  /** Values rejected even when they fall within the declared range. */
+  excludedValues?: ReadonlyArray<string | number>;
   /**
    * Primitive shapes a field accepted before it was expanded to its current
    * type. The exported JSON Schema wraps the field in `anyOf` so values from
@@ -239,7 +256,8 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           },
           timeout: {
             type: 'number',
-            description: 'Timeout in seconds for the hook execution.',
+            description:
+              'Timeout in seconds for the hook execution. Defaults to 60 for command hooks, 600 for http hooks and 30 for prompt hooks. For command hooks, a value of 1000 or more is read as legacy milliseconds.',
           },
           env: {
             type: 'object',
@@ -912,6 +930,38 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      brand: {
+        type: 'object',
+        label: 'Web Shell Brand',
+        category: 'UI',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Product name and logo the Web Shell presents. Read from operator scopes only (System Defaults, User, System) — a workspace settings file cannot rebrand the shell, because it commonly comes from a repository the person opening the shell did not write. Not editable from the in-browser Settings page; edit settings.json directly.',
+        showInDialog: false,
+        properties: {
+          name: {
+            type: 'string',
+            label: 'Web Shell Brand Name',
+            category: 'UI',
+            requiresRestart: false,
+            default: '' as string,
+            description:
+              "Product name shown in the Web Shell sidebar, welcome header, About panel and browser tab title. Sanitized to a single line; capped at 80 characters. A placeholder value that substitution would change ($VAR/${VAR} with the variable set) is refused with a warning on the daemon's stderr, because the substitution source is process-wide and a workspace could supply it; an unresolvable placeholder is kept verbatim. Leave empty to use the built-in name. The terminal banner has its own separate setting, `ui.customBannerTitle`.",
+            showInDialog: false,
+          },
+          logoPath: {
+            type: 'string',
+            label: 'Web Shell Brand Logo Path',
+            category: 'UI',
+            requiresRestart: false,
+            default: '' as string,
+            description:
+              'Path to an SVG file used as the Web Shell sidebar logo and browser favicon. A leading "~" is expanded, and a relative path resolves against the directory of the settings file that declares it. The file must be a regular file — not a symlink, and not reachable through more than one hard link — at most 32 KiB both on disk and once UTF-8-decoded, and its root element must be a namespaced <svg> — a default xmlns, or an xmlns:svg binding on a prefix-bound root, is what makes it renderable as an image. Environment variable placeholders that would resolve are refused, as with the brand name. Leave empty to use the built-in logo.',
+            showInDialog: false,
+          },
+        },
+      },
       autoModeAcknowledged: {
         type: 'boolean',
         label: 'Auto Mode Acknowledged',
@@ -1219,6 +1269,16 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
+        showInDialog: true,
+      },
+      showToolCallDetails: {
+        type: 'boolean',
+        label: 'Show Tool Call Details',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; click a summary in Virtualized History or press Ctrl+O to expand its details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.',
         showInDialog: true,
       },
       showToolCallArgs: {
@@ -1642,6 +1702,32 @@ const SETTINGS_SCHEMA = {
           'Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.',
         showInDialog: false,
       },
+      goalMaxTurns: {
+        type: 'integer',
+        label: 'Goal Max Turns',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        description:
+          'Goal-turn window armed on each new Goal. Every finished Goal turn counts, including user-driven turns; user turns are still admitted at the ceiling, but they can make the next autonomous continuation a wind-down. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window on top of the turns already finished. Unset runs Goals with no turn ceiling, and -1 says so explicitly -- but the opt-out only takes a ceiling off a Goal that has already spent it, on the resume or edit that follows; a Goal still under its ceiling keeps it. A ceiling is armed only on a Goal created after the change, so bounding a Goal already on the record means replacing it with /goal set, which starts a new Goal at revision 1 with its meters reset and its earlier evidence no longer citable, or clearing it and starting again. Zero, values above 10,000, other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.',
+        showInDialog: false,
+        minimum: -1,
+        maximum: GOAL_MAX_TURNS_CAP,
+        excludedValues: [0],
+      },
+      goalMaxActiveMinutes: {
+        type: 'integer',
+        label: 'Goal Max Active Minutes',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        description:
+          'Active-time window armed on each new Goal, in minutes of wall time while the Goal remains active, including waits and idle time between turns. Paused, blocked or stopped time does not count, nor does downtime across a restart; a suspended process is still charged. A Goal that reaches the ceiling gets one wind-down turn to hand off, then stops until you resume it, which authorizes another window. The ceiling is read between turns, not by a timer, so a Goal can run well past it before it stops. Active time is measured between recorded transitions, so time in a turn that a restart interrupted is not charged. Unset runs Goals with no time ceiling, and -1 says so explicitly -- but the opt-out only takes a ceiling off a Goal that has already spent it, on the resume or edit that follows. A ceiling is armed only on a Goal created after the change, so bounding a Goal already on the record means replacing it with /goal set, which starts a new Goal at revision 1 with its meters reset and its earlier evidence no longer citable, or clearing it and starting again. Zero, values above 10,080 (one week), other negative, fractional, or non-number values are rejected at startup. Changes take effect after restart.',
+        showInDialog: false,
+        minimum: -1,
+        maximum: GOAL_MAX_ACTIVE_MINUTES_CAP,
+        excludedValues: [0],
+      },
       goalCheckpointTimeoutSeconds: {
         type: 'integer',
         label: 'Goal Checkpoint Timeout (seconds)',
@@ -1651,7 +1737,7 @@ const SETTINGS_SCHEMA = {
         minimum: 1,
         maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
         description:
-          'Ceiling on one Goal evidence-checkpoint call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; a call that does not finish in time is abandoned as an inconclusive check — the checkpoint stall streak is preserved rather than incremented — and a later turn retries it. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The call is streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the call. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
+          'Ceiling on one Goal evidence-checkpoint model call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; when a call makes its one corrective retry, both requests share this ceiling (docs/users/features/goals.md lists which failures earn one). A check on an overflowing window after a stalled checkpoint sends its evidence in batches, one call per batch, each under its own ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
         showInDialog: false,
       },
       maxToolCalls: {
@@ -2272,7 +2358,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Slash command names to hide and refuse to execute. Matched ' +
           'case-insensitively against the final command name (for extension ' +
-          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"), ' +
+          'except that a skill command is gated under either spelling — its ' +
+          'registered name (rust:pdf) or the name its SKILL.md authors (pdf) ' +
+          '— so an entry written before that prefix existed still gates it. ' +
           'Merged as a union across settings scopes, so workspace settings ' +
           'can add to but not remove entries defined in system/user settings.',
         showInDialog: false,
@@ -2318,7 +2407,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Skill names to hide. Matched case-insensitively against the skill ' +
           'name. Hidden skills do not appear in <available_skills> or as ' +
-          '/<name> slash commands. UNION-merged across systemDefaults/user/' +
+          '/<name> slash commands. An extension skill matches under either its ' +
+          'registered name (rust:pdf) or the name its SKILL.md authors (pdf), ' +
+          'so an entry written before that prefix existed still blocks it. ' +
+          'UNION-merged across systemDefaults/user/' +
           'workspace/system scopes — workspace cannot remove entries defined ' +
           'in higher scopes.',
         showInDialog: false,
@@ -2333,7 +2425,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Skill names disabled by default unless explicitly enabled through ' +
           'skills.enabled. Matched case-insensitively and UNION-merged across ' +
-          'settings scopes. skills.disabled always wins.',
+          'settings scopes. An extension skill is disabled under either its ' +
+          'registered name (rust:pdf) or the name its SKILL.md authors (pdf). ' +
+          'skills.disabled always wins; skills.enabled cancels an entry here ' +
+          'only when the two lists spell the name the same way.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -2344,9 +2439,18 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string[] | undefined,
         description:
-          'Explicit opt-ins that override matching skills.defaultDisabled ' +
-          'entries. Matched case-insensitively and UNION-merged across settings ' +
-          'scopes. Cannot override skills.disabled.',
+          'Explicit opt-ins, matched against the skill name as registered — ' +
+          'an extension skill is rust:pdf there. An entry spelled as the ' +
+          'registered name overrides a matching skills.defaultDisabled ' +
+          'entry and, for an extension skill, both the default the owning ' +
+          'extension declares and the enablement stored for this workspace. ' +
+          'A bare pdf entry never matches as a grant; it only cancels an ' +
+          'identically-spelled skills.defaultDisabled entry, and once ' +
+          'cancelled the enablement stored for this workspace decides, else ' +
+          'the default the owning extension declares. Matched ' +
+          'case-insensitively and UNION-merged across settings scopes. Cannot ' +
+          'override skills.disabled or re-enable skills from a ' +
+          'skills.disabledLevels-excluded level.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -2621,6 +2725,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
+      codeModeOnly: {
+        type: 'boolean',
+        label: 'Code Mode Only (Experimental)',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.',
+        showInDialog: true,
+      },
       sandbox: {
         type: 'object',
         label: 'Sandbox',
@@ -2651,7 +2765,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
+          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2671,7 +2785,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: undefined as string | undefined,
             description:
-              'Model selector for the explicit search path ("modelId" or "authType:modelId"). With WEB_SEARCH_BASE_URL it is the plain model id for that endpoint; otherwise it must match a DashScope-compatible modelProviders entry with an envKey. The automatic path uses qwen3.6-plus. Env override: WEB_SEARCH_MODEL.',
+              'Model selector for the explicit search path ("modelId" or "authType:modelId"). With WEB_SEARCH_BASE_URL it is the plain model id for that endpoint; otherwise it must match a DashScope-compatible modelProviders entry with an envKey. The automatic path uses qwen3.8-flash. Env override: WEB_SEARCH_MODEL.',
             showInDialog: true,
           },
           webExtractor: {
@@ -2682,6 +2796,28 @@ const SETTINGS_SCHEMA = {
             default: true,
             description:
               'Let the search agent open and read result pages (DashScope web_extractor) for better-grounded answers. Billed separately by DashScope. Env override: WEB_SEARCH_EXTRACTOR.',
+            showInDialog: true,
+          },
+          timeoutMs: {
+            type: 'integer',
+            label: 'Search Timeout (ms)',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as number | undefined,
+            minimum: 1,
+            maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
+            description: `Total time budget for one web_search call, in milliseconds (default ${DEFAULT_WEB_SEARCH_TIMEOUT_MS}, max ${MAX_WEB_SEARCH_TIMEOUT_MS}; other values fall back to the default). The search agent runs several queries and may open result pages; a search that exceeds the budget returns whatever arrived as a partial result once at least one search call has completed — if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. A per-tool execution cap (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) below this budget fires first and discards the partial result; keep it above timeoutMs. Env override: WEB_SEARCH_TIMEOUT_MS.`,
+            showInDialog: true,
+          },
+          maxPerSession: {
+            type: 'integer',
+            label: 'Max Searches per Session',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as number | undefined,
+            minimum: 1,
+            maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
+            description: `Maximum web_search calls in one session (default ${DEFAULT_WEB_SEARCH_MAX_PER_SESSION}, max ${MAX_WEB_SEARCH_MAX_PER_SESSION}; other values fall back to the default). The count is shared with subagents and resets when the session changes (/clear, /resume, branching). Once it is reached, further searches are skipped and the model is told to continue with what it has gathered. Env override: WEB_SEARCH_MAX_PER_SESSION.`,
             showInDialog: true,
           },
         },
@@ -3398,9 +3534,9 @@ const SETTINGS_SCHEMA = {
         label: 'Cross-Session Messaging',
         category: 'Advanced',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.',
+          'Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session\'s own review class, which nothing authenticates. Set to false to keep this session invisible and unreachable.',
         showInDialog: false,
       },
       crossSessionInbound: {
@@ -3814,6 +3950,66 @@ const SETTINGS_SCHEMA = {
         default: [],
         description:
           'Hooks that execute when a permission dialog is displayed.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PostCompact: {
+        type: 'array',
+        label: 'Post Compact Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after conversation compaction completes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PermissionDenied: {
+        type: 'array',
+        label: 'Permission Denied Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when AUTO-mode classification denies a tool call.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      TodoCreated: {
+        type: 'array',
+        label: 'Todo Created Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a new todo item is created. They can block creation during validation.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      TodoCompleted: {
+        type: 'array',
+        label: 'Todo Completed Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a todo item is marked as completed. They can block completion during validation.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      InstructionsLoaded: {
+        type: 'array',
+        label: 'Instructions Loaded Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when an instruction file such as QWEN.md is loaded into context.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,

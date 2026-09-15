@@ -168,6 +168,7 @@ import {
   type DaemonWorkspaceService,
   type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
+import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -261,6 +262,7 @@ import {
   registerWorkspaceLifecycleRoutes,
   registerWorkspaceQualifiedLifecycleRoutes,
 } from './routes/workspace-lifecycle.js';
+import { resolveMaxRegisteredWorkspaces } from './workspace-inputs.js';
 import {
   registerWorkspaceManagementRoutes,
   type WorkspaceManagementHandle,
@@ -354,7 +356,11 @@ import {
   resolveLiveProviderCredential,
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
-import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import type {
+  ChildHeapPolicy,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import type { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
 import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
@@ -551,6 +557,8 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  /** Advertise only when the injected channel controller enforces this limit. */
+  maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
@@ -587,6 +595,10 @@ export interface ServeAppDeps {
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  managedChildProcesses?: {
+    registry: ProcessRegistry;
+    policy: ChildHeapPolicy;
+  };
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -618,6 +630,7 @@ export interface ServeAppDeps {
     }>,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
   sessionArtifactsPersistenceAvailable?: boolean;
   /**
    * Test/embed override for the native directory picker probe. Production
@@ -781,6 +794,28 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (
+    opts.childHeapMode === 'admit' &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== 'admit'
+  ) {
+    throw new TypeError('ACP admission requires managed child process wiring.');
+  }
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
+    opts.maxRegisteredWorkspaces,
+    daemonEnvAtBoot,
+  );
+  opts = { ...opts, maxRegisteredWorkspaces };
+  if (
+    deps.workspaceRegistry &&
+    deps.workspaceRegistry.listAllEntries().filter((entry) => !entry.internal)
+      .length > maxRegisteredWorkspaces
+  ) {
+    throw new Error(
+      `Initial workspace registry exceeds the configured limit of ${maxRegisteredWorkspaces}.`,
+    );
+  }
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   if (opts.requireAuth === true && !tokenConfigured) {
@@ -947,8 +982,6 @@ export function createServeApp(
   const primaryRuntimeEnvMetadata =
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
-  const daemonEnv = deps.daemonEnv ?? process.env;
-  const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
   });
@@ -1153,6 +1186,7 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
@@ -1176,9 +1210,11 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs
+      ...(acpChildArgs || deps.managedChildProcesses
         ? {
             channelFactory: createSpawnChannelFactory({
+              processRegistry: deps.managedChildProcesses?.registry,
+              childHeapPolicy: deps.managedChildProcesses?.policy,
               extraArgs: acpChildArgs,
             }),
           }
@@ -1573,7 +1609,7 @@ export function createServeApp(
     liveBoundRuntime = runtime;
     try {
       setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
-        liveCoordinator.captureScreenContext(callerSessionId),
+        liveCoordinator.captureVisualContext(callerSessionId),
       );
       setTaskHandler.call(runtime.bridge, (info) =>
         liveTaskService.handle(info),
@@ -2176,6 +2212,7 @@ export function createServeApp(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
   const syncModelProvidersRuntime = async (
     route: string,
+    writeScope?: SettingScope,
   ): Promise<ServeModelProviderRuntimeSyncResult> => {
     const trusted = isPrimaryWorkspaceTrusted();
     const settings = loadSettings(primaryBoundWorkspace, {
@@ -2183,7 +2220,8 @@ export function createServeApp(
       skipWorkspaceSettings: !trusted,
       workspaceTrusted: trusted,
     });
-    const scope = getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+    const scope =
+      writeScope ?? getModelProvidersOwnerScope(settings) ?? SettingScope.User;
     const primaryContext = buildWorkspaceCtx(route);
     const secondaryRuntimes =
       scope === SettingScope.User
@@ -2251,11 +2289,19 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
-    getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+    getChildHeapPolicySnapshot: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.policy.snapshot()
+      : deps.getChildHeapPolicySnapshot,
+    getCommittedAcpChildCount: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.registry.committedProcessCount
+      : undefined,
+    childAdmissionEnforced:
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit',
   });
 
   if (conversationRuntimeManager) {
@@ -2278,12 +2324,17 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     workspaceRegistry,
     permissionPolicy: primaryBridge.permissionPolicy,
+    maxRegisteredWorkspaces,
+    maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     maxSessionsPerWorkspace: opts.maxSessions,
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+  });
+  registerBrandRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
   });
 
   if (liveVoiceSurfaceAvailable) {
@@ -2653,6 +2704,7 @@ export function createServeApp(
 
   // Dynamic workspace registration.
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
+    maxRegisteredWorkspaces,
     workspaceRegistry,
     mutate,
     safeBody,
@@ -2727,6 +2779,8 @@ export function createServeApp(
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
+      syncImageModel: (scope) =>
+        syncModelProvidersRuntime('POST /workspace/settings imageModel', scope),
       updateSessionWorkflow: (enabled) =>
         primaryBridge.invokeWorkspaceCommand(
           SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
@@ -2860,11 +2914,12 @@ export function createServeApp(
       mutate,
       safeBody,
       persistSettings: deps.persistSettings,
+      updateModelContextWindow: deps.updateModelContextWindow,
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
-      syncModelProvidersRuntime: () =>
-        syncModelProvidersRuntime('DELETE /workspace/models'),
+      syncModelProvidersRuntime: (writeScope, method) =>
+        syncModelProvidersRuntime(`${method} /workspace/models`, writeScope),
     });
   }
 

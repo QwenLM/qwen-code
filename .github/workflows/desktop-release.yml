@@ -39,6 +39,32 @@ on:
         required: true
         default: false
         type: 'boolean'
+  # Kept callable so a scheduled dry run can exercise the packaging path
+  # itself — building the runtime and the installers is the only thing that
+  # catches a bundled-runtime regression introduced outside this package.
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: 'string'
+      qwen_code_ref:
+        required: true
+        type: 'string'
+      electron_bridge:
+        required: true
+        type: 'boolean'
+      dry_run:
+        required: true
+        type: 'boolean'
+      draft:
+        required: true
+        type: 'boolean'
+      prerelease:
+        required: true
+        type: 'boolean'
+      clobber:
+        required: true
+        type: 'boolean'
 
 permissions:
   contents: 'read'
@@ -363,30 +389,50 @@ jobs:
           APPLE_SIGNING_IDENTITY: '${{ env.APPLE_SIGNING_IDENTITY }}'
         run: |
           set -euo pipefail
-          # Sign all native macOS executables in the bundled runtime so
-          # notarization does not reject them. Tauri only signs the main
-          # app binary; resources like ripgrep and the Node.js runtime are
-          # embedded verbatim and must be signed beforehand.
+          # Sign every native macOS binary in the bundled runtime so
+          # notarization does not reject them. Tauri only signs the main app
+          # binary; the runtime is embedded verbatim and must be signed
+          # beforehand.
+          #
+          # Enumerate the Mach-O files instead of listing the known ones. The
+          # runtime is a copy of the CLI's dist tree, so its native payload
+          # changes whenever a CLI dependency does, without anything in this
+          # package changing. An unsigned renderer library arrived exactly
+          # that way and failed release 0.2.3-preview.0 in the notary service,
+          # twenty minutes into the job, against a list that had covered every
+          # binary the runtime carried when it was written.
           runtime_dir="runtime/qwen-code"
-          # ripgrep vendor binaries
-          rg_dir="$runtime_dir/lib/vendor/ripgrep"
-          if [ -d "$rg_dir" ]; then
-            find "$rg_dir" -type f -name 'rg' -path '*-darwin/*' -exec \
-              codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
-              --options runtime --timestamp \
-              {} +
-          else
-            echo "::warning::Ripgrep vendor directory not found at $rg_dir; no ripgrep binaries signed."
+          mach_o=()
+          while IFS= read -r -d '' file; do
+            if [ "$(file -b --mime-type "$file")" = 'application/x-mach-binary' ]; then
+              mach_o+=("$file")
+            fi
+          done < <(find "$runtime_dir" -type f -print0)
+          if [ "${#mach_o[@]}" -eq 0 ]; then
+            echo "::error::No Mach-O binary found under $runtime_dir. The runtime is not staged as expected."
+            exit 1
           fi
-          # Node.js runtime binary
+          # Node.js runs the CLI's JIT; nothing else in the runtime needs an
+          # entitlement of its own, and libraries inherit the host process's.
           node_bin="$runtime_dir/node/bin/node"
-          if [ -f "$node_bin" ]; then
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
-              --options runtime --timestamp \
-              --entitlements src-tauri/NodeEntitlements.plist "$node_bin"
-          else
-            echo "::warning::Node.js runtime binary not found at $node_bin; no Node.js binary signed."
+          for file in "${mach_o[@]}"; do
+            if [ "$file" = "$node_bin" ]; then
+              codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+                --options runtime --timestamp \
+                --entitlements src-tauri/NodeEntitlements.plist "$file"
+            else
+              codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+                --options runtime --timestamp "$file"
+            fi
+          done
+          if [ ! -f "$node_bin" ]; then
+            echo "::warning::Node.js runtime binary not found at $node_bin."
           fi
+          # Verify here rather than learning it from the notary service.
+          for file in "${mach_o[@]}"; do
+            codesign --verify --strict "$file"
+          done
+          echo "Signed and verified ${#mach_o[@]} Mach-O binaries under $runtime_dir."
 
       - name: 'Refresh bundled runtime checksums after signing (macOS)'
         if: "runner.os == 'macOS' && inputs.dry_run == false"

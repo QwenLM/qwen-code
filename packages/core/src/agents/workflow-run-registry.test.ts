@@ -2129,6 +2129,46 @@ describe('WorkflowRunRegistry', () => {
     expect(r.get(entry.runId)?.recentLogs).not.toContain(line);
   });
 
+  // A backgrounded run has nothing but this notification: the trailer that
+  // carries the hint on a foreground failure never reaches it. The tool decides
+  // whether the script is one the model authored; the registry only relays.
+  it('carries the authoring hint on a failed background run', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const hint =
+      'hint: Load the `workflow-authoring` skill for the script reference if you have not, fix the script, and retry.';
+    r.register(
+      reg('wf_hinted', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_hinted.js',
+        authoringHint: hint,
+      }),
+    );
+    r.fail('wf_hinted', 'boom', 2_000);
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const recovery = modelText.slice(
+      modelText.indexOf('<recovery>'),
+      modelText.indexOf('</recovery>'),
+    );
+    expect(recovery).toContain(hint);
+  });
+
+  it.each([
+    ['a run registered without a hint', {}, 'fail'],
+    ['a completed run', { authoringHint: 'hint: x' }, 'complete'],
+  ])('adds no authoring hint to %s', (_case, overrides, settle) => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(reg('wf_plain', { isBackgrounded: true, ...overrides }));
+    if (settle === 'fail') r.fail('wf_plain', 'boom', 2_000);
+    else r.complete('wf_plain', [], 2_000);
+
+    expect(completion.mock.calls[0][1] as string).not.toContain('hint:');
+  });
+
   it('reports usage and the recovery route on a background failure', () => {
     const r = new WorkflowRunRegistry();
     const completion = vi.fn();
@@ -2209,6 +2249,44 @@ describe('WorkflowRunRegistry', () => {
     );
     expect(modelText).toContain('read this file BEFORE diagnosing');
     expect(modelText).not.toContain('<recovery>');
+  });
+
+  // A qualified run name only comes from the extension tier; the advice must
+  // not call a third-party file the user's saved workflow, and must name a
+  // destination the next extension update will not overwrite.
+  it('names an extension workflow in the recovery and diagnostics advice', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const failed = r.register(
+      reg('wf_ext_fail', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_fail/journal.jsonl',
+      }),
+    );
+    failed.workflowName = 'gcp:audit';
+    r.fail(failed.runId, 'boom', 2_000);
+
+    const recovery = completion.mock.calls[0][1] as string;
+    expect(recovery).toContain(
+      'This reads the /gcp:audit workflow the gcp extension ships; copy it into .qwen/workflows before making a run-specific change.',
+    );
+    expect(recovery).not.toContain('saved /gcp:audit');
+
+    const completed = r.register(
+      reg('wf_ext_done', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_done/journal.jsonl',
+      }),
+    );
+    completed.workflowName = 'gcp:audit';
+    r.complete(completed.runId, [], 3_000);
+
+    const diagnostics = completion.mock.calls[1][1] as string;
+    expect(diagnostics).toContain('Re-run the /gcp:audit extension workflow:');
+    expect(diagnostics).not.toContain('Re-run the saved /gcp:audit');
   });
 
   // An unpersisted inline script (no storage, symlinked root) leaves nothing

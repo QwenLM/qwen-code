@@ -4,41 +4,63 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 import {
   LIVE_HOST_BUNDLE_ID,
   LIVE_HOST_PROTOCOL_VERSION,
   LIVE_INPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_EPOCH_BYTES,
+  LIVE_OUTPUT_AUDIO_HEADER_BYTES,
   type LiveAppshotReadiness,
   type LiveDaemonMessage,
   type LiveHostAction,
   type LiveHostHello,
   type LiveHostShortcutResult,
-  type LiveHostScreenContextResult,
   type LiveHostPlaybackStarted,
   type LiveHostPlaybackCompleted,
+  type LiveHostVisualCaptureResult,
+  type LiveHostVisualFrame,
+  type LiveHostVisualSettings,
   type LiveHostStatus,
   type LiveHostMessage,
+  type LiveHostMemoryAction,
+  type LiveHostLanguageAction,
+  type LiveLanguageResult,
+  type LiveLanguageState,
+  type LiveMemoryAction,
+  type LiveMemoryResult,
+  type LiveMemoryState,
   type LiveMuteUpdate,
   type LivePermissionState,
   type LiveProviderReadiness,
   type LiveSessionLocator,
   type LiveState,
   type LiveStatus,
+  type LiveVisualInput,
+  type LiveVisualSource,
 } from './types.js';
+import { isScreenDisplayId } from './screen-display.js';
+import { LiveLogger } from '../logger.js';
+import type { SubagentsSnapshot } from '../subagents/types.js';
+import {
+  isLiveLanguage,
+  liveMessage,
+  liveText,
+  type LiveMessageKey,
+} from '../i18n/messages.js';
 
 const DEFAULT_HELLO_TIMEOUT_MS = 5_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 15_000;
 const DEFAULT_SHORTCUT_TIMEOUT_MS = 5_000;
 // The frame cap must admit every message the per-field caps below allow. The
-// worst conformant case is a host.screen_context_result: requestId (128) +
-// appName (512) + windowTitle (2,048) + accessibilityText (32,000) +
-// screenshotPath (4,096) ≈ 38,784 UTF-16 units, each up to 6 UTF-8 bytes once
-// JSON-escaped (≈ 227 KiB), plus JSON syntax overhead — 256 KiB covers it.
-const MAX_HOST_TEXT_BYTES = 256 * 1024;
+// Visual capture results combine a bounded JPEG with Appshot metadata.
+const MAX_HOST_TEXT_BYTES = 512 * 1024;
 const MAX_HOST_AUDIO_BYTES = 64 * 1024;
+const MAX_HOST_VISUAL_IMAGE_BYTES = 190 * 1024;
+const MAX_HOST_VISUAL_BASE64_LENGTH =
+  Math.ceil(MAX_HOST_VISUAL_IMAGE_BYTES / 3) * 4;
 const MAX_HOST_AUDIO_WIRE_BYTES =
   LIVE_INPUT_AUDIO_EPOCH_BYTES + MAX_HOST_AUDIO_BYTES;
 const MAX_DAEMON_AUDIO_BYTES = 256 * 1024;
@@ -50,22 +72,14 @@ const MAX_STATUS_TEXT_LENGTH = 512;
 const DEFAULT_SHORTCUT = 'Command+E';
 const MAX_SHORTCUT_LENGTH = 128;
 const MAX_APPSHOT_TEXT_LENGTH = 32_000;
-const DEFAULT_APPSHOT_TIMEOUT_MS = 15_000;
-
-function writeLiveHostDiagnostic(
-  event: string,
-  details: Readonly<Record<string, string | number | boolean | undefined>>,
-): void {
-  if (process.env['QWEN_LIVE_DIAGNOSTICS'] !== '1') return;
-  process.stderr.write(
-    `${JSON.stringify({
-      timestamp: new Date().toISOString(),
-      source: 'live-host-coordinator',
-      event,
-      ...details,
-    })}\n`,
-  );
-}
+const DEFAULT_VISUAL_CAPTURE_TIMEOUT_MS = 15_000;
+const DEFAULT_VISUAL_INPUT: LiveVisualInput = {
+  source: 'screen',
+  mode: 'on-demand',
+  fps: 1,
+  liveWidth: 1280,
+  liveHeight: 720,
+};
 
 interface LiveCall {
   epoch: number;
@@ -80,13 +94,24 @@ interface LiveCall {
   workers: LiveSessionLocator[];
 }
 
+type StandaloneDaemonMessage =
+  | (LiveDaemonMessage & {
+      subagentsV1?: SubagentsSnapshot;
+      subagentsControlV1?: true;
+    })
+  | { type: 'host.subagents'; subagentsV1: SubagentsSnapshot };
+type StandaloneHostHello = LiveHostHello & { subagentsV1?: true };
+
 interface HostLease {
   socket: WebSocket;
-  hello?: LiveHostHello;
+  hello?: StandaloneHostHello;
   helloTimer: NodeJS.Timeout;
   heartbeatTimer?: NodeJS.Timeout;
   lastPongAt: number;
   pingId?: string;
+  memoryPending?: Set<string>;
+  memoryResults?: Map<string, LiveMemoryResult>;
+  languageResults?: Map<string, LiveLanguageResult>;
 }
 
 export interface LiveCallHandlers {
@@ -95,6 +120,7 @@ export interface LiveCallHandlers {
     epoch: number;
     callId: string;
     mode: 'resume' | 'new';
+    visualInput: LiveVisualInput;
   }) => void | Promise<void>;
   onStop?: (call: {
     epoch: number;
@@ -105,33 +131,69 @@ export interface LiveCallHandlers {
     callId: string;
     pcm16: Buffer;
   }) => boolean;
+  onInputImage?: (call: {
+    epoch: number;
+    callId: string;
+    source: LiveVisualSource;
+    image: string;
+    displayId?: string;
+  }) => boolean;
+  onVisualSettings?: (call: {
+    epoch: number;
+    callId: string;
+    visualInput: LiveVisualInput;
+  }) => void;
   onPlaybackStarted?: (call: { epoch: number }) => void;
   onPlaybackCompleted?: (call: { epoch: number }) => void;
+  onOutputMuted?: (call: { epoch: number }) => void;
 }
 
 export interface LiveHostCoordinatorOptions {
   daemonInstanceNonce?: string;
+  daemonShutdownV1?: boolean;
+  getUiLanguage?: () => LiveLanguageState;
+  getSubagents?: () => SubagentsSnapshot | undefined;
+  subagentsControlV1?: boolean;
+  onScreenDisplayChange?: (screenDisplayId: string) => void;
+  onLanguageAction?: (
+    language: LiveLanguageState['language'],
+  ) => LiveLanguageState;
   getProviderReadiness: () => LiveProviderReadiness;
   shortcut?: string;
   handlers?: LiveCallHandlers;
   helloTimeoutMs?: number;
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
-  appshotTimeoutMs?: number;
+  visualCaptureTimeoutMs?: number;
   now?: () => number;
+  visualInput?: LiveVisualInput;
+  logger?: LiveLogger;
+  getMemoryState?: () => LiveMemoryState;
+  onMemoryAction?: (
+    action: LiveMemoryAction,
+  ) => LiveMemoryState | Promise<LiveMemoryState>;
 }
 
-export interface LiveScreenContextCapture {
-  appName: string;
+export interface LiveVisualCapture {
+  source: LiveVisualSource;
+  screenScope?: 'display';
+  displayId?: string;
+  image: string;
+  width: number;
+  height: number;
+  appName?: string;
   windowTitle?: string;
-  accessibilityText: string;
-  screenshotPath: string;
+  accessibilityText?: string;
+  screenshotPath?: string;
 }
 
-interface PendingAppshot {
+interface PendingVisualCapture {
   epoch: number;
+  source: LiveVisualSource;
+  screenDisplayId?: string;
+  persistAsset: boolean;
   timer: NodeJS.Timeout;
-  resolve: (capture: LiveScreenContextCapture) => void;
+  resolve: (capture: LiveVisualCapture) => void;
   reject: (error: Error) => void;
 }
 
@@ -162,24 +224,41 @@ function isBoundedString(value: unknown, maxLength = MAX_ID_LENGTH): boolean {
   );
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function isPermissionState(value: unknown): value is LivePermissionState {
   return (
     value === 'granted' || value === 'denied' || value === 'not_determined'
   );
 }
 
-function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
+function parseHello(
+  value: Record<string, unknown>,
+): StandaloneHostHello | undefined {
+  const protocolVersion = value['protocolVersion'];
   const permissions = value['permissions'];
   const selfChecks = value['selfChecks'];
+  const cameraPermission = isObject(permissions)
+    ? permissions['camera']
+    : undefined;
+  const legacyHelloWithoutCamera =
+    protocolVersion !== LIVE_HOST_PROTOCOL_VERSION &&
+    cameraPermission === undefined;
   if (
     value['type'] !== 'host.hello' ||
-    typeof value['protocolVersion'] !== 'number' ||
-    !Number.isInteger(value['protocolVersion']) ||
+    (value['subagentsV1'] !== undefined && value['subagentsV1'] !== true) ||
+    (value['displayCaptureV1'] !== undefined &&
+      value['displayCaptureV1'] !== true) ||
+    typeof protocolVersion !== 'number' ||
+    !Number.isInteger(protocolVersion) ||
     !isBoundedString(value['hostVersion'], MAX_VERSION_LENGTH) ||
     !isBoundedString(value['bundleId']) ||
     !isBoundedString(value['instanceNonce']) ||
     !isObject(permissions) ||
     !isPermissionState(permissions['microphone']) ||
+    (!isPermissionState(cameraPermission) && !legacyHelloWithoutCamera) ||
     !isPermissionState(permissions['accessibility']) ||
     !isPermissionState(permissions['screenRecording']) ||
     !isObject(selfChecks) ||
@@ -190,7 +269,15 @@ function parseHello(value: Record<string, unknown>): LiveHostHello | undefined {
   ) {
     return undefined;
   }
-  return value as unknown as LiveHostHello;
+  return {
+    ...(value as unknown as StandaloneHostHello),
+    permissions: {
+      ...permissions,
+      camera: isPermissionState(cameraPermission)
+        ? cameraPermission
+        : 'not_determined',
+    } as LiveHostHello['permissions'],
+  };
 }
 
 function parseAction(
@@ -233,7 +320,245 @@ function parseAction(
   return undefined;
 }
 
-function parseHostMessage(text: string): LiveHostMessage | undefined {
+function isBoundedVisualImage(image: unknown): image is string {
+  if (
+    typeof image !== 'string' ||
+    image.length === 0 ||
+    image.length > MAX_HOST_VISUAL_BASE64_LENGTH ||
+    image.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(image)
+  ) {
+    return false;
+  }
+  const jpeg = Buffer.from(image, 'base64');
+  return (
+    jpeg.byteLength >= 4 &&
+    jpeg.byteLength <= MAX_HOST_VISUAL_IMAGE_BYTES &&
+    jpeg[0] === 0xff &&
+    jpeg[1] === 0xd8 &&
+    jpeg[jpeg.byteLength - 2] === 0xff &&
+    jpeg[jpeg.byteLength - 1] === 0xd9 &&
+    jpeg.toString('base64') === image
+  );
+}
+
+function isVisualSource(value: unknown): value is LiveVisualSource {
+  return value === 'screen' || value === 'camera';
+}
+
+function validDisplayCaptureIdentity(value: Record<string, unknown>): boolean {
+  return (
+    (value['screenScope'] === undefined && value['displayId'] === undefined) ||
+    (value['source'] === 'screen' &&
+      value['screenScope'] === 'display' &&
+      value['displayId'] !== 'primary' &&
+      isScreenDisplayId(value['displayId']))
+  );
+}
+
+function parseVisualFrame(
+  value: Record<string, unknown>,
+): LiveHostVisualFrame | undefined {
+  const epoch = value['epoch'];
+  const image = value['image'];
+  if (
+    value['type'] !== 'host.visual_frame' ||
+    typeof epoch !== 'number' ||
+    !Number.isSafeInteger(epoch) ||
+    epoch < 0 ||
+    !isVisualSource(value['source']) ||
+    !validDisplayCaptureIdentity(value) ||
+    !isBoundedVisualImage(image)
+  ) {
+    return undefined;
+  }
+  return {
+    type: 'host.visual_frame',
+    epoch,
+    source: value['source'],
+    image,
+    ...(value['screenScope'] === 'display'
+      ? {
+          screenScope: 'display' as const,
+          displayId: (value['displayId'] as string).toLowerCase(),
+        }
+      : {}),
+  };
+}
+
+function parseVisualSettings(
+  value: Record<string, unknown>,
+): LiveHostVisualSettings | undefined {
+  const epoch = value['epoch'];
+  const permissions = value['permissions'];
+  if (
+    value['type'] !== 'host.visual_settings' ||
+    typeof epoch !== 'number' ||
+    !Number.isSafeInteger(epoch) ||
+    epoch < 0 ||
+    !isVisualSource(value['source']) ||
+    (value['mode'] !== 'on-demand' && value['mode'] !== 'live-feed') ||
+    (value['screenDisplayId'] !== undefined &&
+      !isScreenDisplayId(value['screenDisplayId'])) ||
+    !isObject(permissions) ||
+    !isPermissionState(permissions['camera']) ||
+    !isPermissionState(permissions['accessibility']) ||
+    !isPermissionState(permissions['screenRecording']) ||
+    typeof value['appshot'] !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return {
+    type: 'host.visual_settings',
+    epoch,
+    source: value['source'],
+    mode: value['mode'],
+    ...(typeof value['screenDisplayId'] === 'string'
+      ? { screenDisplayId: value['screenDisplayId'].toLowerCase() }
+      : {}),
+    permissions: {
+      camera: permissions['camera'],
+      accessibility: permissions['accessibility'],
+      screenRecording: permissions['screenRecording'],
+    },
+    appshot: value['appshot'],
+  };
+}
+
+function parseVisualCaptureResult(
+  value: Record<string, unknown>,
+): LiveHostVisualCaptureResult | undefined {
+  const requestId = value['requestId'];
+  if (
+    value['type'] !== 'host.visual_capture_result' ||
+    !isBoundedString(requestId)
+  ) {
+    return undefined;
+  }
+  if (value['success'] === false && isBoundedString(value['error'], 1_024)) {
+    return {
+      type: 'host.visual_capture_result',
+      requestId: requestId as string,
+      success: false,
+      error: value['error'] as string,
+    };
+  }
+  const source = value['source'];
+  const width = value['width'];
+  const height = value['height'];
+  if (
+    value['success'] !== true ||
+    !isVisualSource(source) ||
+    !isBoundedVisualImage(value['image']) ||
+    !validDisplayCaptureIdentity(value) ||
+    typeof width !== 'number' ||
+    !Number.isSafeInteger(width) ||
+    width <= 0 ||
+    typeof height !== 'number' ||
+    !Number.isSafeInteger(height) ||
+    height <= 0 ||
+    (value['screenshotPath'] !== undefined &&
+      !isBoundedString(value['screenshotPath'], 4_096))
+  ) {
+    return undefined;
+  }
+  if (source === 'camera') {
+    return {
+      type: 'host.visual_capture_result',
+      requestId: requestId as string,
+      success: true,
+      source,
+      image: value['image'],
+      width,
+      height,
+      ...(value['screenshotPath']
+        ? { screenshotPath: value['screenshotPath'] as string }
+        : {}),
+    };
+  }
+  if (
+    !isBoundedString(value['appName'], 512) ||
+    (value['windowTitle'] !== undefined &&
+      !isBoundedString(value['windowTitle'], 2_048)) ||
+    typeof value['accessibilityText'] !== 'string' ||
+    value['accessibilityText'].length > MAX_APPSHOT_TEXT_LENGTH
+  ) {
+    return undefined;
+  }
+  return {
+    type: 'host.visual_capture_result',
+    requestId: requestId as string,
+    success: true,
+    source,
+    image: value['image'],
+    width,
+    height,
+    appName: value['appName'] as string,
+    ...(value['screenScope'] === 'display'
+      ? {
+          screenScope: 'display' as const,
+          displayId: (value['displayId'] as string).toLowerCase(),
+        }
+      : {}),
+    ...(value['windowTitle']
+      ? { windowTitle: value['windowTitle'] as string }
+      : {}),
+    accessibilityText: value['accessibilityText'],
+    ...(value['screenshotPath']
+      ? { screenshotPath: value['screenshotPath'] as string }
+      : {}),
+  };
+}
+
+function parseMemoryAction(
+  value: Record<string, unknown>,
+): LiveHostMemoryAction | undefined {
+  if (
+    !isBoundedString(value['requestId']) ||
+    !isNonNegativeSafeInteger(value['epoch'])
+  )
+    return undefined;
+  const base = {
+    type: 'host.memory_action' as const,
+    requestId: value['requestId'] as string,
+    epoch: value['epoch'],
+  };
+  switch (value['action']) {
+    case 'set_enabled':
+    case 'set_visual_enabled':
+      return typeof value['enabled'] === 'boolean'
+        ? { ...base, action: value['action'], enabled: value['enabled'] }
+        : undefined;
+    case 'select':
+      return isBoundedString(value['libraryId'], 64)
+        ? { ...base, action: 'select', libraryId: value['libraryId'] as string }
+        : undefined;
+    case 'create':
+      return isBoundedString(value['name'], 160)
+        ? { ...base, action: 'create', name: value['name'] as string }
+        : undefined;
+    case 'rename':
+      return isBoundedString(value['libraryId'], 64) &&
+        isBoundedString(value['name'], 160)
+        ? {
+            ...base,
+            action: 'rename',
+            libraryId: value['libraryId'] as string,
+            name: value['name'] as string,
+          }
+        : undefined;
+    case 'set_model':
+      return isBoundedString(value['model'], 256)
+        ? { ...base, action: 'set_model', model: value['model'] as string }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function parseHostMessage(
+  text: string,
+): LiveHostMessage | LiveHostLanguageAction | undefined {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -243,6 +568,26 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
   if (!isObject(value)) return undefined;
   if (value['type'] === 'host.hello') return parseHello(value);
   if (value['type'] === 'host.action') return parseAction(value);
+  if (value['type'] === 'host.memory_action') return parseMemoryAction(value);
+  if (value['type'] === 'host.language_action') {
+    if (
+      !isBoundedString(value['requestId']) ||
+      !isNonNegativeSafeInteger(value['epoch']) ||
+      !isLiveLanguage(value['language'])
+    )
+      return undefined;
+    return {
+      type: 'host.language_action',
+      requestId: value['requestId'] as string,
+      epoch: value['epoch'],
+      language: value['language'],
+    };
+  }
+  if (value['type'] === 'host.visual_frame') return parseVisualFrame(value);
+  if (value['type'] === 'host.visual_settings')
+    return parseVisualSettings(value);
+  if (value['type'] === 'host.visual_capture_result')
+    return parseVisualCaptureResult(value);
   if (value['type'] === 'host.pong' && isBoundedString(value['pingId'])) {
     return { type: 'host.pong', pingId: value['pingId'] as string };
   }
@@ -268,50 +613,27 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
       };
     }
   }
-  if (value['type'] === 'host.screen_context_result') {
-    const requestId = value['requestId'];
-    if (!isBoundedString(requestId)) return undefined;
-    if (value['success'] === false && isBoundedString(value['error'], 1_024)) {
-      return {
-        type: 'host.screen_context_result',
-        requestId: requestId as string,
-        success: false,
-        error: value['error'] as string,
-      };
-    }
-    if (
-      value['success'] === true &&
-      isBoundedString(value['appName'], 512) &&
-      (value['windowTitle'] === undefined ||
-        isBoundedString(value['windowTitle'], 2_048)) &&
-      typeof value['accessibilityText'] === 'string' &&
-      value['accessibilityText'].length <= MAX_APPSHOT_TEXT_LENGTH &&
-      isBoundedString(value['screenshotPath'], 4_096)
-    ) {
-      return {
-        type: 'host.screen_context_result',
-        requestId: requestId as string,
-        success: true,
-        appName: value['appName'] as string,
-        ...(value['windowTitle']
-          ? { windowTitle: value['windowTitle'] as string }
-          : {}),
-        accessibilityText: value['accessibilityText'],
-        screenshotPath: value['screenshotPath'] as string,
-      };
-    }
-  }
   if (
     value['type'] === 'host.playback_started' &&
-    typeof value['epoch'] === 'number'
+    isNonNegativeSafeInteger(value['epoch']) &&
+    isNonNegativeSafeInteger(value['outputId'])
   ) {
-    return { type: 'host.playback_started', epoch: value['epoch'] };
+    return {
+      type: 'host.playback_started',
+      epoch: value['epoch'],
+      outputId: value['outputId'],
+    };
   }
   if (
     value['type'] === 'host.playback_completed' &&
-    typeof value['epoch'] === 'number'
+    isNonNegativeSafeInteger(value['epoch']) &&
+    isNonNegativeSafeInteger(value['outputId'])
   ) {
-    return { type: 'host.playback_completed', epoch: value['epoch'] };
+    return {
+      type: 'host.playback_completed',
+      epoch: value['epoch'],
+      outputId: value['outputId'],
+    };
   }
   return undefined;
 }
@@ -358,7 +680,9 @@ export class LiveHostCoordinator {
   private readonly helloTimeoutMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
-  private readonly appshotTimeoutMs: number;
+  private readonly visualCaptureTimeoutMs: number;
+  private readonly logger: LiveLogger;
+  private visualInput: LiveVisualInput;
   private shortcut: string;
   private handlers: LiveCallHandlers;
   private host?: HostLease;
@@ -367,16 +691,26 @@ export class LiveHostCoordinator {
   private providerOverride?: LiveProviderReadiness;
   private appshotReadiness: LiveAppshotReadiness = {
     state: 'unavailable',
-    message: 'The dedicated Appshot channel has not been verified.',
+    message: liveText('en', 'runtime.appshotUnchecked'),
   };
   private call?: LiveCall;
   private pendingStartMode?: 'new';
   private deactivating = false;
   private nextEpoch = 0;
+  private nextOutputId = 0;
+  private writableOutputId?: number;
+  private readonly outputAudio = new Map<
+    number,
+    { finished: boolean; drained: boolean }
+  >();
+  private playbackStartedNotified = false;
   private inputMuted = false;
   private outputMuted = false;
   private lastCallError?: string;
-  private readonly pendingAppshots = new Map<string, PendingAppshot>();
+  private readonly pendingVisualCaptures = new Map<
+    string,
+    PendingVisualCapture
+  >();
   private pendingShortcut?: PendingShortcut;
   private readonly inactiveWaiters = new Set<() => void>();
 
@@ -389,8 +723,13 @@ export class LiveHostCoordinator {
       options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.heartbeatTimeoutMs =
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
-    this.appshotTimeoutMs =
-      options.appshotTimeoutMs ?? DEFAULT_APPSHOT_TIMEOUT_MS;
+    this.visualCaptureTimeoutMs =
+      options.visualCaptureTimeoutMs ?? DEFAULT_VISUAL_CAPTURE_TIMEOUT_MS;
+    this.visualInput = {
+      ...(options.visualInput ?? DEFAULT_VISUAL_INPUT),
+    };
+    this.logger = options.logger ?? new LiveLogger();
+    this.appshotReadiness.message = this.uiText('runtime.appshotUnchecked');
     const shortcut = options.shortcut?.trim();
     this.shortcut =
       shortcut && shortcut.length <= MAX_SHORTCUT_LENGTH
@@ -440,10 +779,12 @@ export class LiveHostCoordinator {
       expectedNonce.byteLength !== presentedNonce.byteLength ||
       !timingSafeEqual(expectedNonce, presentedNonce)
     ) {
+      this.debug('host.rejected', { reason: 'daemon_nonce' });
       socket.close(4003, 'Invalid daemon instance nonce.');
       return;
     }
     if (this.host && this.isLeaseHealthy(this.host)) {
+      this.debug('host.rejected', { reason: 'lease_active' });
       socket.close(4009, 'A Live Host is already connected.');
       return;
     }
@@ -464,16 +805,22 @@ export class LiveHostCoordinator {
     };
     lease.helloTimer.unref?.();
     this.host = lease;
+    this.debug('host.connected', {});
 
     socket.on('message', (data, isBinary) => {
       if (this.host !== lease) return;
       if (isBinary) this.handleAudioFrame(lease, data);
       else this.handleTextFrame(lease, data);
     });
-    socket.on('close', () => {
+    socket.on('close', (code = 0, reason = Buffer.alloc(0)) => {
+      this.debug('host.closed', {
+        code,
+        reason: reason.toString('utf8').slice(0, 256),
+      });
       if (this.host === lease) this.detachHost(lease, 'host_disconnected');
     });
-    socket.on('error', () => {
+    socket.on('error', (error: Error) => {
+      this.debug('host.error', { message: error.message.slice(0, 256) });
       if (this.host === lease) this.detachHost(lease, 'host_disconnected');
     });
   }
@@ -505,12 +852,17 @@ export class LiveHostCoordinator {
       requirements.microphone = permissionRequirement(
         hello.permissions.microphone,
       );
-      requirements.accessibility = permissionRequirement(
-        hello.permissions.accessibility,
-      );
-      requirements.screenRecording = permissionRequirement(
-        hello.permissions.screenRecording,
-      );
+      if (this.visualInput.source === 'camera') {
+        requirements.camera = permissionRequirement(hello.permissions.camera);
+      } else {
+        if (this.visualInput.mode === 'on-demand')
+          requirements.accessibility = permissionRequirement(
+            hello.permissions.accessibility,
+          );
+        requirements.screenRecording = permissionRequirement(
+          hello.permissions.screenRecording,
+        );
+      }
       requirements.audioInput = hello.selfChecks.audioInput
         ? 'ready'
         : 'unavailable';
@@ -520,10 +872,19 @@ export class LiveHostCoordinator {
       requirements.globalShortcut = hello.selfChecks.globalShortcut
         ? 'ready'
         : 'unavailable';
-      requirements.appshot = hello.selfChecks.appshot
-        ? appshot.state
-        : 'unavailable';
-    } else if (appshot.state !== 'ready') {
+      if (
+        this.visualInput.source === 'screen' &&
+        this.visualInput.mode === 'on-demand'
+      ) {
+        requirements.appshot = hello.selfChecks.appshot
+          ? appshot.state
+          : 'unavailable';
+      }
+    } else if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
+      appshot.state !== 'ready'
+    ) {
       requirements.appshot = appshot.state;
     }
 
@@ -624,6 +985,7 @@ export class LiveHostCoordinator {
       workers: [],
     };
     this.call = call;
+    this.debug('call.start', { epoch: call.epoch, mode });
     this.lastCallError = undefined;
     this.broadcastState();
     try {
@@ -632,12 +994,13 @@ export class LiveHostCoordinator {
           epoch: call.epoch,
           callId: call.callId,
           mode,
+          visualInput: { ...this.visualInput },
         }),
       ).catch(() => {
-        this.failCall(call.epoch, 'Live Voice failed to start.');
+        this.failCall(call.epoch, this.uiText('runtime.startFailed'));
       });
     } catch {
-      this.failCall(call.epoch, 'Live Voice failed to start.');
+      this.failCall(call.epoch, this.uiText('runtime.startFailed'));
     }
     return { epoch: call.epoch, callId: call.callId, status: this.getStatus() };
   }
@@ -653,8 +1016,12 @@ export class LiveHostCoordinator {
       this.inputMuted = update.inputMuted;
     }
     if (update.outputMuted !== undefined) {
+      const becameMuted = update.outputMuted && !this.outputMuted;
       this.outputMuted = update.outputMuted;
-      if (update.outputMuted && this.call) this.clearOutput(this.call.epoch);
+      if (becameMuted && this.call) {
+        this.clearOutput(this.call.epoch);
+        this.handlers.onOutputMuted?.({ epoch: this.call.epoch });
+      }
     }
     this.broadcastState();
     return this.getStatus();
@@ -774,49 +1141,99 @@ export class LiveHostCoordinator {
     );
   }
 
-  captureScreenContext(
+  captureVisualContext(
     callerSessionId: string,
-  ): Promise<LiveScreenContextCapture> {
+    options: { persistAsset?: boolean; screenScope?: 'display' } = {},
+  ): Promise<LiveVisualCapture> {
     const call = this.call;
     const host = this.host;
+    const display =
+      this.visualInput.source === 'screen' && options.screenScope === 'display';
+    if (display && !host?.hello?.displayCaptureV1)
+      return Promise.reject(
+        new Error(this.uiText('runtime.displayCaptureUnsupported')),
+      );
+    const sourceReady =
+      this.visualInput.source === 'camera'
+        ? host?.hello?.permissions.camera === 'granted'
+        : display
+          ? host?.hello?.permissions.screenRecording === 'granted'
+          : host?.hello?.permissions.accessibility === 'granted' &&
+            host.hello.permissions.screenRecording === 'granted' &&
+            host.hello.selfChecks.appshot;
     if (
       !call ||
       call.coordinator?.sessionId !== callerSessionId ||
       !host?.hello ||
       !this.isLeaseHealthy(host) ||
-      host.hello.permissions.accessibility !== 'granted' ||
-      host.hello.permissions.screenRecording !== 'granted' ||
-      !host.hello.selfChecks.appshot
+      this.visualInput.mode !== 'on-demand' ||
+      !sourceReady
     ) {
       return Promise.reject(
         new Error(
-          'Appshot is available only to the active Live session with a ready Host.',
+          'On Demand capture is available only to the active Live session with a ready selected source.',
         ),
       );
     }
     const requestId = randomUUID();
-    return new Promise<LiveScreenContextCapture>((resolve, reject) => {
+    const source = this.visualInput.source;
+    const screenDisplayId = display
+      ? (this.visualInput.screenDisplayId ?? 'primary')
+      : undefined;
+    const snapshotWidth = display
+      ? this.visualInput.liveWidth
+      : source === 'camera'
+        ? this.visualInput.cameraSnapshotWidth
+        : this.visualInput.snapshotWidth;
+    const snapshotHeight = display
+      ? this.visualInput.liveHeight
+      : source === 'camera'
+        ? this.visualInput.cameraSnapshotHeight
+        : this.visualInput.snapshotHeight;
+    this.debug('visual.capture_requested', {
+      epoch: call.epoch,
+      source,
+      ...(screenDisplayId ? { screenScope: 'display', screenDisplayId } : {}),
+    });
+    return new Promise<LiveVisualCapture>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pendingAppshots.delete(requestId);
-        reject(new Error('Live Host Appshot timed out.'));
-      }, this.appshotTimeoutMs);
+        this.pendingVisualCaptures.delete(requestId);
+        this.debug('visual.capture_failed', {
+          epoch: call.epoch,
+          source,
+          reason: 'timeout',
+        });
+        reject(new Error('Live Host On Demand capture timed out.'));
+      }, this.visualCaptureTimeoutMs);
       timer.unref?.();
-      this.pendingAppshots.set(requestId, {
+      this.pendingVisualCaptures.set(requestId, {
         epoch: call.epoch,
+        source,
+        ...(screenDisplayId ? { screenDisplayId } : {}),
+        persistAsset: options.persistAsset !== false,
         timer,
         resolve,
         reject,
       });
       if (
         !this.sendHost({
-          type: 'host.capture_screen_context',
+          type: 'host.capture_visual',
           requestId,
           epoch: call.epoch,
+          source,
+          ...(screenDisplayId
+            ? { screenScope: 'display' as const, screenDisplayId }
+            : {}),
+          ...(snapshotWidth !== undefined ? { snapshotWidth } : {}),
+          ...(snapshotHeight !== undefined ? { snapshotHeight } : {}),
+          ...(options.persistAsset !== undefined
+            ? { persistAsset: options.persistAsset }
+            : {}),
         })
       ) {
-        this.rejectPendingAppshot(
+        this.rejectPendingVisualCapture(
           requestId,
-          new Error('Live Host is unavailable for Appshot.'),
+          new Error('Live Host is unavailable for On Demand capture.'),
         );
       }
     });
@@ -833,8 +1250,18 @@ export class LiveHostCoordinator {
     this.sendState(this.getStatus());
   }
 
-  failCall(epoch: number, message = 'Live Voice failed.'): boolean {
-    if (!this.call || this.call.epoch !== epoch) return false;
+  failCall(
+    epoch: number,
+    message = this.uiText('runtime.callFailed'),
+  ): boolean {
+    if (
+      !this.call ||
+      this.call.epoch !== epoch ||
+      this.call.state === 'stopping'
+    ) {
+      return false;
+    }
+    this.debug('call.failed', { epoch, message });
     const call = this.call;
     this.pendingStartMode = undefined;
     this.lastCallError = message;
@@ -852,7 +1279,7 @@ export class LiveHostCoordinator {
     ) {
       return false;
     }
-    if (this.outputMuted) return true;
+    if (this.outputMuted) return false;
     const socket = this.host?.socket;
     if (
       !socket ||
@@ -861,18 +1288,67 @@ export class LiveHostCoordinator {
     ) {
       return false;
     }
-    socket.send(pcm16, { binary: true });
-    writeLiveHostDiagnostic('output_audio_sent', {
+    const outputId = this.writableOutputId ?? this.allocateOutputId();
+    const output = this.outputAudio.get(outputId) ?? {
+      finished: false,
+      drained: false,
+    };
+    const frame = Buffer.allocUnsafe(
+      LIVE_OUTPUT_AUDIO_HEADER_BYTES + pcm16.byteLength,
+    );
+    frame.writeBigUInt64BE(BigInt(epoch), 0);
+    frame.writeBigUInt64BE(BigInt(outputId), LIVE_OUTPUT_AUDIO_EPOCH_BYTES);
+    frame.set(pcm16, LIVE_OUTPUT_AUDIO_HEADER_BYTES);
+    socket.send(frame, { binary: true });
+    this.writableOutputId = outputId;
+    if (!this.supportsOutputAudioEndMarker()) {
+      output.finished = false;
+      output.drained = false;
+    }
+    this.outputAudio.set(outputId, output);
+    this.debug('audio.output_sent', {
       epoch,
+      outputId,
       bytes: pcm16.byteLength,
       socketBufferedBytes: socket.bufferedAmount,
     });
     return true;
   }
 
+  finishOutputAudio(epoch: number): void {
+    const call = this.call;
+    const outputId = this.writableOutputId;
+    if (!call || call.epoch !== epoch || outputId === undefined) {
+      return;
+    }
+    const output = this.outputAudio.get(outputId);
+    if (!output || output.finished) return;
+    output.finished = true;
+    if (this.supportsOutputAudioEndMarker()) {
+      if (
+        !this.sendHost({
+          type: 'host.output_audio_finished',
+          epoch,
+          outputId,
+        })
+      ) {
+        output.finished = false;
+      } else {
+        this.writableOutputId = undefined;
+      }
+      return;
+    }
+    if (output.drained) this.completeOutputAudio(call, outputId);
+  }
+
+  isOutputMuted(): boolean {
+    return this.outputMuted;
+  }
+
   clearOutput(epoch: number): void {
     if (this.call && this.call.epoch !== epoch) return;
-    writeLiveHostDiagnostic('clear_output_sent', { epoch });
+    this.resetOutputAudio();
+    this.debug('audio.output_cleared', { epoch });
     this.sendHost({ type: 'host.clear_output', epoch });
   }
 
@@ -887,7 +1363,7 @@ export class LiveHostCoordinator {
         lease.socket.close(1001, 'Daemon shutting down.');
       }
     }
-    this.rejectPendingAppshots(new Error('Live Voice is shutting down.'));
+    this.rejectPendingVisualCaptures(new Error('Live Voice is shutting down.'));
     this.rejectPendingShortcut(new Error('Live Voice is shutting down.'));
     this.notifyInactive();
   }
@@ -900,7 +1376,7 @@ export class LiveHostCoordinator {
       return {
         state: 'unavailable',
         blocker: 'provider_config',
-        message: 'Live provider configuration is invalid.',
+        message: this.uiText('runtime.providerConfig'),
       };
     }
   }
@@ -920,17 +1396,43 @@ export class LiveHostCoordinator {
     if (hello.permissions.microphone !== 'granted') {
       return 'microphone_permission';
     }
-    if (hello.permissions.accessibility !== 'granted') {
+    if (
+      this.visualInput.source === 'camera' &&
+      hello.permissions.camera !== 'granted'
+    )
+      return 'camera_permission';
+    if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'live-feed' &&
+      !hello.displayCaptureV1
+    )
+      return 'host_version';
+    if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
+      hello.permissions.accessibility !== 'granted'
+    )
       return 'accessibility_permission';
-    }
-    if (hello.permissions.screenRecording !== 'granted') {
+    if (
+      this.visualInput.source === 'screen' &&
+      hello.permissions.screenRecording !== 'granted'
+    )
       return 'screen_recording_permission';
-    }
     if (!hello.selfChecks.audioInput) return 'audio_input';
     if (!hello.selfChecks.audioOutput) return 'audio_output';
     if (!hello.selfChecks.globalShortcut) return 'global_shortcut';
-    if (!hello.selfChecks.appshot) return 'appshot';
-    if (appshot.state !== 'ready') return 'appshot';
+    if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
+      !hello.selfChecks.appshot
+    )
+      return 'appshot';
+    if (
+      this.visualInput.source === 'screen' &&
+      this.visualInput.mode === 'on-demand' &&
+      appshot.state !== 'ready'
+    )
+      return 'appshot';
     return undefined;
   }
 
@@ -949,21 +1451,29 @@ export class LiveHostCoordinator {
     if (blocker === 'appshot' && hello?.selfChecks.appshot && appshot.message) {
       return appshot.message;
     }
-    const messages: Record<NonNullable<LiveStatus['blocker']>, string> = {
-      host_missing: 'Qwen Live Host is not connected.',
-      host_disconnected: 'Qwen Live Host disconnected.',
-      host_version: 'Qwen Live Host is not protocol-compatible.',
-      microphone_permission: 'Microphone permission is required.',
-      accessibility_permission: 'Accessibility permission is required.',
-      screen_recording_permission: 'Screen Recording permission is required.',
-      audio_input: 'Live Host audio input self-check failed.',
-      audio_output: 'Live Host audio output self-check failed.',
-      global_shortcut: 'Live Host global shortcut self-check failed.',
-      appshot: 'Appshot self-check failed.',
-      provider_config: 'Live provider configuration is invalid.',
-      provider_unreachable: 'The Live provider is unreachable.',
+    const messages: Record<
+      NonNullable<LiveStatus['blocker']>,
+      LiveMessageKey
+    > = {
+      host_missing: 'runtime.hostMissing',
+      host_disconnected: 'runtime.hostDisconnected',
+      host_version: 'runtime.hostVersion',
+      microphone_permission: 'runtime.microphonePermission',
+      camera_permission: 'runtime.cameraPermission',
+      accessibility_permission: 'runtime.accessibilityPermission',
+      screen_recording_permission: 'runtime.screenPermission',
+      audio_input: 'runtime.audioInput',
+      audio_output: 'runtime.audioOutput',
+      global_shortcut: 'runtime.shortcut',
+      appshot: 'runtime.appshot',
+      provider_config: 'runtime.providerConfig',
+      provider_unreachable: 'runtime.providerUnavailable',
     };
-    return messages[blocker];
+    return this.uiText(messages[blocker]);
+  }
+
+  private uiText(key: LiveMessageKey): string {
+    return this.options.getUiLanguage ? liveMessage(key) : liveText('en', key);
   }
 
   private isLeaseHealthy(lease: HostLease): boolean {
@@ -1004,8 +1514,8 @@ export class LiveHostCoordinator {
       }
       return;
     }
-    if (message.type === 'host.screen_context_result') {
-      this.handleScreenContextResult(message);
+    if (message.type === 'host.visual_capture_result') {
+      this.handleVisualCaptureResult(message);
       return;
     }
     if (message.type === 'host.shortcut_result') {
@@ -1020,7 +1530,146 @@ export class LiveHostCoordinator {
       this.handlePlaybackCompleted(message);
       return;
     }
+    if (message.type === 'host.visual_frame') {
+      this.handleVisualFrame(message);
+      return;
+    }
+    if (message.type === 'host.visual_settings') {
+      this.handleVisualSettings(message);
+      return;
+    }
+    if (message.type === 'host.memory_action') {
+      void this.handleMemoryAction(lease, message);
+      return;
+    }
+    if (message.type === 'host.language_action') {
+      this.handleLanguageAction(lease, message);
+      return;
+    }
     this.handleAction(message);
+  }
+
+  private handleLanguageAction(
+    lease: HostLease,
+    message: LiveHostLanguageAction,
+  ): void {
+    lease.languageResults ??= new Map();
+    const cached = lease.languageResults.get(message.requestId);
+    if (cached) {
+      this.sendHost(cached);
+      return;
+    }
+    let result: LiveLanguageResult;
+    try {
+      if (message.epoch !== this.nextEpoch)
+        throw new Error(liveMessage('language.callChanged'));
+      if (!this.options.onLanguageAction)
+        throw new Error(liveMessage('language.unavailable'));
+      const uiLanguageV1 = this.options.onLanguageAction(message.language);
+      result = {
+        type: 'host.language_result',
+        requestId: message.requestId,
+        ok: true,
+        uiLanguageV1,
+      };
+    } catch (error) {
+      result = {
+        type: 'host.language_result',
+        requestId: message.requestId,
+        ok: false,
+        error:
+          error instanceof Error && error.message.startsWith('qwen-live-ui:')
+            ? error.message
+            : liveMessage('language.saveFailed'),
+        ...(this.options.getUiLanguage
+          ? { uiLanguageV1: this.options.getUiLanguage() }
+          : {}),
+      };
+    }
+    lease.languageResults.set(message.requestId, result);
+    if (lease.languageResults.size > 64)
+      lease.languageResults.delete(lease.languageResults.keys().next().value!);
+    this.sendHost(result);
+    this.broadcastState();
+  }
+
+  refreshMemoryState(): void {
+    this.broadcastState();
+  }
+
+  refreshSubagentsState(): void {
+    const subagentsV1 = this.options.getSubagents?.();
+    if (subagentsV1 && this.host?.hello?.subagentsV1)
+      this.sendHost({ type: 'host.subagents', subagentsV1 });
+  }
+
+  private memoryState(): LiveMemoryState | undefined {
+    const state = this.options.getMemoryState?.();
+    return state ? { ...state, locked: this.call !== undefined } : undefined;
+  }
+
+  private async handleMemoryAction(
+    lease: HostLease,
+    message: LiveHostMemoryAction,
+  ): Promise<void> {
+    lease.memoryResults ??= new Map();
+    lease.memoryPending ??= new Set();
+    const cached = lease.memoryResults.get(message.requestId);
+    if (cached) {
+      this.sendHost(cached);
+      return;
+    }
+    if (lease.memoryPending.has(message.requestId)) return;
+    if (lease.memoryPending.size >= 16) {
+      this.sendHost({
+        type: 'host.memory_result',
+        requestId: message.requestId,
+        ok: false,
+        error: this.uiText('memoryUI.pending'),
+      });
+      return;
+    }
+    lease.memoryPending.add(message.requestId);
+    let result: LiveMemoryResult;
+    try {
+      if (message.epoch !== this.nextEpoch)
+        throw new Error(this.uiText('memoryUI.callChanged'));
+      if (!this.options.onMemoryAction)
+        throw new Error(this.uiText('memoryUI.unavailable'));
+      if (
+        this.call &&
+        ['select', 'create', 'set_model'].includes(message.action)
+      )
+        throw new Error(this.uiText('memoryUI.locked'));
+      await this.options.onMemoryAction(message);
+      const memory = this.memoryState();
+      if (!memory) throw new Error(this.uiText('memoryUI.stateUnavailable'));
+      result = {
+        type: 'host.memory_result',
+        requestId: message.requestId,
+        ok: true,
+        memory,
+      };
+    } catch (error) {
+      const memory = this.memoryState();
+      result = {
+        type: 'host.memory_result',
+        requestId: message.requestId,
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message.slice(0, 1024)
+            : this.uiText('memoryUI.updateFailed'),
+        ...(memory ? { memory } : {}),
+      };
+    }
+    lease.memoryPending.delete(message.requestId);
+    if (this.host !== lease) return;
+    lease.memoryResults.set(message.requestId, result);
+    if (lease.memoryResults.size > 64)
+      lease.memoryResults.delete(lease.memoryResults.keys().next().value!);
+    this.sendHost(result);
+    this.broadcastState();
   }
 
   private handleShortcutResult(message: LiveHostShortcutResult): void {
@@ -1048,48 +1697,136 @@ export class LiveHostCoordinator {
     pending.resolve(status);
   }
 
-  private handleScreenContextResult(
-    message: LiveHostScreenContextResult,
+  private handleVisualCaptureResult(
+    message: LiveHostVisualCaptureResult,
   ): void {
-    const pending = this.pendingAppshots.get(message.requestId);
+    const pending = this.pendingVisualCaptures.get(message.requestId);
     if (!pending) return;
     const call = this.call;
     if (!call || call.epoch !== pending.epoch) {
-      this.rejectPendingAppshot(
+      this.rejectPendingVisualCapture(
         message.requestId,
-        new Error('The Live call changed before Appshot completed.'),
+        new Error('The Live call changed before visual capture completed.'),
       );
       return;
     }
-    this.pendingAppshots.delete(message.requestId);
+    this.pendingVisualCaptures.delete(message.requestId);
     clearTimeout(pending.timer);
     if (!message.success) {
+      this.debug('visual.capture_failed', {
+        epoch: pending.epoch,
+        reason: message.error.slice(0, 256),
+      });
       pending.reject(new Error(message.error));
       return;
     }
+    if (message.source !== pending.source) {
+      this.debug('visual.capture_failed', {
+        epoch: pending.epoch,
+        source: pending.source,
+        reason: 'source_mismatch',
+      });
+      pending.reject(
+        new Error('Live Host returned the wrong visual capture source.'),
+      );
+      return;
+    }
+    if (
+      pending.screenDisplayId &&
+      (message.source !== 'screen' ||
+        message.screenScope !== 'display' ||
+        !message.displayId ||
+        (pending.screenDisplayId !== 'primary' &&
+          message.displayId.toLowerCase() !==
+            pending.screenDisplayId.toLowerCase()))
+    ) {
+      pending.reject(new Error(this.uiText('runtime.displayCaptureMismatch')));
+      return;
+    }
+    if (
+      !pending.screenDisplayId &&
+      message.source === 'screen' &&
+      message.screenScope === 'display'
+    ) {
+      pending.reject(new Error(this.uiText('runtime.displayCaptureMismatch')));
+      return;
+    }
+    if (pending.persistAsset && !message.screenshotPath) {
+      this.debug('visual.capture_failed', {
+        epoch: pending.epoch,
+        source: pending.source,
+        reason: 'asset_missing',
+      });
+      pending.reject(
+        new Error('Live Host did not persist the requested visual capture.'),
+      );
+      return;
+    }
+    this.debug('visual.capture_completed', {
+      epoch: pending.epoch,
+      source: message.source,
+      ...(message.source === 'screen' && message.displayId
+        ? { displayId: message.displayId }
+        : {}),
+      width: message.width,
+      height: message.height,
+      bytes: Buffer.byteLength(message.image, 'base64'),
+      frameHash: createHash('sha256')
+        .update(Buffer.from(message.image, 'base64'))
+        .digest('hex')
+        .slice(0, 16),
+    });
     pending.resolve({
-      appName: message.appName,
-      ...(message.windowTitle ? { windowTitle: message.windowTitle } : {}),
-      accessibilityText: message.accessibilityText,
-      screenshotPath: message.screenshotPath,
+      source: message.source,
+      image: message.image,
+      ...(message.source === 'screen' && message.screenScope === 'display'
+        ? { screenScope: 'display' as const, displayId: message.displayId }
+        : {}),
+      width: message.width,
+      height: message.height,
+      ...(message.source === 'screen'
+        ? {
+            appName: message.appName,
+            ...(message.windowTitle
+              ? { windowTitle: message.windowTitle }
+              : {}),
+            accessibilityText: message.accessibilityText,
+            ...(message.screenshotPath
+              ? { screenshotPath: message.screenshotPath }
+              : {}),
+          }
+        : message.screenshotPath
+          ? { screenshotPath: message.screenshotPath }
+          : {}),
     });
   }
 
-  private handleHello(lease: HostLease, hello: LiveHostHello): void {
+  private handleHello(lease: HostLease, hello: StandaloneHostHello): void {
     if (
       hello.protocolVersion !== LIVE_HOST_PROTOCOL_VERSION ||
       hello.bundleId !== LIVE_HOST_BUNDLE_ID ||
       (lease.hello && lease.hello.instanceNonce !== hello.instanceNonce)
     ) {
       this.lastHostFailure = 'host_version';
-      lease.socket.close(4006, 'Incompatible Live Host.');
       this.detachHost(lease, 'host_version');
+      lease.socket.close(4006, 'Incompatible Live Host.');
       return;
     }
     lease.hello = hello;
     lease.lastPongAt = this.now();
     this.hadConnectedHost = true;
     this.lastHostFailure = undefined;
+    this.debug('host.ready', {
+      hostVersion: hello.hostVersion,
+      protocolVersion: hello.protocolVersion,
+      microphone: hello.permissions.microphone,
+      camera: hello.permissions.camera,
+      accessibility: hello.permissions.accessibility,
+      screenRecording: hello.permissions.screenRecording,
+      audioInput: hello.selfChecks.audioInput,
+      audioOutput: hello.selfChecks.audioOutput,
+      appshot: hello.selfChecks.appshot,
+    });
     clearTimeout(lease.helloTimer);
     if (!lease.heartbeatTimer) {
       lease.heartbeatTimer = setInterval(
@@ -1106,27 +1843,197 @@ export class LiveHostCoordinator {
       /* readiness remains fail-closed until a later Host hello */
     }
     const status = this.getStatus();
+    const memory = this.memoryState();
     this.sendHost({
       type: 'host.welcome',
+      displayCaptureV1: true,
+      ...(this.options.subagentsControlV1
+        ? { subagentsControlV1: true as const }
+        : {}),
+      ...(this.host?.hello?.subagentsV1 && this.options.getSubagents
+        ? { subagentsV1: this.options.getSubagents() }
+        : {}),
       protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
       daemonInstanceNonce: this.daemonInstanceNonce,
+      ...(this.options.getUiLanguage
+        ? { uiLanguageV1: this.options.getUiLanguage() }
+        : {}),
+      ...(this.options.daemonShutdownV1
+        ? { daemonShutdownV1: true as const }
+        : {}),
       heartbeatIntervalMs: this.heartbeatIntervalMs,
       epoch: this.nextEpoch,
+      ...(hello.capabilities?.outputAudioEndMarkerV1 === true
+        ? { capabilities: { outputAudioEndMarkerV1: true as const } }
+        : {}),
+      visualInput: { ...this.visualInput },
       status: projectStatusForHost(status),
+      ...(memory ? { memory } : {}),
     });
     this.sendState(status);
   }
 
   private handlePlaybackStarted(message: LiveHostPlaybackStarted): void {
     const call = this.call;
-    if (!call || call.epoch !== message.epoch) return;
+    if (
+      !call ||
+      call.epoch !== message.epoch ||
+      !this.outputAudio.has(message.outputId) ||
+      this.outputMuted
+    ) {
+      return;
+    }
+    if (this.playbackStartedNotified) return;
+    this.playbackStartedNotified = true;
     this.handlers.onPlaybackStarted?.({ epoch: call.epoch });
   }
 
   private handlePlaybackCompleted(message: LiveHostPlaybackCompleted): void {
     const call = this.call;
-    if (!call || call.epoch !== message.epoch) return;
+    if (
+      !call ||
+      call.epoch !== message.epoch ||
+      !this.outputAudio.has(message.outputId) ||
+      this.outputMuted
+    ) {
+      return;
+    }
+    const output = this.outputAudio.get(message.outputId);
+    if (!output) return;
+    if (this.supportsOutputAudioEndMarker() && !output.finished) return;
+    output.drained = true;
+    if (output.finished) this.completeOutputAudio(call, message.outputId);
+  }
+
+  private completeOutputAudio(call: LiveCall, outputId: number): void {
+    this.outputAudio.delete(outputId);
+    if (this.writableOutputId === outputId) this.writableOutputId = undefined;
+    if (this.outputAudio.size > 0) return;
+    this.playbackStartedNotified = false;
     this.handlers.onPlaybackCompleted?.({ epoch: call.epoch });
+  }
+
+  private resetOutputAudio(): void {
+    this.writableOutputId = undefined;
+    this.outputAudio.clear();
+    this.playbackStartedNotified = false;
+  }
+
+  private handleVisualFrame(message: LiveHostVisualFrame): void {
+    const call = this.call;
+    if (
+      !call ||
+      call.epoch !== message.epoch ||
+      call.state === 'stopping' ||
+      this.visualInput.mode !== 'live-feed' ||
+      this.visualInput.source !== message.source ||
+      (message.source === 'screen' &&
+        (!this.host?.hello?.displayCaptureV1 ||
+          message.screenScope !== 'display' ||
+          !message.displayId ||
+          ((this.visualInput.screenDisplayId ?? 'primary') !== 'primary' &&
+            message.displayId.toLowerCase() !==
+              this.visualInput.screenDisplayId?.toLowerCase())))
+    ) {
+      return;
+    }
+    const frameHash = createHash('sha256')
+      .update(Buffer.from(message.image, 'base64'))
+      .digest('hex')
+      .slice(0, 16);
+    try {
+      const accepted =
+        this.handlers.onInputImage?.({
+          epoch: call.epoch,
+          callId: call.callId,
+          source: message.source,
+          image: message.image,
+          ...(message.displayId ? { displayId: message.displayId } : {}),
+        }) ?? false;
+      this.debug('visual.frame', {
+        epoch: call.epoch,
+        source: message.source,
+        bytes: Buffer.byteLength(message.image, 'base64'),
+        frameHash,
+        accepted,
+      });
+    } catch (error) {
+      this.debug('visual.frame', {
+        epoch: call.epoch,
+        source: message.source,
+        bytes: Buffer.byteLength(message.image, 'base64'),
+        frameHash,
+        accepted: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private handleVisualSettings(message: LiveHostVisualSettings): void {
+    const call = this.call;
+    if (
+      message.epoch !== (call?.epoch ?? this.nextEpoch) ||
+      call?.state === 'stopping'
+    ) {
+      return;
+    }
+    const hello = this.host?.hello;
+    if (hello) {
+      hello.permissions.camera = message.permissions.camera;
+      hello.permissions.accessibility = message.permissions.accessibility;
+      hello.permissions.screenRecording = message.permissions.screenRecording;
+      hello.selfChecks.appshot = message.appshot;
+    }
+    const changed =
+      this.visualInput.source !== message.source ||
+      this.visualInput.mode !== message.mode ||
+      (message.screenDisplayId !== undefined &&
+        (this.visualInput.screenDisplayId ?? 'primary').toLowerCase() !==
+          message.screenDisplayId);
+    if (
+      message.screenDisplayId !== undefined &&
+      (this.visualInput.screenDisplayId ?? 'primary').toLowerCase() !==
+        message.screenDisplayId
+    ) {
+      try {
+        this.options.onScreenDisplayChange?.(message.screenDisplayId);
+      } catch {
+        this.sendHostError(
+          'invalid_message',
+          this.uiText('runtime.displaySaveFailed'),
+        );
+        this.broadcastState();
+        return;
+      }
+    }
+    this.visualInput = {
+      ...this.visualInput,
+      source: message.source,
+      mode: message.mode,
+      ...(message.screenDisplayId !== undefined
+        ? { screenDisplayId: message.screenDisplayId }
+        : {}),
+    };
+    if (call && changed) {
+      this.rejectPendingVisualCaptures(
+        new Error('The visual settings changed before capture completed.'),
+        call.epoch,
+      );
+    }
+    this.debug('visual.settings', {
+      epoch: message.epoch,
+      source: message.source,
+      mode: message.mode,
+      screenDisplayId: this.visualInput.screenDisplayId ?? 'primary',
+    });
+    if (call && changed) {
+      this.handlers.onVisualSettings?.({
+        epoch: call.epoch,
+        callId: call.callId,
+        visualInput: { ...this.visualInput },
+      });
+    }
+    this.broadcastState();
   }
 
   private handleAction(action: LiveHostAction): void {
@@ -1162,13 +2069,22 @@ export class LiveHostCoordinator {
       this.start(mode);
     } catch (error) {
       if (error instanceof LiveUnavailableError) {
+        this.debug('call.start_blocked', {
+          mode,
+          ...(error.status.blocker ? { blocker: error.status.blocker } : {}),
+          ...(error.status.message ? { message: error.status.message } : {}),
+        });
         this.sendState(error.status);
         return;
       }
+      this.debug('call.start_failed', {
+        mode,
+        message: error instanceof Error ? error.message : String(error),
+      });
       this.sendState({
         ...this.getStatus(),
         state: 'error',
-        message: 'Live Voice failed to start.',
+        message: this.uiText('runtime.startFailed'),
       });
     }
   }
@@ -1214,10 +2130,10 @@ export class LiveHostCoordinator {
         pcm16: Buffer.from(pcm16),
       });
       if (accepted === false) {
-        this.failCall(call.epoch, 'Live Voice audio transport dropped input.');
+        this.failCall(call.epoch, this.uiText('runtime.audioDropped'));
       }
     } catch {
-      this.failCall(call.epoch, 'Live Voice audio input failed.');
+      this.failCall(call.epoch, this.uiText('runtime.audioInputFailed'));
     }
   }
 
@@ -1240,8 +2156,8 @@ export class LiveHostCoordinator {
     this.clearOutput(call.epoch);
     this.call = undefined;
     this.notifyInactive();
-    this.rejectPendingAppshots(
-      new Error('The Live call ended before Appshot completed.'),
+    this.rejectPendingVisualCaptures(
+      new Error('The Live call ended before visual capture completed.'),
       call.epoch,
     );
     ++this.nextEpoch;
@@ -1267,7 +2183,7 @@ export class LiveHostCoordinator {
         callId: call.callId,
       });
     } catch {
-      this.failStoppingCall(call, 'Live Voice failed to stop safely.');
+      this.failStoppingCall(call, this.uiText('runtime.stopFailed'));
       return;
     }
     if (!result || !('then' in result)) {
@@ -1276,7 +2192,7 @@ export class LiveHostCoordinator {
     }
     void Promise.resolve(result).then(
       (outcome) => this.finishStoppingCall(call, outcome),
-      () => this.failStoppingCall(call, 'Live Voice failed to stop safely.'),
+      () => this.failStoppingCall(call, this.uiText('runtime.stopFailed')),
     );
   }
 
@@ -1290,9 +2206,10 @@ export class LiveHostCoordinator {
       return;
     }
     this.call = undefined;
+    this.resetOutputAudio();
     this.notifyInactive();
-    this.rejectPendingAppshots(
-      new Error('The Live call ended before Appshot completed.'),
+    this.rejectPendingVisualCaptures(
+      new Error('The Live call ended before visual capture completed.'),
       call.epoch,
     );
     ++this.nextEpoch;
@@ -1312,8 +2229,9 @@ export class LiveHostCoordinator {
     if (this.call !== call || call.state !== 'stopping') return;
     this.pendingStartMode = undefined;
     this.call = undefined;
+    this.resetOutputAudio();
     this.notifyInactive();
-    this.rejectPendingAppshots(new Error(message), call.epoch);
+    this.rejectPendingVisualCaptures(new Error(message), call.epoch);
     this.lastCallError = message;
     ++this.nextEpoch;
     this.broadcastState();
@@ -1341,7 +2259,7 @@ export class LiveHostCoordinator {
     this.host = undefined;
     this.clearLeaseTimers(lease);
     this.lastHostFailure = failure;
-    this.rejectPendingAppshots(new Error('Qwen Live Host disconnected.'));
+    this.rejectPendingVisualCaptures(new Error('Qwen Live Host disconnected.'));
     this.rejectPendingShortcut(new Error('Qwen Live Host disconnected.'));
     this.stopForReadinessLoss();
   }
@@ -1354,18 +2272,18 @@ export class LiveHostCoordinator {
     pending.reject(error);
   }
 
-  private rejectPendingAppshot(requestId: string, error: Error): void {
-    const pending = this.pendingAppshots.get(requestId);
+  private rejectPendingVisualCapture(requestId: string, error: Error): void {
+    const pending = this.pendingVisualCaptures.get(requestId);
     if (!pending) return;
-    this.pendingAppshots.delete(requestId);
+    this.pendingVisualCaptures.delete(requestId);
     clearTimeout(pending.timer);
     pending.reject(error);
   }
 
-  private rejectPendingAppshots(error: Error, epoch?: number): void {
-    for (const [requestId, pending] of this.pendingAppshots) {
+  private rejectPendingVisualCaptures(error: Error, epoch?: number): void {
+    for (const [requestId, pending] of this.pendingVisualCaptures) {
       if (epoch !== undefined && pending.epoch !== epoch) continue;
-      this.rejectPendingAppshot(requestId, error);
+      this.rejectPendingVisualCapture(requestId, error);
     }
   }
 
@@ -1379,10 +2297,19 @@ export class LiveHostCoordinator {
   }
 
   private sendState(status: LiveStatus): void {
+    const memory = this.memoryState();
     this.sendHost({
       type: 'host.state',
+      ...(this.host?.hello?.subagentsV1 && this.options.getSubagents
+        ? { subagentsV1: this.options.getSubagents() }
+        : {}),
       epoch: this.nextEpoch,
+      ...(this.options.getUiLanguage
+        ? { uiLanguageV1: this.options.getUiLanguage() }
+        : {}),
+      visualInput: { ...this.visualInput },
       status: projectStatusForHost(status),
+      ...(memory ? { memory } : {}),
     });
   }
 
@@ -1393,7 +2320,7 @@ export class LiveHostCoordinator {
     this.sendHost({ type: 'host.error', code, message });
   }
 
-  private sendHost(message: LiveDaemonMessage): boolean {
+  private sendHost(message: StandaloneDaemonMessage): boolean {
     const lease = this.host;
     const socket = lease?.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -1403,6 +2330,22 @@ export class LiveHostCoordinator {
     }
     socket.send(JSON.stringify(message));
     return true;
+  }
+
+  private allocateOutputId(): number {
+    if (this.nextOutputId >= Number.MAX_SAFE_INTEGER) {
+      this.nextOutputId = 0;
+    }
+    this.nextOutputId += 1;
+    return this.nextOutputId;
+  }
+
+  private supportsOutputAudioEndMarker(): boolean {
+    return this.host?.hello?.capabilities?.outputAudioEndMarkerV1 === true;
+  }
+
+  private debug(event: string, details: Record<string, unknown>): void {
+    this.logger.debug(`${event} ${JSON.stringify(details)}`);
   }
 
   private notifyInactive(): void {

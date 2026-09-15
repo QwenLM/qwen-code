@@ -242,14 +242,21 @@ function WorkspaceSessionProviderWorkspace({
     lockWorkspaceCwd,
   ]);
 
+  // Keep an unscoped session mounted when a later refresh fails.
   if (
-    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    (effectiveWorkspaceCwd ||
+      effectiveWorkspaceId ||
+      (effectiveSessionId && !workspace.capabilities)) &&
     workspace.status === 'error'
   ) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
-        description={t('workspace.loadFailedDescription')}
+        description={
+          workspace.error?.message
+            ? `${t('workspace.loadFailedDescription')} (${workspace.error.message})`
+            : t('workspace.loadFailedDescription')
+        }
         actionLabel={t('common.retry')}
         theme={webShellProps.theme}
         icon={<WifiOffIcon />}
@@ -260,7 +267,7 @@ function WorkspaceSessionProviderWorkspace({
     );
   }
   if (
-    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    (effectiveSessionId || effectiveWorkspaceCwd || effectiveWorkspaceId) &&
     !workspace.capabilities
   ) {
     return (
@@ -324,6 +331,7 @@ function WorkspaceSessionProviderWorkspace({
     <DaemonSessionProvider
       key="main-session"
       sessionId={effectiveSessionId}
+      sessionSourceType={webShellProps.sessionSourceType}
       sessionContext={
         usePrimaryNewSession
           ? undefined
@@ -340,6 +348,8 @@ function WorkspaceSessionProviderWorkspace({
       clientId={clientId}
       historyPageSize={historyPageSize}
       subagentTranscriptMode="summary"
+      prefetchGitBranch={false}
+      prefetchSkills={false}
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}

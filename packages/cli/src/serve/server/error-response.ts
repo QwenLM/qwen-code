@@ -15,12 +15,14 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionWriterError,
+  SessionSourceError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
@@ -270,6 +272,34 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  const sourceErrorKind =
+    err instanceof SessionSourceError
+      ? err.code
+      : (err as { data?: { errorKind?: unknown } } | null)?.data?.errorKind;
+  const sourceErrorStatus =
+    sourceErrorKind === 'invalid_source'
+      ? 400
+      : sourceErrorKind === 'source_limit_reached'
+        ? 409
+        : sourceErrorKind === 'source_persistence_unavailable'
+          ? 503
+          : sourceErrorKind === 'source_attachment_not_found'
+            ? 404
+            : undefined;
+  if (sourceErrorStatus !== undefined) {
+    const sourceError =
+      err instanceof Error ? err : new Error('Source operation failed');
+    if (sourceErrorStatus >= 500) {
+      reportBridgeError(sourceError, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(sourceError, ctx, daemonLog);
+    }
+    res.status(sourceErrorStatus).json({
+      error: err instanceof Error ? err.message : 'Source operation failed',
+      code: sourceErrorKind,
+    });
+    return;
+  }
   if (err instanceof BridgeTimeoutError && err.label === 'initialize') {
     recordExpectedBridgeError(err, ctx, daemonLog);
     if (ctx?.initPrecedesMutations === true) {
@@ -367,8 +397,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof StandaloneSessionServiceError) {
-    const status =
-      err.code === 'invalid_request'
+    const status = err.capacity
+      ? 503
+      : err.code === 'invalid_request'
         ? 400
         : err.code === 'standalone_session_not_found'
           ? 404
@@ -381,12 +412,13 @@ export function sendBridgeError(
             ? 500
             : 409;
     if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
-    if (err.retryable) res.set('Retry-After', '5');
+    if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,
       code: err.code,
       errorKind: err.code,
       retryable: err.retryable,
+      ...(err.capacity ? { capacity: err.capacity } : {}),
       ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
     });
     return;
@@ -398,6 +430,19 @@ export function sendBridgeError(
     res.status(503).json({
       error: err.message,
       code: 'runtime_still_starting',
+    });
+    return;
+  }
+  const capacityError =
+    err instanceof WorkspaceRuntimeInitializationError ? err.cause : err;
+  if (capacityError instanceof AcpChildCapacityExceededError) {
+    recordExpectedBridgeError(capacityError, ctx, daemonLog);
+    res.status(503).json({
+      error: capacityError.message,
+      code: capacityError.code,
+      errorKind: capacityError.code,
+      maxConcurrentChildren: capacityError.maxConcurrentChildren,
+      committedAcpChildren: capacityError.committedAcpChildren,
     });
     return;
   }
