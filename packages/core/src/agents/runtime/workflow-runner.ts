@@ -412,6 +412,16 @@ export class WorkflowRunner {
       }
     };
     const emitter: WorkflowOrchestratorEmitter = {
+      workflowCallUpdated: (call) => {
+        if (!isCurrentEntry()) return;
+        registry?.onWorkflowCallUpdated(runId, call);
+        emitUpdate();
+      },
+      workflowCallsTruncated: () => {
+        if (!isCurrentEntry()) return;
+        registry?.onWorkflowCallsTruncated(runId);
+        emitUpdate();
+      },
       phaseStarted: (title) => {
         if (!isCurrentEntry()) return;
         registry?.onPhaseStarted(runId, title);

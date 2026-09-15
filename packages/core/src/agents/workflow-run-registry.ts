@@ -22,7 +22,11 @@
  * consumer replacing the other.
  */
 
-import type { WorkflowSourceRef } from './workflow-correlation.js';
+import {
+  MAX_WORKFLOW_CALL_TRACES,
+  type WorkflowCallTrace,
+  type WorkflowSourceRef,
+} from './workflow-correlation.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Config } from '../config/config.js';
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
@@ -208,6 +212,8 @@ export interface WorkflowPhaseVisit {
 }
 
 export interface WorkflowDispatchTrace {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -222,6 +228,8 @@ export interface WorkflowDispatchTrace {
 }
 
 export interface WorkflowDispatchQueued {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   label?: string;
   prompt: string;
@@ -288,6 +296,8 @@ export type WorkflowEvent = WorkflowEventPayload & { id: string };
  */
 export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   sourceRef?: WorkflowSourceRef;
+  workflowCalls?: WorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   /** Run identifier (e.g. `wf_<8hex>`); aliased to `TaskBase.id`. */
   runId: string;
@@ -779,6 +789,8 @@ export class WorkflowRunRegistry {
     entry.phaseVisits = [];
     entry.currentPhaseVisitId = null;
     entry.dispatches = [];
+    entry.workflowCalls = [];
+    entry.workflowCallsTruncated = false;
     entry.agentsDispatched = 0;
     entry.agentsCompleted = 0;
     entry.agentsRespawned = 0;
@@ -1147,6 +1159,8 @@ export class WorkflowRunRegistry {
     if (entry.dispatches.some((dispatch) => dispatch.id === event.id)) return;
     const fallbackLabel = `Agent ${entry.dispatches.length + 1}`;
     entry.dispatches.push({
+      ...(event.stepId !== undefined ? { stepId: event.stepId } : {}),
+      ...(event.workflowCallId ? { workflowCallId: event.workflowCallId } : {}),
       id: event.id,
       phaseVisitId: entry.currentPhaseVisitId,
       label:
@@ -1171,6 +1185,37 @@ export class WorkflowRunRegistry {
         dispatchId: event.id,
       });
     }
+    this.emitStatusChange(entry);
+  }
+
+  onWorkflowCallUpdated(runId: string, call: WorkflowCallTrace): void {
+    const entry = this.entries.get(runId);
+    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
+    const calls = (entry.workflowCalls ??= []);
+    const existing = calls.find(({ id }) => id === call.id);
+    if (existing && existing.status !== 'running') return;
+    if (!existing && calls.length >= MAX_WORKFLOW_CALL_TRACES) {
+      this.onWorkflowCallsTruncated(runId);
+      return;
+    }
+    const record = {
+      ...call,
+      ...(call.workflowName
+        ? { workflowName: stripAnsiAndControl(call.workflowName).slice(0, 256) }
+        : {}),
+      ...(call.error
+        ? { error: stripAnsiAndControl(call.error).slice(0, 4_096) }
+        : {}),
+    };
+    if (existing) Object.assign(existing, record);
+    else calls.push(record);
+    this.emitStatusChange(entry);
+  }
+
+  onWorkflowCallsTruncated(runId: string): void {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.workflowCallsTruncated) return;
+    entry.workflowCallsTruncated = true;
     this.emitStatusChange(entry);
   }
 
@@ -1385,6 +1430,7 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
     this.cancelLiveDispatches(entry, endTime);
+    this.cancelLiveWorkflowCalls(entry, endTime);
     entry.result = result;
     this.appendEvent(entry, { type: 'workflow-completed', at: endTime });
     entry.notified = true;
@@ -1402,6 +1448,7 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
     this.cancelLiveDispatches(entry, endTime);
+    this.cancelLiveWorkflowCalls(entry, endTime);
     // Script-derived failure text rides into the snapshot, the /workflows
     // render, and the completion-notification XML: normalize it once at
     // this boundary and persist the same string in both projections.
@@ -1431,6 +1478,7 @@ export class WorkflowRunRegistry {
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
     this.cancelLiveDispatches(entry, endTime);
+    this.cancelLiveWorkflowCalls(entry, endTime);
     this.appendEvent(entry, { type: 'workflow-cancelled', at: endTime });
     entry.notified = true;
     try {
@@ -1560,6 +1608,7 @@ export class WorkflowRunRegistry {
       entry.endTime = endTime;
       this.closeCurrentPhase(entry, endTime);
       this.cancelLiveDispatches(entry, endTime);
+      this.cancelLiveWorkflowCalls(entry, endTime);
       this.appendEvent(entry, { type: 'workflow-cancelled', at: endTime });
       entry.notified = true;
       try {
@@ -1585,6 +1634,14 @@ export class WorkflowRunRegistry {
         at: endTime,
         phaseVisitId: current.id,
       });
+    }
+  }
+
+  private cancelLiveWorkflowCalls(entry: WorkflowTask, endTime: number): void {
+    for (const call of entry.workflowCalls ?? []) {
+      if (call.status !== 'running') continue;
+      call.status = 'cancelled';
+      call.endedAt = endTime;
     }
   }
 
