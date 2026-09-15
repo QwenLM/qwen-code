@@ -71,6 +71,7 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
@@ -607,6 +608,24 @@ export abstract class ChannelBase {
       return;
     }
     await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected getBackgroundResponseSourceLabel(
+    sessionId: string,
+  ): string | undefined {
+    const target = this.router.getTarget(sessionId);
+    const presentation = this.namedSessions?.presentation(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      !this.router.isSessionLive(sessionId) ||
+      !presentation ||
+      presentation.status !== 'open' ||
+      !this.sameTaskOwner(target, presentation.target)
+    ) {
+      return undefined;
+    }
+    return this.createSourceLabel(presentation, target);
   }
 
   protected async resolveBackgroundResponseDelivery(
@@ -1424,6 +1443,7 @@ export abstract class ChannelBase {
         filePath: join(options.stateDir, 'named-sessions.json'),
         router: this.router,
         isBusy: (sessionId) => this.isNamedSessionBusy(sessionId),
+        onSessionRetiring: (sessionId) => this.onSessionRetiring(sessionId),
       });
     }
 
@@ -2790,9 +2810,13 @@ export abstract class ChannelBase {
         if (
           !cancelSucceeded ||
           active.deliveryStarted ||
-          (turnEnded && !active.cancelled)
+          (turnEnded && !active.cancelled && !active.cancellationEmitted)
         ) {
           return false;
+        }
+        if (turnEnded) {
+          this.emitTaskCancellation(active, sessionId, reason);
+          return true;
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
@@ -3987,7 +4011,6 @@ export abstract class ChannelBase {
           const result = await namedSessions.close(owner, parts[0]!);
           if (closing) {
             this.cancelBtw(closing.sessionId);
-            this.onSessionRetiring(closing.sessionId);
           }
           await this.sendThreadMessage(
             envelope.chatId,
@@ -4112,7 +4135,9 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
-          if (id !== retiringSessionId) this.onSessionRetiring(id);
+          if (!this.namedSessions && id !== retiringSessionId) {
+            this.onSessionRetiring(id);
+          }
           this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
@@ -7231,8 +7256,17 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
       promptBridge.on('responseBoundary', onResponseBoundary);
 
+      let taskResultPartial = false;
       try {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
+          ...(this.config.outputMode === 'per_task'
+            ? {
+                outputMode: 'per_task' as const,
+                onTaskResult: ({ partial }: { partial: boolean }) => {
+                  taskResultPartial = partial;
+                },
+              }
+            : {}),
           ...(images.length > 0 ? { images } : {}),
           imageBase64,
           imageMimeType,
@@ -7250,6 +7284,7 @@ export abstract class ChannelBase {
         if (!promptState.cancelled && response) {
           promptState.deliveryStarted = true;
           const segment = this.ensureOutputSegment(sessionId, promptState);
+          if (segment && taskResultPartial) segment.partial = true;
           await this.onResponseComplete(
             envelope.chatId,
             response,
@@ -7283,13 +7318,23 @@ export abstract class ChannelBase {
           });
         }
       } catch (err) {
+        const runtimeCancelled =
+          !promptState.deliveryStarted &&
+          err instanceof ChannelPromptCancelledError;
         // Mirror the try path: once delivery started, a late-settling cancel
         // must not suppress the failed emit (the /cancel handler declines to
         // emit its own terminal once deliveryStarted is set).
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
+          if (runtimeCancelled) {
+            this.emitTaskCancellation(
+              promptState,
+              sessionId,
+              'runtime_cancelled',
+            );
+          }
         }
-        if (!promptState.cancelled) {
+        if (!promptState.cancelled && !runtimeCancelled) {
           releaseHeldChunks();
           const segment = this.closeOutputSegment(sessionId, promptState);
           void this.notifyOutputSegmentEnd(
@@ -7316,7 +7361,7 @@ export abstract class ChannelBase {
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
-        if (promptState.cancelled) {
+        if (promptState.cancelled || runtimeCancelled) {
           return;
         }
         if (sourceLabel) {

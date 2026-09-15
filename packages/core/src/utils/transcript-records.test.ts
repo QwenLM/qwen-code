@@ -175,6 +175,26 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts background completion metadata without degrading restored history', () => {
+    const prepared = prepareTranscriptRecords([
+      record('completion', null, {
+        type: 'system',
+        subtype: 'background_task_completed',
+        message: undefined,
+        systemPayload: {
+          displayText: 'Task finished',
+          backgroundTask: {
+            taskId: 'agent-1',
+            kind: 'agent',
+            status: 'completed',
+          },
+        },
+      }),
+      record('root', 'completion'),
+    ]);
+    expect(prepared.diagnostics).toEqual([]);
+  });
+
   it('accepts session source metadata as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('source', null, {

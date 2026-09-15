@@ -1914,7 +1914,7 @@ await agent('scan package.json')
       );
       expect(trailer).toContain('tokens: 0 spent (no cap)');
       expect(trailer).toContain(
-        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "${runId}" })`,
+        `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "${runId}" })`,
       );
       // Named paths are real files, not a format the runtime never wrote.
       await expect(fs.readFile(result.scriptPath!, 'utf8')).resolves.toBe(
@@ -2210,6 +2210,48 @@ await agent('scan package.json')
       expect(result.error).toBeDefined();
     });
 
+    it("advises copying an extension's workflow file before changing it", async () => {
+      const { config, storage } = storedConfig();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        '..',
+        'extensions',
+        'gcp',
+        'workflows',
+        'audit.js',
+      );
+      await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+      await fs.writeFile(scriptPath, 'throw new Error("boom")', 'utf8');
+      const realScriptPath = await fs.realpath(scriptPath);
+      Object.assign(config, {
+        getActiveExtensions: () => [
+          {
+            name: 'gcp',
+            workflows: [
+              {
+                name: 'gcp:audit',
+                extensionName: 'gcp',
+                scriptPath: realScriptPath,
+                description: 'Audits the project',
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await new WorkflowTool(config)
+        .build({ scriptPath: realScriptPath })
+        .execute(new AbortController().signal);
+      const text = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+
+      expect(text).toContain(
+        "this reads an extension's workflow file; copy it into .qwen/workflows",
+      );
+      expect(text).not.toContain('this reads the saved workflow');
+    });
+
     it('does not advise editing a saved workflow to resume one run', async () => {
       const { config, storage } = storedConfig();
       const scriptPath = path.join(
@@ -2405,7 +2447,7 @@ await agent('scan package.json')
       // A resume without the original args still runs — it just misses every
       // journal key, because the script bakes args into the agent prompts.
       expect(trailer).toContain(
-        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "`,
+        `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "`,
       );
       expect(trailer).toContain('args: {"who":"world"}');
       expect(trailer).not.toContain('too large to inline');
@@ -2467,5 +2509,135 @@ await agent('scan package.json')
         /^Workflow failed: boom\n--- workflow run ---/,
       );
     });
+  });
+});
+
+describe('WorkflowTool — extension workflow labels', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-ext-label-')),
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function extensionScript(): Promise<string> {
+    const scriptPath = path.join(dir, 'gcp', 'workflows', 'audit.js');
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.writeFile(scriptPath, 'return 1;\n', 'utf8');
+    return scriptPath;
+  }
+
+  function configWithExtensionWorkflow(scriptPath: string, active: boolean) {
+    const { config } = configWithStorage();
+    Object.assign(config, {
+      getActiveExtensions: () =>
+        active
+          ? [
+              {
+                name: 'gcp',
+                workflows: [
+                  {
+                    name: 'gcp:audit',
+                    extensionName: 'gcp',
+                    scriptPath,
+                    description: 'Audits the project',
+                  },
+                ],
+              },
+            ]
+          : [],
+    });
+    return config;
+  }
+
+  it('names an active extension workflow instead of calling it saved', async () => {
+    const scriptPath = await extensionScript();
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, true),
+    );
+    const invocation = tool.build({ scriptPath });
+
+    expect(invocation.getDescription()).toBe(
+      'Run extension workflow (gcp:audit)',
+    );
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string; permissionRules?: string[] };
+    expect(details.prompt).toContain('Extension workflow: gcp:audit');
+    expect(details.prompt).toContain('Audits the project');
+    expect(details.prompt).toContain(`Loaded from: ${scriptPath}`);
+    expect(details.prompt).not.toContain('Saved workflow');
+    // Same path-scoped pre-approval as any other saved script.
+    expect(details.permissionRules).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'names an extension workflow reached through a symlinked ancestor',
+    async () => {
+      const scriptPath = await extensionScript();
+      // Discovery records real paths; the call spells the path through a
+      // symlink, the way macOS `/var` resolves to `/private/var`.
+      const alias = path.join(dir, 'alias');
+      await fs.symlink(path.join(dir, 'gcp'), alias);
+      const aliasedPath = path.join(alias, 'workflows', 'audit.js');
+      const tool = new WorkflowTool(
+        configWithExtensionWorkflow(scriptPath, true),
+      );
+
+      expect(tool.build({ scriptPath: aliasedPath }).getDescription()).toBe(
+        'Run extension workflow (gcp:audit)',
+      );
+      // The approval dialog labels the same call the same way.
+      const details = (await tool
+        .build({ scriptPath: aliasedPath })
+        .getConfirmationDetails(new AbortController().signal)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain('Extension workflow: gcp:audit');
+      expect(details.prompt).not.toContain('Saved workflow');
+    },
+  );
+
+  it("keeps the saved-workflow label for the user's own script while an extension is active", async () => {
+    const scriptPath = await extensionScript();
+    const ownScript = path.join(
+      dir,
+      'project',
+      '.qwen',
+      'workflows',
+      'deploy.js',
+    );
+    await fs.mkdir(path.dirname(ownScript), { recursive: true });
+    await fs.writeFile(ownScript, 'return 1;\n', 'utf8');
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, true),
+    );
+    const invocation = tool.build({ scriptPath: ownScript });
+
+    expect(invocation.getDescription()).toBe('Run saved workflow (deploy.js)');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string };
+    expect(details.prompt).toContain(`Saved workflow: ${ownScript}`);
+    expect(details.prompt).not.toContain('Extension workflow');
+  });
+
+  it('falls back to the saved-workflow label once the extension is inactive', async () => {
+    const scriptPath = await extensionScript();
+    const tool = new WorkflowTool(
+      configWithExtensionWorkflow(scriptPath, false),
+    );
+    const invocation = tool.build({ scriptPath });
+
+    expect(invocation.getDescription()).toBe('Run saved workflow (audit.js)');
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string };
+    expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
   });
 });

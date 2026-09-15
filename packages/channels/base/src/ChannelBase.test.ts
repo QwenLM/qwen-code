@@ -19,6 +19,7 @@ import type {
   ChannelAgentBridge,
   ChannelLoopToolHandler,
 } from './ChannelAgentBridge.js';
+import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
@@ -31,6 +32,7 @@ import type {
   ChannelWebhookTask,
 } from './ChannelWebhookTask.js';
 import { SessionRouter } from './SessionRouter.js';
+import type { NamedSessionManager } from './named-session-manager.js';
 import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
@@ -234,6 +236,10 @@ class TestChannel extends ChannelBase {
 
   inboundErrorSourceLabelForTest(envelope: Envelope): string | undefined {
     return this.getInboundErrorSourceLabel(envelope);
+  }
+
+  backgroundSourceLabelForTest(sessionId: string): string | undefined {
+    return this.getBackgroundResponseSourceLabel(sessionId);
   }
 
   debugPayloadForTest(platform: string, payload: unknown): void {
@@ -721,6 +727,135 @@ describe('ChannelBase', () => {
   });
 
   describe('gate integration', () => {
+    it('preserves the next prompt buffer when a runtime-cancelled turn has a late cancel RPC', async () => {
+      const ch = createChannel({
+        outputMode: 'per_task',
+        dispatchMode: 'collect',
+      });
+      ch.enableCancelCommand();
+      let rejectA!: (error: Error) => void;
+      let resolveB!: (text: string) => void;
+      let resolveCancel!: () => void;
+      const aGate = new Promise<string>((_resolve, reject) => {
+        rejectA = reject;
+      });
+      const bGate = new Promise<string>((resolve) => {
+        resolveB = resolve;
+      });
+      const cancelGate = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      bridge.prompt
+        .mockImplementationOnce(() => aGate)
+        .mockImplementationOnce(() => bGate)
+        .mockResolvedValue('buffered followup completed');
+      bridge.cancelSession.mockReturnValue(cancelGate);
+      const a = ch.handleInbound(envelope({ text: 'turn A', messageId: 'm1' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', messageId: 'm2' }),
+      );
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).toHaveBeenCalledTimes(1),
+      );
+      vi.useFakeTimers();
+      let b: Promise<void> | undefined;
+      try {
+        rejectA(new ChannelPromptCancelledError());
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS + 1);
+        await a;
+        b = ch.handleInbound(envelope({ text: 'turn B', messageId: 'm3' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        await ch.handleInbound(
+          envelope({ text: 'next buffered message', messageId: 'm4' }),
+        );
+        const buffers = (
+          ch as unknown as { collectBuffers: Map<string, unknown[]> }
+        ).collectBuffers;
+        expect(buffers.get('s-1')).toHaveLength(1);
+        resolveCancel();
+        await cancel;
+        expect(ch.threadMessages.map((message) => message.text)).toContain(
+          'Cancelled current request.',
+        );
+        expect(ch.promptBufferDrops).toEqual([]);
+        expect(buffers.get('s-1')).toHaveLength(1);
+        resolveB('turn B complete');
+        await b;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+        expect(bridge.prompt.mock.calls[2]?.[1]).toContain(
+          'next buffered message',
+        );
+      } finally {
+        resolveCancel();
+        resolveB('cleanup');
+        await a.catch(() => undefined);
+        await b?.catch(() => undefined);
+        await cancel;
+        vi.useRealTimers();
+      }
+    });
+
+    it('passes retained task partiality to the final output segment', async () => {
+      const ch = createChannel({ outputMode: 'per_task' });
+      bridge.prompt.mockImplementation(async (_sessionId, _text, options) => {
+        options?.onTaskResult?.({ partial: true });
+        return 'Retained partial reply';
+      });
+      await ch.handleInbound(envelope({ text: 'inspect this' }));
+      expect(ch.responseCompletions).toEqual([
+        expect.objectContaining({
+          text: 'Retained partial reply',
+          segment: expect.objectContaining({ partial: true }),
+        }),
+      ]);
+    });
+
+    it('leaves a completed task result unmarked', async () => {
+      const ch = createChannel({ outputMode: 'per_task' });
+      bridge.prompt.mockImplementation(async (_sessionId, _text, options) => {
+        options?.onTaskResult?.({ partial: false });
+        return 'Completed reply';
+      });
+      await ch.handleInbound(envelope({ text: 'inspect this' }));
+      expect(ch.responseCompletions).toEqual([
+        expect.objectContaining({
+          text: 'Completed reply',
+          segment: expect.not.objectContaining({ partial: true }),
+        }),
+      ]);
+    });
+
+    it('terminalizes a remotely cancelled task without delivering retained output', async () => {
+      const ch = createChannel({ outputMode: 'per_task' });
+      bridge.prompt.mockImplementation(async (sessionId) => {
+        bridge.emit('textChunk', sessionId, 'Stale main response');
+        throw new ChannelPromptCancelledError();
+      });
+      await ch.handleInbound(envelope({ text: 'inspect this' }));
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'cancelled'),
+      ).toEqual([expect.objectContaining({ reason: 'runtime_cancelled' })]);
+      expect(
+        ch.taskEvents.some(
+          (event) => event.type === 'completed' || event.type === 'failed',
+        ),
+      ).toBe(false);
+      expect(ch.sent).toEqual([]);
+    });
+
+    it.each([undefined, 'per_task', 'per_turn', 'per_response'] as const)(
+      'requests runtime task completion only for %s',
+      async (outputMode) => {
+        const ch = createChannel({ outputMode });
+        await ch.handleInbound(envelope({ text: 'inspect this' }));
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+        expect(bridge.prompt.mock.calls[0]?.[2]?.outputMode).toBe(
+          outputMode === 'per_task' ? 'per_task' : undefined,
+        );
+      },
+    );
+
     it.each(['hello', '/review /new', '@Qwen /review inspect this'])(
       'preserves %s when an old config still contains messagePrefix',
       async (text) => {
@@ -4135,6 +4270,58 @@ describe('ChannelBase', () => {
   });
 
   describe('slash commands', () => {
+    it.each([
+      'open',
+      'missing target',
+      'foreign channel',
+      'not live',
+      'missing presentation',
+      'closed',
+      'foreign owner',
+    ] as const)(
+      'validates the background source label for a %s named session',
+      async (state) => {
+        const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+        const ch = createChannel({ multiSession: true }, { stateDir });
+        const internals = ch as unknown as {
+          router: SessionRouter;
+          namedSessions: NamedSessionManager;
+        };
+        try {
+          await ch.handleInbound(envelope({ text: '/session new review' }));
+          const target = internals.router.getTarget('s-1')!;
+          const presentation = internals.namedSessions.presentation('s-1')!;
+          expect(ch.backgroundSourceLabelForTest('s-1')).toBe('[review]');
+          if (state === 'missing target' || state === 'foreign channel') {
+            vi.spyOn(internals.router, 'getTarget').mockReturnValue(
+              state === 'missing target'
+                ? undefined
+                : { ...target, channelName: 'foreign' },
+            );
+          } else if (state === 'not live') {
+            vi.spyOn(internals.router, 'isSessionLive').mockReturnValue(false);
+          } else if (state !== 'open') {
+            vi.spyOn(internals.namedSessions, 'presentation').mockReturnValue(
+              state === 'missing presentation'
+                ? undefined
+                : {
+                    ...presentation,
+                    ...(state === 'closed'
+                      ? { status: 'closed' as const }
+                      : {
+                          target: { ...target, senderId: 'another-owner' },
+                        }),
+                  },
+            );
+          }
+          expect(ch.backgroundSourceLabelForTest('s-1')).toBe(
+            state === 'open' ? '[review]' : undefined,
+          );
+        } finally {
+          rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+    );
     it('keeps task creation details out of chat while logging the sanitized cause', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const ch = createChannel({ multiSession: true }, { stateDir });
@@ -5390,6 +5577,56 @@ describe('ChannelBase', () => {
       }
     });
 
+    it.each(['close', 'reset', 'worktree reset'] as const)(
+      'retires a named task before forgetting its target on %s',
+      async (operation) => {
+        const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+        const ch = createChannel({ multiSession: true }, { stateDir });
+        const router = (ch as unknown as { router: SessionRouter }).router;
+        const targets: Array<SessionTarget | undefined> = [];
+        vi.spyOn(
+          ch as unknown as { onSessionRetiring(sessionId: string): void },
+          'onSessionRetiring',
+        ).mockImplementation((id) => targets.push(router.getTarget(id)));
+        try {
+          await ch.handleInbound(
+            envelope({
+              text: `/session new review${operation === 'worktree reset' ? ' --worktree' : ''}`,
+            }),
+          );
+          const target = router.getTarget('s-1');
+          expect(target).toBeDefined();
+          await ch.handleInbound(
+            envelope({
+              text: operation === 'close' ? '/session close review' : '/clear',
+            }),
+          );
+          expect(targets).toEqual([target]);
+          expect(router.getTarget('s-1')).toBeUndefined();
+        } finally {
+          rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('does not retire a named task when detach fails', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        vi.mocked(bridge.discardSession!).mockRejectedValueOnce(
+          new Error('detach failed'),
+        );
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+        expect(ch.sent.at(-1)?.text).toContain('Failed to close task');
+        expect(ch.retiringSessions).toEqual([]);
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)?.text).toContain('Current task: review');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps a named task busy for the full shell command', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       let finishShell!: (result: {
@@ -5786,8 +6023,6 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: '/clear' }));
         expect(ch.sent.at(-1)!.text).toContain('Task "review" reset');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
-        // /clear of a named task retires it through the removedIds loop, the
-        // only path that lets an adapter drain what the task had buffered.
         expect(ch.retiringSessions).toEqual(['s-1']);
 
         await ch.handleInbound(envelope({ text: '/session use feature' }));

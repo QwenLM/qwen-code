@@ -17,6 +17,7 @@ overrides:
   '@types/react': ^19.2.0
   '@types/react-dom': ^19.2.0
   axios: ^1.19.0
+  '@tybys/wasm-util': 0.10.3
   react-markdown: ^9.0.0
   '@agentclientprotocol/sdk>zod': 3.25.76
 
@@ -36,6 +37,12 @@ importers:
         specifier: ^3.36.0
         version: 3.36.0(supports-color@7.2.0)
     devDependencies:
+      '@emnapi/core':
+        specifier: 1.11.3
+        version: 1.11.3
+      '@emnapi/runtime':
+        specifier: 1.11.3
+        version: 1.11.3
       '@types/chrome':
         specifier: ^0.1.32
         version: 0.1.43
@@ -1137,6 +1144,9 @@ importers:
       '@node-rs/jieba':
         specifier: 2.0.2
         version: 2.0.2
+      '@node-rs/jieba-wasm32-wasi':
+        specifier: 2.0.2
+        version: 2.0.2
       '@qwen-code/sdk':
         specifier: workspace:*
         version: link:../sdk-typescript
@@ -1826,8 +1836,23 @@ packages:
   '@dotenvx/primitives@0.8.0':
     resolution: {integrity: sha512-VYJy0uhFm9zTJ1TxBaW/pA8bjbOM/OttaNMwZ1RHG4JKyRG7DhSdiqD1ipQoAyoD22olUtxbP78W9xY3Wd11bg==}
 
+  '@emnapi/core@1.11.3':
+    resolution: {integrity: sha512-zLpS5asjEb7lq8jYLq37N6XKaE41DIexlY1rF/z4/tIl3wo13Sqm28fRyfIsKZD+NZ8mM5RoKkpW/rBcuoSZSg==}
+
+  '@emnapi/core@2.0.0-alpha.4':
+    resolution: {integrity: sha512-KjoUR6mNvjT+z5bKMy+a5QDI+kTNTiMZi6uPKzWuWjwZGNa0UPwIVduTfeBRdf6v8Ws5fmHDh7Usf15w/ANfkg==}
+
   '@emnapi/runtime@1.11.3':
     resolution: {integrity: sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==}
+
+  '@emnapi/runtime@2.0.0-alpha.4':
+    resolution: {integrity: sha512-Wy1TQ99obRP3Ah7cf/OOtK1zD9t3pYTWz+G/SpAwTFMhG5hoMdlvfzBpYoHUigS/izu3q+VhYMKhJd7Ii/trpg==}
+
+  '@emnapi/wasi-threads@1.2.3':
+    resolution: {integrity: sha512-ELEBe8PsLvvJ6QMr0zLt8ffvOHW/dc1m3CEzNMg7aJUv3bMaoDtw2TXyDAwkYBuroxxuHEwhRTLJSe5sya547g==}
+
+  '@emnapi/wasi-threads@2.0.1':
+    resolution: {integrity: sha512-9DsSk+o5NBX0CCJT8s0EROGSGxjR/tKu6aBTaVyq+SjAEQH4XcdcRxPBRzsBLizTTJ49MJjF+jgu3qnO9GLQcQ==}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -2834,6 +2859,13 @@ packages:
     os: [linux]
     libc: [glibc]
 
+  '@napi-rs/wasm-runtime@1.2.4':
+    resolution: {integrity: sha512-AJxoUD2/15ESHbvpcyjU274nsAPLuOtPHCk0vKJM5pj//Fg/B1FXNWjPnXTT9PymCYYiHo4zPj0ZomXBKhoy7g==}
+    engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
+    peerDependencies:
+      '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
+      '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
+
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
@@ -2904,6 +2936,10 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [musl]
+
+  '@node-rs/jieba-wasm32-wasi@2.0.2':
+    resolution: {integrity: sha512-dCwPgGljuxCCqNK7VmOWGTgs/aFX+A9oeCerm0KY3GWAhZMwQwe5gjB/j05ypY37TB6Og3JtJQ/ptBIYe0NT+Q==}
+    engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
 
   '@node-rs/jieba-win32-arm64-msvc@2.0.2':
     resolution: {integrity: sha512-EI3JLL01kf6pP3mAUoYnDrt8S+FY2W2nWpjtiK7ucs46tITLkYDx9wmAwDsOnoCkxs4CETzLytPhLZ12lzR5Qw==}
@@ -4421,6 +4457,9 @@ packages:
 
   '@ts-morph/common@0.27.0':
     resolution: {integrity: sha512-Wf29UqxWDpc+i61k3oIOzcUfQt79PIT9y/MWfAGlrkjg6lBC1hwDECLXPVJAhWjiGbfBCxZd65F/LIZF3+jeJQ==}
+
+  '@tybys/wasm-util@0.10.3':
+    resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
 
   '@types/archiver@6.0.3':
     resolution: {integrity: sha512-a6wUll6k3zX6qs5KlxIggs1P1JcYJaTCx2gnlr+f0S1yd2DoaEwoIK10HmBaLnZwWneBz+JBm0dwcZu0zECBcQ==}
@@ -10703,10 +10742,31 @@ snapshots:
 
   '@dotenvx/primitives@0.8.0': {}
 
+  '@emnapi/core@1.11.3':
+    dependencies:
+      '@emnapi/wasi-threads': 1.2.3
+      tslib: 2.8.1
+
+  '@emnapi/core@2.0.0-alpha.4':
+    dependencies:
+      '@emnapi/wasi-threads': 2.0.1
+      tslib: 2.8.1
+
   '@emnapi/runtime@1.11.3':
     dependencies:
       tslib: 2.8.1
-    optional: true
+
+  '@emnapi/runtime@2.0.0-alpha.4':
+    dependencies:
+      tslib: 2.8.1
+
+  '@emnapi/wasi-threads@1.2.3':
+    dependencies:
+      tslib: 2.8.1
+
+  '@emnapi/wasi-threads@2.0.1':
+    dependencies:
+      tslib: 2.8.1
 
   '@esbuild/aix-ppc64@0.21.5':
     optional: true
@@ -11559,6 +11619,12 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
+  '@napi-rs/wasm-runtime@1.2.4(@emnapi/core@2.0.0-alpha.4)(@emnapi/runtime@2.0.0-alpha.4)':
+    dependencies:
+      '@emnapi/core': 2.0.0-alpha.4
+      '@emnapi/runtime': 2.0.0-alpha.4
+      '@tybys/wasm-util': 0.10.3
+
   '@noble/hashes@1.8.0': {}
 
   '@nodable/entities@2.2.0': {}
@@ -11592,6 +11658,12 @@ snapshots:
 
   '@node-rs/jieba-linux-x64-musl@2.0.2':
     optional: true
+
+  '@node-rs/jieba-wasm32-wasi@2.0.2':
+    dependencies:
+      '@emnapi/core': 2.0.0-alpha.4
+      '@emnapi/runtime': 2.0.0-alpha.4
+      '@napi-rs/wasm-runtime': 1.2.4(@emnapi/core@2.0.0-alpha.4)(@emnapi/runtime@2.0.0-alpha.4)
 
   '@node-rs/jieba-win32-arm64-msvc@2.0.2':
     optional: true
@@ -13185,6 +13257,10 @@ snapshots:
       fast-glob: 3.3.3
       minimatch: 10.2.5
       path-browserify: 1.0.1
+
+  '@tybys/wasm-util@0.10.3':
+    dependencies:
+      tslib: 2.8.1
 
   '@types/archiver@6.0.3':
     dependencies:
