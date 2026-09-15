@@ -16,6 +16,7 @@ import {
   SessionStorageEntryError,
   SessionWriterConflictError,
   SessionWriterLostError,
+  GitWorktreeService,
   type SessionWriterLease,
   Storage,
   getCronFilePath,
@@ -2675,27 +2676,27 @@ describe('deleteDaemonSessions worktree cleanup', () => {
   });
 
   it('does not certify preservation when the checkout may be partially deleted', async () => {
-    // Make the final rmdir fail after the contents are gone (the parent
-    // goes read-only): the failure log must not claim the checkout was
-    // preserved.
+    // Simulate a removal that deletes the checkout before reporting failure:
+    // the failure log must not claim the checkout was preserved.
     const sessionId = '550e8400-e29b-41d4-a716-4466554400b8';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
-    const parent = path.dirname(worktreePath);
-    fs.chmodSync(parent, 0o500);
-    try {
-      const result = await deleteDaemonSessions({
-        sessionIds: [sessionId],
-        service,
-        bridge: cleanupBridge(),
-        coordinator: new SessionArchiveCoordinator(),
-      });
+    vi.spyOn(
+      GitWorktreeService.prototype,
+      'removeUserWorktree',
+    ).mockImplementation(async () => {
+      fs.rmSync(worktreePath, { recursive: true, force: true });
+      return { success: false, error: 'injected removal failure' };
+    });
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
 
-      expect(result.removed).toEqual([sessionId]);
-      expect(warnings()).toContain('may be partially deleted');
-      expect(warnings()).not.toContain('preserved checkout');
-    } finally {
-      fs.chmodSync(parent, 0o700);
-    }
+    expect(result.removed).toEqual([sessionId]);
+    expect(warnings()).toContain('may be partially deleted');
+    expect(warnings()).not.toContain('preserved checkout');
   });
 
   it('keeps the checkout and warns when a sidecar base is not absolute', async () => {

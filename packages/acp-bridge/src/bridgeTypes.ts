@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  BackgroundNotificationTurn,
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
@@ -187,6 +188,55 @@ export interface BridgeStandaloneSpawnRequest {
   approvalMode?: ApprovalMode;
 }
 
+export type { BackgroundNotificationTurn } from '@qwen-code/qwen-code-core';
+
+export function parseBackgroundNotificationTurn(
+  value: unknown,
+): BackgroundNotificationTurn | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const { turnId, taskId, kind, startedAt } = record;
+  if (
+    typeof turnId !== 'string' ||
+    !turnId ||
+    turnId.length > 256 ||
+    typeof taskId !== 'string' ||
+    !taskId ||
+    taskId.length > 256 ||
+    (kind !== 'agent' &&
+      kind !== 'monitor' &&
+      kind !== 'shell' &&
+      kind !== 'workflow') ||
+    typeof startedAt !== 'number' ||
+    !Number.isFinite(startedAt) ||
+    startedAt < 0
+  )
+    return undefined;
+  for (const key of ['toolUseId', 'sourceTurnId', 'label']) {
+    if (
+      record[key] !== undefined &&
+      (typeof record[key] !== 'string' || (record[key] as string).length > 4096)
+    )
+      return undefined;
+  }
+  return {
+    turnId,
+    taskId,
+    kind,
+    startedAt,
+    ...(record['toolUseId'] !== undefined
+      ? { toolUseId: record['toolUseId'] as string }
+      : {}),
+    ...(record['sourceTurnId'] !== undefined
+      ? { sourceTurnId: record['sourceTurnId'] as string }
+      : {}),
+    ...(record['label'] !== undefined
+      ? { label: record['label'] as string }
+      : {}),
+  };
+}
+
 export interface BridgeSession {
   sessionId: string;
   /**
@@ -208,6 +258,8 @@ export interface BridgeSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   /**
    * Only present when this spawn carried a `parentSessionId`. `true` iff the
    * parent lineage was durably written to the child's transcript (survives a
@@ -462,6 +514,8 @@ export interface ActiveWorkHoldV1 {
 export interface ActiveWorkSessionSnapshotV1 {
   sessionId: string;
   holds: ActiveWorkHoldV1[];
+  hasRunningBackgroundTasks?: boolean;
+  finishedBackgroundTurnId?: string;
 }
 
 /**
@@ -825,6 +879,8 @@ export interface BridgeSessionSummary {
   /** Per-session active-work observation. `idle` is emitted only from a
    * fresh snapshot that covers every negotiated hold category. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   /** True while a non-question permission request awaits a response. */
   isWaitingForPermission?: boolean;
   /** True while an ask_user_question request awaits a response. */
@@ -1113,7 +1169,8 @@ export const MID_TURN_RECONCILIATION_RING_SIZE = 200;
 /**
  * Child-to-parent request that atomically assigns the next Todo Stop Guard
  * model send to the current daemon FIFO owner. `promptId`, when present, is
- * the trusted bridge invocation id rather than the provider-facing prompt id.
+ * the trusted bridge invocation id or admitted background execution id,
+ * rather than the provider-facing prompt id.
  */
 export const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
@@ -1315,6 +1372,8 @@ export interface BridgeDaemonSessionDiagnostic {
   pendingPromptCount: number;
   pendingPermissionCount: number;
   hasActivePrompt: boolean;
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   lastEventId: number;
   lastSeenAt?: number;
   currentModelId?: string;
