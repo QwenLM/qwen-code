@@ -61,7 +61,7 @@ Injected globals, and nothing else:
   invalid arguments.
 - `pipeline(items, ...stages)` — run each item through the stages
   independently. See **Default to `pipeline()`**.
-- `workflow(nameOrRef, args?)` — run a saved workflow inline. See **Saved
+- `workflow(nameOrRef, args?, { stepId }?)` — run a saved workflow inline. See **Saved
   workflows and workflow()**.
 - `args` — the structured value the caller passed, or `undefined`.
 - `budget` — `{ total, spent(), remaining() }`. See **Scaling to the token
@@ -85,11 +85,11 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
+`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
 
-- `label` (string) — the name shown in the run views and the failures list.
-  Make it unique per dispatch: a failure line carries only the label and the
-  error, so two failed dispatches that share a label cannot be told apart.
+- `stepId` (string, ≤128 chars) — optional caller node ID; does not affect caching. Also accepted in `workflow()` options.
+- `label` (string) — display name in run views and failures.
+  Make it unique per dispatch to distinguish failures.
 - `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
   would: this dispatch and every dispatch issued after it are attributed to that
   phase. It is not scoped to the one call, so in a fan-out open phases with
@@ -278,9 +278,9 @@ truncation reads as full coverage, which is worse than a smaller honest result.
 
 ## Saved workflows and workflow()
 
-`workflow(nameOrRef, args?)` runs a saved workflow inline under this run's caps
-and nests one level only — a workflow reached through `workflow()` cannot call
-`workflow()` itself, and doing so throws.
+`workflow(nameOrRef, args?, { stepId }?)` shares this run's caps. Calls have
+individual traces grouping their agents. It nests one level only;
+a nested `workflow()` call throws.
 
 It takes one of two forms. `workflow('<name>')` resolves a name against
 `<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
@@ -296,8 +296,7 @@ inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
 other thunk rejection — with no agent dispatched and nothing in the failures
 list — so null-check a `workflow()` result too.
 
-To create or edit a saved workflow, use the `workflow-creator` skill — it owns
-the file layout, naming rules, and the save round-trip.
+Use the `workflow-creator` skill to create or edit saved workflows.
 
 ## Resume and diagnostics
 

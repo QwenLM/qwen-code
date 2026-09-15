@@ -1709,6 +1709,8 @@ export default {
     'この拡張機能は次のサブエージェントをインストールします:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     'この拡張機能は次のワークフローをインストールします（サブエージェントを起動できる JavaScript スクリプト）:',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'インストール済みのバージョンから次のワークフロースクリプトが変更されています: {{names}}。',
   'Installation cancelled for "{{name}}".':
     '"{{name}}" のインストールをキャンセルしました。',
   '--ref and --auto-update are not applicable for marketplace extensions.':

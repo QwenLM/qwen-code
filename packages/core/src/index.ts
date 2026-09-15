@@ -483,6 +483,7 @@ export * from './services/backgroundShellRegistry.js';
 export * from './agents/background-notification-queue.js';
 export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
+export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export {
   listSavedWorkflows,

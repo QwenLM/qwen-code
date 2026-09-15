@@ -854,6 +854,8 @@ export default {
     '此擴展將安裝以下子智能體：',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     '此擴展將安裝以下工作流程（可啟動子智能體的 JavaScript 腳本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流程腳本與已安裝版本相比有變更：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安裝 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安裝來自 {{originSource}} 的擴展。某些功能可能無法完美兼容 Qwen Code。',
@@ -2052,8 +2054,6 @@ export default {
     '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已儲存，但此工作區不受信任時不會生效。',
-  'Set a goal — keep working until the condition is met':
-    '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',

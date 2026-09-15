@@ -27,6 +27,7 @@ import { isPathWithin } from '../../extension/agent-plugins-v1/paths.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { extractAndStripMeta } from './workflow-sandbox.js';
 import {
+  computeWorkflowScriptDigest,
   isValidWorkflowExtensionName,
   qualifyExtensionWorkflowName,
   WORKFLOW_NAME_PATTERN,
@@ -64,6 +65,12 @@ export interface ExtensionWorkflowDefinition {
    * {@link MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS}; the script never ran.
    */
   description: string;
+  /**
+   * {@link computeWorkflowScriptDigest} of the script as discovered. Install
+   * consent compares it, so an update that only changes a script's code
+   * still asks.
+   */
+  contentDigest: string;
 }
 
 export interface LoadExtensionWorkflowsOptions {
@@ -320,6 +327,7 @@ async function collectFile(
     ...(owner.displayName ? { extensionDisplayName: owner.displayName } : {}),
     scriptPath: filePath,
     description: clampDescription(meta.description),
+    contentDigest: computeWorkflowScriptDigest(source),
   });
 }
 
