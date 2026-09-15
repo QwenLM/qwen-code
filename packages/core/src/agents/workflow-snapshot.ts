@@ -13,6 +13,10 @@
  * for caching): a snapshot is the whole-run summary.
  */
 
+import {
+  isWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from './workflow-correlation.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -38,6 +42,7 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
+  sourceRef?: WorkflowSourceRef;
   runId: string;
   /** Tool call that launched the run. Absent on legacy snapshots. */
   toolUseId?: string;
@@ -82,6 +87,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   }
   return {
     runId: task.runId,
+    ...(task.sourceRef ? { sourceRef: { ...task.sourceRef } } : {}),
     ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
     description: task.description,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
@@ -379,6 +385,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   const events = value['events'];
   const perPhaseTokens = value['perPhaseTokens'];
   return (
+    (value['sourceRef'] === undefined ||
+      isWorkflowSourceRef(value['sourceRef'])) &&
     typeof value['runId'] === 'string' &&
     value['runId'].length > 0 &&
     isOptionalString(value['toolUseId']) &&

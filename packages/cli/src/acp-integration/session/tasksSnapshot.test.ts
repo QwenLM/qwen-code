@@ -549,6 +549,27 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
+  it('preserves source attribution in historical task snapshots', () => {
+    const source = workflowSnapshot({
+      toolUseId: 'exact-tool-call',
+      sourceRef: { id: 'flow', revision: 'rev-1' },
+    });
+    const snapshot = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [source],
+      { includeWorkflows: true },
+    );
+    const entry = snapshot.tasks.find((task) => task.kind === 'workflow');
+    expect(entry).toMatchObject({
+      id: source.runId,
+      toolUseId: 'exact-tool-call',
+      sourceRef: { id: 'flow', revision: 'rev-1' },
+    });
+    expect(entry?.sourceRef).not.toBe(source.sourceRef);
+  });
+
   it('omits workflow tasks unless the caller opts in', () => {
     const snapshot = buildSessionTasksStatus(
       'session-1',
