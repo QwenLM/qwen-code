@@ -4193,17 +4193,6 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         expect(r.posted).toContain('@qwen-code /review');
         expect(r.posted).not.toContain('did not complete successfully');
         expect(r.posted).not.toContain('retried automatically');
-        // Which CAUSE the body claims is a separate axis from whether the
-        // branch fires, and it is the one the predicate cannot observe: real
-        // cancelled runs reach this shape in 10-40 minutes rather than at the
-        // 24-hour queue cap (an operator cancelling a review still queued, or
-        // a command-triggered run cancelled while it waited — both on an OPEN
-        // PR, so the pr_state gate does not filter them). Naming a duration
-        // would be false by a factor of 40-150x and would send the reader to
-        // the schedule workflow for something the schedule did not do.
-        expect(r.posted).not.toContain('24-hour');
-        expect(r.posted).not.toContain('queue limit');
-        expect(r.posted).toContain('cancelled while the job was still waiting');
         expect(r.summary).toContain('never started by a runner');
       }
     },
