@@ -587,6 +587,93 @@ class FileConversationRuntimeOwnership implements ConversationRuntimeOwnership {
   }
 }
 
+export async function checkLegacyConversationRuntimeOwner(
+  options: Pick<
+    ConversationRuntimeOwnershipOptions,
+    | 'stableBaseDir'
+    | 'isProcessAlive'
+    | 'wait'
+    | 'handoffGraceMs'
+    | 'lockOptions'
+  >,
+): Promise<void> {
+  const ownerPath = getConversationRuntimeOwnerPath(options.stableBaseDir);
+  const directory = path.dirname(ownerPath);
+  const lockPath = path.join(directory, OWNER_LOCK);
+  let reclaimed = false;
+  try {
+    let base: DirectoryIdentity;
+    let identity: DirectoryIdentity;
+    try {
+      base = await inspectDirectory(options.stableBaseDir, false);
+      identity = await inspectDirectory(directory, true);
+    } catch (error) {
+      if (isMissing(error)) return;
+      throw error;
+    }
+    await assertLockShapeIfPresent(lockPath);
+    const lockfile = (await import('proper-lockfile')).default;
+    let compromised = false;
+    const release = await lockfile.lock(directory, {
+      realpath: false,
+      lockfilePath: lockPath,
+      stale: 5_000,
+      update: 1_000,
+      retries: { retries: 40, minTimeout: 10, maxTimeout: 50 },
+      ...options.lockOptions,
+      onCompromised: () => {
+        compromised = true;
+      },
+    });
+    let operationError: unknown;
+    try {
+      await assertLockShapeIfPresent(lockPath);
+      await assertDirectoryIdentity(options.stableBaseDir, base, false);
+      await assertDirectoryIdentity(directory, identity);
+      const existing = await readOwnerRecord(ownerPath);
+      if (compromised) throw new UnsafeOwnershipStateError();
+      if (existing) {
+        if ((options.isProcessAlive ?? processIsAlive)(existing.pid)) {
+          throw conversationRuntimeInUseError();
+        }
+        const confirmed = await readOwnerRecord(ownerPath);
+        if (!confirmed || !sameRecord(existing, confirmed)) {
+          throw new UnsafeOwnershipStateError();
+        }
+        await assertDirectoryIdentity(options.stableBaseDir, base, false);
+        await assertDirectoryIdentity(directory, identity);
+        if (compromised) throw new UnsafeOwnershipStateError();
+        await fs.unlink(ownerPath);
+        await syncDirectory(directory);
+        reclaimed = true;
+      }
+    } catch (error) {
+      operationError = error;
+    }
+    try {
+      await release();
+    } catch (error) {
+      throw new UnsafeOwnershipStateError(undefined, { cause: error });
+    }
+    if (compromised) throw new UnsafeOwnershipStateError();
+    if (operationError) throw operationError;
+    if (reclaimed) {
+      await (options.wait ?? delay)(
+        options.handoffGraceMs ?? DEFAULT_HANDOFF_GRACE_MS,
+      );
+    }
+  } catch (error) {
+    if (error instanceof ConversationRuntimeOwnershipError) throw error;
+    if (
+      error instanceof UnsafeOwnershipStateError ||
+      (error as NodeJS.ErrnoException).code === 'ECOMPROMISED'
+    ) {
+      throw conversationRuntimeOwnershipCompromisedError(error);
+    }
+    throw conversationRuntimeUnavailableError(error);
+  }
+}
+
 export function createConversationRuntimeOwnership(
   options: ConversationRuntimeOwnershipOptions,
 ): ConversationRuntimeOwnership {

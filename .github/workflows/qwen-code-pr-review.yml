@@ -993,9 +993,11 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           AUTO_REVIEW: '${{ steps.context.outputs.auto_review }}'
+          QWEN_REVIEW_AUTOMATIC: '${{ steps.context.outputs.auto_review }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
           TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
           # Timeout headroom for CI reviews, measured against the PR 8507
@@ -1671,6 +1673,23 @@ jobs:
             mkdir -p "$QWEN_HOME"
             printf '%s\n' '{"tools":{"shell":{"defaultTimeoutMs":2400000}}}' \
               > "$QWEN_HOME/settings.json"
+          fi
+          # vars.QWEN_PR_REVIEW_EFFORT is to model.reasoningEffort what
+          # vars.QWEN_PR_REVIEW_MODEL is to --model (low|medium|high|xhigh|
+          # max); the CLI has no flag for it, so it goes in the same per-run
+          # settings file, merged so it composes with the cover above. Unset
+          # keeps the provider's default. This is the model's thinking depth,
+          # not /review's own --effort (which --comment pins to high).
+          if [ -n "${QWEN_PR_REVIEW_EFFORT:-}" ]; then
+            mkdir -p "$QWEN_HOME"
+            node -e '
+              const fs = require("node:fs");
+              const [file, effort] = process.argv.slice(1);
+              let s = {};
+              try { s = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+              s.model = { ...s.model, reasoningEffort: effort };
+              fs.writeFileSync(file, JSON.stringify(s) + "\n");
+            ' "$QWEN_HOME/settings.json" "$QWEN_PR_REVIEW_EFFORT"
           fi
 
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
@@ -3024,7 +3043,21 @@ jobs:
                 "${GIT_SAFE[@]}" branch -D "$review_ref" ||
                   echo "::warning::could not remove review branch: $review_ref"
               done || true
-          rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
+          # Both locations: leases moved to `.qwen/review-leases` (out of the
+          # directory the review sandbox mounts read-write), and a runner whose
+          # workspace persists can still be holding one written by an older
+          # build in the old place. The lease name matches no `review-pr-*`
+          # glob above, and a reviewed PR can leave a DIRECTORY — or a
+          # mode-000 one — at a lease's name: a bare `rm -rf` fails on that
+          # shape, and discarding its stderr and status would leave the
+          # residue to wedge every later job on this runner with nothing in
+          # the log. One loop over both globs, through the same repair ladder
+          # the trees get: a survivor is repaired away or named in a warning,
+          # never silently kept.
+          for lease in .qwen/review-leases/qwen-review-lease-pr-*.json .qwen/tmp/qwen-review-lease-pr-*.json; do
+            [ -e "$lease" ] || [ -L "$lease" ] || continue
+            remove_review_tree "$lease"
+          done
           echo "review worktrees cleaned"
 
   # A review job that dies abnormally — runner crash, host loss, or the
@@ -3808,7 +3841,6 @@ jobs:
           # not abort the step under set -e and swallow the only failure signal.
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md" ||
             echo "::warning::Resolve was skipped, but posting the skip-reason comment failed."
-
 
   # Publishes what the agent job produced — verification, push and the result
   # comment — on a runner that never executed the agent. It starts from a

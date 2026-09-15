@@ -114,9 +114,9 @@ These events are workspace-keyed, not session-keyed. The session reducer treats 
 
 ### Extensions lifecycle
 
-| Type                 | Direction | Trigger                                                              | Key payload fields                                                                                                                               |
-| -------------------- | --------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `extensions_changed` | S->C      | Background extension install/refresh work completed or status change | `refreshed, failed, status?: 'installed' \| 'enabled' \| 'disabled' \| 'updated' \| 'uninstalled' \| 'failed', source?, name?, version?, error?` |
+| Type                 | Direction | Trigger                                                              | Key payload fields                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------------------- | --------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extensions_changed` | S->C      | Background extension install/refresh work completed or status change | `refreshed, failed, status?: 'installed' \| 'enabled' \| 'disabled' \| 'updated' \| 'uninstalled' \| 'failed', source?, name?, version?, error?`. A daemon advertising `extension_activation_explicit_refresh` commits activation without broadcasting it, so a successful activation no longer emits `enabled`/`disabled`; those come from older daemons, and newer ones converge activation through a status-less refresh broadcast. |
 
 ### Mid-turn message injection
 

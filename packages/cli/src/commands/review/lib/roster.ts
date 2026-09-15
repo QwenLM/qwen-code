@@ -25,6 +25,7 @@
 // roster that gets shrunk.
 
 import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
 // The topology gate lives in `budget.ts` — it is a size ruling, and the round
@@ -52,6 +53,7 @@ export type ReviewMode =
 
 /** The plan, as far as the roster needs it. */
 export interface RosterPlan {
+  reviewProfile?: unknown;
   ownerRepo?: unknown;
   chunks?: Array<{ id?: unknown }>;
   files?: Array<{
@@ -271,6 +273,9 @@ function heavyFiles(plan: RosterPlan): string[] {
  * dimension nobody reviewed, and must not certify the diff.
  */
 export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
+  if (plan.reviewProfile === DOCS_NAV_PROFILE) {
+    return [{ key: 'docs-nav', role: 'docs-nav' }];
+  }
   const mode = reviewMode(plan);
   const out: RequiredAgent[] = [];
   const add = (role: RoleId, file?: string) =>
@@ -434,7 +439,7 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
  * adversarial personas, re-add whole-diff walkers to a chunked 3B fan-out, or
  * demand a tree-grepping tracer from a review that has no tree.
  */
-function contextRoleRunsInThisReview(
+export function contextRoleRunsInThisReview(
   role: RepositoryContextRoleId,
   plan: RosterPlan,
   mode: ReviewMode,

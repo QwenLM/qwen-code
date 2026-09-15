@@ -215,8 +215,10 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/serve-token.ts',
     {
       reason:
-        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
-      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
+        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN; ' +
+        'the remote-bind resolver reads the same variable so the generation ' +
+        'decision distinguishes an absent source from an explicitly empty one.',
+      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 2 },
     },
   ],
   [

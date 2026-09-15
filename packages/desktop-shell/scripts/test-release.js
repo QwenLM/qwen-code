@@ -313,28 +313,44 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
-  const ripgrepStart = workflow.indexOf('# ripgrep vendor binaries');
-  const ripgrepEnd = workflow.indexOf('# Node.js runtime binary');
-  assert.ok(
-    ripgrepStart !== -1 && ripgrepEnd > ripgrepStart,
-    'the vendor signing step must keep its ripgrep/Node section markers',
-  );
-  const ripgrepSigningBlock = workflow.slice(ripgrepStart, ripgrepEnd);
-  assert.doesNotMatch(
-    ripgrepSigningBlock,
-    /--entitlements/,
-    'ripgrep must not inherit the app entitlements',
+  // The step used to name the binaries it signed. It now discovers them,
+  // because the runtime is a copy of the CLI's dist tree and gains native
+  // payload without this package changing — an unsigned renderer library
+  // reached the notary service that way. These assertions pin the discovery
+  // and the properties the old list guaranteed by construction.
+  assert.match(
+    workflow,
+    /if \[ "\$\(file -b --mime-type "\$file"\)" = 'application\/x-mach-binary' \]; then/,
+    'the vendor signing step must discover Mach-O binaries rather than list them',
   );
   assert.match(
     workflow,
-    /--options runtime --timestamp \\\n\s+\{\} \+/,
-    'ripgrep codesign failures must fail the signing step',
+    /done < <\(find "\$runtime_dir" -type f -print0\)/,
+    'Mach-O discovery must cover the whole staged runtime',
   );
   assert.ok(
     workflow.includes(
-      '--entitlements src-tauri/NodeEntitlements.plist "$node_bin"',
+      '--entitlements src-tauri/NodeEntitlements.plist "$file"',
     ),
     'Node.js must use its minimal helper entitlements',
+  );
+  const entitlementFlags = workflow
+    .slice(
+      workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'"),
+      workflow.indexOf(
+        "name: 'Refresh bundled runtime checksums after signing",
+      ),
+    )
+    .match(/--entitlements/g);
+  assert.deepStrictEqual(
+    entitlementFlags,
+    ['--entitlements'],
+    'only the Node.js branch may pass entitlements; everything else signs without them',
+  );
+  assert.match(
+    workflow,
+    /codesign --verify --strict "\$file"/,
+    'the signing step must verify what it signed instead of leaving it to the notary service',
   );
   const nodeEntitlements = fs.readFileSync(
     path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
@@ -370,8 +386,8 @@ function testDesktopReleaseSigningWorkflow() {
   );
   assert.match(
     workflow,
-    /Ripgrep vendor directory not found at \$rg_dir/,
-    'missing ripgrep binaries must be visible in release logs',
+    /No Mach-O binary found under \$runtime_dir/,
+    'a runtime with no native binary must fail rather than silently sign nothing',
   );
   assert.match(
     workflow,

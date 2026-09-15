@@ -11,7 +11,6 @@ import {
   isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
   sanitizeSenderName,
-  startsWithMessagePrefix,
 } from '@qwen-code/channel-base';
 import {
   buildCardContent,
@@ -142,39 +141,6 @@ const escapeFeishuMarkdown = (value: string) =>
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
-/**
- * Consume the leading `@name` mention run so prefix matching starts at the
- * payload.
- *
- * Only the leading run: a mention the user typed after the prefix is part of
- * the message and has to survive into the dispatched prompt. Display names
- * are matched literally because Feishu renders them verbatim -- a name
- * containing spaces is one token here, which the shared mention skip in
- * `stripMessagePrefix` cannot recognize. The loop stops as soon as the
- * remainder starts with the configured prefix, so a prefix that itself
- * begins with `@` is never eaten as a mention.
- */
-function stripLeadingMentionNames(
-  text: string,
-  names: readonly string[],
-  prefix: string | undefined,
-): string {
-  let rest = text.trimStart();
-  const tokens = [
-    ...new Set(names.filter(Boolean).map((name) => `@${name}`)),
-  ].sort((a, b) => b.length - a.length);
-  let consumed = true;
-  while (consumed && !(prefix && startsWithMessagePrefix(rest, prefix))) {
-    consumed = false;
-    for (const token of tokens) {
-      if (!rest.startsWith(token)) continue;
-      rest = rest.slice(token.length).trimStart();
-      consumed = true;
-      break;
-    }
-  }
-  return rest;
-}
 const FEISHU_STATUS_LABELS = `(?:${FEISHU_STATUS_STRINGS.map(escapeRegExp).join('|')})`;
 /** A rendered status block: `---` divider line + `*label*` line,
  *  at line granularity anywhere in the joined card text. */
@@ -1442,11 +1408,6 @@ export class FeishuChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    // In blockStreaming mode, the BlockStreamer delivers text as plain messages.
-    // Skip card creation/updates to avoid duplicate content and a misleading
-    // "已取消" card at the end.
-    if (this.config.blockStreaming === 'on') return;
-
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) {
       process.stderr.write(
@@ -1632,7 +1593,6 @@ export class FeishuChannel extends ChannelBase {
     _chatId: string,
     sessionId: string,
   ): void {
-    if (this.config.blockStreaming === 'on') return;
     const inboundMsgId = this.sessionToInboundMsg.get(sessionId);
     if (!inboundMsgId) return;
     const cardState = this.cardSessions.get(inboundMsgId);
@@ -1660,7 +1620,7 @@ export class FeishuChannel extends ChannelBase {
       this.onResponseBoundary(chatId, sessionId);
       return;
     }
-    if (reason !== 'input_requested' || this.config.blockStreaming === 'on') {
+    if (reason !== 'input_requested') {
       return;
     }
 
@@ -2112,10 +2072,7 @@ export class FeishuChannel extends ChannelBase {
       const sourceLabel = this.getResponseSourceLabel(sessionId);
       this.sessionToInboundMsg.set(sessionId, inboundMsgId);
       this.addReaction(inboundMsgId, 'OnIt').catch(() => {});
-      if (
-        this.config.blockStreaming !== 'on' &&
-        !this.cardSessions.has(inboundMsgId)
-      ) {
+      if (!this.cardSessions.has(inboundMsgId)) {
         this.cardSessions.set(inboundMsgId, {
           messageId: '',
           created: false,
@@ -2221,8 +2178,9 @@ export class FeishuChannel extends ChannelBase {
         // to avoid leaking state if onResponseComplete was skipped.
         this.cleanupCard(inboundMsgId);
       } else if (!cs) {
-        // No card session created (blockStreaming mode or gate rejection) —
-        // clean up auxiliary maps populated by processMessage.
+        // onPromptStart's isKnownInboundMessageId gate rejected this message, so
+        // no card session exists — clean up the auxiliary maps processMessage
+        // populated.
         this.msgToQuestion.delete(inboundMsgId);
         this.msgToSenderName.delete(inboundMsgId);
         this.msgToSenderId.delete(inboundMsgId);
@@ -2662,7 +2620,6 @@ export class FeishuChannel extends ChannelBase {
       // Check @mention
       let isMentioned = false;
       let cleanText = content.text;
-      const mentionNames = [...(content.mentionNames ?? [])];
       if (msg.mentions && msg.mentions.length > 0) {
         const mentionReplacements = new Map<string, string>();
         for (const mention of msg.mentions) {
@@ -2679,7 +2636,6 @@ export class FeishuChannel extends ChannelBase {
             mention.key,
             isBotMention ? '' : `@${mention.name}`,
           );
-          if (!isBotMention && mention.name) mentionNames.push(mention.name);
         }
         const mentionKeys = [...mentionReplacements.keys()].sort(
           (a, b) => b.length - a.length,
@@ -2702,15 +2658,6 @@ export class FeishuChannel extends ChannelBase {
         return;
       }
 
-      // Matching-only text: the prefix follows the leading mention run, and
-      // only that run is consumed. Mentions inside the payload survive into
-      // the dispatched prompt, as they do with no prefix configured.
-      const messagePrefixText = stripLeadingMentionNames(
-        cleanText,
-        mentionNames,
-        this.configuredMessagePrefix(),
-      );
-
       // Parent authorship is resolved under the named-session preparation lock;
       // replies run the full preflight again before they can be processed.
       const envelope: Envelope = {
@@ -2720,11 +2667,7 @@ export class FeishuChannel extends ChannelBase {
         chatId,
         ...(chatName ? { chatName } : {}),
         text: cleanText,
-        // A media message carries only an adapter-synthesized placeholder,
-        // which no user action can prefix -- gating it would drop every
-        // image, file, audio and video with the prefix configured.
         ...(!content.userAuthoredText ? { syntheticText: true as const } : {}),
-        messagePrefixText: messagePrefixText.trim(),
         messageId: msgId,
         threadId: msg.root_id || undefined,
         isGroup,
@@ -2924,25 +2867,7 @@ export class FeishuChannel extends ChannelBase {
     imageKey?: string;
     fileKey?: string;
     fileName?: string;
-    /**
-     * Display names this method rendered as `@name` mention markers.
-     *
-     * A `post` message carries its mentions as at-nodes, so the message-level
-     * `mention.key` tokens never appear in `text` and stripping them for
-     * prefix matching is a no-op. Reporting the rendered names lets the
-     * caller consume the leading mention run the same way.
-     */
-    mentionNames?: string[];
-    /**
-     * Whether `text` is something the user typed.
-     *
-     * Feishu delivers media as its own message type with no caption
-     * field, so an image or file carries only an adapter-synthesized
-     * placeholder. Gating that on `messagePrefix` would drop every media
-     * message with no action the user could take, so the caller bypasses
-     * the filter when this is false -- the same contract DingTalk and
-     * WeCom already implement.
-     */
+    /** Whether text came from the user rather than a media placeholder. */
     userAuthoredText: boolean;
   } {
     try {
@@ -2958,7 +2883,6 @@ export class FeishuChannel extends ChannelBase {
         case 'post': {
           // Rich text (post) format: extract text from nested structure
           const lines: string[] = [];
-          const mentionNames: string[] = [];
           const post = content as Record<string, unknown>;
           // Post can have multiple language versions like {"zh_cn": {title, content}}
           // or be directly {title, content} (no language wrapper).
@@ -2987,7 +2911,6 @@ export class FeishuChannel extends ChannelBase {
                   ];
                   if (typeof userName === 'string' && userName) {
                     parts.push(`@${userName}`);
-                    mentionNames.push(userName);
                   }
                 }
               }
@@ -2996,7 +2919,6 @@ export class FeishuChannel extends ChannelBase {
           }
           return {
             text: lines.join('\n').trim() || '',
-            mentionNames,
             userAuthoredText: true,
           };
         }

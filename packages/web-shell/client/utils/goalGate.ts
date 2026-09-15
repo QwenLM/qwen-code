@@ -51,3 +51,32 @@ export function canResumeGoal(goal: GoalResumeGateRecord): boolean {
   if (goal.status === 'complete' || goal.status === 'active') return false;
   return true;
 }
+
+/** The slice of a Goal record the checkpoint-health gate reads. */
+export interface GoalCheckpointHealthRecord {
+  status?: string;
+  checkpointStalls?: number;
+  lastCheckpointFailure?: string;
+  limitKind?: string;
+}
+
+/**
+ * Whether a Goal card shows checkpoint health: never on a completed Goal,
+ * always during a stall streak, the failure that stopped a Goal whose
+ * checkpoint request was too large, and any other failure that spent no stall
+ * only while the Goal is active.
+ *
+ * A copy of core's `goalCheckpointHealthVisible`, which this browser bundle
+ * cannot import, so the terminal cards and this one agree on which records
+ * show it. `goalGate.drift.test.ts` runs core's own function body against this
+ * copy, so a branch added to either one without the other fails there.
+ */
+export function goalCheckpointHealthVisible(
+  goal: GoalCheckpointHealthRecord,
+): boolean {
+  if (goal.status === 'complete') return false;
+  if ((goal.checkpointStalls ?? 0) > 0) return true;
+  const failed = Boolean(goal.lastCheckpointFailure?.trim());
+  if (goal.limitKind === 'checkpoint_request') return failed;
+  return (goal.status ?? 'active') === 'active' && failed;
+}

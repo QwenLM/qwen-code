@@ -841,7 +841,7 @@ describe('runCliEntry', () => {
       expect(helpText).toContain(`--${name}`);
     }
     expect(helpText).toContain(
-      '"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
+      '"openai", "openai-responses", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
     );
     // The fast path mirrors config.ts and wraps help at the terminal width;
     // in a non-TTY (columns unset) that disables wrapping, so a description
@@ -1734,6 +1734,7 @@ describe('bootstrap import boundaries', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
       ['authCommand', 'auth'],
+      ['boardCommand', 'board'],
       ['channelCommand', 'channel'],
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],

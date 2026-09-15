@@ -57,6 +57,19 @@ export interface WorktreeSession {
    * treat empty as "unknown" and skip the commit-count display.
    */
   originalHeadCommit: string;
+  /**
+   * Set on the superseded session's sidecar by a worktree reset: the
+   * replacement session this session's worktree ownership moved to. Readers
+   * redirect to it (and self-heal their registry) instead of restoring the
+   * superseded session.
+   */
+  supersededBy?: string;
+  /**
+   * Set on the replacement session's sidecar by a worktree reset: the
+   * session it took the worktree from. Cross-checked against the old
+   * session's `supersededBy` to classify an interrupted transfer.
+   */
+  supersedes?: string;
 }
 
 export type StrictWorktreeSession =
@@ -82,7 +95,10 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
     (v['workspaceCwd'] === undefined ||
       typeof v['workspaceCwd'] === 'string') &&
     typeof v['originalBranch'] === 'string' &&
-    typeof v['originalHeadCommit'] === 'string'
+    typeof v['originalHeadCommit'] === 'string' &&
+    (v['supersededBy'] === undefined ||
+      typeof v['supersededBy'] === 'string') &&
+    (v['supersedes'] === undefined || typeof v['supersedes'] === 'string')
   );
 }
 
@@ -142,19 +158,22 @@ export async function readWorktreeSessionStrict(
       nodeFs.constants.O_RDONLY |
       (nodeFs.constants.O_NOFOLLOW ?? 0) |
       (nodeFs.constants.O_NONBLOCK ?? 0);
-    const before = await fs.lstat(filePath);
+    const before = await fs.lstat(filePath, { bigint: true });
     observedSidecar = true;
-    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1n) {
       return { state: 'invalid', reason: 'unsafe sidecar file type' };
     }
-    if (before.ino === 0 || before.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES) {
+    if (
+      before.ino === 0n ||
+      before.size > BigInt(WORKTREE_SESSION_SIDECAR_MAX_BYTES)
+    ) {
       return { state: 'invalid', reason: 'unsafe sidecar size or identity' };
     }
     handle = await fs.open(filePath, flags);
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     if (
       !opened.isFile() ||
-      opened.nlink !== 1 ||
+      opened.nlink !== 1n ||
       opened.dev !== before.dev ||
       opened.ino !== before.ino
     ) {
@@ -178,16 +197,16 @@ export async function readWorktreeSessionStrict(
     if (bytesRead > WORKTREE_SESSION_SIDECAR_MAX_BYTES) {
       return { state: 'invalid', reason: 'unsafe sidecar size or identity' };
     }
-    const after = await handle.stat();
-    const pathStats = await fs.lstat(filePath);
+    const after = await handle.stat({ bigint: true });
+    const pathStats = await fs.lstat(filePath, { bigint: true });
     if (
       !after.isFile() ||
-      after.nlink !== 1 ||
-      after.size !== bytesRead ||
+      after.nlink !== 1n ||
+      after.size !== BigInt(bytesRead) ||
       after.dev !== opened.dev ||
       after.ino !== opened.ino ||
       !pathStats.isFile() ||
-      pathStats.nlink !== 1 ||
+      pathStats.nlink !== 1n ||
       pathStats.dev !== after.dev ||
       pathStats.ino !== after.ino
     ) {
@@ -481,6 +500,12 @@ export interface WorktreeRestoreResult {
  *    error (e.g. permission, EIO) — we still attempt cleanup so the next
  *    resume isn't stuck reading the same broken file.
  *
+ * A sidecar carrying `supersededBy` is refused the same way but deliberately
+ * NOT cleared: a worktree reset moved ownership of that checkout to the
+ * replacement session, and the daemon's reset route still reads this sidecar's
+ * `supersededBy` to redirect and to classify an interrupted transfer. Restoring
+ * here would point a live session at a checkout another session owns.
+ *
  * Shared by TUI / headless / ACP entry points so all three behave
  * consistently on `--resume`. Failures are logged via the supplied
  * `onWarn` callback but never thrown — worktree restore is best-effort,
@@ -517,6 +542,21 @@ export async function restoreWorktreeContext(
     } catch (clearErr) {
       onWarn?.(clearErr);
     }
+    return { contextMessage: null, session: null };
+  }
+
+  if (session.supersededBy !== undefined) {
+    // A worktree reset moved ownership of this checkout to
+    // `session.supersededBy`. Refuse the restore — resuming here would direct
+    // a live session into a worktree another session now owns — but leave the
+    // sidecar alone: the daemon's reset route still reads this link to
+    // redirect and to classify an interrupted transfer.
+    onWarn?.(
+      new Error(
+        `worktree session was superseded by ${session.supersededBy}; ` +
+          `not restoring its worktree context.`,
+      ),
+    );
     return { contextMessage: null, session: null };
   }
 

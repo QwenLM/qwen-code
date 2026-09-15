@@ -32,6 +32,7 @@ import {
   getDialogSettingKeys,
   getSettingDefinition,
   getEffectiveValue,
+  nextBooleanSettingValue,
   setPendingSettingValueAny,
   saveModifiedSettings,
   getDisplayValue,
@@ -43,6 +44,7 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 import {
+  isNumericSettingType,
   TOGGLE_TYPES,
   type SettingsType,
   type SettingsValue,
@@ -151,13 +153,14 @@ export function nextToggleValue(
     | {
         type?: SettingsType;
         options?: ReadonlyArray<{ value: SettingsValue }>;
+        default?: SettingsValue;
       }
     | undefined,
   currentValue: SettingsValue,
 ): SettingsValue | undefined {
   if (!definition || !TOGGLE_TYPES.has(definition.type)) return undefined;
   if (definition.type === 'boolean') {
-    return !(currentValue as boolean);
+    return nextBooleanSettingValue(currentValue, definition.default);
   }
   if (definition.type === 'enum' && definition.options) {
     const options = definition.options;
@@ -181,7 +184,7 @@ export function parseEditCommit(
   buffer: string,
 ): string | number | null | undefined {
   const trimmed = buffer.trim();
-  if (type === 'number') {
+  if (isNumericSettingType(type)) {
     if (trimmed === '') return null;
     const numParsed = Number(trimmed);
     return Number.isNaN(numParsed) ? null : numParsed;
@@ -562,7 +565,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       const definition = getSettingDefinition(editingKey);
       const ch = original.sequence;
       let isValidChar = false;
-      if (definition?.type === 'number') {
+      if (isNumericSettingType(definition?.type)) {
         isValidChar = /^[0-9\-+.]$/.test(ch);
       } else {
         isValidChar = ch.length === 1 && ch >= ' ' && !ctrl;
@@ -595,7 +598,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         if (name === 'return') onSelect(currentItem.key, selectedScope);
         return;
       }
-      if (currentItem.type === 'number' || currentItem.type === 'string') {
+      if (
+        isNumericSettingType(currentItem.type) ||
+        currentItem.type === 'string'
+      ) {
         startEditing(currentItem.key);
       } else {
         toggleCurrent(currentItem.key);
@@ -607,7 +613,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       }
     } else if (/^[0-9]$/.test(original.sequence)) {
       const currentItem = items[activeSettingIndex];
-      if (currentItem?.type === 'number') {
+      if (isNumericSettingType(currentItem?.type)) {
         startEditing(currentItem.key, original.sequence);
       } else {
         setFocusZone('search');
@@ -749,7 +755,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             let displayValue: string;
             if (isEditing) {
               displayValue = edit.buffer;
-            } else if (item.type === 'number' || item.type === 'string') {
+            } else if (
+              isNumericSettingType(item.type) ||
+              item.type === 'string'
+            ) {
               const path = item.key.split('.');
               const currentValue = getNestedValue(pendingSettings, path);
               const defaultValue = getDefaultValue(item.key);
@@ -813,12 +822,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                   </text>
                 </box>
                 <box flexGrow={1} flexShrink={1}>
-                  <text fg={isActive ? C.green : C.text}>
-                    {item.label}
+                  <box flexDirection="row">
+                    <text fg={isActive ? C.green : C.text}>{item.label}</text>
                     {scopeMessage ? (
-                      <text fg={C.dim}> {scopeMessage}</text>
+                      <text fg={C.dim}>{` ${scopeMessage}`}</text>
                     ) : null}
-                  </text>
+                  </box>
                 </box>
                 <box marginLeft={1} flexShrink={0}>
                   <text
