@@ -1535,12 +1535,16 @@ jobs:
             fi
             EXPECTED_HEAD_SHA="$EVENT_HEAD_SHA"
           fi
-          # Unchanged-diff skip: a synchronize whose diff against the base is
-          # byte-identical to an already-reviewed head (an update-branch
+          # Unchanged-diff skip: a synchronize whose OWN diff against the base
+          # is byte-identical to an already-reviewed head (an update-branch
           # merge of main — 32% of automatic reviews, measured 2026-09-08/09)
-          # has nothing new to review. The anchor is the qwen-review/reviewed
-          # commit status stamped by "Record reviewed head", never a bot
-          # comment (R13-1). Any failure in the check runs the full review.
+          # has nothing new IN THAT DIFF to review. The merged tree is still
+          # new: a merge that changes code the PR calls in a file it never
+          # touches leaves this diff identical, and the criterion here is the
+          # PR's own diff, never the merged tree. The anchor is the
+          # qwen-review/reviewed commit status stamped by "Record reviewed
+          # head", never a bot comment (R13-1). Any failure in the check runs
+          # the full review.
           # Design and hole analysis: .github/scripts/review-unchanged-diff.sh.
           # The base is the one the state lookup above already read, and it is
           # passed through verbatim: a re-derivation that failed would swallow
@@ -2508,11 +2512,11 @@ jobs:
           BODY="$(printf '%s\n' \
             "<!-- qwen-review-salvaged ${EXPECTED_HEAD_SHA} -->" \
             '' \
-            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor. Full log in the [workflow run](${RUN_URL})." \
+            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor; if that delta leaves the PR's own diff against its base byte-identical to the head reviewed here, the unchanged-diff skip suppresses it. Full log in the [workflow run](${RUN_URL})." \
             '' \
             '<details><summary>中文说明</summary>' \
             '' \
-            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量。完整日志见 [workflow 运行](${RUN_URL})。" \
+            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量；但若该增量使 PR 相对 base 自身的 diff 与本次评审的 head 逐字节相同，则会被 unchanged-diff 跳过。完整日志见 [workflow 运行](${RUN_URL})。" \
             '' \
             '</details>')"
           gh pr comment "$PR_NUMBER" \

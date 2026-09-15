@@ -41,8 +41,13 @@
 # `index` line survives to differ — every head then hashes as the empty digest
 # and any reviewed ancestor anchors a false skip.
 # Context lines are part of the diff on purpose: when main edits a file the
-# PR also touches, the PR's diff against the new base differs and the
-# review runs — that is the case a merge can break.
+# PR also touches, the PR's diff against the new base differs and the review
+# runs. What that comparison SEES is the PR's own diff and nothing else —
+# main's delta in a file the PR never touches is excluded, so a merge that
+# changes code the PR calls out there leaves the fingerprint identical and is
+# skipped. That judgment layer is the price of the 32% of automatic reviews
+# this saves, and it is why the verdict means "this is the diff that was
+# reviewed", never "nothing has changed since".
 #
 # Usage: review-unchanged-diff.sh <owner/repo> <pr-number> <head-sha> <base-ref>
 # Env:   GH_TOKEN  read access for the commit status lookup

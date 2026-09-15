@@ -7348,4 +7348,24 @@ describe('qwen pr review unchanged-diff anchor', () => {
     expect(creator).toBe('github-actions[bot]');
     expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
   });
+
+  // R1-3. The prose is what a reader has to go on, and both sites claimed
+  // more coverage than the comparison has: the fingerprint is the PR's OWN
+  // diff against the base, so main's delta in a file the PR never touches is
+  // excluded and a merge that changes code the PR calls out there is skipped.
+  // Both halves are pinned behaviorally in the skip's own suite ('a merge of
+  // main that leaves the diff identical is unchanged' / 'main editing a file
+  // the PR touches changes the diff even without conflict'); this pins the
+  // words to them, so the wider promise cannot come back unremarked.
+  it('describes the skip as the PR own diff, never as the merged tree', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    expect(run).not.toContain('has nothing new to review');
+    expect(run).toContain('has nothing new IN THAT DIFF to review');
+    expect(skipScript).not.toContain('that is the case a merge can break');
+    expect(skipScript).toContain(
+      "main's delta in a file the PR never touches is excluded",
+    );
+  });
 });
