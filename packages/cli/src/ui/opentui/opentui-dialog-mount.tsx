@@ -105,13 +105,13 @@ import {
   OpenTuiDeleteDialog,
   OpenTuiDiffDialog,
   OpenTuiEditorDialog,
-  OpenTuiHooksDialog,
   OpenTuiResumeDialog,
   OpenTuiRewindDialog,
   OpenTuiSubagentCreateDialog,
   OpenTuiSubagentListDialog,
   OpenTuiTrustDialog,
 } from './dialogs-misc.js';
+import { OpenTuiHooksDialog } from './dialogs-hooks.js';
 
 export interface OpenTuiDialogMountProps {
   request: OpenTuiDialogRequest;
