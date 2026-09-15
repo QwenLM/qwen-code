@@ -918,6 +918,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     [host, host.getVersion()],
   );
 
+  // ink's Composer drops the phrase (not the row) when this setting is off.
+  const showLoadingPhrases =
+    config.getAccessibility()?.enableLoadingPhrases !== false;
+
   return (
     <OpenTuiErrorBoundary
       recordForExitEcho
@@ -976,6 +980,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 <OpenTuiLoadingIndicator
                   streaming={Boolean(streaming)}
                   waiting
+                  showPhrase={showLoadingPhrases}
                 />
               </box>
             </box>
@@ -1034,6 +1039,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 streaming={Boolean(streaming)}
                 streamingCharsRef={streamingCharsRef}
                 isReceivingContent={isReceivingContent}
+                showPhrase={showLoadingPhrases}
               />
               <OpenTuiQueuedMessageDisplay messageQueue={messageQueue ?? []} />
               <OpenTuiInputPrompt

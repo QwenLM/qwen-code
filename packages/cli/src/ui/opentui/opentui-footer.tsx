@@ -86,6 +86,12 @@ export interface OpenTuiLoadingIndicatorProps {
   streamingCharsRef?: RefObject<number>;
   /** False while waiting on the API (↑), true once content arrives (↓). */
   isReceivingContent?: boolean;
+  /**
+   * False when `ui.accessibility.enableLoadingPhrases` is off. ink's `Composer`
+   * passes no phrase in that case and the row still renders, so the row is not
+   * what the setting removes — only its text.
+   */
+  showPhrase?: boolean;
 }
 
 /** Spinner + witty phrase + elapsed time + token estimate, above the composer. */
@@ -94,6 +100,7 @@ export function OpenTuiLoadingIndicator({
   waiting = false,
   streamingCharsRef,
   isReceivingContent = false,
+  showPhrase = true,
 }: OpenTuiLoadingIndicatorProps) {
   const { width } = useTerminalDimensions();
   // The shared cycler resolves the phrase list for all nine locales and owns
@@ -134,7 +141,7 @@ export function OpenTuiLoadingIndicator({
     0,
     width - 5 - (isNarrow ? 0 : getCachedStringWidth(suffix)),
   );
-  const phraseText = truncateToWidth(phrase, phraseBudget);
+  const phraseText = showPhrase ? truncateToWidth(phrase, phraseBudget) : '';
   return (
     <box paddingLeft={2} flexDirection={isNarrow ? 'column' : 'row'}>
       <box flexDirection="row">

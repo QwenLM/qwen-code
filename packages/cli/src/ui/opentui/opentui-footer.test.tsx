@@ -145,10 +145,27 @@ describe('OpenTuiLoadingIndicator', () => {
     const { container } = render(
       <OpenTuiLoadingIndicator streaming={false} waiting />,
     );
+    // The frame stays put because no tick exists to move it, not because the
+    // next tick happens to draw the same glyph.
+    expect(vi.getTimerCount()).toBe(0);
     expect(container.textContent).toContain('Waiting for user confirmation...');
+    // ink drops the cancel suffix here: there is no in-flight request to cancel.
+    expect(container.textContent).not.toContain('esc to cancel');
     act(() => {
       vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 20);
     });
+    expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
+  });
+
+  it('keeps the waiting row but loses its phrase when loading phrases are off', () => {
+    // ui.accessibility.enableLoadingPhrases: ink's Composer passes no phrase,
+    // and the row stays so the waiting-row sequence is unchanged.
+    const { container } = render(
+      <OpenTuiLoadingIndicator streaming={false} waiting showPhrase={false} />,
+    );
+    expect(container.textContent).not.toContain(
+      'Waiting for user confirmation',
+    );
     expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
   });
 

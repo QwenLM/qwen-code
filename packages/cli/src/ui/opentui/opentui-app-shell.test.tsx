@@ -279,6 +279,7 @@ vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
 
 const CONFIG = {
   getContextFilePaths: () => [],
+  getAccessibility: () => ({}),
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
@@ -658,6 +659,7 @@ describe('OpenTuiApp shell wiring', () => {
     const onTranscriptEvent = vi.fn();
     renderApp({
       config: {
+        ...CONFIG,
         getContextFilePaths: () => ['/repo/AGENTS.md'],
       } as unknown as Config,
       onTranscriptEvent,
@@ -1695,6 +1697,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     let mode = initial;
     const writes: ApprovalMode[] = [];
     const config = {
+      ...CONFIG,
       getApprovalMode: () => mode,
       setApprovalMode(next: ApprovalMode) {
         if (options.refuse) throw new Error('approval mode is pinned');
@@ -1929,6 +1932,23 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
 });
 
 describe('OpenTuiApp transcript scroll region', () => {
+  beforeEach(() => {
+    mocks.state.handleResult = { kind: 'handled' };
+    mocks.state.handleResults.length = 0;
+    mocks.state.handledTexts.length = 0;
+    mocks.state.host = null;
+    mocks.state.hosts.length = 0;
+    mocks.state.dispatcherConstructions = 0;
+    mocks.state.inputProps = null;
+    mocks.state.dialogProps = null;
+    mocks.state.footerProps = null;
+    mocks.state.exitInProgress = false;
+    mocks.state.emitAutoModeEntryNotices.mockClear();
+    mocks.state.mcpApprovalProps = null;
+    mocks.state.mcpQueue.length = 0;
+    mocks.state.handleMcpApprovalSelect.mockClear();
+  });
+
   const layoutOf = (
     node: Element | null | undefined,
   ): Record<string, unknown> =>
