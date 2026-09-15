@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -342,6 +351,9 @@ describe('Desktop release sync caller', () => {
     // Hosted, not the desktop matrix: reporting that the publish path broke
     // must not queue behind the path it is reporting on.
     expect(report).toContain("runs-on: 'ubuntu-latest'");
+    // The reporter must run its own copy of the script: a tag cut before the
+    // job merged carries no copy of it, so checking out the tag would fail.
+    expect(report).toContain("ref: 'main'");
     expect(report).toContain("issues: 'write'");
     expect(report).toContain(
       'bash .github/scripts/desktop-sync-failure-issue.sh',
@@ -351,3 +363,125 @@ describe('Desktop release sync caller', () => {
     );
   });
 });
+
+// Replay the reporter under a recording gh stub, the same way the image-build
+// reporter's suite does: text pins alone stay green when the body's recovery
+// advice or the failed-leg listing drifts away from what the script emits.
+const replayable =
+  process.platform !== 'win32' && spawnSync('jq', ['--version']).status === 0;
+
+describe.skipIf(!replayable)(
+  'desktop-sync-failure-issue script behavior',
+  () => {
+    const runScript = ({ jobs, listFails = false, issues = [] }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'desktop-failure-issue-'));
+      const callsLog = join(dir, 'calls.log');
+      const bodyCapture = join(dir, 'captured-body.md');
+      const fixture = join(dir, 'fixture-issues.json');
+      const jobsFile = join(dir, 'jobs.json');
+      writeFileSync(fixture, JSON.stringify(issues));
+      writeFileSync(jobsFile, JSON.stringify(jobs));
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/bin/bash',
+          'echo "gh $*" >> "' + callsLog + '"',
+          'prev=""',
+          'jqf=""',
+          'for arg in "$@"; do',
+          '  if [[ "$prev" == "--body-file" ]]; then cp "$arg" "' +
+            bodyCapture +
+            '"; fi',
+          '  if [[ "$prev" == "--jq" ]]; then jqf="$arg"; fi',
+          '  prev="$arg"',
+          'done',
+          'case "$1 $2" in',
+          '  "issue list")',
+          '    if [[ -n "${STUB_LIST_FAILS:-}" ]]; then exit 1; fi',
+          '    cat "' + fixture + '" ;;',
+          // The real gh applies --jq itself; the stub must too, or the script
+          // would read the raw payload as the leg list.
+          '  "api "*) jq -r "$jqf" "' + jobsFile + '" ;;',
+          'esac',
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(dir, 'gh'), 0o755);
+      const result = spawnSync(
+        'bash',
+        ['.github/scripts/desktop-sync-failure-issue.sh'],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: dir + ':' + (process.env.PATH ?? ''),
+            REPO: 'QwenLM/qwen-code',
+            RUN_ID: '1',
+            RUN_URL: 'https://github.com/QwenLM/qwen-code/actions/runs/1',
+            RELEASE_TAG: 'v0.23.3',
+            DEDUP_LABEL: 'scope/ci-cd',
+            RUNNER_TEMP: dir,
+            ...(listFails ? { STUB_LIST_FAILS: '1' } : {}),
+          },
+        },
+      );
+      return {
+        status: result.status,
+        calls: existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '',
+        body: existsSync(bodyCapture) ? readFileSync(bodyCapture, 'utf8') : '',
+      };
+    };
+
+    it('names the failed legs and files a fresh issue when none is tracked', () => {
+      const run = runScript({
+        jobs: {
+          jobs: [
+            {
+              name: 'Publish desktop for v0.23.3 / build',
+              conclusion: 'failure',
+            },
+            {
+              name: 'Publish desktop for v0.23.3 / prepare',
+              conclusion: 'skipped',
+            },
+          ],
+        },
+      });
+      expect(run.status).toBe(0);
+      expect(run.body).toContain('- Failed: build');
+      // A skipped leg never ran; listing it would claim a build failed that
+      // was never started.
+      expect(run.body).not.toContain('prepare');
+      expect(run.body).toContain('desktop-v0.23.3');
+      expect(run.calls).toContain('gh issue create');
+      expect(run.calls).not.toContain('gh issue comment');
+    });
+
+    it('comments on the tracked issue instead of filing a duplicate', () => {
+      const run = runScript({
+        jobs: { jobs: [] },
+        // The listing is newest-first, so the canonical (oldest) issue is last;
+        // the lookup takes last(...) to skip issues that merely quote the marker.
+        issues: [
+          {
+            number: 9,
+            body: 'quotes <!-- desktop-release-sync-failure --> in a bug report',
+          },
+          { number: 7, body: '<!-- desktop-release-sync-failure -->' },
+        ],
+      });
+      expect(run.status).toBe(0);
+      // The empty-legs branch: no job reported a failure, so the publish job
+      // itself never started.
+      expect(run.body).toContain('startup_failure');
+      expect(run.calls).toContain('gh issue comment 7');
+      expect(run.calls).not.toContain('gh issue create');
+    });
+
+    it('still files when the dedup lookup fails', () => {
+      const run = runScript({ jobs: { jobs: [] }, listFails: true });
+      expect(run.status).toBe(0);
+      expect(run.calls).toContain('gh issue create');
+    });
+  },
+);

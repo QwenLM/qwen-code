@@ -28,7 +28,7 @@ on:
     types: ['published']
     # A prerelease promoted to stable fires `released`, not `published`, so a
     # promoted release never reaches this path; mirror it by dispatching
-    # desktop-release.yml with follows_release set.
+    # desktop-release.yml from main with the released version.
 
 permissions:
   actions: 'read'
@@ -65,9 +65,9 @@ jobs:
   report_failure:
     name: 'Report a desktop release that did not follow'
     needs: 'publish'
-    # `cancelled` is deliberately not a failure: a newer release supersedes an
-    # older one's pending legs through the concurrency group, which says
-    # nothing about whether the pipeline works.
+    # `cancelled` is deliberately not a failure: the concurrency group queues
+    # this release behind a newer one (or someone stopped the run), and
+    # neither says the pipeline is broken; the newer run reports for itself.
     if: "${{ always() && needs.publish.result == 'failure' && github.repository == 'QwenLM/qwen-code' }}"
     # Hosted, not the desktop matrix: this job reports that the publish path is
     # broken, and running it on the same path would be the trap it documents.
@@ -82,6 +82,9 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
+          # The reporter's own copy of the script, not the tag's: a tag cut
+          # before this job merged carries no copy of it at all.
+          ref: 'main'
           fetch-depth: 1
 
       - name: 'File or update the did-not-follow issue'

@@ -54,14 +54,14 @@ body_file="${RUNNER_TEMP:-/tmp}/desktop-sync-failure.md"
   elif [[ -n "${failed_legs}" ]]; then
     echo "- Failed: ${failed_legs}"
   else
-    echo "- Failed: no job reported a failure, so the run itself was cancelled or the call never started."
+    echo "- Failed: no job reported a failure, so the publish job itself never started (startup_failure) and no leg ran."
   fi
   echo "- CLI release: \`${RELEASE_TAG}\`"
   echo "- Run: ${RUN_URL}"
   echo
   echo "Nothing else surfaces this. A desktop release that never happens looks exactly like a release that was not due, and this path runs without anyone watching it."
   echo
-  echo "To recover, dispatch \`Desktop Release\` by hand with the same version once the cause is fixed — the tag does not exist yet, so no \`clobber\` is needed."
+  echo "To recover: if the \`desktop-${RELEASE_TAG}\` tag does not exist yet, dispatch \`Desktop Release\` by hand with the same version; if it exists, the publish got partway and the re-dispatch needs \`clobber=true\`."
 } > "${body_file}"
 
 # Degrade rather than abort: a transient failure on the dedup lookup must not
