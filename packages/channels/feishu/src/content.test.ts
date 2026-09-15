@@ -275,6 +275,82 @@ describe('parseFeishuContent (#11554)', () => {
     expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
   });
 
+  it('ends a blockquoted fence at a bare blank line', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '> ```\n> code\n\n> see ![a](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('closes a fence whose closer is followed by a tab', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '```md\n![a](img_sample)\n```\t\nsee ![b](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('harvests an image line inside a nested list item', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '- outer\n  - inner\n    ![a](img_nested)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_nested' }]);
+  });
+
+  it('treats a tab-indented fence as indented code', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [[{ tag: 'md', text: '\t```\n\t![a](img_tab)\n\t```' }]],
+      }),
+    );
+    expect(result.resources).toEqual([]);
+  });
+
+  it('harvests a double-quoted title containing an apostrophe', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [[{ tag: 'md', text: `![d](img_v2_abc "it's the flow")` }]],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_v2_abc' }]);
+  });
+
+  it('closeOpenFence leaves a quote whose closer skips the space alone', () => {
+    const text = '> ```\n> code\n>```';
+    expect(closeOpenFence(text)).toBe(text);
+  });
+
   it('reads fence lines through CRLF line endings', () => {
     const result = parseFeishuContent(
       'post',
@@ -474,13 +550,61 @@ describe('parseFeishuContent (#11554)', () => {
         content_v2: [[{ tag: 'md', text: '![x](img_C) and ![y](img_A)' }]],
       }),
     );
-    // The text cites img_C before img_A, so that order must survive; img_B
-    // is cited nowhere, so its position comes from the legacy sweep alone.
+    // The text cites img_C before img_A (node 0, in citation order); img_B's
+    // legacy node sits after that paragraph, so it follows both.
     expect(result.resources.map((r) => r.key)).toEqual([
       'img_C',
-      'img_B',
       'img_A',
+      'img_B',
     ]);
+  });
+
+  it('orders a legacy-only key by its node, not ahead of a cited key', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_A' }],
+          [{ tag: 'img', image_key: 'img_B' }],
+          [{ tag: 'img', image_key: 'img_C' }],
+        ],
+        content_v2: [
+          [{ tag: 'img', image_key: 'img_A' }],
+          [{ tag: 'md', text: 'see ![b](img_B)' }],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual([
+      'img_A',
+      'img_B',
+      'img_C',
+    ]);
+  });
+
+  it('drops the later legacy-only key, not a text-cited native one', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          ...Array.from({ length: 8 }, (_, i) => [
+            { tag: 'img', image_key: `img_${i}` },
+          ]),
+          [{ tag: 'img', image_key: 'img_8' }],
+        ],
+        content_v2: [
+          ...Array.from({ length: 8 }, (_, i) => [
+            { tag: 'img', image_key: `img_${i}` },
+          ]),
+          [{ tag: 'md', text: 'and ![nine](img_9)' }],
+        ],
+      }),
+    );
+    // The eight native images fill the cap in document order; img_9 (cited
+    // ninth) and img_8 (cited nowhere) are the tail that drops.
+    expect(result.resources.map((r) => r.key)).toEqual(
+      Array.from({ length: 8 }, (_, i) => `img_${i}`),
+    );
+    expect(result.droppedResourceCount).toBe(2);
   });
 
   it('keeps the text-cited key under the cap, not a legacy-only one', () => {

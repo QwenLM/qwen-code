@@ -51,16 +51,23 @@ interface FenceState {
   prefix: string;
 }
 
+/** Blockquote markers compare canonically: the spaces around `>` are
+ *  insignificant in CommonMark, so `>```` is the same container as `> `. */
+const canonicalBq = (prefix: string) => prefix.replace(/ *> ?/g, '>');
+
 /**
  * Line-based code-fence scan with container state. A fence opens when a line
  * — after its blockquote markers and open-list indentation are stripped —
  * starts with at most 3 spaces then 3+ backticks or tildes. It closes on a
  * fence-run-only line with the same character, at least the opener's length,
- * and the opener's exact container prefix; it auto-closes at a container
- * boundary. An unclosed fence consumes the rest of its container only. A line
- * indented 4+ spaces beyond its blockquote-free container is an indented code
- * block and is never harvested either. Linear in the input — no backreference
- * rescans.
+ * and the opener's container prefix (compared canonically), with trailing
+ * spaces or tabs allowed; it auto-closes at a container boundary. A bare
+ * blank line ends a blockquote container and whatever it held, but not a
+ * top-level list item; a blank carrying the quote marker is inside the
+ * quote. An unclosed fence consumes the rest of its container only. A line
+ * indented 4+ columns (tabs advance to the next multiple of 4) beyond its
+ * blockquote-free container is an indented code block and is never harvested
+ * either. Linear in the input — no backreference rescans.
  *
  * Inline backtick runs are deliberately NOT stripped: a stray backtick is
  * common in chat text, and pairing it with a later one would silently delete
@@ -72,7 +79,11 @@ function scanFenceLines(
   onKeptLine?: (line: string) => void,
 ): FenceState | undefined {
   let fence: FenceState | undefined;
+  // Open list items as a stack of content-indent widths (markers nest), plus
+  // the blockquote prefix of the context they opened in.
+  const listStack: number[] = [];
   let listIndent = 0;
+  let listBq = '';
   // Line endings are normalized first: CommonMark admits CR and CRLF, and a
   // fence line terminated by `\r` must still read as a fence line.
   for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
@@ -85,33 +96,49 @@ function scanFenceLines(
     }
     const bqPrefix = prefix;
     if (/^[\t ]*$/.test(rest)) {
-      // A blank line ends nothing: CommonMark keeps a list item open across
-      // it while the following block re-indents, and inside a fence it is
-      // ordinary content. Resetting the container here would tear the fence
-      // in half and re-read its real closer as an opener.
+      if (bqPrefix === '') {
+        // A bare blank line ends a blockquote container (CommonMark), and
+        // with it a fence or list held inside one — resetting a LIST fence
+        // here would tear it in half, but a quote's fence really closes.
+        if (fence && canonicalBq(fence.prefix).includes('>')) fence = undefined;
+        if (listBq) {
+          listStack.length = 0;
+          listIndent = 0;
+          listBq = '';
+        }
+        if (!fence) onKeptLine?.(line);
+        continue;
+      }
+      // A blank line carrying the quote marker sits inside the blockquote.
       if (!fence) onKeptLine?.(line);
       continue;
     }
-    if (listIndent > 0) {
-      if (rest.startsWith(' '.repeat(listIndent))) {
-        prefix += ' '.repeat(listIndent);
-        rest = rest.slice(listIndent);
-      } else {
-        // The list ends here; a fence it held ends with it.
-        listIndent = 0;
+    // Pop list levels until the line carries the remaining content indent;
+    // the innermost list ending ends a fence it held, an outer list may not.
+    while (listIndent > 0 && !rest.startsWith(' '.repeat(listIndent))) {
+      listStack.pop();
+      listIndent = listStack.reduce((sum, width) => sum + width, 0);
+      if (listIndent === 0) {
+        listBq = '';
         fence = undefined;
       }
     }
+    if (listIndent > 0) {
+      prefix += ' '.repeat(listIndent);
+      rest = rest.slice(listIndent);
+    }
 
     if (fence) {
-      if (!prefix.startsWith(fence.prefix)) {
+      const fenceContainer = canonicalBq(fence.prefix);
+      const lineContainer = canonicalBq(prefix);
+      if (!lineContainer.startsWith(fenceContainer)) {
         // Container boundary: the fence auto-closes and this line is outside.
         fence = undefined;
       } else {
-        const close = /^ {0,3}(`{3,}|~{3,}) *$/.exec(rest);
+        const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(rest);
         if (
           close &&
-          prefix === fence.prefix &&
+          lineContainer === fenceContainer &&
           close[1]!.charAt(0) === fence.char &&
           close[1]!.length >= fence.length
         ) {
@@ -121,26 +148,31 @@ function scanFenceLines(
       }
     }
 
-    const leadingSpaces = /^ */.exec(rest)![0].length;
+    const leadingWhitespace = /^[ \t]*/.exec(rest)![0];
+    let leadingColumns = 0;
+    for (const ch of leadingWhitespace)
+      leadingColumns += ch === '\t' ? 4 - (leadingColumns % 4) : 1;
     const open = /^ {0,3}(`{3,}|~{3,})/.exec(rest);
-    if (open && leadingSpaces <= 3) {
+    if (open && leadingColumns <= 3) {
       fence = { char: open[1]!.charAt(0), length: open[1]!.length, prefix };
       continue;
     }
-    if (leadingSpaces >= INDENTED_CODE_SPACES && bqPrefix === '') {
+    if (leadingColumns >= INDENTED_CODE_SPACES && bqPrefix === '') {
       // An indented code block: code, so never harvested. The check keys on
       // the blockquote prefix only — inside a list the content indent is
-      // already stripped, so 4 further spaces are code there too, while a
+      // already stripped, so 4 further columns are code there too, while a
       // blockquoted over-indented line is a lazy paragraph continuation and
       // its keys are real references.
       continue;
     }
     onKeptLine?.(line);
-    // A list marker outside a fence opens a list whose content lines carry
-    // the marker's width as extra indentation.
+    // A list marker outside a fence opens a nested list whose content lines
+    // carry the accumulated marker widths as extra indentation.
     const listMarker = /^ {0,3}(?:[-*+]|\d+[.)]) /.exec(rest);
     if (listMarker) {
-      listIndent = listMarker[0].length;
+      listStack.push(listMarker[0].length);
+      listIndent += listMarker[0].length;
+      listBq = bqPrefix;
     }
   }
   return fence;
@@ -176,7 +208,7 @@ export function closeOpenFence(text: string): string {
  * images are not produced by the platform's Markdown export and resolving
  * them would take a second definition pass — out of scope.
  */
-const MD_IMAGE_SOURCE = String.raw`!\[[^\]\n]{0,200}\]\(\s*<?(img_[A-Za-z0-9_.:-]{1,200})>?(?:\s+["'][^"'\n]{0,200}["'])?\s*\)`;
+const MD_IMAGE_SOURCE = String.raw`!\[[^\]\n]{0,200}\]\(\s*<?(img_[A-Za-z0-9_.:-]{1,200})>?(?:\s+(?:"[^"\n]{0,200}"|'[^'\n]{0,200}'))?\s*\)`;
 const mdImageRe = () => new RegExp(MD_IMAGE_SOURCE, 'g');
 
 /** At-mention markup in `md` text; bounded so truncated markup cannot stall. */
@@ -286,13 +318,18 @@ function parsePostContent(
   // Whether any node contributed real (non-placeholder) content: title prose,
   // text/link/mention/code/markdown — anything but an img/media placeholder.
   let hasNonPlaceholderContent = false;
-  // Document position of every referenced key, harvested or legacy-rescued.
-  // The merge sorts on these so attachment order follows the order the
-  // rendered text cites each key; the counter advances per node and per key
-  // so keys share one comparable space with the legacy sweep below.
+  // Document position of every referenced key, harvested or legacy-rescued,
+  // in ONE space both sides compute the same way: node ordinal times a
+  // stride, plus the key's ordinal within its node. A message cannot carry
+  // anywhere near STRIDE key references in one node (each reference is a
+  // dozen-plus characters of platform-bounded text), so the spaces never
+  // overlap. The merge sorts on these so attachment order follows the order
+  // the rendered text cites each key.
+  const POSITION_STRIDE = 1 << 16;
   const positions = new Map<string, number>();
   const resourceById = new Map<string, FeishuResource>();
-  let positionCounter = 0;
+  let nodeIndex = -1;
+  let intraKey = 0;
   const addAtPosition = (
     type: FeishuResource['type'],
     key: unknown,
@@ -301,7 +338,8 @@ function parsePostContent(
     if (typeof key === 'string' && key) {
       const id = `${type}:${key}`;
       if (!positions.has(id)) {
-        positions.set(id, positionCounter);
+        positions.set(id, nodeIndex * POSITION_STRIDE + intraKey);
+        intraKey += 1;
         resourceById.set(id, {
           type,
           key,
@@ -309,7 +347,6 @@ function parsePostContent(
         });
       }
     }
-    positionCounter += 1;
     add(type, key, fileName);
   };
   const title = string(body['title']);
@@ -321,7 +358,8 @@ function parsePostContent(
     }
   }
   const render = (value: unknown): string => {
-    positionCounter += 1;
+    nodeIndex += 1;
+    intraKey = 0;
     const node = record(value);
     const text = string(node['text']);
     switch (node['tag']) {
@@ -403,11 +441,11 @@ function parsePostContent(
   // sweep computes; keys both representations carry keep the v2 citation
   // position, and the cap applies once over the position-sorted union.
   if (rows === v2 && Array.isArray(body['content'])) {
-    let legacyPos = 0;
+    let legacyNodeIndex = -1;
     for (const row of body['content']) {
       if (!Array.isArray(row)) continue;
       for (const value of row) {
-        const position = legacyPos++;
+        legacyNodeIndex += 1;
         const node = record(value);
         const key =
           node['tag'] === 'img'
@@ -420,7 +458,9 @@ function parsePostContent(
           node['tag'] === 'img' ? 'image' : 'video';
         const id = `${type}:${key}`;
         if (positions.has(id)) continue;
-        positions.set(id, position);
+        // Same formula the v2 side uses: a legacy resource at node index j
+        // gets the position the v2 render would give a key at node j.
+        positions.set(id, legacyNodeIndex * POSITION_STRIDE);
         resourceById.set(id, { type, key });
       }
     }
