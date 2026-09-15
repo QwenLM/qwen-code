@@ -386,6 +386,46 @@ describe('ordinary REST session Managed owner', () => {
     expect(JSON.stringify(res.body)).toContain(ASSISTANT_TEXT);
   });
 
+  it('pages GET /session/:id/transcript for a cold Managed session without spawning legacy', async () => {
+    await startModelServer();
+    await writeSettings();
+    app = bootApp();
+    const sessionId = await createManagedSession();
+
+    const admitted = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'say ping' }] });
+    expect(admitted.status).toBe(202);
+    const turn = await waitForTurn(sessionId, admitted.body.promptId as string);
+    expect(turn.state).toBe('completed');
+
+    await getServeAppLifecycle(app).close({ timeoutMs: 30_000 });
+    app = bootApp();
+
+    spawnHarness.blockLegacySpawn = true;
+    const res = await request(app)
+      .get(`/session/${sessionId}/transcript`)
+      .set('Host', host());
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe(sessionId);
+    expect(JSON.stringify(res.body)).toContain(ASSISTANT_TEXT);
+
+    const index = await request(app)
+      .get(`/session/${sessionId}/turn-index`)
+      .set('Host', host());
+    expect(index.status).toBe(200);
+    expect(index.body.sessionId).toBe(sessionId);
+    expect(index.body.totalTurns).toBeGreaterThan(0);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+  });
+
   it('queues a second ordinary prompt on the live Managed session', async () => {
     await startModelServer();
     await writeSettings();

@@ -1163,6 +1163,169 @@ export function registerSessionRoutes(
     return codec;
   };
 
+  const isLiveBridgeSession = (
+    bridge: AcpSessionBridge,
+    sessionId: string,
+  ): boolean => {
+    try {
+      bridge.getSessionSummary(sessionId);
+      return true;
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return false;
+      throw error;
+    }
+  };
+
+  const isVerifiedManagedOwner = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<boolean> => {
+    const state =
+      await createWorkspaceRuntimeSessionService(runtime).readExecutionEngine(
+        sessionId,
+      );
+    return state?.status === 'verified' && state.engine === 'managed';
+  };
+
+  const readPersistedWorkspaceTranscriptPage = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    query: {
+      limit?: number;
+      cursor?: string;
+      direction?: 'backward';
+      beforeRecordId?: string;
+      atRecordId?: string;
+      snapshot?: string;
+    },
+  ) =>
+    runWithWorkspaceRuntimeStorage(runtime, async () => {
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      if (query.cursor === undefined) {
+        await assertSessionLoadable(
+          runtime.workspaceCwd,
+          sessionId,
+          runtime.sessionRuntimeBaseDir,
+          { allowActiveConflict: true },
+        );
+      }
+      const codec = getTranscriptCursorCodec(runtime);
+      const reader = new SessionTranscriptReader(runtime.workspaceCwd, codec);
+      let page;
+      try {
+        page = await reader.readPage(sessionId, {
+          ...(query.limit !== undefined ? { limit: query.limit } : {}),
+          ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+          ...(query.direction !== undefined
+            ? { direction: query.direction }
+            : {}),
+          ...(query.beforeRecordId !== undefined
+            ? { beforeRecordId: query.beforeRecordId }
+            : {}),
+          ...(query.atRecordId !== undefined
+            ? { atRecordId: query.atRecordId }
+            : {}),
+          ...(query.snapshot !== undefined ? { snapshot: query.snapshot } : {}),
+          maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+        if (query.cursor !== undefined || query.snapshot !== undefined) {
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        const location = await service.getSessionLocation(sessionId);
+        if (location === 'archived') {
+          throw new SessionArchivedError(sessionId);
+        }
+        if (location === 'conflict') {
+          throw new SessionConflictError(sessionId);
+        }
+        throw new SessionNotFoundError(sessionId);
+      }
+      if (page.records.some((record) => record.sessionId !== sessionId)) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      const replay = await replayTranscriptRecordPage({
+        sessionId,
+        page,
+        finalizeDangling: true,
+        encodeCursor: (state) => codec.encode(state),
+      });
+      const cursorTooLarge =
+        replay.nextCursor !== undefined &&
+        Buffer.byteLength(replay.nextCursor) >
+          WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES;
+      return {
+        v: 1 as const,
+        sessionId,
+        events: replay.updates.map((update) => ({
+          v: 1 as const,
+          type: 'session_update' as const,
+          data: update,
+        })),
+        ...(replay.nextCursor && !cursorTooLarge
+          ? { nextCursor: replay.nextCursor }
+          : {}),
+        hasMore: cursorTooLarge ? false : replay.hasMore,
+        startTime: replay.startTime,
+        lastUpdated: replay.lastUpdated,
+        ...(replay.partial || cursorTooLarge
+          ? {
+              partial: true as const,
+              replayError: cursorTooLarge
+                ? TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR
+                : replay.replayError,
+            }
+          : {}),
+        ...(page.targetRecordId ? { targetRecordId: page.targetRecordId } : {}),
+        ...(page.hasOlder !== undefined ? { hasOlder: page.hasOlder } : {}),
+      };
+    });
+
+  const readPersistedWorkspaceTurnIndexPage = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    query: { snapshot?: string; start?: number; limit?: number },
+  ) =>
+    runWithWorkspaceRuntimeStorage(runtime, async () => {
+      if (query.snapshot === undefined) {
+        await assertSessionLoadable(
+          runtime.workspaceCwd,
+          sessionId,
+          runtime.sessionRuntimeBaseDir,
+          { allowActiveConflict: true },
+        );
+      }
+      try {
+        return await new SessionTranscriptReader(
+          runtime.workspaceCwd,
+          getTranscriptCursorCodec(runtime),
+        ).readTurnIndexPage(sessionId, {
+          ...(query.snapshot !== undefined ? { snapshot: query.snapshot } : {}),
+          ...(query.start !== undefined ? { start: query.start } : {}),
+          ...(query.limit !== undefined ? { limit: query.limit } : {}),
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+        if (query.snapshot !== undefined) {
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        const service = createWorkspaceRuntimeSessionService(runtime);
+        const location = await service.getSessionLocation(sessionId);
+        if (location === 'archived') {
+          throw new SessionArchivedError(sessionId);
+        }
+        if (location === 'conflict') {
+          throw new SessionConflictError(sessionId);
+        }
+        throw new SessionNotFoundError(sessionId);
+      }
+    });
+
   const logSessionRoutingFailure = (
     route: string,
     resolutionKind: string,
@@ -5879,15 +6042,28 @@ export function registerSessionRoutes(
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          const page = await runtime.bridge.getSessionTranscriptPage({
-            sessionId,
+          const query = {
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
             ...(direction !== undefined ? { direction } : {}),
             ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
             ...(atRecordId !== undefined ? { atRecordId } : {}),
             ...(snapshot !== undefined ? { snapshot } : {}),
-          });
+          };
+          // Cold Managed history is already on disk. Paging it through the
+          // workspace control slot would spawn a second, legacy ACP child.
+          const page =
+            !isLiveBridgeSession(runtime.bridge, sessionId) &&
+            (await isVerifiedManagedOwner(runtime, sessionId))
+              ? await readPersistedWorkspaceTranscriptPage(
+                  runtime,
+                  sessionId,
+                  query,
+                )
+              : await runtime.bridge.getSessionTranscriptPage({
+                  sessionId,
+                  ...query,
+                });
           assertRuntimeGenerationOpen?.();
           return page;
         },
@@ -6191,12 +6367,24 @@ export function registerSessionRoutes(
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          const page = await runtime.bridge.getSessionTurnIndexPage({
-            sessionId,
+          const query = {
             ...(snapshot !== undefined ? { snapshot } : {}),
             ...(start !== undefined ? { start } : {}),
             ...(limit !== undefined ? { limit } : {}),
-          });
+          };
+          // Same cold-Managed disk path as GET /session/:id/transcript.
+          const page =
+            !isLiveBridgeSession(runtime.bridge, sessionId) &&
+            (await isVerifiedManagedOwner(runtime, sessionId))
+              ? await readPersistedWorkspaceTurnIndexPage(
+                  runtime,
+                  sessionId,
+                  query,
+                )
+              : await runtime.bridge.getSessionTurnIndexPage({
+                  sessionId,
+                  ...query,
+                });
           assertRuntimeGenerationOpen?.();
           return page;
         },
