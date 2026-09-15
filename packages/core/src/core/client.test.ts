@@ -91,6 +91,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { TurnBudget } from './turn-budget.js';
 import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
@@ -2311,6 +2312,110 @@ describe('Gemini Client (client.ts)', () => {
         h.parts?.some((p) => p.functionResponse),
       );
       expect(hasAnyFunctionResponse).toBe(false);
+    });
+  });
+
+  // The turn a workflow's `+500k` budget measures against starts here, in the
+  // one place every front end's turns go through.
+  describe('turn token budget', () => {
+    let turns: TurnBudget;
+    const sessionTokens = vi.fn(() => 1_234);
+
+    beforeEach(() => {
+      turns = new TurnBudget();
+      Object.assign(mockConfig, { getTurnBudget: () => turns });
+      sessionTokens.mockReturnValue(1_234);
+      Object.assign(mockUiTelemetryService, {
+        getTotalOutputTokens: sessionTokens,
+      });
+    });
+
+    async function send(
+      request: Parameters<typeof client.sendMessageStream>[0],
+      promptId: string,
+      options?: Parameters<typeof client.sendMessageStream>[3],
+    ): Promise<void> {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        request,
+        new AbortController().signal,
+        promptId,
+        options,
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+    }
+
+    it('opens the turn with the directive the user typed, not the reminder in front of it', async () => {
+      await send(
+        [
+          {
+            text: '<system-reminder>\nbudget +900k\n</system-reminder>\n\nsweep every package +500k',
+          },
+        ],
+        'p1',
+      );
+
+      expect(turns.current('test-session-id')).toEqual({
+        promptId: 'p1',
+        sessionId: 'test-session-id',
+        budget: 500_000,
+        directiveText: '+500k',
+        outputTokensAtTurnStart: 1_234,
+      });
+      expect(sessionTokens).toHaveBeenCalledWith('test-session-id');
+    });
+
+    it('opens a cron turn with no target, whatever its text says', async () => {
+      await send([{ text: 'nightly sweep +500k' }], 'cron-1', {
+        type: SendMessageType.Cron,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'cron-1',
+        budget: null,
+      });
+    });
+
+    it('leaves the turn alone for a tool result and for a side question', async () => {
+      await send([{ text: 'fan out +500k' }], 'p1');
+      sessionTokens.mockReturnValue(9_999);
+
+      await send([{ text: 'tool output mentions +1m' }], 'p1', {
+        type: SendMessageType.ToolResult,
+      });
+      await send([{ text: 'quick question +2m' }], 'side-1', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'p1',
+        budget: 500_000,
+        outputTokensAtTurnStart: 1_234,
+      });
+    });
+
+    // A retry replaces a failed attempt of the same prompt; what that attempt
+    // spent is still this turn's spend.
+    it('keeps the starting point when the same prompt is retried', async () => {
+      await send([{ text: 'fan out +500k' }], 'p1');
+      sessionTokens.mockReturnValue(9_999);
+
+      await send([{ text: 'fan out +500k' }], 'p1', {
+        type: SendMessageType.Retry,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'p1',
+        budget: 500_000,
+        outputTokensAtTurnStart: 1_234,
+      });
     });
   });
 

@@ -9,6 +9,7 @@ import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import {
+  AcpChildCapacityExceededError,
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
   InvalidSessionMetadataError,
@@ -17,6 +18,47 @@ import {
 } from '../acp-session-bridge.js';
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
+
+describe('capacity RPC errors', () => {
+  it('carries an explicit HTTP status and machine reason', () => {
+    const error = new AcpChildCapacityExceededError(6, 6);
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        httpStatus: 503,
+        errorKind: error.code,
+        maxConcurrentChildren: 6,
+        committedAcpChildren: 6,
+      },
+    });
+  });
+  it('preserves standalone rollback classification with nested capacity', () => {
+    const capacity = {
+      code: 'acp_child_capacity_exhausted' as const,
+      maxConcurrentChildren: 1,
+      committedAcpChildren: 1,
+    };
+    expect(
+      toRpcError(
+        new StandaloneSessionServiceError(
+          'standalone_creation_rolled_back',
+          'id',
+          'rollback',
+          true,
+          capacity,
+        ),
+      ),
+    ).toMatchObject({
+      data: {
+        code: 'standalone_creation_rolled_back',
+        httpStatus: 503,
+        capacity,
+        sessionId: 'id',
+      },
+    });
+  });
+});
 
 describe('toRpcError', () => {
   it('maps sealed maintenance to a JSON-RPC server error', () => {
