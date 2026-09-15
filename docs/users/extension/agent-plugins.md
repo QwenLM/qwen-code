@@ -33,6 +33,7 @@ The root manifest must target the canonical v1 schema:
 | Streamable HTTP MCP servers                | Yes                                      |
 | Legacy HTTP+SSE MCP servers                | No; the entry is skipped                 |
 | Commands, agents, and hooks                | No; these directories are ignored        |
+| Workflows                                  | No; the directory is ignored             |
 | Qwen context, settings, channels, and apps | No                                       |
 | `extensions.*` client namespaces           | No; unimplemented namespaces are ignored |
 

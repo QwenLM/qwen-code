@@ -61,10 +61,11 @@ Injected globals, and nothing else:
   invalid arguments.
 - `pipeline(items, ...stages)` — run each item through the stages
   independently. See **Default to `pipeline()`**.
-- `workflow(nameOrRef, args?)` — run a saved workflow inline. See **Saved
+- `workflow(nameOrRef, args?, { stepId }?)` — run a saved workflow inline. See **Saved
   workflows and workflow()**.
 - `args` — the structured value the caller passed, or `undefined`.
-- `budget` — `budget.total` (`null` = uncapped) and `budget.spent()`.
+- `budget` — `{ total, spent(), remaining() }`. See **Scaling to the token
+  budget**.
 
 Pass THUNKS to `parallel()`, not eager calls: `parallel([() => agent(...)])`,
 not `parallel([agent(...)])`. The eager form is refused outright: a
@@ -83,11 +84,11 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
+`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
 
-- `label` (string) — the name shown in the run views and the failures list.
-  Make it unique per dispatch: a failure line carries only the label and the
-  error, so two failed dispatches that share a label cannot be told apart.
+- `stepId` (string, ≤128 chars) — optional caller node ID; does not affect caching. Also accepted in `workflow()` options.
+- `label` (string) — display name in run views and failures.
+  Make it unique per dispatch to distinguish failures.
 - `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
   would: this dispatch and every dispatch issued after it are attributed to that
   phase. It is not scoped to the one call, so in a fan-out open phases with
@@ -217,9 +218,9 @@ at its index.
   come back `null` — but a value above the clamp is silently cut down to it.
 - Stall retries: 3 attempts per `agent()` call; the stall timeout itself
   (`QWEN_CODE_WORKFLOW_STALL_SECONDS`) is applied as given.
-- Tokens: a per-run output-token cap may be in effect — read `budget.total`
-  (`null` = uncapped) before committing to a large fan-out, because once the
-  cap is reached every further `agent()` call is refused.
+- Tokens: a token target or cap may be in effect — read `budget.total`
+  (`null` = uncapped) before committing to a large fan-out, because once it is
+  reached every further `agent()` call is refused.
 
 ## Default to `pipeline()`
 
@@ -267,25 +268,25 @@ truncation reads as full coverage, which is worse than a smaller honest result.
 
 ## Saved workflows and workflow()
 
-`workflow(nameOrRef, args?)` runs a saved workflow inline under this run's caps
-and nests one level only — a workflow reached through `workflow()` cannot call
-`workflow()` itself, and doing so throws.
+`workflow(nameOrRef, args?, { stepId }?)` shares this run's caps. Calls have
+individual traces grouping their agents. It nests one level only;
+a nested `workflow()` call throws.
 
 It takes one of two forms. `workflow('<name>')` resolves a name against
 `<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
 slash commands) and `~/.qwen/workflows` (user scope, lower precedence when both
-define the same name). `workflow({ scriptPath: '<absolute path>' })` loads a
-script file directly from either of those directories or from the
-generated-scripts root (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the
-per-project runtime dir, not the project tree); a path outside those roots is
-refused. A bare string is always a name: a path passed as a string is rejected
+define the same name); an active extension's workflow is always named
+`'<extension>:<name>'`. `workflow({ scriptPath: '<absolute path>' })` loads a
+script file directly from either of those directories, an active extension's
+workflow file, or the generated-scripts root
+(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project runtime dir,
+not the project tree); any other path is refused. A bare string is always a name: a path passed as a string is rejected
 as an invalid workflow name. At the top level that rejection ends the run;
 inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
 other thunk rejection — with no agent dispatched and nothing in the failures
 list — so null-check a `workflow()` result too.
 
-To create or edit a saved workflow, use the `workflow-creator` skill — it owns
-the file layout, naming rules, and the save round-trip.
+Use the `workflow-creator` skill to create or edit saved workflows.
 
 ## Resume and diagnostics
 
@@ -440,3 +441,16 @@ it needs, handles each `null` in the stage that dispatched the agent, gives
 every verify dispatch its own label, `log()`s every dimension and agent it
 loses, and returns what the verifiers refuted next to what they confirmed — a
 verifier can be wrong too, and nothing is silently omitted.
+
+## Scaling to the token budget
+
+When the user's message sets a turn target with a `+500k`-style directive
+(`+1m`, "use 300k tokens"), `budget.total` is that target and `spent()` then
+counts every output token this turn — the main loop and every agent, not just
+this run. Otherwise `total` is an operator's per-run cap, or `null`. Once
+`spent()` reaches `total`, further `agent()` calls throw; agents already
+running are not stopped by it. Loop with
+`while (budget.total && budget.remaining() > 50_000) { ... }` — guard on
+`budget.total`, since with no target `remaining()` is `Infinity` and the loop
+runs to the 1000-agent cap — or size a fan-out once with
+`const FLEET = budget.total ? Math.floor(budget.total / 100_000) : 5;`.
