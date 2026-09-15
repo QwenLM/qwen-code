@@ -207,6 +207,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
@@ -284,10 +285,11 @@ import {
   startChildHeapProbe,
   type ChildHeapProbe,
 } from './child-heap-probe.js';
+import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
-  buildModelReasoningConfigPreview,
+  buildModelReasoningRoutePreview,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
   getDefaultReasoningConfig,
@@ -295,7 +297,6 @@ import {
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
-  resolvePersistedReasoningConfigState,
   REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
   REASONING_EFFORT_NAMES,
@@ -6425,6 +6426,7 @@ class QwenAgent implements Agent {
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
@@ -6437,6 +6439,7 @@ class QwenAgent implements Agent {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
     delete meta['qwen.goalProposalApproval'];
     if (
       this.privateParentState === 'trusted' &&
@@ -6464,6 +6467,9 @@ class QwenAgent implements Agent {
       suppliedChannelPrompt === true
     ) {
       meta[CHANNEL_PROMPT_META_KEY] = true;
+      if (suppliedChannelOutputMode === 'per_task') {
+        meta[CHANNEL_OUTPUT_MODE_META_KEY] = suppliedChannelOutputMode;
+      }
     }
     // Channel delivery is a daemon-managed side effect (the prompt route
     // injects it from the trusted context); an untrusted direct-ACP caller
@@ -7872,34 +7878,31 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
-        const resolved =
-          !model.isRuntimeModel && !modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? config.getResolvedModelConfig?.(
-                model.authType,
-                model.id,
-                model.registryBaseUrl ?? model.baseUrl,
-              )
-            : undefined;
-        const configOptions =
-          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? undefined
-            : buildModelReasoningConfigPreview(
-                model.id,
-                resolvePersistedReasoningConfigState(
-                  model.id,
-                  settings.merged.model?.reasoningEffort,
-                  resolved?.generationConfig.thinkingMandatory === true,
-                  model.capabilities?.reasoning,
-                ),
-                model.capabilities?.reasoning,
-                resolved
-                  ? {
-                      ...resolved.generationConfig,
-                      model: model.id,
-                      baseUrl: resolved.baseUrl,
-                    }
-                  : undefined,
-              );
+        const resolved = !model.isRuntimeModel
+          ? config.getResolvedModelConfig?.(
+              model.authType,
+              model.id,
+              model.registryBaseUrl,
+            )
+          : undefined;
+        const generation: ContentGeneratorConfig = {
+          ...resolved?.generationConfig,
+          model: model.id,
+          authType: model.authType,
+          baseUrl: resolved?.baseUrl,
+        };
+        const configOptions = model.isRuntimeModel
+          ? undefined
+          : buildModelReasoningRoutePreview(
+              generation,
+              resolveReasoningCapabilities(
+                generation,
+                model.capabilities?.reasoning ??
+                  resolved?.capabilities?.reasoning,
+              ),
+              settings.merged.model?.reasoningEffort,
+              modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+            );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -14064,6 +14067,22 @@ class QwenAgent implements Agent {
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
+            const reasoningError = session
+              .getConfig()
+              .stageReasoningOverrides?.(
+                newMerged.modelProviders,
+                newMerged.providerProtocol ?? {},
+              );
+            if (reasoningError)
+              await session
+                .sendUpdate({
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: reasoningError },
+                  _meta: { qwenDiscreteMessage: true },
+                })
+                .catch((error) =>
+                  debugLogger.warn('Reasoning notice delivery failed', error),
+                );
             if (!session.isIdle()) {
               skipped.push(id);
               return;
@@ -15470,7 +15489,8 @@ class QwenAgent implements Agent {
 
     if (
       activeRuntimeSnapshot ||
-      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+        !modelReasoning?.profile) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,
@@ -15522,6 +15542,13 @@ class QwenAgent implements Agent {
       generation,
       modelReasoning,
     );
+    if (
+      modelReasoning?.profile &&
+      gptOverride?.enabled &&
+      gptOverride.useDefaultEffort
+    ) {
+      return [modeConfigOption, modelConfigOption];
+    }
     const gptEnableOverride =
       generation.reasoning === false
         ? getGptReasoningOverrideState(
@@ -15620,10 +15647,11 @@ class QwenAgent implements Agent {
         config.getAuthType?.(),
         config.getCurrentModelRegistryBaseUrl?.(),
       );
-    if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
-      return undefined;
-    }
-    return getConfiguredModelReasoning(config);
+    const reasoning = getConfiguredModelReasoning(config);
+    return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+      !reasoning?.profile
+      ? undefined
+      : reasoning;
   }
 
   private buildSelectableModelOptions(config: Config) {

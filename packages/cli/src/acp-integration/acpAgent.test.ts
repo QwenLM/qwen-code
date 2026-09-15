@@ -2697,6 +2697,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       _meta: {
         keep: true,
         'qwen.channel.prompt': true,
+        'qwen.channel.outputMode': 'per_task',
         'qwen.goalProposalApproval': true,
         'qwen.daemon.channelDelivery': {
           deliveryId: 'delivery-forged',
@@ -2719,6 +2720,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([true, false])(
+    'accepts per_task channel output mode only for a trusted channel prompt: %s',
+    async (channelPrompt) => {
+      await setupSessionMocks('trusted-output-session');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+        'expected-capability',
+      );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await agent.prompt({
+        sessionId: 'trusted-output-session',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          keep: true,
+          'qwen.channel.prompt': channelPrompt,
+          'qwen.channel.outputMode': 'per_task',
+        },
+      });
+      expect(lastSessionMock?.prompt).toHaveBeenCalledWith(
+        {
+          sessionId: 'trusted-output-session',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: {
+            keep: true,
+            ...(channelPrompt
+              ? {
+                  'qwen.channel.prompt': true,
+                  'qwen.channel.outputMode': 'per_task',
+                }
+              : {}),
+          },
+        },
+        undefined,
+        expect.any(AbortSignal),
+        undefined,
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('closes managed writers before resource shutdown on connection EOF', async () => {
     const innerConfig = await setupSessionMocks('managed-session');
@@ -10675,6 +10717,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('keeps healthy model previews when another live reasoning declaration is invalid, ignoring bootstrap snapshots', async () => {
+    const models = ['healthy', 'broken'].map((id) => ({
+      id,
+      label: id,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: `https://${id}.example/v1`,
+      capabilities: {
+        reasoning:
+          id === 'healthy'
+            ? {
+                profile: 'openai-effort',
+                efforts: ['low', 'medium'],
+                defaultEffort: 'medium',
+              }
+            : { profile: 'invalid-profile' },
+      },
+    }));
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn(() => '/work/status'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+      getModel: vi.fn(() => 'healthy'),
+      getAllConfiguredModels: vi.fn(() => models),
+      getContentGeneratorConfig: vi.fn(() => ({
+        model: 'healthy',
+        authType: AuthType.USE_OPENAI,
+        reasoningSnapshot: [],
+      })),
+      getResolvedModelConfig: vi.fn((_auth: string, id: string) => ({
+        baseUrl: `https://${id}.example/v1`,
+        generationConfig: {},
+      })),
+    } as unknown as Config;
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    try {
+      const status = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        {},
+      );
+      expect(status['errors']).toBeUndefined();
+      expect(status).toMatchObject({
+        providers: [
+          {
+            models: [
+              {
+                baseModelId: 'healthy',
+                configOptions: [{ currentValue: 'medium' }],
+              },
+              { baseModelId: 'broken' },
+            ],
+          },
+        ],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('uses the target provider raw override for cold reasoning preview', async () => {

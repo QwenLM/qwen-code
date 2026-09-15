@@ -32,6 +32,7 @@ import {
   type PromptCacheSharingParameters,
 } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import { determineProvider } from './index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
@@ -2230,7 +2231,12 @@ describe('ContentGenerationPipeline', () => {
         }).modelProviders![0].models[0];
         expect(installed.capabilities?.reasoning).toBeDefined();
 
-        for (const mode of ['enabled', 'disabled', 'side-query'] as const) {
+        for (const [mode, partial] of (
+          ['enabled', 'disabled', 'side-query'] as const
+        ).flatMap((mode) => [
+          [mode, false] as const,
+          ...(effort ? [[mode, true] as const] : []),
+        ])) {
           mockContentGeneratorConfig = {
             ...mockContentGeneratorConfig,
             ...installed.generationConfig,
@@ -2243,7 +2249,14 @@ describe('ContentGenerationPipeline', () => {
           };
           mockCliConfig = {
             ...mockCliConfig,
-            getResolvedModelConfig: vi.fn().mockReturnValue(installed),
+            getResolvedModelConfig: vi.fn().mockReturnValue(
+              partial
+                ? {
+                    ...installed,
+                    capabilities: { reasoning: { defaultEffort: effort } },
+                  }
+                : installed,
+            ),
             getContentGeneratorConfig: () => mockContentGeneratorConfig,
             getCliVersion: () => 'test',
           } as unknown as Config;
@@ -2288,6 +2301,8 @@ describe('ContentGenerationPipeline', () => {
             mockClient.chat.completions.create as Mock
           ).mock.calls.at(-1)![0];
           expect(wire.reasoning).toBeUndefined();
+          if (partial && mandatory && mode === 'side-query')
+            expect(wire.reasoning_effort).toBeUndefined();
           if (mode === 'enabled') {
             expect(wire.reasoning_effort).toBe(effort);
             if (
@@ -2364,6 +2379,264 @@ describe('ContentGenerationPipeline', () => {
       );
       return (mockClient.chat.completions.create as Mock).mock.calls.at(-1)![0];
     }
+
+    it.each([
+      [
+        'openai-effort',
+        { reasoning_effort: 'medium' },
+        { reasoning_effort: 'none' },
+      ],
+      [
+        'openai-reasoning',
+        { reasoning: { effort: 'medium' } },
+        { reasoning: { enabled: false } },
+      ],
+      [
+        'deepseek-openai',
+        { thinking: { type: 'enabled' }, reasoning_effort: 'medium' },
+        { thinking: { type: 'disabled' } },
+      ],
+      [
+        'dashscope-effort',
+        { reasoning_effort: 'medium' },
+        { reasoning_effort: 'none' },
+      ],
+      [
+        'dashscope-thinking',
+        { enable_thinking: true },
+        { enable_thinking: false },
+      ],
+      [
+        'qwen-chat-template',
+        { chat_template_kwargs: { enable_thinking: true } },
+        { chat_template_kwargs: { enable_thinking: false } },
+      ],
+    ])(
+      'uses declared %s defaults and disable wire for an unknown alias',
+      async (profile, enabled, disabled) => {
+        (mockProvider.buildRequest as Mock).mockImplementation((request) =>
+          new DefaultOpenAICompatibleProvider(
+            mockContentGeneratorConfig,
+            mockCliConfig,
+          ).buildRequest(request, 'test'),
+        );
+        const capability = {
+          profile,
+          ...(profile === 'dashscope-thinking' ||
+          profile === 'qwen-chat-template'
+            ? {}
+            : { efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }),
+        };
+        for (const [reasoning, expected] of [
+          [undefined, enabled],
+          [false, disabled],
+        ] as const) {
+          const wire = await executeWithCapability(
+            capability,
+            { reasoning },
+            'company-alias',
+          );
+          const actual = Object.fromEntries(
+            Object.entries(wire).filter(([key]) =>
+              [
+                'reasoning',
+                'reasoning_effort',
+                'thinking',
+                'enable_thinking',
+                'chat_template_kwargs',
+              ].includes(key),
+            ),
+          );
+          expect(actual).toEqual(expected);
+        }
+      },
+    );
+
+    it('preserves template siblings and clears incompatible budget on declared off requests', async () => {
+      (mockProvider.buildRequest as Mock).mockImplementation((request) =>
+        new DefaultOpenAICompatibleProvider(
+          mockContentGeneratorConfig,
+          mockCliConfig,
+        ).buildRequest(request, 'test'),
+      );
+      const template = await executeWithCapability(
+        { profile: 'qwen-chat-template' },
+        {
+          reasoning: false,
+          extra_body: {
+            enable_thinking: true,
+            chat_template_kwargs: { foo: 1 },
+          },
+        },
+        'company-alias',
+      );
+      expect(template['chat_template_kwargs']).toEqual({
+        foo: 1,
+        enable_thinking: false,
+      });
+      expect(template['enable_thinking']).toBeUndefined();
+      const effort = await executeWithCapability(
+        { defaultEffort: 'medium' },
+        {
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          reasoning: false,
+          extra_body: { thinking_budget: 4096, enable_thinking: true },
+        },
+        'qwen3.8-max',
+      );
+      expect(effort['reasoning_effort']).toBe('none');
+      expect(effort['thinking_budget']).toBeUndefined();
+      expect(effort['enable_thinking']).toBeUndefined();
+    });
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'keeps native DeepSeek %s reasoning projection with a profile',
+      async (source) => {
+        (mockProvider.buildRequest as Mock).mockImplementation((request) =>
+          new DeepSeekOpenAICompatibleProvider(
+            mockContentGeneratorConfig,
+            mockCliConfig,
+          ).buildRequest(request, 'test'),
+        );
+        const wire = await executeWithCapability(
+          {
+            profile: 'deepseek-openai',
+            efforts: ['high', 'max'],
+            defaultEffort: 'high',
+          },
+          {
+            baseUrl: 'https://api.deepseek.com/v1',
+            [source]: { reasoning: { effort: 'max' } },
+          },
+        );
+        expect(wire['reasoning_effort']).toBe('max');
+        expect(wire['reasoning']).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'openai-effort', 'reasoning_content', ''],
+      [
+        'https://api.cerebras.ai/v1',
+        'deepseek-openai',
+        'reasoning_content',
+        undefined,
+      ],
+      [
+        'https://api.mistral.ai/v1',
+        'deepseek-openai',
+        'reasoning_content',
+        undefined,
+      ],
+      [
+        'https://api.fireworks.ai/inference/v1',
+        'qwen-chat-template',
+        'reasoning',
+        undefined,
+      ],
+      [
+        'https://api.xiaomimimo.com/v1',
+        'openai-effort',
+        'reasoning_content',
+        '',
+      ],
+    ] as const)(
+      'preserves native history constraints on %s with %s',
+      (baseUrl, profile, field, expected) => {
+        const config = {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          model: 'alias',
+          baseUrl,
+        };
+        const cli = {
+          ...mockCliConfig,
+          getResolvedModelConfig: vi.fn().mockReturnValue({
+            capabilities: {
+              reasoning: {
+                profile,
+                ...(profile === 'qwen-chat-template'
+                  ? {}
+                  : {
+                      efforts: ['low', 'medium', 'high'],
+                      defaultEffort: 'medium',
+                    }),
+              },
+            },
+          }),
+        };
+        const provider = determineProvider(config, cli as unknown as Config);
+        const result = provider.buildRequest(
+          {
+            model: 'alias',
+            messages: [
+              {
+                role: 'assistant',
+                content: 'answer',
+                ...(expected === undefined
+                  ? { reasoning_content: 'trace' }
+                  : {}),
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionCreateParams,
+          'test',
+        );
+        if (expected === undefined)
+          expect(result.messages[0]).not.toHaveProperty(field);
+        else expect(result.messages[0]).toHaveProperty(field, expected);
+      },
+    );
+
+    it('keeps explicit sampling reasoning above a configured default', async () => {
+      const capability = {
+        profile: 'openai-effort',
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+      };
+      const wire = await executeWithCapability(
+        capability,
+        { samplingParams: { reasoning: { effort: 'minimal' } } },
+        'company-alias',
+      );
+      expect(wire['reasoning']).toEqual({ effort: 'minimal' });
+      const budget = await executeWithCapability(
+        capability,
+        {
+          samplingParams: undefined,
+          reasoning: { effort: 'high', budget_tokens: 8192 },
+        },
+        'company-alias',
+      );
+      expect(budget).toMatchObject({
+        reasoning_effort: 'high',
+        reasoning: { budget_tokens: 8192 },
+      });
+    });
+
+    it.each([
+      ['qwen3.8-max', 'https://dashscope.aliyuncs.com/compatible-mode/v1'],
+      ['openai/gpt-5.4', 'https://openrouter.ai/api/v1'],
+    ])(
+      'resolves %s default before shaping its request',
+      async (model, baseUrl) => {
+        const wire = await executeWithCapability(
+          { defaultEffort: 'medium' },
+          {
+            baseUrl,
+            extra_body: model.startsWith('openai/')
+              ? undefined
+              : { reasoning_effort: null },
+          },
+          model,
+        );
+        if (model.startsWith('openai/'))
+          expect(wire['reasoning']).toEqual({ effort: 'medium' });
+        else {
+          expect(wire['reasoning_effort']).toBe('medium');
+          expect(wire['reasoning']).toBeUndefined();
+        }
+      },
+    );
 
     it.each([
       ['enable_thinking', false, undefined, undefined],
@@ -6360,7 +6633,7 @@ describe('ContentGenerationPipeline', () => {
       expect(body.response_format).toEqual({ type: 'json_object' });
     });
 
-    it('falls back to json_object when required is partial (goalJudge shape)', () => {
+    it('falls back to json_object when required is partial', () => {
       const body = pipeline['buildResponseFormat']({
         model: 'test-model',
         contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],

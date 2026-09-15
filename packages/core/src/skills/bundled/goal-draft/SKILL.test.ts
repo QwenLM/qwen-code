@@ -96,7 +96,7 @@ describe('bundled goal-draft skill', () => {
   it('explains the verifier rules the objective format is derived from', () => {
     const { body } = loadGoalDraftSkill();
 
-    // These mirror goal-verifier.ts / goalJudge.ts: transcript-only
+    // These mirror goal-verifier.ts: transcript-only
     // evidence, delivered_output cannot prove external state, and user
     // actions need user_input evidence.
     expect(body).toContain('sees ONLY transcript evidence');
