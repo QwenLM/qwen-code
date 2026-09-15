@@ -162,6 +162,7 @@ import {
   type ActiveWorkHoldCategory,
   type ActiveWorkSnapshotV1,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
@@ -10697,6 +10698,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       ? { ...copy._meta }
                       : {};
                   const promptDisplayText = channelDisplayText;
+                  const channelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -10724,6 +10726,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // authorization and re-arms it through the trusted
                   // `channelPrompt` context flag below.
                   delete meta[CHANNEL_PROMPT_META_KEY];
+                  delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
                   delete meta['qwen.goalProposalApproval'];
                   if (
                     originatorClientId !== undefined &&
@@ -10763,6 +10766,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }
                   if (context?.channelPrompt === true) {
                     meta[CHANNEL_PROMPT_META_KEY] = true;
+                    if (channelOutputMode === 'per_task') {
+                      meta[CHANNEL_OUTPUT_MODE_META_KEY] = channelOutputMode;
+                    }
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
