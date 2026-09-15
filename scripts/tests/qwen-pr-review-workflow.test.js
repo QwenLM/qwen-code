@@ -4155,7 +4155,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   });
 
   it.skipIf(!hasJq)(
-    'posts the queue-expiry body when no runner ever started review-pr',
+    'posts a cause-neutral body when no runner ever started review-pr',
     () => {
       // The review pool is closed for 12 of every 24 hours, so a review-pr job
       // queued into the dark window can expire without a runner ever picking it
@@ -4186,6 +4186,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         expect(r.status).toBe(0);
         expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
         expect(r.posted).toContain('never started');
+        expect(r.posted).not.toContain('24-hour queue limit');
+        expect(r.posted).toContain('cannot determine the cause');
+        expect(r.summary).not.toContain('queue expired');
         expect(r.posted).toContain('actions/runs/12345)');
         expect(r.posted).toContain('@qwen-code /review');
         expect(r.posted).not.toContain('did not complete successfully');

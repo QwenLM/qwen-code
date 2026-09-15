@@ -138,8 +138,6 @@ import {
   evaluatePlanModeShellPolicy,
   validatePlanModeShellApproval,
   validatePlanModeShellContext,
-  abortGoalForStopHookCap,
-  getStopHookContinuationReason,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   decorateAutoModeFallbackConfirmation,
@@ -2875,9 +2873,9 @@ export class Session implements SessionContext {
   /**
    * Stops an autonomous Goal loop when the Stop-hook blocking cap fires.
    *
-   * `abortGoalForStopHookCap` only knows about the legacy `activeGoalStore`,
-   * which no longer has a writer for daemon sessions, so ACP needs the
-   * canonical runtime acted on directly.
+   * Pauses the canonical runtime, the way the TUI's interrupted-exit path
+   * does: left active, `finishTurn` would mint the next continuation and a
+   * Stop hook that always blocks would loop the session forever.
    */
   async #pauseGoalForStopHookCap(): Promise<void> {
     try {
@@ -7193,7 +7191,7 @@ export class Session implements SessionContext {
           stopOutput?.isBlockingDecision() ||
           stopOutput?.shouldStopExecution()
         ) {
-          externalReason = getStopHookContinuationReason(stopOutput);
+          externalReason = stopOutput.getEffectiveReason();
           stopHookIterationCount++;
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
@@ -7229,20 +7227,7 @@ export class Session implements SessionContext {
           'Stop',
           stopHookBlockingCap,
         );
-        if (
-          !abortGoalForStopHookCap(
-            this.config,
-            this.config.getSessionId(),
-            warning,
-          )
-        ) {
-          // The legacy store is empty for daemon sessions, so the cap above
-          // stops nothing on its own: without this the goal stays active,
-          // `finishTurn` mints the next continuation, and the blocked Stop
-          // hook loops the session forever. Pause the canonical runtime the
-          // way the TUI's interrupted-exit path does.
-          await this.#pauseGoalForStopHookCap();
-        }
+        await this.#pauseGoalForStopHookCap();
         this.todoStopGuard.suspend();
         blockGoalProposalSettlement();
         await this.messageEmitter.emitAgentMessage(warning);
