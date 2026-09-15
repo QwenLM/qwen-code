@@ -515,3 +515,98 @@ test('creates and deletes a typed Channel configuration', async ({
       }),
     ]);
 });
+
+test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke', async ({
+  page,
+}, testInfo) => {
+  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
+    sessions: [
+      {
+        workspaceCwd,
+        sessionId: 'qwen-live-task',
+        clientCount: 1,
+        hasActivePrompt: false,
+        displayName: 'Qwen Live task fixture',
+        sourceType: 'qwen-live',
+      },
+      {
+        workspaceCwd,
+        sessionId: 'ordinary-task',
+        displayName: 'Ordinary task fixture',
+        sourceType: 'default',
+      },
+      {
+        workspaceCwd,
+        sessionId: 'channel-task',
+        displayName: 'Channel task fixture',
+        sourceType: 'channel',
+      },
+    ],
+  });
+  scenario.capabilities.features.push(
+    'session_archive',
+    'workspace_session_metadata',
+  );
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  await page.goto('/');
+  await expect(
+    page.getByRole('tab', { name: 'Tasks', exact: true }),
+  ).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.getByText('Qwen Live task fixture', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Channel task fixture', { exact: true }),
+  ).toHaveCount(0);
+
+  const liveRow = page
+    .locator('[data-web-shell-session-title]', {
+      hasText: 'Qwen Live task fixture',
+    })
+    .locator('..');
+  await liveRow.hover();
+  await expect(
+    liveRow.getByRole('button', { name: 'Delete', exact: true }),
+  ).toHaveCount(0);
+  await liveRow.getByRole('button', { name: 'More actions' }).click();
+  await expect(
+    page.getByRole('menuitem', { name: 'Delete', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('menuitem', { name: 'Archive', exact: true }),
+  ).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
+  const ordinaryRow = page
+    .locator('[data-web-shell-session-title]', {
+      hasText: 'Ordinary task fixture',
+    })
+    .locator('..');
+  await ordinaryRow.hover();
+  await ordinaryRow.getByRole('button', { name: 'More actions' }).click();
+  await expect(
+    page.getByRole('menuitem', { name: 'Delete', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('menuitem', { name: 'Archive', exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('tab', { name: 'Channels', exact: true }).click();
+  await expect(
+    page.getByText('Channel task fixture', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Qwen Live task fixture', { exact: true }),
+  ).toHaveCount(0);
+
+  await page.getByRole('tab', { name: 'Tasks', exact: true }).click();
+  await expect(
+    page.getByText('Qwen Live task fixture', { exact: true }),
+  ).toBeVisible();
+});
