@@ -578,6 +578,10 @@ export default {
     'Это расширение установит следующие навыки:',
   'This extension will install the following subagents:':
     'Это расширение установит следующие подагенты:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Это расширение установит следующие рабочие процессы (скрипты JavaScript, которые могут запускать подагентов):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Эти скрипты рабочих процессов изменились по сравнению с установленной версией: {{names}}.',
   'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',
@@ -642,6 +646,7 @@ export default {
   'Context files:': 'Контекстные файлы:',
   'Skills:': 'Навыки:',
   'Agents:': 'Агенты:',
+  'Workflows:': 'Рабочие процессы:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'Не удалось установить связанное расширение.',
@@ -1485,6 +1490,11 @@ export default {
   'No tasks currently running': 'Нет запущенных задач',
   'No entry to show.': 'Нет записи для отображения.',
   'needs approval': 'требует подтверждения',
+  'Large workflow': 'Большой workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Большой workflow: запланировано агентов: {{agents}} (порог предупреждения {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Большой workflow: ожидается ~{{tokens}} выходных токенов (порог предупреждения {{cap}}).',
   'rejected — edit config to re-approve':
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
@@ -2230,6 +2240,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
