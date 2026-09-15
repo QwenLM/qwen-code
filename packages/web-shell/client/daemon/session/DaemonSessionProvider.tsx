@@ -68,7 +68,12 @@ import {
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
-import { extractHttpStatus, isRecord } from './httpErrors.js';
+import {
+  extractHttpStatus,
+  isRecord,
+  isAcpChildCapacityError,
+} from './httpErrors.js';
+import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
@@ -3915,8 +3920,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // events the SSE client already yielded (lastSeenEventId has advanced
           // past them).
           flushTranscriptSync();
-          const message =
-            error instanceof Error ? error.message : String(error);
+          const capacityRejected = isAcpChildCapacityError(error);
+          const message = capacityRejected
+            ? getTranslator('en')('daemon.capacity.exhausted')
+            : error instanceof Error
+              ? error.message
+              : String(error);
           const errorStatus = extractHttpStatus(error);
           if (
             activeSessionContextRef.current?.kind === 'standalone' &&
@@ -3982,6 +3991,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             (pendingLoad === undefined ||
               pendingLoad.sessionId === restoreSessionId);
           if (
+            !capacityRejected &&
             autoReconnect &&
             loadingRequestedSession &&
             ((restoreRetryDelayMs !== undefined && pendingLoadMatches) ||
@@ -4048,6 +4058,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad.reject(error);
           }
           if (
+            capacityRejected ||
             (session === undefined &&
               activeSessionContextRef.current?.kind === 'standalone' &&
               isSessionWriterBlockedCode(getDaemonErrorCode(error))) ||

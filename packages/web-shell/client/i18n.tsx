@@ -16,6 +16,8 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'daemon.capacity.exhausted':
+    'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -3696,6 +3698,8 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'daemon.capacity.exhausted':
+    '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
