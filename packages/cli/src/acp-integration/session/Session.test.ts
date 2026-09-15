@@ -1853,6 +1853,22 @@ describe('Session', () => {
     });
   });
 
+  const makeWorkflowApproval = (approvalId: string): core.WorkflowApproval => ({
+    approvalId,
+    subagentId: `agent-${approvalId}`,
+    callId: `call-${approvalId}`,
+    name: 'run_shell_command',
+    description: 'Run command',
+    confirmationDetails: {
+      type: 'exec',
+      title: 'Run command',
+      command: 'echo safe',
+      rootCommand: 'echo',
+      hideAlwaysAllow: true,
+    },
+    at: 1,
+  });
+
   it('bridges workflow approvals through ACP permission requests', async () => {
     mockToolRegistry.getTool.mockReturnValue({
       displayName: 'Shell',
@@ -1951,31 +1967,15 @@ describe('Session', () => {
       );
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
       .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = callback(
       { runId: 'wf_concurrent' } as core.WorkflowTask,
-      makeApproval('wfap_first'),
+      makeWorkflowApproval('wfap_first'),
       { command: 'echo first' },
       new AbortController().signal,
     );
     const second = callback(
       { runId: 'wf_concurrent' } as core.WorkflowTask,
-      makeApproval('wfap_second'),
+      makeWorkflowApproval('wfap_second'),
       { command: 'echo second' },
       new AbortController().signal,
     );
@@ -2055,31 +2055,15 @@ describe('Session', () => {
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
     const secondCallback = secondWorkflowRunRegistry.setApprovalRequestCallback
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = firstCallback(
       { runId: 'wf_first' } as core.WorkflowTask,
-      makeApproval('wfap_first'),
+      makeWorkflowApproval('wfap_first'),
       { command: 'echo first' },
       new AbortController().signal,
     );
     const second = secondCallback(
       { runId: 'wf_second' } as core.WorkflowTask,
-      makeApproval('wfap_second'),
+      makeWorkflowApproval('wfap_second'),
       { command: 'echo second' },
       new AbortController().signal,
     );
@@ -2102,6 +2086,34 @@ describe('Session', () => {
     settleFirst?.({ outcome: { outcome: 'cancelled' } });
     settleSecond?.({ outcome: { outcome: 'cancelled' } });
     await Promise.allSettled([first, second]);
+
+    // The send half above only shows where the request went. Each session must
+    // also settle its own approval against its own registry.
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_first',
+      'wfap_first',
+      core.ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+    expect(
+      secondWorkflowRunRegistry.resolvePendingApproval,
+    ).toHaveBeenCalledWith(
+      'wf_second',
+      'wfap_second',
+      core.ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+    expect(
+      mockWorkflowRunRegistry.resolvePendingApproval.mock.calls.map(
+        ([runId]) => runId,
+      ),
+    ).toEqual(['wf_first']);
+    expect(
+      secondWorkflowRunRegistry.resolvePendingApproval.mock.calls.map(
+        ([runId]) => runId,
+      ),
+    ).toEqual(['wf_second']);
+
     secondSession.dispose();
   });
 
@@ -2125,25 +2137,9 @@ describe('Session', () => {
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
       .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
     const firstAbort = new AbortController();
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = callback(
       { runId: 'wf_abort_queue' } as core.WorkflowTask,
-      makeApproval('wfap_aborted'),
+      makeWorkflowApproval('wfap_aborted'),
       { command: 'echo first' },
       firstAbort.signal,
     );
@@ -2152,7 +2148,7 @@ describe('Session', () => {
     });
     const second = callback(
       { runId: 'wf_abort_queue' } as core.WorkflowTask,
-      makeApproval('wfap_after_abort'),
+      makeWorkflowApproval('wfap_after_abort'),
       { command: 'echo second' },
       new AbortController().signal,
     );
@@ -2188,25 +2184,9 @@ describe('Session', () => {
       });
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
       .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = callback(
       { runId: 'wf_queued_abort' } as core.WorkflowTask,
-      makeApproval('wfap_head'),
+      makeWorkflowApproval('wfap_head'),
       { command: 'echo first' },
       new AbortController().signal,
     );
@@ -2216,7 +2196,7 @@ describe('Session', () => {
     const queuedAbort = new AbortController();
     const queued = callback(
       { runId: 'wf_queued_abort' } as core.WorkflowTask,
-      makeApproval('wfap_queued'),
+      makeWorkflowApproval('wfap_queued'),
       { command: 'echo second' },
       queuedAbort.signal,
     );
@@ -2239,7 +2219,7 @@ describe('Session', () => {
     // Dropping it must not wedge the session queue either.
     await callback(
       { runId: 'wf_queued_abort' } as core.WorkflowTask,
-      makeApproval('wfap_after'),
+      makeWorkflowApproval('wfap_after'),
       { command: 'echo third' },
       new AbortController().signal,
     );
