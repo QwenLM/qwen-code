@@ -222,6 +222,14 @@ describe('bundled workflow-authoring skill', () => {
     ['a `started` line when an agent is dispatched'],
     ['Only `result` lines feed the resume cache'],
     ['means the run was interrupted'],
+    // budget: where total comes from, what spent() counts, what the gate
+    // does not stop, and the two ways to size work to it.
+    ['a `+500k`-style directive'],
+    ['`spent()` then counts every output token this turn'],
+    ['agents already running are not stopped by it'],
+    ['guard on `budget.total`'],
+    ['budget.remaining() > 50_000'],
+    ['Math.floor(budget.total / 100_000)'],
     // Saving is a different skill.
     ['`workflow-creator` skill'],
   ])('states the script contract: %s', (anchor) => {

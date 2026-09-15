@@ -81,8 +81,16 @@ export class WorkflowAgentCapExceededError extends Error {
   override readonly name = 'WorkflowAgentCapExceededError';
 
   constructor(maxAgents: number) {
+    // The cap is rarely reached by a fan-out that meant to be that large; a
+    // loop gated on `budget.remaining()` with no token target set is the
+    // usual cause, because `remaining()` is then Infinity and nothing else
+    // ends the loop.
     super(
-      `Workflow exceeded the maximum of ${maxAgents} agent() calls per run.`,
+      `Workflow exceeded the maximum of ${maxAgents} agent() calls per run. ` +
+        'This usually means a loop using budget.remaining() never terminates ' +
+        'because no token budget was set — remaining() returns Infinity when ' +
+        'budget.total is null. Add a hard iteration cap to the loop, or pass ' +
+        'a token budget.',
     );
   }
 }
