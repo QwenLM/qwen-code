@@ -11,6 +11,8 @@ import express, {
 } from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import type { ExtensionStoreSnapshot } from '@qwen-code/qwen-code-core';
 import type { BridgeWorkspaceRuntimeLifecycleSnapshot } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import type {
@@ -22,6 +24,13 @@ import {
   registerWorkspaceRuntimeRoutes,
 } from './workspace-runtime.js';
 import { WorkspaceRuntimeStillStartingError } from '../workspace-runtime-coordinator.js';
+
+const EMPTY_STORE_SNAPSHOT: ExtensionStoreSnapshot = {
+  version: 2,
+  generation: 0,
+  legacyProjectionHash: 'empty',
+  extensions: {},
+};
 
 function createRuntime(workspaceCwd = '/workspace') {
   let snapshot: BridgeWorkspaceRuntimeLifecycleSnapshot = {
@@ -38,6 +47,22 @@ function createRuntime(workspaceCwd = '/workspace') {
       activeWork: false,
     };
   });
+  const invokeWorkspaceCommand = vi.fn(
+    async (method: string): Promise<unknown> => {
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile ||
+        method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh
+      ) {
+        return {
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+          configsRefreshed: 1,
+          configsFailed: 0,
+        };
+      }
+      throw new Error(`unexpected workspace command: ${method}`);
+    },
+  );
   return {
     workspaceCwd,
     workspaceId: `ws-${workspaceCwd}`,
@@ -45,8 +70,37 @@ function createRuntime(workspaceCwd = '/workspace') {
     bridge: {
       sessionCount: 0,
       preheat,
+      invokeWorkspaceCommand,
+      initializeWorkspaceMcp: vi.fn(async () => ({ accepted: true })),
+      reloadWorkspaceMcp: vi.fn(async () => ({ accepted: true })),
       getWorkspaceRuntimeLifecycleSnapshot: () => snapshot,
       publishWorkspaceEvent: vi.fn(),
+    },
+    workspaceService: {
+      getWorkspaceSkillsRuntimeStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        runtimeEpoch: snapshot.runtimeEpoch,
+        skills: [],
+      })),
+      getWorkspaceExtensionsStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        runtimeEpoch: snapshot.runtimeEpoch,
+        extensions: [],
+      })),
+      getWorkspaceMcpStatus: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        runtimeEpoch: snapshot.runtimeEpoch,
+        source: 'live',
+        discoveryState: 'completed',
+        servers: [],
+      })),
+      invalidateWorkspaceSkillsStatus: vi.fn(),
     },
   } as unknown as WorkspaceRuntime;
 }
@@ -56,6 +110,7 @@ function createApp(
   options: {
     denyStrictMutations?: boolean;
     runtimeState?: 'active' | 'transitioning';
+    readExtensionStoreSnapshot?: () => Promise<ExtensionStoreSnapshot>;
   } = {},
 ) {
   const app = express();
@@ -80,6 +135,8 @@ function createApp(
       },
     safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
     sendBridgeError,
+    readExtensionStoreSnapshot:
+      options.readExtensionStoreSnapshot ?? (async () => EMPTY_STORE_SNAPSHOT),
   });
   return app;
 }
@@ -101,6 +158,37 @@ describe('workspace runtime routes', () => {
     expect(runtime.bridge.preheat).toHaveBeenCalledWith({
       keepAliveMs: 600_000,
     });
+  });
+
+  it('observes the durable extension store generation before the first ensure certifies', async () => {
+    const runtime = createRuntime();
+    const app = createApp(runtime, {
+      readExtensionStoreSnapshot: async () => ({
+        version: 2,
+        generation: 7,
+        legacyProjectionHash: 'store-hash-7',
+        extensions: {},
+      }),
+    });
+
+    const response = await request(app).post('/workspace/runtime/ensure');
+
+    expect(response.status).toBe(200);
+    // The coordinator is in-memory only: without observing the durable
+    // store, the first ensure would certify its zero generation even though
+    // the store sits at generation 7.
+    expect(response.body.capabilities?.extensions).toMatchObject({
+      state: 'ready',
+      desiredGeneration: 7,
+      appliedGeneration: 7,
+    });
+    const reconcileCalls = vi
+      .mocked(runtime.bridge.invokeWorkspaceCommand)
+      .mock.calls.filter(
+        (call) =>
+          call[0] === SERVE_CONTROL_EXT_METHODS.workspaceExtensionsReconcile,
+      );
+    expect(reconcileCalls).toHaveLength(1);
   });
 
   it('rejects parameters on the unified ensure route', async () => {

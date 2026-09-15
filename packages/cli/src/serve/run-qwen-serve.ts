@@ -2309,6 +2309,8 @@ async function loadServeRuntimeModules() {
       workspaceRegistryModule.createWorkspaceGenerationGuard,
     getWorkspaceRuntimeCoordinatorIfSupported:
       workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
+    observeDurableExtensionStoreGeneration:
+      workspaceRuntimeCoordinatorModule.observeDurableExtensionStoreGeneration,
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
   };
 }
@@ -4462,6 +4464,9 @@ async function runQwenServeImpl(
   let getWorkspaceRuntimeCoordinatorIfSupported:
     | (typeof import('./workspace-runtime-coordinator.js'))['getWorkspaceRuntimeCoordinatorIfSupported']
     | undefined;
+  let observeDurableExtensionStoreGeneration:
+    | (typeof import('./workspace-runtime-coordinator.js'))['observeDurableExtensionStoreGeneration']
+    | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
   let managedProcessRegistry:
     | {
@@ -4852,6 +4857,8 @@ async function runQwenServeImpl(
       ]);
     getWorkspaceRuntimeCoordinatorIfSupported =
       runtime.getWorkspaceRuntimeCoordinatorIfSupported;
+    observeDurableExtensionStoreGeneration =
+      runtime.observeDurableExtensionStoreGeneration;
     cliVersion = resolvedCliVersion;
     settingsRuntime.environment.preResolveHomeEnvOverrides();
     const bootTrustSnapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
@@ -9296,8 +9303,14 @@ async function runQwenServeImpl(
           );
           return;
         }
-        void coordinator
-          .ensure({ keepAliveMs: ENSURE_KEEP_ALIVE_MS })
+        // The coordinator is in-memory only: observe the durable Extension
+        // Store first so the boot ensure cannot certify its zero generation
+        // while the store sits at a later one.
+        void (
+          observeDurableExtensionStoreGeneration?.(coordinator) ??
+          Promise.resolve()
+        )
+          .then(() => coordinator.ensure({ keepAliveMs: ENSURE_KEEP_ALIVE_MS }))
           .catch((err) => {
             if (shuttingDown || runtimeStartupError !== undefined) {
               return;

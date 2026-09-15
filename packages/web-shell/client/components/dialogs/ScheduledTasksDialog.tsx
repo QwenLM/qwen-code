@@ -24,6 +24,7 @@ import {
   Trash2Icon,
 } from 'lucide-react';
 import {
+  useOptionalWorkspace,
   useWorkspaceActions,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
@@ -560,6 +561,7 @@ export function ScheduledTasksDialog({
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
+  const workspace = useOptionalWorkspace();
   const actions = useWorkspaceActions();
   const portalRoot = useWebShellPortalRoot();
 
@@ -967,7 +969,61 @@ export function ScheduledTasksDialog({
       try {
         let items: PromptReferenceItem[];
         if (kind === 'extension') {
-          const status = await actions.loadExtensionsStatus();
+          let status;
+          // The qualified runtime route is trust-gated per target; an
+          // untrusted primary keeps the trust-free legacy loader. Untrusted
+          // secondaries are never offered as a form target.
+          if (
+            workspace?.capabilities?.features.includes(
+              'workspace_extension_mentions',
+            ) === true &&
+            !(formWorkspace?.primary === true && !formWorkspace.trusted)
+          ) {
+            // undefined = the primary's trust-free unqualified route; null =
+            // the form still names a workspace that left the operable list
+            // (e.g. its trust was revoked). The two must not be conflated:
+            // an unresolvable secondary must never read the primary's
+            // catalog.
+            const client =
+              formWorkspace === undefined && formWorkspaceId !== undefined
+                ? null
+                : formWorkspace?.primary === false
+                  ? workspace.client.workspaceByCwd(formWorkspace.cwd)
+                  : undefined;
+            if (client === null) {
+              throw new Error('The selected workspace is no longer available.');
+            }
+            const coordinator = client
+              ? await client.ensureRuntime()
+              : await workspace.client.ensureWorkspaceRuntime();
+            const capability = coordinator.capabilities?.extensions;
+            if (
+              capability &&
+              (capability.state !== 'ready' ||
+                capability.runtimeEpoch !== coordinator.runtimeEpoch)
+            ) {
+              throw new Error(
+                capability.error?.message ??
+                  'Extension runtime catalog is not initialized.',
+              );
+            }
+            status = await (
+              client ?? workspace.client
+            ).workspaceRuntimeExtensions();
+            if (
+              status.initialized === false ||
+              (status.errors?.length ?? 0) > 0 ||
+              (coordinator.runtimeEpoch !== undefined &&
+                status.runtimeEpoch !== coordinator.runtimeEpoch)
+            ) {
+              throw new Error(
+                status.errors?.[0]?.error ??
+                  'Extension runtime catalog is not initialized.',
+              );
+            }
+          } else {
+            status = await actions.loadExtensionsStatus();
+          }
           items = (status.extensions ?? [])
             .filter((extension) => extension.isActive)
             .map((extension) => ({
@@ -1016,9 +1072,12 @@ export function ScheduledTasksDialog({
     },
     [
       actions,
+      formWorkspace,
+      formWorkspaceId,
       referenceKind,
       resetReferenceState,
       updateReferencePickerPosition,
+      workspace,
     ],
   );
 
@@ -1476,6 +1535,16 @@ export function ScheduledTasksDialog({
                     setModelServiceId('');
                     setGroupChoice('');
                     setNewGroupName('');
+                    setPrompt((current) =>
+                      current.replace(
+                        PROMPT_REFERENCE_TOKEN,
+                        (matched, prefix: string, token: string) =>
+                          token.startsWith('@ext:') ? prefix : matched,
+                      ),
+                    );
+                    // Reference candidates are scoped to the form's workspace;
+                    // an open picker still shows the previous workspace's list.
+                    resetReferenceState();
                   }}
                 >
                   {operableWorkspaces.map((ws) => (

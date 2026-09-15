@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import type { ExtensionStoreSnapshot } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -15,13 +16,18 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
+import {
+  getWorkspaceRuntimeCoordinatorIfSupported,
+  observeDurableExtensionStoreGeneration,
+} from '../workspace-runtime-coordinator.js';
 
 interface RegisterWorkspaceRuntimeRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   sendBridgeError: SendBridgeError;
+  /** Test seam; production reads the real Extension Store. */
+  readExtensionStoreSnapshot?: () => Promise<ExtensionStoreSnapshot>;
 }
 
 type ResolveRuntime = (req: Request, res: Response) => WorkspaceRuntime | null;
@@ -42,7 +48,7 @@ function registerFor(
   resolveRuntime: ResolveRuntime,
   deps: Pick<
     RegisterWorkspaceRuntimeRoutesDeps,
-    'mutate' | 'safeBody' | 'sendBridgeError'
+    'mutate' | 'safeBody' | 'sendBridgeError' | 'readExtensionStoreSnapshot'
   >,
 ): void {
   const { mutate, safeBody, sendBridgeError } = deps;
@@ -61,6 +67,14 @@ function registerFor(
       return;
     }
     try {
+      // ensure() certifies the coordinator's observed desired generation,
+      // and the coordinator is in-memory only: observe the durable store
+      // first so the first ensure on a fresh coordinator never certifies
+      // its zero generation while the store sits at N.
+      await observeDurableExtensionStoreGeneration(
+        coordinator,
+        deps.readExtensionStoreSnapshot,
+      );
       res.status(200).json(await coordinator.ensure());
     } catch (error) {
       sendBridgeError(res, error, { route });

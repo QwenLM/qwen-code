@@ -385,6 +385,10 @@ export function AtMentionPanel({
             <div className={styles.atEmpty} role="status" aria-live="polite">
               {t('common.loading')}
             </div>
+          ) : menu.error && rows.length === 0 ? (
+            <div className={styles.atEmpty} role="alert">
+              {menu.error}
+            </div>
           ) : rows.length === 0 ? (
             <div className={styles.atEmpty} role="status" aria-live="polite">
               {t('common.noResults')}

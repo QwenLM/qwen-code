@@ -15,6 +15,7 @@ import {
   ExtensionConflictError,
   ExtensionStore,
   ExtensionStoreCorruptError,
+  getExtensionStoreContentHash,
 } from './extension-store.js';
 import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
@@ -2759,6 +2760,10 @@ describe('ExtensionStore', () => {
       const recovered = await store.ensureInitialized([identity]);
 
       expect(recovered.generation).toBe(1);
+      expect(recovered.recoveryId).toEqual(expect.any(String));
+      expect(getExtensionStoreContentHash(recovered)).not.toBe(
+        getExtensionStoreContentHash(targetSnapshot),
+      );
       expect(recovered.extensions[identity.id]?.defaultActivation).toBe(
         'disabled',
       );
@@ -2843,6 +2848,55 @@ describe('ExtensionStore', () => {
       );
     },
   );
+
+  it('distinguishes recommitted artifacts with identical metadata after recovery', async () => {
+    const store = makeStore();
+    const identity = { id: 'a'.repeat(64), name: 'demo' };
+    const destinationDirectory = path.join(extensionsDir, identity.name);
+    await store.ensureInitialized([identity]);
+    await fsp.mkdir(destinationDirectory);
+    const update = async (version: string) => {
+      const stagingDirectory = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(stagingDirectory, 'version'), version);
+      return await store.commitArtifact({
+        operation: 'update',
+        identity,
+        destinationDirectory,
+        stagingDirectory,
+      });
+    };
+    await update('1');
+    let previous = await update('2');
+    for (const version of ['3', '4']) {
+      await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+      const recovered = await store.readSnapshot();
+      expect(recovered.generation).toBe(1);
+      expect(recovered.recoveryId).toEqual(expect.any(String));
+      expect(recovered.recoveryId).not.toBe(previous.recoveryId);
+      const recommitted = await update(version);
+      expect(recommitted.recoveryId).toBe(recovered.recoveryId);
+      expect(recommitted.generation).toBe(previous.generation);
+      expect(recommitted.extensions).toEqual(previous.extensions);
+      expect(recommitted.legacyProjectionHash).toBe(
+        previous.legacyProjectionHash,
+      );
+      expect(getExtensionStoreContentHash(recommitted)).not.toBe(
+        getExtensionStoreContentHash(previous),
+      );
+      expect(await store.readSnapshot()).toEqual(recommitted);
+      expect(
+        await fsp.readFile(path.join(destinationDirectory, 'version'), 'utf8'),
+      ).toBe(version);
+      previous = recommitted;
+    }
+    const skills = await store.setSkillWorkspaceOverrides(
+      identity,
+      root,
+      { alpha: false },
+      previous.generation,
+    );
+    expect(skills.recoveryId).toBe(previous.recoveryId);
+  });
 
   it('fails closed when current and previous state are corrupt', async () => {
     const store = makeStore();

@@ -11750,6 +11750,8 @@ describe('runQwenServe runtime startup failures', () => {
           'persistent_workspace_registration',
           'workspace_runtime_removal',
           'workspace_runtime',
+          'workspace_extensions_config_runtime',
+          'workspace_extension_mentions',
         ]),
         modelServices: [],
         workspaceCwd: boundWorkspace,
@@ -18385,6 +18387,49 @@ describe('runQwenServe startup observability', () => {
       expect(bridge.preheat).toHaveBeenNthCalledWith(2, {
         keepAliveMs: ENSURE_KEEP_ALIVE_MS,
       });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('observes the durable extension store before the boot runtime ensure', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-ext-observe-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+    Object.assign(bridge, lifecycleBridgeExtras());
+    const coordinatorModule = await import(
+      './workspace-runtime-coordinator.js'
+    );
+    const observeSpy = vi
+      .spyOn(coordinatorModule, 'observeDurableExtensionStoreGeneration')
+      .mockResolvedValue(undefined);
+    const ensureSpy = vi.spyOn(WorkspaceRuntimeCoordinator.prototype, 'ensure');
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { preheatBridge: true },
+    );
+
+    try {
+      expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
+        status: 'succeeded',
+      });
+      await vi.waitFor(() => expect(ensureSpy).toHaveBeenCalledOnce());
+      // The in-memory coordinator starts at generation 0: the boot ensure
+      // must observe the durable Extension Store before it certifies.
+      expect(observeSpy).toHaveBeenCalledOnce();
+      expect(observeSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        ensureSpy.mock.invocationCallOrder[0]!,
+      );
+      expect(observeSpy.mock.calls[0]?.[0]).toBe(ensureSpy.mock.instances[0]);
     } finally {
       await handle.close();
     }

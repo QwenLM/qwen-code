@@ -35,6 +35,7 @@ export interface ExtensionPolicy {
 export interface ExtensionStoreSnapshot {
   version: 2;
   generation: number;
+  recoveryId?: string;
   legacyProjectionHash: string;
   legacyProjectionRemainder?: AllExtensionsEnablementConfig;
   extensions: Record<string, ExtensionPolicy>;
@@ -154,6 +155,15 @@ function projectionHash(projection: AllExtensionsEnablementConfig): string {
   return crypto
     .createHash('sha256')
     .update(JSON.stringify(projection))
+    .digest('hex');
+}
+
+export function getExtensionStoreContentHash(
+  snapshot: ExtensionStoreSnapshot,
+): string {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(snapshot))
     .digest('hex');
 }
 
@@ -328,6 +338,9 @@ function parseState(
     candidate.version !== 2 ||
     !Number.isSafeInteger(candidate.generation) ||
     candidate.generation! < 0 ||
+    (candidate.recoveryId !== undefined &&
+      (typeof candidate.recoveryId !== 'string' ||
+        !/^[a-f0-9-]{36}$/.test(candidate.recoveryId))) ||
     typeof candidate.legacyProjectionHash !== 'string' ||
     !/^[a-f0-9]{64}$/.test(candidate.legacyProjectionHash) ||
     (candidate.legacyProjectionRemainder !== undefined &&
@@ -1622,6 +1635,8 @@ export class ExtensionStore {
       const recovered = {
         ...latest.snapshot,
         generation: latest.recoveryGeneration,
+        // A recommit can reuse both generation and artifact metadata.
+        recoveryId: crypto.randomUUID(),
       };
       await atomicWriteJSON(this.statePath, recovered, {
         mode: 0o600,

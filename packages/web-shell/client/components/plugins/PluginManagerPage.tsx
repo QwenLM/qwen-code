@@ -57,6 +57,10 @@ export function PluginManagerPage({
     workspace.capabilities?.features?.includes(
       'workspace_skills_config_runtime',
     ) === true;
+  const splitExtensionsRuntimeAvailable =
+    workspace.capabilities?.features?.includes(
+      'workspace_extensions_config_runtime',
+    ) === true;
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
     () => defaultWorkspaceCwd,
   );
@@ -94,6 +98,7 @@ export function PluginManagerPage({
 
   const workspaceSelect = (disabled: boolean) =>
     (activeTab === 'mcp' ||
+      (activeTab === 'extensions' && splitExtensionsRuntimeAvailable) ||
       (activeTab === 'skills' && splitSkillsRuntimeAvailable)) &&
     workspaces.length > 1 ? (
       <Select
@@ -144,9 +149,15 @@ export function PluginManagerPage({
       <TabsContent value={activeTab} className="mt-0">
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
-            key={`extensions-${pageRevision}`}
+            key={`extensions-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
             onClose={onClose}
             embedded={embedded}
+            workspaceCwd={
+              splitExtensionsRuntimeAvailable
+                ? selectedWorkspaceCwd
+                : workspace.workspaceCwd
+            }
+            workspaceControl={workspaceSelect(true)}
           />
         ) : activeTab === 'skills' ? (
           <SkillsManagerPage

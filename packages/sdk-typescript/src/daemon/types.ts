@@ -2285,6 +2285,14 @@ export interface DaemonWorkspaceRuntimeStatus {
   runtimeLive: boolean;
   runtimeEpoch: number;
   capabilities?: {
+    extensions?: {
+      state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+      revision: number;
+      runtimeEpoch?: number;
+      desiredGeneration: number;
+      appliedGeneration: number;
+      error?: { code: string; message: string };
+    };
     mcp?: {
       state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
       revision: number;
@@ -5088,6 +5096,7 @@ export interface DaemonWorkspaceExtensionsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   extensions: DaemonExtensionEntry[];
   errors?: DaemonStatusCell[];
 }
