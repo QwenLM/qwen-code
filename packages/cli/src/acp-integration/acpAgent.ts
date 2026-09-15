@@ -8500,6 +8500,11 @@ class QwenAgent implements Agent {
           : availableCommands.filter((command) => command.name !== 'workflows'),
       availableSkills: availableSkills ?? [],
       workflowsEnabled,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: false,
+        workflowStepId: false,
+      },
       savedWorkflows,
     };
   }
@@ -12685,6 +12690,7 @@ class QwenAgent implements Agent {
                   ? { scriptPath: readableScriptPath }
                   : { script: task.script }),
                 args: task.args,
+                ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
               const result = (await workflowTool
