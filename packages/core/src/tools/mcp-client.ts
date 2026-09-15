@@ -591,14 +591,22 @@ export class McpClient {
         // (unknown message type, a throwing notification handler, a
         // progress notification for an unknown token, a response for
         // an unknown message ID, ...) none of which close the
-        // transport. `_onclose` is the only place the SDK clears its
-        // transport reference, so "the protocol's transport is gone"
-        // is the load-bearing death signal; gate the DISCONNECTED
-        // write on it. Genuine transport death still lands here: a
-        // dead transport rejects its next operation, the stdio child
-        // 'close' event fires `onclose`, and network transports error
-        // through their own close paths (R4-4 round 5).
-        if (this.client.transport === undefined) {
+        // transport. BUT terminal network death also reaches ONLY
+        // `onerror`: a remote HTTP failure fires
+        // `Maximum reconnection attempts (N) exceeded.` /
+        // `SSE stream disconnected:` WITHOUT a transport close, so
+        // `_onclose` never runs, the SDK never clears its transport
+        // reference, and a `transport === undefined` gate never fires —
+        // a dead network server stays recorded CONNECTED (R5-4
+        // round 7). So classify the error instead: the transports'
+        // terminal network messages plus undici's `fetch failed` family
+        // mean death; anything else defers to the `onclose` chain
+        // below, which owns close-shaped death.
+        const terminalNetworkDeath =
+          /maximum reconnection attempts|sse stream disconnected|econnrefused|socket hang up|connection error|fetch failed/i.test(
+            getErrorMessage(error),
+          );
+        if (this.client.transport === undefined || terminalNetworkDeath) {
           this.updateStatus(MCPServerStatus.DISCONNECTED);
         }
       };

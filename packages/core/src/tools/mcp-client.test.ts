@@ -1648,6 +1648,72 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       );
     });
 
+    it('records DISCONNECTED for a terminal network onerror that never closes the transport (R5-4 round 7)', async () => {
+      // Remote HTTP failure fires `onerror` (`Maximum reconnection
+      // attempts (N) exceeded.`, `SSE stream disconnected:`) WITHOUT a
+      // transport close, so `_onclose` never runs and the SDK never
+      // clears its transport reference — a `transport === undefined`
+      // gate never fires and the dead server stays recorded CONNECTED.
+      // The transports' terminal network messages mean death; the
+      // writer must record DISCONNECTED for them regardless of the
+      // transport reference still being set.
+      let onErrorHandler: ((error: Error) => void | Promise<void>) | undefined;
+      const mockedClient = {
+        connect: vi.fn(),
+        discover: vi.fn(),
+        disconnect: vi.fn(),
+        getStatus: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
+        // Terminal network death WITHOUT close: transport still set.
+        transport: {} as unknown as ClientLib.Client['transport'],
+        request: vi.fn().mockResolvedValue({ tools: [] }),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+        set onerror(handler: (error: Error) => void | Promise<void>) {
+          onErrorHandler = handler;
+        },
+        get onerror() {
+          return onErrorHandler as (error: Error) => void | Promise<void>;
+        },
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [],
+          }),
+        callTool: vi.fn(),
+      } as unknown as GenAiLib.CallableTool);
+      const serverName = `terminal-onerror-${Date.now()}`;
+      const client = new McpClient(
+        serverName,
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+
+      // The SDK's terminal reconnect-exhaustion message, transport
+      // still referenced.
+      expect(onErrorHandler).toBeTypeOf('function');
+      await onErrorHandler!(
+        new Error('Maximum reconnection attempts (5) exceeded.'),
+      );
+
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+    });
+
     it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
       // F2 (#4175) pool path: a single shared McpClient produces this
       // snapshot once; per-session SessionMcpView instances each register

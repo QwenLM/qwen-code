@@ -772,7 +772,16 @@ export class ToolRegistry {
       discoveryGeneration,
       revealEpoch,
     ).finally(() => {
-      this.serverDiscoveryInFlight.delete(serverName);
+      // Identity-check the eviction (R7-1 round 7): a teardown between
+      // two passes deliberately deletes the dedup entry
+      // (`markMcpServerTornDown`) so pass B installs its OWN entry; a
+      // late-settling pass A must not then delete by name and unhook
+      // B — a pass C would start concurrently with B, purge B's
+      // freshly registered tools after snapshotting them, and skip the
+      // restore on the all-empty leg.
+      if (this.serverDiscoveryInFlight.get(serverName) === run) {
+        this.serverDiscoveryInFlight.delete(serverName);
+      }
     });
     this.serverDiscoveryInFlight.set(serverName, run);
     return run;

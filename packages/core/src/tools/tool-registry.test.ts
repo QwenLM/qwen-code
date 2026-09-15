@@ -2296,6 +2296,70 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool(reRegistered.name)).toBeDefined();
     });
 
+    it('a late-settling pass does not unhook its successor dedup entry (R7-1 round 7)', async () => {
+      // Pass A parks; the operator teardown deliberately evicts A's
+      // dedup entry (`markMcpServerTornDown`) so pass B installs its
+      // OWN; A settling must not delete the entry BY NAME — that would
+      // unhook B, and the next pass C would start concurrently with B
+      // (purging B's freshly registered tools after snapshotting them),
+      // violating the one-pass-at-a-time contract R2-1 established.
+      const promptRegistry = new PromptRegistry();
+      const resourceRegistry = new ResourceRegistry();
+      vi.spyOn(config, 'getPromptRegistry').mockReturnValue(promptRegistry);
+      vi.spyOn(config, 'getResourceRegistry').mockReturnValue(resourceRegistry);
+      vi.spyOn(config, 'getMcpServers').mockReturnValue({
+        'flaky-server': new MCPServerConfig('node'),
+      });
+      const resolvers: Array<() => void> = [];
+      let entered = 0;
+      vi.spyOn(
+        McpClientManager.prototype,
+        'discoverMcpToolsForServer',
+      ).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            entered += 1;
+            resolvers.push(() => resolve(undefined));
+          }),
+      );
+
+      // A enters and parks.
+      const callA = toolRegistry.discoverToolsForServer('flaky-server');
+      expect(entered).toBe(1);
+      // The teardown evicts A's entry by design (generation bump pins
+      // A's restore too), so B installs its own entry and parks.
+      toolRegistry.markMcpServerTornDown('flaky-server');
+      const callB = toolRegistry.discoverToolsForServer('flaky-server');
+      expect(entered).toBe(2);
+      // B's discovery registers a fresh tool mid-flight (the shape a
+      // reconnecting `client.discover()` produces).
+      const bTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'flaky-server',
+        'query',
+        'description',
+        {},
+        undefined,
+        'flaky-server_query',
+      );
+      toolRegistry.registerTool(bTool);
+
+      // A settles: with the identity check its finally leaves B's
+      // entry alone; pre-fix (delete-by-name) it unhooks B.
+      resolvers[0]!();
+      await callA;
+
+      // C must dedup onto B's still-hooked entry. Pre-fix C enters
+      // `discoverToolsForServerInner` — purging bTool while B's
+      // discovery is still in flight — and `entered` becomes 3.
+      const callC = toolRegistry.discoverToolsForServer('flaky-server');
+      expect(entered).toBe(2);
+
+      resolvers[1]!();
+      await Promise.all([callB, callC]);
+      expect(await toolRegistry.ensureTool(bTool.name)).toBe(bTool);
+    });
+
     it('restores the snapshot when the manager purges mid-pass and resolves without registering (R3-7 round 5)', async () => {
       // The generation bump must live ONLY in operator teardown
       // (`markMcpServerTornDown`). The manager's OWN in-pass

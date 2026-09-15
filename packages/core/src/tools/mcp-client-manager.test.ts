@@ -157,6 +157,120 @@ describe('McpClientManager', () => {
     expect(McpClient).not.toHaveBeenCalled();
   });
 
+  it('a pooled pass racing a runtime removal does not install a connection afterwards (R7-4 round 7)', async () => {
+    // Pool-mode discovery never flows through the standalone gates,
+    // so `removeRuntimeMcpServer`'s teardown marker was unread there:
+    // an in-flight `pool.acquire` resolved AFTER the removal returned
+    // `{removed: true}` and installed a live connection for the
+    // removed name. The late-set must consult the tombstone/epoch.
+    // `pool.acquire` is called by BOTH the seed runtime-add below (pool
+    // mode routes adds through the pool too) and the parked discovery
+    // pass. A single parked deferred would deadlock the seed add, so
+    // the spy resolves the FIRST call (the add) immediately and parks
+    // only the second (the pass under test).
+    let releaseAcquire!: (value: unknown) => void;
+    const seedConn = {
+      release: vi.fn(),
+      on: vi.fn(),
+      id: 'docs::seed',
+      serverName: 'docs',
+      entryIndex: 0,
+      transportId: 'docs::seed::v1',
+      toolsSnapshot: [],
+    };
+    const pooledConn = {
+      release: vi.fn(),
+      // `on` is load-bearing: without it the pass throws BEFORE the
+      // late-set gate and the catch block skips the install — a false
+      // green that pins nothing.
+      on: vi.fn(),
+      id: 'docs::abc',
+      serverName: 'docs',
+      entryIndex: 0,
+    };
+    let acquireCalls = 0;
+    const acquireSpy = vi.fn().mockImplementation(() => {
+      acquireCalls += 1;
+      if (acquireCalls === 1) {
+        return Promise.resolve(seedConn);
+      }
+      return new Promise((resolve) => {
+        releaseAcquire = resolve;
+      });
+    });
+    const fakePool = {
+      acquire: acquireSpy,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const runtimeServers: Record<string, unknown> = {};
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () =>
+        Object.fromEntries(
+          Object.entries(runtimeServers).map(([n, c]) => [
+            n,
+            typeof c === 'object' && c && 'command' in c
+              ? c
+              : { command: 'node' },
+          ]),
+        ),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+      getSettingsMcpServers: () => ({}),
+      getRuntimeMcpServers: (() =>
+        runtimeServers) as Config['getRuntimeMcpServers'],
+      addRuntimeMcpServer: ((_name: string, cfg: unknown) => {
+        runtimeServers['docs'] = cfg;
+      }) as Config['addRuntimeMcpServer'],
+      removeRuntimeMcpServer: ((_name: string) => {
+        delete runtimeServers['docs'];
+        return true;
+      }) as Config['removeRuntimeMcpServer'],
+    } as unknown as Config;
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
+
+    // Seed the runtime entry so the removal below is a real removal
+    // and `getMcpServers` (the effective-servers source the pooled
+    // pass reads) advertises it. In pool mode the add installs the
+    // seed connection into `pooledConnections`.
+    const seeded = await manager.addRuntimeMcpServer(
+      'docs',
+      { command: 'node' } as MCPServerConfig,
+      'client-1',
+    );
+    expect(seeded).toMatchObject({ name: 'docs' });
+    expect(acquireCalls).toBe(1);
+    // Park a pooled discovery on pool.acquire for the same name.
+    const pooledPass = (
+      manager as unknown as {
+        discoverAllMcpToolsViaPool: (c: Config) => Promise<void>;
+      }
+    ).discoverAllMcpToolsViaPool(mockConfig);
+    await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalled());
+    // The operator removes the runtime server; the call completes and
+    // reports removal while the acquire is still parked.
+    const removed = await manager.removeRuntimeMcpServer('docs', 'client-1');
+    expect(removed).toMatchObject({ name: 'docs' });
+    // The acquire now resolves: the late-set must drop it.
+    releaseAcquire(pooledConn);
+    await pooledPass;
+    const pooled = (
+      manager as unknown as { pooledConnections: Map<string, unknown> }
+    ).pooledConnections;
+    expect(pooled.has('docs')).toBe(false);
+    expect(pooledConn.release).toHaveBeenCalled();
+  }, 30_000);
+
   it('swallows BudgetExhaustedError from pool.acquire and logs at debug (F2 commit 6 W23)', async () => {
     // Wenshao W23 review fold-in: the manager's `discoverAllMcpToolsViaPool`
     // catch block now branches on `instanceof BudgetExhaustedError`
@@ -4284,6 +4398,402 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // The live, slot-holding server must no longer read as refused.
     expect(manager.wasRefused('docs')).toBe(false);
   });
+
+  it('a runtime-add success must not reset the epoch baseline for a pass parked since before the replace (R7-2 round 7)', async () => {
+    // Pass P captures epoch 0 and parks on the existing client's
+    // disconnect; a runtime REPLACE completes over the same name (its
+    // success used to DELETE the epoch entry); P resumes and its gate
+    // would read `0 !== 0` — false — resurrecting the OLD config the
+    // replace retired. Retention keeps P refused.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const pendingExistingDisconnects: Array<() => void> = [];
+    const pendingReplacementConnects: Array<() => void> = [];
+    let existingDisconnectCalls = 0;
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        existingDisconnectCalls += 0;
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(() => {
+            existingDisconnectCalls += 1;
+            if (existingDisconnectCalls === 1) {
+              return new Promise<void>((resolve) => {
+                pendingExistingDisconnects.push(resolve);
+              });
+            }
+            return Promise.resolve(undefined);
+          }),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      if (call === 2) {
+        const state = { connected: false };
+        return {
+          connect: vi.fn().mockImplementation(async () => {
+            await new Promise<void>((resolve) => {
+              pendingReplacementConnects.push(resolve);
+            });
+            state.connected = true;
+          }),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(() =>
+            state.connected
+              ? MCPServerStatus.CONNECTED
+              : MCPServerStatus.DISCONNECTED,
+          ),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const runtimeServers: Record<string, unknown> = {};
+    const config = configWithServers(
+      { a: { command: 'node' } },
+      {
+        getSettingsMcpServers: () => ({}),
+        getRuntimeMcpServers: (() =>
+          runtimeServers) as Config['getRuntimeMcpServers'],
+        addRuntimeMcpServer: ((_name: string, cfg: unknown) => {
+          runtimeServers['a'] = cfg;
+        }) as Config['addRuntimeMcpServer'],
+        removeRuntimeMcpServer: ((_name: string) =>
+          true) as Config['removeRuntimeMcpServer'],
+      },
+    );
+    const manager = mkManager({
+      config,
+      toolRegistry: {
+        removeMcpToolsByServer: () => undefined,
+        markMcpServerTornDown: () => undefined,
+        getToolsByServer: () => [],
+      } as unknown as ToolRegistry,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await manager.discoverAllMcpTools(config);
+
+    // P parks on the existing client's disconnect (epoch 0 captured).
+    const passP = manager.discoverMcpToolsForServer('a', config);
+    await vi.waitFor(() =>
+      expect(pendingExistingDisconnects.length).toBeGreaterThan(0),
+    );
+    // The replace-phase runtime add bumps the epoch (markOperatorTeardown
+    // in the replace leg), disconnects the existing client (2nd call,
+    // resolves) and parks in the replacement's connect.
+    const runtimeAdd = manager.addRuntimeMcpServer(
+      'a',
+      { command: 'node', args: ['v2'] },
+      'client-1',
+    );
+    await vi.waitFor(() =>
+      expect(pendingReplacementConnects.length).toBeGreaterThan(0),
+    );
+    // The replacement lands: pre-fix its success deleted the epoch.
+    for (const resolve of pendingReplacementConnects.splice(0)) resolve();
+    const added = await runtimeAdd;
+    expect(added).toMatchObject({ name: 'a', replaced: true });
+    const epochs = (
+      manager as unknown as { operatorTeardownEpochs: Map<string, number> }
+    ).operatorTeardownEpochs;
+    expect(epochs.get('a')).toBe(1);
+    // ...and only now P resumes: the retained epoch must refuse it —
+    // the OLD-config client it would build never lands.
+    for (const resolve of pendingExistingDisconnects.splice(0)) resolve();
+    await passP;
+    const clients = (manager as unknown as { clients: Map<string, McpClient> })
+      .clients;
+    expect(clients.size).toBe(1);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    // The surviving client is the replacement (call 2), not a
+    // resurrection built from the pre-replace config.
+    expect(clients.get('a')).toBeDefined();
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+  }, 30_000);
+
+  it('a late-settling pass does not evict its successor dedup entry or tracked client (R7-1 round 7)', async () => {
+    // Pass A parks on the existing client's disconnect; a teardown
+    // between the passes deliberately evicts the dedup entry so pass B
+    // installs its OWN; A settling must not delete by NAME — that
+    // would unhook B's entry (registry leg) and drop B's live client
+    // (manager leg, the identity-unchecked `clients.delete` the
+    // `disconnectServer` finally already guards).
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const pendingExistingDisconnects: Array<() => void> = [];
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(
+            () =>
+              new Promise<void>((resolve) => {
+                pendingExistingDisconnects.push(resolve);
+              }),
+          ),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = mkManager({
+      config,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+
+    // Pass A parks on the existing client's disconnect (park #1).
+    const passA = manager.discoverMcpToolsForServer('a', config);
+    await vi.waitFor(() =>
+      expect(pendingExistingDisconnects.length).toBeGreaterThan(0),
+    );
+    // The operator's disconnectServer parks as park #2 and its call
+    // COMPLETES (trailing block clears the plain tombstone, epoch
+    // survives); its finally's tombstone leg disconnects nothing new
+    // (client already gone).
+    const operatorDisconnect = manager.disconnectServer('a');
+    await vi.waitFor(() =>
+      expect(pendingExistingDisconnects.length).toBeGreaterThan(1),
+    );
+    const [passAPark, operatorPark] = pendingExistingDisconnects.splice(0);
+    operatorPark();
+    await operatorDisconnect;
+    // B enters POST-teardown (the teardown evicted A's dedup entry) and
+    // installs its OWN client while A is still parked on the old
+    // client's disconnect.
+    const passB = manager.discoverMcpToolsForServer('a', config);
+    await passB;
+    const clients = (manager as unknown as { clients: Map<string, McpClient> })
+      .clients;
+    expect(clients.has('a')).toBe(true);
+
+    // Release pass A: it drops at the epoch gate and its finally runs
+    // AFTER B installed — the identity check must keep B's client;
+    // pre-fix (delete-by-name) A evicted it here.
+    passAPark();
+    await passA;
+
+    // B's client is live and tracked; no slot churn beyond B's own.
+    expect(clients.has('a')).toBe(true);
+    expect(clients.size).toBe(1);
+    expect(manager.getServerStatus('a')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+  }, 30_000);
+
+  it('a successor pass completing must not reset the epoch baseline for a parked pre-teardown pass (R7-2 round 7)', async () => {
+    // Pass P captures epoch 0 and parks; the operator disconnects
+    // (epoch -> 1, trailing block keeps it); a successor pass S enters
+    // AFTER the teardown, passes the gate, connects and (pre-fix)
+    // DELETED the epoch entry — resetting the baseline to 0 so P's
+    // gate read `0 !== 0` and P resurrected the OLD config. Retention
+    // keeps P refused while S (post-teardown entry) still connects.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const pendingExistingDisconnects: Array<() => void> = [];
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockImplementation(
+            () =>
+              new Promise<void>((resolve) => {
+                pendingExistingDisconnects.push(resolve);
+              }),
+          ),
+          getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+          readResource: vi.fn().mockResolvedValue({ contents: [] }),
+        } as unknown as McpClient;
+      }
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = mkManager({
+      config,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await manager.discoverAllMcpTools(config);
+
+    // P parks on the existing client's disconnect (captured epoch 0).
+    const passP = manager.discoverMcpToolsForServer('a', config);
+    await vi.waitFor(() =>
+      expect(pendingExistingDisconnects.length).toBeGreaterThan(0),
+    );
+    // Operator teardown completes (epoch -> 1, tombstone cleared).
+    const operatorDisconnect = manager.disconnectServer('a');
+    await vi.waitFor(() =>
+      expect(pendingExistingDisconnects.length).toBeGreaterThan(1),
+    );
+    const [pPark, operatorPark] = pendingExistingDisconnects.splice(0);
+    operatorPark();
+    await operatorDisconnect;
+    // Successor S enters POST-teardown: captures epoch 1, passes the
+    // gate, connects. Pre-fix its success deleted the epoch entry.
+    const successor = manager.discoverMcpToolsForServer('a', config);
+    await successor;
+    const epochs = (
+      manager as unknown as { operatorTeardownEpochs: Map<string, number> }
+    ).operatorTeardownEpochs;
+    expect(epochs.get('a')).toBe(1);
+    // ...and only now P resumes: the retained epoch must still refuse
+    // it (no second client, no double slot).
+    pPark();
+    await passP;
+    const clients = (manager as unknown as { clients: Map<string, McpClient> })
+      .clients;
+    expect(clients.has('a')).toBe(true);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    // S's client survived P's late settle — exactly one client object.
+    expect(clients.get('a')).toBeDefined();
+    expect(clients.size).toBe(1);
+  }, 30_000);
+
+  it('a discovery timeout does not blacklist the name — a later deliberate rediscovery reconnects (R5-1 round 7)', async () => {
+    // The timeout handler used to install the PERSISTENT operator
+    // tombstone, whose only reachable clearer (the post-connect clear)
+    // sits after the gate the tombstone itself trips — one tools/list
+    // timeout and every later reconnect attempt built a client,
+    // dropped it at the gate and returned. The anti-resurrection
+    // intent now rides the epoch + registry generation alone, so a
+    // pass that ENTERS after the timeout passes the gate cleanly.
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    let hung = false;
+    const clients: Array<{ connect: ReturnType<typeof vi.fn> }> = [];
+    vi.mocked(McpClient).mockImplementation(() => {
+      const c = {
+        connect: vi.fn(() =>
+          hung ? new Promise<void>(() => {}) : Promise.resolve(undefined),
+        ),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      };
+      clients.push(c);
+      return c as unknown as McpClient;
+    });
+    const config = configWithServers({
+      slow: { command: 'node', discoveryTimeoutMs: 100 },
+    });
+    const manager = mkManager({
+      config,
+      toolRegistry: {
+        removeMcpToolsByServer: vi.fn(),
+        markMcpServerTornDown: vi.fn(),
+      } as unknown as ToolRegistry,
+      options: {
+        healthConfig: {
+          autoReconnect: false,
+          checkIntervalMs: 100,
+          maxConsecutiveFailures: 1,
+          reconnectDelayMs: 100,
+        },
+      },
+    });
+
+    // First pass: connect hangs, discovery times out.
+    hung = true;
+    vi.useFakeTimers();
+    try {
+      const timedOut = manager.discoverAllMcpToolsIncremental(config);
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      await timedOut;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(
+      (manager as unknown as { clients: Map<string, unknown> }).clients.has(
+        'slow',
+      ),
+    ).toBe(false);
+
+    // The deliberate retry must reach CONNECTED, not drop at a gate.
+    hung = false;
+    await manager.discoverMcpToolsForServer('slow', config);
+    expect(manager.getServerStatus('slow')).toBe(MCPServerStatus.CONNECTED);
+  }, 30_000);
+
+  it('a gated early return publishes no global status entry for a never-connected client (R7-3 round 7)', async () => {
+    // Real `McpClient.disconnect()` writes a global DISCONNECTED
+    // status entry even for a client that never connected; the gated
+    // exits must not leave that record behind for a name the manager
+    // never tracked. The gate here is the tombstone/epoch one, driven
+    // via the R6-2 staging (manual tombstone + epoch).
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const { getAllMCPServerStatuses, updateMCPServerStatus } = await import(
+      './mcp-status.js'
+    );
+    let call = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      call += 1;
+      void call;
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        discover: vi.fn().mockResolvedValue(undefined),
+        // A REAL disconnect publishes the global entry — approximate
+        // that observable behavior at the mock layer by writing the
+        // global map, so the assertion exercises the manager's gate
+        // cleanup rather than mock emptiness.
+        disconnect: vi.fn(() => {
+          const statuses = getAllMCPServerStatuses();
+          if (!statuses.has('a')) {
+            updateMCPServerStatus('a', MCPServerStatus.DISCONNECTED);
+          }
+          return Promise.resolve(undefined);
+        }),
+        getStatus: vi.fn(() => MCPServerStatus.CONNECTED),
+        readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      } as unknown as McpClient;
+    });
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = mkManager({
+      config,
+      options: { budgetConfig: { clientBudget: 1, budgetMode: 'enforce' } },
+    });
+    await manager.discoverAllMcpTools(config);
+    // Tear down; re-arm the tombstone + epoch manually so the NEXT
+    // pass constructs a fresh client and drops at the gate.
+    await manager.disconnectServer('a');
+    const internals = manager as unknown as {
+      operatorTornDownServers: Set<string>;
+      operatorTeardownEpochs: Map<string, number>;
+    };
+    internals.operatorTornDownServers.add('a');
+    internals.operatorTeardownEpochs.set('a', 99);
+    getAllMCPServerStatuses().delete('a');
+    await manager.discoverMcpToolsForServer('a', config);
+    // The gate's disconnect must not leave a global status entry.
+    expect(getAllMCPServerStatuses().has('a')).toBe(false);
+  }, 30_000);
 
   it('discoverMcpToolsForServerInternal rejects pending-approval servers', async () => {
     let createdCount = 0;
