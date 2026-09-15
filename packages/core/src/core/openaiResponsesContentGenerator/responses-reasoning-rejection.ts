@@ -14,6 +14,30 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('RESPONSES_REASONING_REJECTION');
 
+const TOOL_MEDIA_CAPTION = '(attached media from previous tool call)';
+
+/**
+ * True for the user message the converter flushes after a turn's tool outputs
+ * to carry tool-returned media: a content array whose first part is the
+ * caption. Detected positionally, the same way the converter emits it.
+ */
+function isToolMediaFollowUp(item: ResponsesApiInputItem | undefined): boolean {
+  if (
+    typeof item !== 'object' ||
+    item === null ||
+    !('type' in item) ||
+    item.type !== 'message' ||
+    !('role' in item) ||
+    item.role !== 'user'
+  ) {
+    return false;
+  }
+  const content = (item as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  const first = content[0] as { type?: unknown; text?: unknown };
+  return first?.type === 'input_text' && first?.text === TOOL_MEDIA_CAPTION;
+}
+
 /**
  * The call_ids of the maximal run of `function_call` items immediately
  * following `index`. The endpoint pairs a replayed reasoning item with the
@@ -198,10 +222,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Replace the reasoning items the endpoint will refuse with the ordinary
- * assistant messages their summaries carry, preserving position and leaving
- * every other item byte-exact and identical by reference. Returns `items`
- * itself when nothing is downgraded, so the caller can detect a no-op by
- * identity. Never mutates `items` or anything inside it.
+ * assistant messages their summaries carry, preserving position. The endpoint
+ * pairs a reasoning item with the function_call run that follows it, so a
+ * removed or downgraded reasoning item takes its call group and the group's
+ * outputs with it; every other item stays byte-exact and identical by
+ * reference. Returns `items` itself when nothing is downgraded, so the caller
+ * can detect a no-op by identity. Never mutates `items` or anything inside it.
  */
 export function downgradeRejectedReasoningItems(
   items: ResponsesApiInputItem[],
@@ -224,6 +250,7 @@ export function downgradeRejectedReasoningItems(
   // orphan output (#11665).
   const droppedCallIds = new Set<string>();
   let droppedUnits = 0;
+  let justDroppedUnit = false;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (
@@ -236,6 +263,15 @@ export function downgradeRejectedReasoningItems(
       changed = true;
       continue;
     }
+    // A tool-media follow-up message captions media from a call the unit drop
+    // just removed; keeping it would retry a user message advertising an
+    // attachment whose tool call is nowhere in the request.
+    if (justDroppedUnit && isToolMediaFollowUp(item)) {
+      changed = true;
+      justDroppedUnit = false;
+      continue;
+    }
+    justDroppedUnit = false;
     if (!isReasoningItem(item) || !exceedsMax(item, maxLength)) {
       rewritten.push(item);
       continue;
@@ -254,6 +290,7 @@ export function downgradeRejectedReasoningItems(
       }
       i += unitCallIds.length;
       droppedUnits++;
+      justDroppedUnit = true;
     }
     // A signature-only item has nothing human-readable to preserve; keeping
     // it as an empty assistant message would add a blank turn.

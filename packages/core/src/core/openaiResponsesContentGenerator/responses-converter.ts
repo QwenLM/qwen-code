@@ -357,11 +357,10 @@ export function convertResponsesEventToGemini(
         if (!encryptedContent) return null;
         // NOTE: a single turn can contain multiple reasoning output items
         // (e.g. one per parallel function call), each emitted here as its own
-        // signature-only chunk. geminiChat.ts's history consolidation only
-        // keeps the *first* thoughtSignature it sees per turn when merging
-        // thought chunks, so only the first item's encrypted_content survives
-        // into history — a pre-existing limitation of that shared
-        // consolidation logic, not specific to this generator.
+        // signature-only chunk. llm-chat.ts's thought-episode consolidation
+        // concatenates thoughtSignature chunks until one parses as a complete
+        // Responses signature, so the items' encrypted_content folds into the
+        // surviving episode in emission order.
         return makeChunkResponse(model, state, [
           {
             thought: true,

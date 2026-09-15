@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   countReasoningItems,
   isEncryptedReasoningRejection,
+  downgradeEncryptedReasoningItems,
   downgradeRejectedReasoningItems,
   parseReasoningIdRejection,
 } from './responses-reasoning-rejection.js';
@@ -578,6 +579,146 @@ describe('downgradeRejectedReasoningItems', () => {
       keep,
       { type: 'message', role: 'assistant', content: 'thought' },
     ]);
+  });
+
+  it('scopes the unit drop to the rejected reasoning group only', () => {
+    // A second call group later in the turn must survive the first group's
+    // drop intact.
+    const keep = userItem('hi');
+    const after = userItem('bye');
+    const items = Object.freeze([
+      keep,
+      reasoningItem(LONG, []),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+      reasoningItem('rs_short', ['kept']),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c2',
+        name: 'g',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c2',
+        output: 'ok',
+      }),
+      after,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
+    ).toEqual([keep, items[4], items[5], items[6], after]);
+  });
+
+  it('drops the whole unit on the encrypted-content recovery path', () => {
+    // downgradeEncryptedReasoningItems reports no maximum, so every signed
+    // reasoning item exceeds and its call group goes with it.
+    const items = Object.freeze([
+      reasoningItem(LONG, ['thought']),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+    ]) as ResponsesApiInputItem[];
+    expect(downgradeEncryptedReasoningItems(items)).toEqual([
+      { type: 'message', role: 'assistant', content: 'thought' },
+    ]);
+  });
+
+  it('drops the tool-media follow-up whose call the unit drop removed', () => {
+    // The converter flushes tool-returned media as a captioned user message
+    // after the turn's outputs; with the call group gone the caption points
+    // nowhere.
+    const mediaFollowUp = Object.freeze({
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: '(attached media from previous tool call)',
+        },
+        { type: 'input_image', image_url: 'data:image/png;base64,AAA' },
+      ],
+    }) as unknown as ResponsesApiInputItem;
+    const items = Object.freeze([
+      reasoningItem(LONG, []),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+      mediaFollowUp,
+      userItem('next'),
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 }),
+    ).toEqual([items[4]]);
+  });
+
+  it('keeps tool media when its call group survived', () => {
+    const mediaFollowUp = Object.freeze({
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: '(attached media from previous tool call)',
+        },
+        { type: 'input_image', image_url: 'data:image/png;base64,AAA' },
+      ],
+    }) as unknown as ResponsesApiInputItem;
+    const items = Object.freeze([
+      reasoningItem(LONG, []),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+      reasoningItem('rs_short', ['kept']),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c2',
+        name: 'g',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c2',
+        output: 'ok',
+      }),
+      mediaFollowUp,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 }),
+    ).toEqual([items[3], items[4], items[5], mediaFollowUp]);
   });
 
   it('downgrades every reasoning item when no maximum is reported', () => {
