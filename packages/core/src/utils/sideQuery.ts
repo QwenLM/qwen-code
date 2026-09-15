@@ -104,6 +104,12 @@ export interface SideQueryTextOptions {
    * the full rationale. Defaults to `false`.
    */
   stream?: boolean;
+  /**
+   * Reports each retry backoff (delay in ms) to the caller. Forwarded to
+   * {@link GenerateTextOptions.onRetry} — reporting only, never raises the
+   * side query's own retry budget.
+   */
+  onRetry?: (delayMs: number) => void;
   validate?: (text: string) => string | null;
   /**
    * Fail (throw) instead of silently falling back to the main generator when a
@@ -263,6 +269,7 @@ export async function runSideQuery<TResponse>(
     }),
     ...(options.stream !== undefined && { stream: options.stream }),
     ...(options.failClosed !== undefined && { failClosed: options.failClosed }),
+    ...(options.onRetry !== undefined && { onRetry: options.onRetry }),
   });
 
   const customError = options.validate?.(result.text);

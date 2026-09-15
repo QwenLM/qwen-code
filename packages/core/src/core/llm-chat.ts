@@ -587,6 +587,8 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** Reports retry backoff so background-agent liveness can extend its deadline. */
+  onRetry?: (delayMs: number) => void;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -666,6 +668,14 @@ interface TryCompressOptions {
    * under the same gateway body limit.
    */
   requestPayloadTooLarge?: boolean;
+  /**
+   * Reports each retry backoff (delay in ms) from the compression side
+   * queries, threaded down from the send's {@link LlmChatSendOptions.onRetry}
+   * so a background agent's watchdog can extend its model deadline while
+   * compression waits out provider-directed backoff. Reporting only — the
+   * compression budget itself is unchanged.
+   */
+  onRetry?: (delayMs: number) => void;
 }
 
 // Model-output validation errors (protocol tag leaks, malformed tool calls)
@@ -2675,6 +2685,7 @@ export class LlmChat {
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
       requestPayloadTooLarge: options?.requestPayloadTooLarge,
+      onRetry: options?.onRetry,
       signal,
     });
     // The service owns the compression outcome; LlmChat owns the input
@@ -3146,6 +3157,7 @@ export class LlmChat {
             requestGenerationConfig: params.config,
             requestRouteKey,
             deferChatCompressionRecord: shouldForceFromHard,
+            onRetry: options?.onRetry,
             // Hard-rescue is force=true to bypass the cheap-gate breaker
             // but it remains a semantically AUTOMATIC trigger. Tag the
             // compactTrigger explicitly as 'auto' so PostCompact hooks are
@@ -3617,6 +3629,7 @@ export class LlmChat {
                 ? transportContinuationPrefix
                 : undefined,
               acceptQuietToolResultCompletion,
+              options?.onRetry,
             );
             streamEstablished = true;
 
@@ -4095,6 +4108,7 @@ export class LlmChat {
                       requestRouteKey,
                       trigger: 'auto',
                       requestPayloadTooLarge: requestPayloadOverflow.isTooLarge,
+                      onRetry: options?.onRetry,
                     },
                   );
 
@@ -4411,6 +4425,7 @@ export class LlmChat {
                 turnGoalContext,
                 undefined,
                 acceptQuietToolResultCompletion,
+                options?.onRetry,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -4843,6 +4858,7 @@ export class LlmChat {
                     fallbackRetryErrorCodes,
                     requestRouteKey,
                     turnGoalContext,
+                    options?.onRetry,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -5038,6 +5054,7 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
+    onRetry?: (delayMs: number) => void,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -5107,6 +5124,7 @@ export class LlmChat {
           }
         : {}),
       onRetry: (info) => {
+        onRetry?.(info.delayMs);
         logApiRetry(
           this.config,
           new ApiRetryEvent({
@@ -5144,6 +5162,7 @@ export class LlmChat {
     retryErrorCodes?: readonly number[],
     routeKey?: string,
     goalContext?: GoalTurnPermit,
+    onRetry?: (delayMs: number) => void,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
       model,
@@ -5153,6 +5172,9 @@ export class LlmChat {
       { contentGenerator, retryAuthType, retryErrorCodes },
       routeKey,
       goalContext,
+      undefined,
+      false,
+      onRetry,
     );
 
     for await (const chunk of stream) {

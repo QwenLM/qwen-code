@@ -124,6 +124,14 @@ export interface GenerateTextOptions {
    * conversion closed instead.
    */
   failClosed?: boolean;
+  /**
+   * Reports each retry backoff (delay in ms) to the caller, in addition to
+   * the standard `logApiRetry` telemetry. Lets long-running callers (e.g. a
+   * background agent's progress watchdog) extend their liveness deadline
+   * while this side query waits out provider-directed backoff. Reporting
+   * only — it never raises the request's own retry budget.
+   */
+  onRetry?: (delayMs: number) => void;
 }
 
 /**
@@ -382,6 +390,7 @@ export class BaseLlmClient {
       promptId,
       maxAttempts,
       stream,
+      onRetry,
     } = options;
 
     const requestConfig: GenerateContentConfig = {
@@ -472,6 +481,7 @@ export class BaseLlmClient {
               subagentName: subagentNameContext.getStore(),
             }),
           );
+          onRetry?.(info.delayMs);
         },
       });
 
