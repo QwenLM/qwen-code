@@ -624,6 +624,8 @@ export default {
     'Aquesta extensió instal·larà els subagents següents:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     'Aquesta extensió instal·larà els fluxos de treball següents (scripts JavaScript que poden iniciar subagents):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Aquests scripts de flux de treball han canviat des de la versió instal·lada: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Instal·lació cancel·lada per a "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -2738,8 +2740,6 @@ export default {
   // ============================================================================
   // Ordres diverses
   // ============================================================================
-  'Set a goal — keep working until the condition is met':
-    'Estableix un objectiu — continua treballant fins que es compleixi la condició',
   'Show current process memory diagnostics':
     'Mostra els diagnòstics de memòria del procés actual',
   'Record a CPU profile for Chrome DevTools analysis':

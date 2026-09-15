@@ -37,6 +37,8 @@ import {
   Storage,
   isSafeModeEnv,
   getExtensionDisplayName,
+  authoredSkillName,
+  qualifySkillName,
 } from '@qwen-code/qwen-code-core';
 import type { Config, Extension, SkillLevel } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
@@ -234,7 +236,7 @@ async function buildWorkspaceSkillsStatus(
       const enabled = extension
         ? extensionSkillStates
             .get(extension)
-            ?.get(skill.name.trim().toLowerCase())
+            ?.get(authoredSkillName(skill).trim().toLowerCase())
         : undefined;
       // Preserve missing display names; the helper otherwise falls back to the name.
       const localizedSkill =
@@ -260,6 +262,8 @@ async function buildWorkspaceSkillsStatus(
           mapSkillConfigToStatus(
             {
               ...skill,
+              name: qualifySkillName(extension.name, skill.name),
+              authoredName: skill.name,
               level: 'extension',
               extensionName: extension.name,
               extensionDisplayName:

@@ -617,6 +617,7 @@ export type {
   DaemonWorkflowApprovalStatusEntry,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,
+  DaemonWorkflowCallTrace,
   DaemonWorkflowEvent,
   DaemonWorkflowPhaseVisit,
   DaemonSessionProcessTaskLifecycleStatus,

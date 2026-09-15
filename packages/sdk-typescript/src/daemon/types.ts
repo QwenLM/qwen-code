@@ -1668,7 +1668,7 @@ export interface DaemonSessionListPageOptions {
    * opaque and activity-based.
    */
   parentSessionId?: string;
-  /** Restrict the page to sessions attributed to this source type. */
+  /** Filter by source; `default` includes legacy and `qwen-live` tasks. */
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
@@ -2929,6 +2929,11 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    workflowStepId: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
@@ -3076,6 +3081,8 @@ export type DaemonWorkflowDispatchStatus =
   | 'cached';
 
 export interface DaemonWorkflowDispatchStatusEntry {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -3140,7 +3147,20 @@ export type DaemonWorkflowEvent =
       error: string;
     });
 
+export interface DaemonWorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
 export interface DaemonSessionWorkflowTaskStatus {
+  sourceRef?: { id: string; revision: string };
+  workflowCalls?: DaemonWorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */
