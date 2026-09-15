@@ -51,6 +51,13 @@ const METADATA_KEY = 'coding-plan';
 const TOKEN_METADATA_KEY = 'token-plan';
 
 describe('useProviderUpdates', () => {
+  let userSettingsFile:
+    | {
+        settings: Record<string, unknown>;
+        originalSettings: Record<string, unknown>;
+        path: string;
+      }
+    | undefined;
   const mockSettings = {
     merged: {
       modelProviders: {} as Record<string, unknown>,
@@ -85,11 +92,11 @@ describe('useProviderUpdates', () => {
       path: '/tmp/default-settings.json',
     },
     get user() {
-      return {
+      return (userSettingsFile ??= {
         settings: mockSettings.merged,
         originalSettings: structuredClone(mockSettings.merged),
         path: '/tmp/settings.json',
-      };
+      });
     },
   };
 
@@ -113,9 +120,12 @@ describe('useProviderUpdates', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    userSettingsFile = undefined;
     mockSettings.setValue.mockImplementation(
-      (_scope: unknown, key: string, value: unknown) => {
-        setNestedPropertySafe(mockSettings.merged, key, value);
+      (scope: SettingScope, key: string, value: unknown) => {
+        const settingsFile = mockSettings.forScope(scope);
+        setNestedPropertySafe(settingsFile.settings, key, value);
+        setNestedPropertySafe(settingsFile.originalSettings, key, value);
       },
     );
     mockSettings.merged['modelProviders'] = {};
@@ -352,11 +362,17 @@ describe('useProviderUpdates', () => {
     expect(reloaded[AuthType.USE_OPENAI]).toEqual(
       expect.arrayContaining([customModel, ...chinaTemplate]),
     );
+    expect(mockSettings.user.originalSettings['modelProviders']).toEqual(
+      reloaded,
+    );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
       `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
       chinaVersion,
     );
+    expect(
+      mockSettings.user.originalSettings[PROVIDER_METADATA_NS],
+    ).toMatchObject({ [METADATA_KEY]: { version: chinaVersion } });
   });
 
   it('executes update when user confirms with "update"', async () => {
