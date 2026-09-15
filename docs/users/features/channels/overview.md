@@ -415,6 +415,18 @@ Channels use their normal response delivery path. The shared delivery layer send
 
 The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings are no longer supported and can be removed from channel configuration. They do not affect delivery. Channel settings management rejects newly added or changed values for these fields. An unchanged stored value is retained, or removed, when the edit keeps the channel's `type`; changing a channel's `type` requires removing these fields first.
 
+### Turn output mode
+
+`outputMode` is a shared channel setting with adapter opt-in. Currently only **DingTalk** supports it and defaults to `per_turn` when the setting is omitted. Other adapters retain their existing behavior and receive no output-mode default: the channel editor does not offer this field, and configuration parsing or management saves reject an explicit value on unsupported adapters.
+
+- `per_task` waits for the main task and its associated background tasks and notifications, then delivers one final result containing the last non-empty assistant reply for that task.
+- `per_response` delivers each complete assistant response, not each token chunk.
+- `per_turn` delivers the last non-empty assistant reply within each turn. The main turn finishes immediately when its prompt ends; later background notification turns deliver separate results.
+
+In the default `per_turn` mode, a later background callback cannot reopen or replace the completed main result. A main result followed by eleven independent callback turns can therefore produce twelve result messages or cards. Choose `per_task` when the final result should wait for the associated background work. These modes select assistant output; they do not generate an extra summary or concatenate every intermediate reply.
+
+The selected policy applies whether interactive cards are enabled or replies use ordinary messages. The shared layer owns output selection and task/turn coordination; native rendering, media and fallback delivery remain adapter-specific. See [DingTalk turn output mode](./dingtalk#turn-output-mode) for presentation details and the conversation scope. Channel loops and webhook runs are unchanged.
+
 ## Scheduled Channel Loops
 
 Channels have a persistent scheduler for prompts that should run later and push
