@@ -11,6 +11,10 @@
  */
 
 import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../../agents/workflow-correlation.js';
+import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
@@ -89,6 +93,7 @@ import {
 } from '../../agents/workflow-resume-call.js';
 
 export interface WorkflowParams {
+  sourceRef?: WorkflowSourceRef;
   /**
    * Inline JavaScript source for the workflow. Provide exactly one of
    * `script` or `scriptPath`.
@@ -126,6 +131,7 @@ export interface WorkflowToolOptions {
 }
 
 export interface WorkflowToolResult extends ToolResult {
+  sourceRef?: WorkflowSourceRef;
   /** Exact run started by a successfully admitted background invocation. */
   workflowRunId?: string;
   /**
@@ -141,6 +147,17 @@ export interface WorkflowToolResult extends ToolResult {
 const WORKFLOW_PARAM_SCHEMA = {
   type: 'object',
   properties: {
+    sourceRef: {
+      type: 'object',
+      description:
+        'Optional caller-supplied definition id and revision for run correlation. Requires a writable journal; omit for ordinary workflows.',
+      properties: {
+        id: { type: 'string', minLength: 1, maxLength: 256 },
+        revision: { type: 'string', minLength: 1, maxLength: 256 },
+      },
+      required: ['id', 'revision'],
+      additionalProperties: false,
+    },
     script: {
       type: 'string',
       description:
@@ -406,6 +423,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         script: this.params.script,
         scriptPath: this.params.scriptPath,
         args: this.params.args,
+        sourceRef: this.params.sourceRef,
         resumeFromRunId: this.params.resumeFromRunId,
         dispatch: this.toolOptions.dispatch,
         runInBackground,
@@ -462,6 +480,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         workflowRunId: handle.runId,
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         llmContent: [
           {
             text: buildBackgroundStartText(handle, status),
@@ -503,6 +522,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // keep the payload shape minimal.
       const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         ...(outcome.meta ? { meta: outcome.meta } : {}),
         phases: outcome.phases,
         logs: outcome.logs,
@@ -534,6 +554,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       return {
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         // Two parts: the script's return value is left exactly as it was,
         // and the run handle follows as a separate part. Note what this does
         // NOT mean — `convertToFunctionResponse` joins the text parts with a
@@ -605,6 +626,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       return {
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         // The failure message alone names what threw but not where to look:
         // the logs the runtime already mirrored (`dispatch failed (result not
         // consumed)` and friends) only reached `returnDisplay`, which the
@@ -1416,6 +1438,13 @@ export class WorkflowTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: WorkflowParams,
   ): string | null {
+    try {
+      readWorkflowSourceRef(params.sourceRef);
+    } catch (error) {
+      return error instanceof Error
+        ? error.message
+        : 'Invalid workflow sourceRef.';
+    }
     const hasScript =
       typeof params.script === 'string' && params.script.length > 0;
     const hasPath =

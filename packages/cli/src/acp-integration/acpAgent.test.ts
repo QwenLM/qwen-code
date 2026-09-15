@@ -12981,6 +12981,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
       availableSkills: ['review'],
       workflowsEnabled: true,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: false,
+        workflowStepId: false,
+      },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
         { name: 'release-check', source: 'user' },
