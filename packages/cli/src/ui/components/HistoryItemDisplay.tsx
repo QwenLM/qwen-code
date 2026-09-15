@@ -70,6 +70,7 @@ import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { hyperlinkAtCell } from '../utils/hyperlink-at.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
+import { MULTI_CLICK_MS } from '../selection/use-text-selection.js';
 import {
   measureElementPosition,
   layoutRowForEvent,
@@ -250,25 +251,36 @@ export const CollapsibleToolGroupMessage: React.FC<
 > = ({ expansionKey, ...props }) => {
   const settings = useSettings();
   const [locallyExpanded, setLocallyExpanded] = useState(false);
-  const { expandedBatchIds, expandBatch } = useToolDetailsExpanded();
+  const { expandedBatchIds, toggleBatch } = useToolDetailsExpanded();
   const ref = useRef<DOMElement>(null);
   const pressRef = useRef<{ col: number; row: number } | null>(null);
+  const lastClickRef = useRef<{
+    col: number;
+    row: number;
+    time: number;
+    count: number;
+  } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
+  const { stdout } = useStdout();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const { menu: contextMenu } = useContextMenu();
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled;
-  const collapsed =
+  const canToggle =
     settings.merged.ui?.showToolCallDetails === false &&
-    !locallyExpanded &&
-    !(expansionKey && expandedBatchIds.has(expansionKey)) &&
     !props.fullDetail &&
     !hasRequiredToolInteraction(props);
+  const isActive = canToggle && contextMenu === null;
+  const expanded = expansionKey
+    ? expandedBatchIds.has(expansionKey)
+    : locallyExpanded;
+  const collapsed = canToggle && !expanded;
 
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
-        if (!collapsed || !ref.current) return;
+        if (!canToggle || !ref.current) return;
         if (event.name === 'move') {
           if (
             pressRef.current &&
@@ -276,43 +288,85 @@ export const CollapsibleToolGroupMessage: React.FC<
               event.row !== pressRef.current.row)
           ) {
             pressRef.current = null;
+            lastClickRef.current = null;
           }
           return;
         }
         if (event.name !== 'left-press' && event.name !== 'left-release') {
           pressRef.current = null;
+          lastClickRef.current = null;
           return;
         }
         const metrics = measureElementPosition(ref.current);
         const col = event.col - 1;
         const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
-        const isInside =
+        const isInsideBounds =
           col >= metrics.x &&
           col < metrics.x + metrics.width &&
           row >= metrics.y &&
           row < metrics.y + metrics.height;
+        const isInside = isInsideBounds && (collapsed || row === metrics.y);
         if (event.name === 'left-press') {
-          pressRef.current = isInside
-            ? { col: event.col, row: event.row }
-            : null;
+          if (!isInside) {
+            pressRef.current = null;
+            lastClickRef.current = null;
+            return;
+          }
+          pressRef.current = { col: event.col, row: event.row };
+          const now = Date.now();
+          const previous = lastClickRef.current;
+          const near =
+            previous !== null &&
+            previous.row === row &&
+            Math.abs(previous.col - col) <= 1 &&
+            now - previous.time < MULTI_CLICK_MS;
+          lastClickRef.current = {
+            col,
+            row,
+            time: now,
+            count: near ? Math.min(previous.count + 1, 3) : 1,
+          };
           return;
         }
         const press = pressRef.current;
         pressRef.current = null;
         if (isInside && press?.col === event.col && press.row === event.row) {
+          if (lastClickRef.current?.count !== 1) return;
+          if (props.isPending && expanded) return;
+          const url = hyperlinkAtCell(
+            getScreenBuffer(stdout)?.frame ?? null,
+            col,
+            row,
+          );
+          if (url) return;
           if (expansionKey) {
-            expandBatch(expansionKey);
+            toggleBatch(expansionKey);
           } else {
-            setLocallyExpanded(true);
+            setLocallyExpanded((value) => !value);
           }
         }
       },
-      [collapsed, terminalHeight, expansionKey, expandBatch],
+      [
+        canToggle,
+        collapsed,
+        terminalHeight,
+        props.isPending,
+        stdout,
+        expanded,
+        expansionKey,
+        toggleBatch,
+      ],
     ),
-    { isActive: collapsed && clickable },
+    { isActive: isActive && clickable },
   );
 
-  if (!collapsed) return <ToolGroupMessage {...props} />;
+  if (!collapsed) {
+    return (
+      <Box ref={isActive ? ref : undefined} flexDirection="column">
+        <ToolGroupMessage {...props} />
+      </Box>
+    );
+  }
 
   return (
     <ToolGroupMessage
