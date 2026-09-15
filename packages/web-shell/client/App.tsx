@@ -3444,13 +3444,15 @@ export function App({
         : undefined
       : connection.workspaceCwd;
   const {
-    hasActivePrompt: sessionHasActivePrompt,
+    hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
   } = useDaemonSessionActivityBridge(
     workspace.client,
     activePromptWorkspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePrompt =
+    daemonHasActivePrompt || !!connection.backgroundTurn;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const trustedPrimaryWorkspaceCwd = useMemo(
@@ -5417,6 +5419,15 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openCurrentContextUsagePanel = useCallback(() => {
+    if (connection.sessionId)
+      openContextUsagePanel(connection.sessionId, sessionActions);
+  }, [connection.sessionId, openContextUsagePanel, sessionActions]);
+  const openPaneContextUsagePanel = useCallback(
+    (sessionId: string, actions: DaemonSessionActions) =>
+      openContextUsagePanel(sessionId, actions, true),
+    [openContextUsagePanel],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -5811,6 +5822,29 @@ export function App({
                 workspaceCwd: tab.workspaceCwd,
               };
             }
+          }
+        }
+        if (!restored && tab.targetKind === 'subagent' && tab.taskId) {
+          const snapshot = await workspace.client.sessionTasks(
+            tab.sourceSessionId,
+          );
+          const task =
+            snapshot.sessionId === tab.sourceSessionId
+              ? snapshot.tasks.find(
+                  (item) => item.kind === 'agent' && item.id === tab.taskId,
+                )
+              : undefined;
+          if (task?.kind === 'agent') {
+            const rootTool = agentTaskAsToolCall(task);
+            restored = {
+              id: tab.id,
+              kind: 'subagent',
+              title: tab.title,
+              sessionId: tab.sourceSessionId,
+              rootToolCallId: rootTool.callId,
+              rootTool,
+              workspaceCwd: tab.workspaceCwd,
+            };
           }
         }
         if (!restored) {
@@ -6516,6 +6550,44 @@ export function App({
         onRightPanelOpen(request);
         return;
       }
+      if (request.kind === 'background_task') {
+        if (!request.sourceSessionId) return;
+        const turn = request.backgroundTurn;
+        const tab: ArtifactPanelTab =
+          turn.kind === 'workflow'
+            ? {
+                id: `workflow:${request.sourceSessionId}`,
+                kind: 'workflow',
+                title: request.title,
+                sessionId: request.sourceSessionId,
+              }
+            : {
+                id: request.id,
+                kind: 'pending',
+                title: request.title,
+                targetKind: turn.kind === 'agent' ? 'subagent' : turn.kind,
+                sourceSessionId: request.sourceSessionId,
+                rootToolCallId: turn.toolUseId,
+                taskId: turn.taskId,
+                workspaceCwd: request.workspaceCwd,
+              };
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+        if (tab.kind === 'pending') {
+          const existing = artifactPanelTabsRef.current.find(
+            (item) => item.id === tab.id,
+          );
+          if (!existing || existing.kind === 'pending')
+            void hydratePendingArtifactPanelTab(tab);
+        }
+        return;
+      }
       if (request.kind === 'review') {
         openReviewPanel(
           request.changes,
@@ -6664,6 +6736,7 @@ export function App({
     },
     [
       getDefaultReviewPanelWidth,
+      hydratePendingArtifactPanelTab,
       onFileReviewOpen,
       onRightPanelOpen,
       openReviewPanel,
@@ -7494,6 +7567,7 @@ export function App({
   }
   previousStreamingStateRef.current = streamingState;
   const activeTurnStartedAt = useMemo(() => {
+    if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (streamingState === 'idle') return undefined;
     for (let i = displayMessages.length - 1; i >= 0; i--) {
       const message = displayMessages[i];
@@ -7502,7 +7576,7 @@ export function App({
       }
     }
     return localStreamingStartedAtRef.current;
-  }, [displayMessages, streamingState]);
+  }, [displayMessages, streamingState, connection.backgroundTurn]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
@@ -10957,6 +11031,12 @@ export function App({
   useEffect(() => {
     const onBtwShortcut = (e: KeyboardEvent) => {
       if (interactionBlocked || pendingApproval || isWebTerminalTarget(e))
+        return;
+      const target = e.composedPath()[0] ?? e.target;
+      if (
+        target instanceof Element &&
+        target.closest('[data-web-shell-context-popover]')
+      )
         return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
@@ -17534,6 +17614,9 @@ export function App({
         .catch(() => undefined);
     }
   }, [primaryContextControls, paneContextControls, compressionResults]);
+  const reconciledContextControls = useRef(
+    new WeakMap<ContextUsageControls, ContextUsageControls>(),
+  );
   const contextUsageControls = useMemo(() => {
     const live =
       primaryContextControls &&
@@ -17545,18 +17628,21 @@ export function App({
           }
         : paneContextControls;
     return Object.fromEntries(
-      Object.entries(live).map(([id, controls]) => [
-        id,
-        {
-          ...controls,
-          result: controls.compressing
-            ? undefined
-            : controls.result &&
-                !observedCompressionResults.current.has(controls.result)
-              ? controls.result
-              : (compressionResults[id] ?? controls.result),
-        },
-      ]),
+      Object.entries(live).map(([id, controls]) => {
+        const result = controls.compressing
+          ? undefined
+          : controls.result &&
+              !observedCompressionResults.current.has(controls.result)
+            ? controls.result
+            : (compressionResults[id] ?? controls.result);
+        const previous = reconciledContextControls.current.get(controls);
+        const reconciled =
+          previous && previous.result === result
+            ? previous
+            : { ...controls, result };
+        reconciledContextControls.current.set(controls, reconciled);
+        return [id, reconciled];
+      }),
     );
   }, [
     mainView,
@@ -18131,6 +18217,36 @@ export function App({
                       setGitModeIntent({ mode: 'current' });
                     }
                   }}
+                  onOpenGitDiff={
+                    projectFeaturesAvailable
+                      ? (workspaceCwd) =>
+                          setGitDialog({
+                            workspaceCwd,
+                            gitCwd:
+                              workspaceCwd === activeWorkspaceCwd
+                                ? sessionWorktree?.path
+                                : undefined,
+                            view: 'diff',
+                          })
+                      : undefined
+                  }
+                  onOpenCommit={
+                    projectFeaturesAvailable
+                      ? (workspaceCwd) =>
+                          setGitDialog({
+                            workspaceCwd,
+                            // A worktree session commits in the worktree checkout,
+                            // not the base workspace cwd — but only for the active
+                            // session's own workspace row; another workspace's row
+                            // has no association with this session's worktree.
+                            gitCwd:
+                              workspaceCwd === activeWorkspaceCwd
+                                ? sessionWorktree?.path
+                                : undefined,
+                            view: 'commit',
+                          })
+                      : undefined
+                  }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported
                       ? () => setShowAddWorkspaceDialog(true)
@@ -19040,6 +19156,7 @@ export function App({
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         registerContextUsageControls={registerContextUsageControls}
                         onBeforeContextCompress={preparePaneContextCompression}
+                        onOpenContextUsage={openPaneContextUsagePanel}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
@@ -19257,6 +19374,18 @@ export function App({
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
+                                onOpenBackground={(turn) => {
+                                  if (!connection.sessionId) return;
+                                  handleTurnOutputOpen({
+                                    id: `background:${connection.sessionId}:${turn.taskId}`,
+                                    kind: 'background_task',
+                                    title: turn.label ?? turn.kind,
+                                    turnId: turn.turnId,
+                                    backgroundTurn: turn,
+                                    sourceSessionId: connection.sessionId,
+                                    workspaceCwd: connection.workspaceCwd,
+                                  });
+                                }}
                               >
                                 {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
@@ -19576,6 +19705,10 @@ export function App({
                                 activeTurnStartedAt
                               }
                               hasActivePrompt={sessionHasActivePrompt}
+                              backgroundLabel={
+                                connection.backgroundTurn?.label ??
+                                connection.backgroundTurn?.kind
+                              }
                             />
                           )
                         ) : newSessionSuggestion ? (
@@ -19851,6 +19984,14 @@ export function App({
                           }
                           onShowContextUsage={
                             contextUsageAvailable ? handleShowContextUsage : undefined
+                          }
+                          contextUsageControls={
+                            connection.sessionId
+                              ? contextUsageControls[connection.sessionId]
+                              : undefined
+                          }
+                          onOpenContextUsage={
+                            contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}

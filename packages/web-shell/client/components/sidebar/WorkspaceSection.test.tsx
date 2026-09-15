@@ -152,6 +152,8 @@ function renderSection(
     ) => ReactNode;
     onOpenPathLocally: (cwd: string) => Promise<void>;
     onOpenTerminalLocally: (cwd: string) => Promise<void>;
+    onOpenGitDiff: (workspaceCwd: string) => void;
+    onOpenCommit: (workspaceCwd: string) => void;
   }> = {},
 ): void {
   act(() => {
@@ -193,6 +195,8 @@ function renderSection(
           gitBranchWanted={overrides.gitBranchWanted}
           onOpenPathLocally={overrides.onOpenPathLocally}
           onOpenTerminalLocally={overrides.onOpenTerminalLocally}
+          onOpenGitDiff={overrides.onOpenGitDiff}
+          onOpenCommit={overrides.onOpenCommit}
         />
       </I18nProvider>,
     );
@@ -1317,6 +1321,228 @@ describe('WorkspaceSection Git summary', () => {
       expect(workspaceGit).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('WorkspaceSection Git picker entry', () => {
+  function gitRow(): HTMLElement | null {
+    return document.querySelector<HTMLElement>(
+      '[data-web-shell-workspace-git]',
+    );
+  }
+
+  async function showBranchRow(): Promise<HTMLElement> {
+    const dialog = await openDetailsDialog(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    return dialog;
+  }
+
+  it('turns the branch row into the picker trigger when Git is wired', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    const onOpenGitDiff = vi.fn();
+    const onOpenCommit = vi.fn();
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff,
+      onOpenCommit,
+    });
+    const dialog = await showBranchRow();
+
+    const row = gitRow();
+    expect(row).not.toBeNull();
+    expect(row?.tagName).toBe('BUTTON');
+    expect(row?.getAttribute('aria-label')).toBe(
+      'Current Git branch: main — 2 modified',
+    );
+    expect(row?.querySelector('svg.lucide-chevron-right')).not.toBeNull();
+    // The severity dot rides the row regardless of the picker.
+    expect(
+      dialog.querySelector('[class*="sessionDetailsGitDot"]'),
+    ).not.toBeNull();
+    // Neither callback fires merely from pressing the row: the picker owns
+    // the actions, so only opening it counts.
+    expect(onOpenGitDiff).not.toHaveBeenCalled();
+    expect(onOpenCommit).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('collapses the details when the pointer crosses onto the picker layer', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff: vi.fn(),
+      onOpenCommit: vi.fn(),
+    });
+    const details = await showBranchRow();
+    const row = gitRow()!;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    const contents = document.querySelectorAll('[data-slot="popover-content"]');
+    const picker = contents[contents.length - 1] as HTMLElement;
+    expect(picker).not.toBe(details);
+
+    // The sequence a browser sends. First the pointer arrives on the row from
+    // the details content, so the collapse below can only come from the row's
+    // own leave; then it crosses onto the picker layer, naming the picker node
+    // as the relatedTarget. React computes enter/leave over the React tree, so
+    // that leave must land on the row — the details content never sees it.
+    await act(async () => {
+      details.dispatchEvent(
+        new MouseEvent('pointerout', { bubbles: true, relatedTarget: row }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      row.dispatchEvent(
+        new MouseEvent('pointerout', { bubbles: true, relatedTarget: picker }),
+      );
+      picker.dispatchEvent(
+        new MouseEvent('pointerover', { bubbles: true, relatedTarget: row }),
+      );
+      await Promise.resolve();
+    });
+
+    // Escape dismisses the topmost layer (the picker); the details follow.
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(details.isConnected).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('hands keyboard focus back to the folder row when the picker collapses the details', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff: vi.fn(),
+      onOpenCommit: vi.fn(),
+    });
+    const details = await showBranchRow();
+    const row = gitRow()!;
+    const folderButton = container.querySelector<HTMLElement>(
+      '[class*="headerRow"] button',
+    )!;
+    // Keyboard path: the row is focused, no pointer ever touches it.
+    await act(async () => {
+      row.focus();
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelectorAll('[data-slot="popover-content"]').length,
+    ).toBe(2);
+
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(details.isConnected).toBe(false);
+    // Both the row and the picker's own field unmount with the details, and
+    // Radix cannot restore focus (this popover is anchored, not triggered).
+    expect(document.activeElement).toBe(folderButton);
+    vi.useRealTimers();
+  });
+
+  it('opens the real picker as a nested layer from the branch row', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff: vi.fn(),
+      onOpenCommit: vi.fn(),
+    });
+    const details = await showBranchRow();
+    expect(workspaceGitBranches).not.toHaveBeenCalled();
+
+    await act(async () => {
+      gitRow()!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(workspaceGitBranches).toHaveBeenCalled();
+    expect(
+      document.querySelector(
+        'input[placeholder="Search for branches and actions"]',
+      ),
+    ).not.toBeNull();
+    // Opening the picker must not tear the details down with it. Assert on the
+    // node captured before the picker existed: every popover content carries
+    // role="dialog", so a fresh query could match the picker's own layer.
+    expect(details.isConnected).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it.each([untrustedWorkspace, { ...trustedWorkspace, cwd: 'Project' }])(
+    'leaves the branch row a plain summary without a real trusted workspace: $cwd',
+    async (workspace) => {
+      workspaceGit.mockResolvedValue({
+        v: 2,
+        workspaceCwd: '/tmp/project',
+        branch: 'main',
+        unstaged: 2,
+        computedAt: 1,
+      });
+      renderSection({
+        workspace,
+        client: makeOverviewClient(),
+        overviewEnabled: true,
+        onOpenGitDiff: vi.fn(),
+        onOpenCommit: vi.fn(),
+      });
+      await showBranchRow();
+      expect(gitRow()).toBeNull();
+      vi.useRealTimers();
+    },
+  );
+
+  it('leaves the branch row a plain summary when Git is not wired', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    await showBranchRow();
+    expect(gitRow()).toBeNull();
+    vi.useRealTimers();
+  });
 });
 
 describe('isAbsolutePath', () => {
