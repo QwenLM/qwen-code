@@ -110,6 +110,7 @@ function parseRestoreOptions(
   const body = requireExactBody(req, res, [
     'historyPageSize',
     'liveReplayMode',
+    'compactedReplayMode',
     'hideInheritedHistory',
     'approvalMode',
   ]);
@@ -138,6 +139,18 @@ function parseRestoreOptions(
     sendInvalidRequest(res, '`liveReplayMode` must be `full` or `summary`.');
     return undefined;
   }
+  const compactedReplayMode = body['compactedReplayMode'];
+  if (
+    compactedReplayMode !== undefined &&
+    compactedReplayMode !== 'full' &&
+    compactedReplayMode !== 'summary'
+  ) {
+    sendInvalidRequest(
+      res,
+      '`compactedReplayMode` must be `full` or `summary`.',
+    );
+    return undefined;
+  }
   const hideInheritedHistory = body['hideInheritedHistory'];
   if (
     hideInheritedHistory !== undefined &&
@@ -157,6 +170,7 @@ function parseRestoreOptions(
       ? { historyPageSize: historyPageSize as number }
       : {}),
     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+    ...(compactedReplayMode !== undefined ? { compactedReplayMode } : {}),
     ...(hideInheritedHistory !== undefined ? { hideInheritedHistory } : {}),
     ...(approvalMode !== undefined ? { approvalMode } : {}),
   };
