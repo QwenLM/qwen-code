@@ -734,18 +734,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<McpAppResultDisplay | undefined> {
     if (!this.appResourceUri || !this.mcpClient?.readResource) return undefined;
 
+    const timeoutMs = Math.min(
+      this.mcpTimeout ?? MCP_APP_RESOURCE_TIMEOUT_MS,
+      MCP_APP_RESOURCE_TIMEOUT_MS,
+    );
+    const timeoutSignal = AbortSignal.timeout(MCP_APP_RESOURCE_TIMEOUT_MS);
     try {
       const resource = await this.mcpClient.readResource(
         { uri: this.appResourceUri },
         {
-          timeout: Math.min(
-            this.mcpTimeout ?? MCP_APP_RESOURCE_TIMEOUT_MS,
-            MCP_APP_RESOURCE_TIMEOUT_MS,
-          ),
-          signal: AbortSignal.any([
-            signal,
-            AbortSignal.timeout(MCP_APP_RESOURCE_TIMEOUT_MS),
-          ]),
+          timeout: timeoutMs,
+          signal: AbortSignal.any([signal, timeoutSignal]),
         },
       );
       const content = resource.contents.find(
@@ -763,8 +762,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             ? Buffer.from(content.blob, 'base64').toString('utf8')
             : undefined;
       if (!html) throw new Error('resource did not return HTML content');
-      if (Buffer.byteLength(html, 'utf8') > MCP_APP_RESOURCE_MAX_BYTES) {
-        throw new Error('resource HTML exceeds the 1 MiB host limit');
+      const htmlBytes = Buffer.byteLength(html, 'utf8');
+      if (htmlBytes > MCP_APP_RESOURCE_MAX_BYTES) {
+        throw new Error(
+          `resource HTML is ${htmlBytes} bytes, exceeding the ${MCP_APP_RESOURCE_MAX_BYTES} byte (1 MiB) host limit`,
+        );
       }
 
       const metadata = getMcpAppResourceMetadata(
@@ -783,10 +785,23 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       };
     } catch (error) {
       if (signal.aborted) return undefined;
-      debugLogger.warn(
-        `Failed to load MCP App '${this.appResourceUri}' from '${this.serverName}': ${getErrorMessage(error)}`,
-      );
-      return undefined;
+      const reason =
+        timeoutSignal.aborted ||
+        (error instanceof Error && error.name === 'TimeoutError') ||
+        isExecutionTimeoutFailure(error, this.serverName, signal)
+          ? `resource read timed out (limit: ${timeoutMs} ms)`
+          : getErrorMessage(error);
+      const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
+      debugLogger.warn(warning);
+      return {
+        type: 'mcp_app',
+        serverName: this.serverName,
+        resourceUri: this.appResourceUri,
+        html: '',
+        toolResult,
+        toolArguments: this.params,
+        fallbackText: [warning, fallbackText].filter(Boolean).join('\n\n'),
+      };
     }
   }
 
