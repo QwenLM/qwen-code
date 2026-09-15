@@ -80,6 +80,18 @@ pub struct AtspiTreeResult {
     pub incomplete_notes: Vec<String>,
 }
 
+impl AtspiTreeResult {
+    pub fn read_complete(&self) -> bool {
+        self.window_scoped
+            && (self.complete
+                || (self.truncated
+                    && !self.incomplete_notes.is_empty()
+                    && self.incomplete_notes.iter().all(|note| {
+                        matches!(note.as_str(), "max_elements_reached" | "max_depth_reached")
+                    })))
+    }
+}
+
 /// Walk the AT-SPI tree for a window identified by (pid, xid).
 /// Falls back to a minimal X11 property tree if AT-SPI is unavailable.
 pub fn walk_tree(pid: u32, xid: u64, query: Option<&str>) -> AtspiTreeResult {

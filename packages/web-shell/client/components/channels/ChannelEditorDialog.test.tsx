@@ -341,6 +341,68 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('edits DWS direct access separately from sender and group authorization', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'dws',
+      displayName: 'DingTalk Workspace',
+      manageable: true,
+      fields: [
+        ...DINGTALK_WITH_ACCESS.fields.filter((field) =>
+          ['senderPolicy', 'groupPolicy', 'allowedUsers'].includes(field.key),
+        ),
+        {
+          key: 'dmPolicy',
+          label: 'DM descriptor fallback',
+          kind: 'enum',
+          required: true,
+          default: 'open',
+          options: [
+            { value: 'open', label: 'Open' },
+            { value: 'disabled', label: 'Disabled' },
+          ],
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'dws-bot',
+      config: { type: 'dws', senderPolicy: 'pairing', groupPolicy: 'open' },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance, onSave });
+    expect(sectionHeadingOf(fieldByLabel('Direct message access'))).toBe(
+      'Access control',
+    );
+    expect(fieldByLabel('Direct message access')?.textContent).toContain(
+      'Open',
+    );
+    expect(fieldByLabel('Sender policy')).not.toBeNull();
+    await selectOption('Direct message access', 'Disabled');
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save!.click());
+    expect(onSave).toHaveBeenCalledWith(
+      'dws-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          dmPolicy: 'disabled',
+          groupPolicy: 'open',
+          senderPolicy: 'pairing',
+        }),
+      }),
+    );
+    await renderDialog({
+      descriptor,
+      instance: { ...instance, config: onSave.mock.calls[0]![1].config },
+      language: 'zh-CN',
+    });
+    expect(fieldByLabel('私聊访问')?.textContent).toContain('禁用');
+    expect(fieldByLabel('发送者策略')).not.toBeNull();
+  });
+
   it('defaults to the primary workspace and allows a registered workspace', async () => {
     const onWorkspaceChange = vi.fn();
     await renderDialog({ onWorkspaceChange });
