@@ -5806,13 +5806,17 @@ export function WebShellSidebar({
                   className="w-full"
                   aria-label={t('sidebar.sessionSource')}
                 >
-                  <TabsTrigger value="default">
+                  <TabsTrigger value="default" className="min-w-0">
                     <ListTodoIcon />
-                    {t('sidebar.sessionSource.tasks')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.tasks')}
+                    </span>
                   </TabsTrigger>
-                  <TabsTrigger value="channel">
+                  <TabsTrigger value="channel" className="min-w-0">
                     <MessageCircleIcon />
-                    {t('sidebar.sessionSource.channels')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.channels')}
+                    </span>
                   </TabsTrigger>
                 </TabsList>
               </Tabs>

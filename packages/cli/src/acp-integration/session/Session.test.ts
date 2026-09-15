@@ -33962,7 +33962,7 @@ describe('Session', () => {
           expect(stopInputs[1]).toMatchObject({ stop_hook_active: true });
         });
 
-        it('preserves goal feedback alongside an external stop reason', async () => {
+        it('continues with the stop reason when a blocking Stop hook also gives a reason', async () => {
           const messageBus = {
             request: vi
               .fn()
@@ -33973,9 +33973,6 @@ describe('Session', () => {
                   continue: false,
                   stopReason: 'External stop hook feedback',
                   reason: 'Keep working on the active goal',
-                  hookSpecificOutput: {
-                    qwenGoalHookId: 'goal-hook',
-                  },
                 },
               })
               .mockResolvedValueOnce({
@@ -34009,7 +34006,7 @@ describe('Session', () => {
           const continuation = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1]?.[1] as { message: Part[] };
           expect(textParts(continuation.message)).toEqual([
-            'External stop hook feedback\nKeep working on the active goal',
+            'External stop hook feedback',
           ]);
         });
 
@@ -34113,11 +34110,9 @@ describe('Session', () => {
         });
 
         it('pauses the canonical Goal runtime when the blocking cap fires', async () => {
-          // `abortGoalForStopHookCap` only reads the legacy
-          // `activeGoalStore`, which has no writer for daemon sessions --
-          // so on its own the cap stops nothing here: the goal stays active,
-          // the runtime mints the next continuation, and a Stop hook that
-          // always blocks loops the session forever.
+          // Without the pause the goal stays active, the runtime mints the
+          // next continuation, and a Stop hook that always blocks loops the
+          // session forever.
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',
             revision: 3,
