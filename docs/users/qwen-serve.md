@@ -650,9 +650,10 @@ invocation and its final arguments reach the provider, but this feature does
 not continuously authorize the process or add a process-completion audit
 protocol; a policy that requires foreground completion should deny those
 shapes. Guarded MCP calls also disable automatic reconnect/replay after a
-transport error. After a successful startup handshake, `/capabilities`
-advertises `external_tool_guard`; its absence means clients must not assume
-enforcement.
+transport error, and a guarded cancel of a dead server connection does not
+trigger the background reconnect either. After a successful startup handshake,
+`/capabilities` advertises `external_tool_guard`; its absence means clients
+must not assume enforcement.
 
 This feature does not authorize explicit daemon REST/ACP management calls;
 those continue to use the daemon's existing authentication and route

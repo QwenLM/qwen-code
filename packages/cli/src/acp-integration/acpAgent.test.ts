@@ -1354,6 +1354,7 @@ describe('runAcpAgent shutdown cleanup', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       shutdown: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -1938,6 +1939,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(mockHookSystem),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(true),
@@ -2385,6 +2387,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       shutdown: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -4738,6 +4741,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
@@ -23501,6 +23505,7 @@ describe('QwenAgent sessionIdContext binding', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -23840,6 +23845,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -25361,6 +25367,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -25690,6 +25697,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
@@ -29200,6 +29208,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
@@ -30101,6 +30110,7 @@ describe('sessionLanguage multi-session propagation', () => {
       setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
       getModel: vi.fn().mockReturnValue('m'),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
