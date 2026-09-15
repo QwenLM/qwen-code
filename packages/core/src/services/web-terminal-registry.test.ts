@@ -9,18 +9,24 @@ import pkg from '@xterm/headless';
 
 const { Terminal } = pkg;
 
-const { spawn, getPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
-  () => ({
-    spawn: vi.fn(),
-    getPty: vi.fn(),
-    spawnSync: vi.fn(),
-    osPlatform: vi.fn(),
-    loadXtermHeadless: vi.fn(),
-  }),
-);
+const {
+  spawn,
+  getPty,
+  getPtyLoadError,
+  spawnSync,
+  osPlatform,
+  loadXtermHeadless,
+} = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  getPty: vi.fn(),
+  getPtyLoadError: vi.fn(),
+  spawnSync: vi.fn(),
+  osPlatform: vi.fn(),
+  loadXtermHeadless: vi.fn(),
+}));
 
 vi.mock('node:child_process', () => ({ spawnSync }));
-vi.mock('../utils/getPty.js', () => ({ getPty }));
+vi.mock('../utils/getPty.js', () => ({ getPty, getPtyLoadError }));
 vi.mock('../utils/load-xterm-headless.js', () => ({ loadXtermHeadless }));
 // conpty-host reads os.platform() for its win32 release gate, and the
 // registry for the bundled-vs-inbox ConPTY backend choice; killPtyTree
@@ -230,10 +236,38 @@ describe('WebTerminalRegistry', () => {
     // inbox backend — covered by the bundled-backend cases below.
     osPlatform.mockReturnValue('linux');
     const registry = new WebTerminalRegistry();
+    // The shape a broken standalone archive produces: the wrapper is present
+    // but its native module cannot be dlopen'd, which getPty() reports as null
+    // plus a recorded reason (#11872). The message must name that cause rather
+    // than claim no backend module was found.
     getPty.mockResolvedValueOnce(null);
+    getPtyLoadError.mockReturnValueOnce(
+      'Failed to load native module: pty.node, checked: build/Release',
+    );
     await expect(
       registry.create({ workspaceCwd: '/workspace' }),
-    ).resolves.toEqual({ error: 'PTY not available' });
+    ).resolves.toEqual({
+      error: `PTY not available: no loadable PTY backend (@lydell/node-pty or node-pty) for linux/${process.arch}: Failed to load native module: pty.node, checked: build/Release`,
+    });
+
+    // No backend and nothing recorded: the message stays reason-free instead of
+    // inventing one.
+    getPty.mockResolvedValueOnce(null);
+    getPtyLoadError.mockReturnValueOnce(null);
+    await expect(
+      registry.create({ workspaceCwd: '/workspace' }),
+    ).resolves.toEqual({
+      error: `PTY not available: no loadable PTY backend (@lydell/node-pty or node-pty) for linux/${process.arch}`,
+    });
+
+    // Defensive arm: getPty() currently always resolves, so this pins the
+    // handler rather than a production path.
+    getPty.mockRejectedValueOnce(new Error('native load failed'));
+    await expect(
+      registry.create({ workspaceCwd: '/workspace' }),
+    ).resolves.toEqual({
+      error: `PTY not available: PTY support failed to load on linux/${process.arch}: native load failed`,
+    });
 
     spawn.mockImplementationOnce(() => {
       throw new Error('spawn failed');
