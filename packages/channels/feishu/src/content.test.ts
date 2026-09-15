@@ -326,6 +326,26 @@ describe('parseFeishuContent (#11554)', () => {
     expect(result.resources).toEqual([{ type: 'image', key: 'img_nested' }]);
   });
 
+  it('accumulates list indents across nesting levels', () => {
+    // Inner content indent is 4; two further columns are a paragraph
+    // continuation (a real image), not indented code. Only a stacking
+    // indent gets this right — replacing the indent reads it as code.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '- outer\n  - inner\n      ![a](img_deep)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_deep' }]);
+  });
+
   it('treats a tab-indented fence as indented code', () => {
     const result = parseFeishuContent(
       'post',
