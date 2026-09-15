@@ -15,58 +15,12 @@ import type {
   GenerateContentResponseUsageMetadata,
   Part,
 } from '@google/genai';
-<<<<<<< HEAD
-import type {
-  Config,
-  ContentGeneratorConfig,
-  LlmChat,
-  ToolCallConfirmationDetails,
-  ToolConfirmationPayload,
-  ToolResult,
-  ToolResultDisplay,
-  ShellProgressData,
-  ChatRecord,
-  HistoryGap,
-  AgentEventEmitter,
-  StopHookOutput,
-  HookExecutionRequest,
-  HookExecutionResponse,
-  MessageBus,
-  StreamEvent,
-  ChatCompressionInfo,
-  AutoModeDecision,
-  AutoModeOutcome,
-  AutoModeFallbackConfirmation,
-  GoalRecord,
-  GoalRuntime,
-  GoalSnapshotV2,
-  GoalStateCause,
-  GoalTurnHost,
-  GoalTurnPermit,
-  ToolCallRequestInfo,
-  ToolCallResponseInfo,
-  ToolExecutionStatus,
-  LoopTickResult,
-  ToolArtifact,
-  VisionBridgeResult,
-  MemoryWriteCandidate,
-  CronTaskDelivery,
-  CronRunSessionOutcome,
-  InvocationContextV1,
-  ChatRecordingService,
-  TurnResultRecordPayload,
-  WorkflowApproval,
-  WorkflowSnapshot,
-  WorkflowTask,
-  BranchPoint,
-  TeamManager,
-  TeammateApprovalRequestEvent,
-} from '@qwen-code/qwen-code-core';
-=======
->>>>>>> origin/main
+
 import {
   type Config,
   type ContentGeneratorConfig,
+  type TeamManager,
+  type TeammateApprovalRequestEvent,
   type LlmChat,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
@@ -293,13 +247,10 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
-<<<<<<< HEAD
   TeamEventType,
-=======
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
->>>>>>> origin/main
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -502,12 +453,9 @@ const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
-<<<<<<< HEAD
 const TEAM_MANAGER_CHANGED_ABORT_REASON = 'qwen:team-manager-changed';
-=======
 const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
->>>>>>> origin/main
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
@@ -1744,11 +1692,8 @@ function parsePromptChannelDelivery(
   };
 }
 
-<<<<<<< HEAD
 const MAX_NOTIFICATION_QUEUE = 20;
 const TEAMMATE_NOTIFICATION_TASK_PREFIX = 'teammate-';
-=======
->>>>>>> origin/main
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
 export function resolveExistingFile(
