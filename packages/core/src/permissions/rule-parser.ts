@@ -816,6 +816,15 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
 /**
+ * The characters bash treats as word separators (its default `IFS`): space,
+ * tab and newline. JavaScript's `\s` also matches `\r`, `\v`, `\f`,
+ * `\u00a0` and other Unicode whitespace, none of which bash treats as
+ * separators — bash takes such a character as part of the neighbouring word
+ * instead.
+ */
+const BASH_WORD_SEPARATORS = [' ', '\t', '\n'];
+
+/**
  * Count the consecutive backslashes immediately before `index`.
  *
  * An odd count means the character at `index` is itself escaped, so it is a
@@ -844,6 +853,11 @@ function precedingBackslashCount(command: string, index: number): number {
  * the `echo` and then run the `rm`. Reading that `\>` as a redirection would
  * keep both halves in one segment and let the `echo`'s allow rule cover the
  * `rm`.
+ *
+ * The scan skips only {@link BASH_WORD_SEPARATORS}: with `\s` it also skipped
+ * `\r`/`\v`/`\f`/`\u00a0`, which bash treats as ordinary word characters, so
+ * `echo x >\r& rm -rf /` collapsed into one segment whose `echo x` allow rule
+ * covered the `rm` (#11851).
  */
 function isAsyncOperator(command: string, index: number): boolean {
   if (command[index + 1] === '>') {
@@ -851,7 +865,7 @@ function isAsyncOperator(command: string, index: number): boolean {
   }
   for (let j = index - 1; j >= 0; j--) {
     const ch = command[j]!;
-    if (/\s/.test(ch)) {
+    if (BASH_WORD_SEPARATORS.includes(ch)) {
       continue;
     }
     if (ch === '>' || ch === '<') {

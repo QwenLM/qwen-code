@@ -645,6 +645,31 @@ describe('splitCompoundCommand', () => {
     },
   );
 
+  // #11851: bash only treats space, tab and newline as word separators. `\r`,
+  // `\v`, `\f` and `\u00a0` are ordinary word characters to bash, so in
+  // `echo x >\r& rm …` the redirection target is the `\r` and the `&` is the
+  // async operator — bash runs two commands. When the scan skipped those four
+  // as if they were whitespace, both halves stayed in one segment and the
+  // first command's allow rule covered the second.
+  it.each([
+    ['echo x >\r& rm -rf /tmp/x'],
+    ['echo x >\v& rm -rf /tmp/x'],
+    ['echo x >\f& rm -rf /tmp/x'],
+    ['echo x >\u00a0& rm -rf /tmp/x'],
+    // Spaced variant: real separators around the non-IFS character.
+    ['echo x > \r & rm -rf /tmp/x'],
+  ])(
+    'splits %s, where a non-IFS "whitespace" sits between the > and the &',
+    async (command) => {
+      // Segments are trimmed, and `String.prototype.trim` also strips these
+      // characters, so the first segment ends at the bare `>`.
+      expect(splitCompoundCommand(command)).toEqual([
+        'echo x >',
+        'rm -rf /tmp/x',
+      ]);
+    },
+  );
+
   // Over-correction guard: the longer operators must keep winning over the
   // bare `&`, so these two pass both before and after the change.
   it.each([
