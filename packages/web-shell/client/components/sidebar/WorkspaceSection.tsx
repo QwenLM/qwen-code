@@ -199,6 +199,14 @@ interface WorkspaceSectionProps {
    * on the same machine.
    */
   onOpenTerminalLocally?: (cwd: string) => Promise<void>;
+  /**
+   * Open the working-tree Changes dialog for this workspace. When wired, the
+   * hover popover's branch row becomes the trigger for that workspace's Git
+   * picker; without it the row stays a plain-text summary.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
+  onOpenCommit?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
@@ -243,6 +251,8 @@ export function WorkspaceSection({
   isPinnedSectionMember,
   onOpenPathLocally,
   onOpenTerminalLocally,
+  onOpenGitDiff,
+  onOpenCommit,
 }: WorkspaceSectionProps) {
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [channelCatalog, setChannelCatalog] = useState<{
@@ -819,6 +829,21 @@ export function WorkspaceSection({
           sessions={stats}
           overview={overview ?? retainedOverview}
           items={overviewItems}
+          gitActions={
+            // Untrusted workspaces have no git runtime, and a synthetic
+            // fallback has no real cwd to scope the picker's routes with.
+            onOpenGitDiff && workspace.trusted && gitPollCwd
+              ? {
+                  workspaceCwd: workspace.cwd,
+                  onOpenDiff: () => onOpenGitDiff(workspace.cwd),
+                  onOpenCommit: onOpenCommit
+                    ? () => onOpenCommit(workspace.cwd)
+                    : undefined,
+                  onStatusRefreshed: setGitStatus,
+                  onBranchChanged: () => void loadGitStatus(),
+                }
+              : undefined
+          }
           onOpenChange={setDetailsOpen}
           onOpenPathLocally={
             onOpenPathLocally && gitPollCwd && workspace.trusted

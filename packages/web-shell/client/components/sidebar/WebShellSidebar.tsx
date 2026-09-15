@@ -451,6 +451,14 @@ interface WebShellSidebarProps {
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /**
+   * Open the working-tree Changes dialog for a workspace. Forwarded to each
+   * trusted workspace's hover details, where the branch row fires it from the
+   * workspace's Git picker. Omit it and the row stays a plain-text summary.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
+  onOpenCommit?: (workspaceCwd: string) => void;
+  /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
    * registration is unavailable; locked workspaces hide the action separately.
    */
@@ -962,6 +970,8 @@ export function WebShellSidebar({
   onMobileClose,
   selectedWorkspaceCwd,
   onSelectWorkspace,
+  onOpenGitDiff,
+  onOpenCommit,
   onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
@@ -4462,6 +4472,8 @@ export function WebShellSidebar({
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const backgroundRunning =
+        !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -4509,7 +4521,7 @@ export function WebShellSidebar({
             styles.sessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
-            running && styles.runningSession,
+            running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
           )}
           onMouseEnter={(event) =>
@@ -4537,13 +4549,25 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {completedUnread ? (
+            {completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
+            {backgroundRunning && (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionBackgroundRunning,
+                )}
+                data-web-shell-session-background-running
+                role="img"
+                aria-label={t('background.running')}
+                title={t('background.running')}
+              />
+            )}
             {session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
@@ -4553,7 +4577,7 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !completedUnread ? (
+            ) : sessionWorkActive && !completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
@@ -4621,7 +4645,7 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {session.hasActivePrompt || sessionWorkActive ? (
+                {running && !backgroundRunning ? (
                   <span
                     className={styles.sessionLoading}
                     aria-label={
@@ -6072,6 +6096,12 @@ export function WebShellSidebar({
                         mapSession={applyOptimisticPin}
                         limitSessions={editingSessionIdentity === null}
                         isPinnedSectionMember={isPinnedSectionMember}
+                        onOpenGitDiff={
+                          projectFeaturesEnabled ? onOpenGitDiff : undefined
+                        }
+                        onOpenCommit={
+                          projectFeaturesEnabled ? onOpenCommit : undefined
+                        }
                         searchQuery={searchQuery}
                         expanded={ws.primary ? projectExpanded : undefined}
                         autoExpandKey={

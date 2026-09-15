@@ -335,6 +335,32 @@ export function resolveToolName(rawName: string): string {
     : rawName;
 }
 
+const TOOL_NAME_ALIASES_BY_CANONICAL: ReadonlyMap<string, readonly string[]> =
+  (() => {
+    const byCanonical = new Map<string, string[]>();
+    for (const [alias, canonical] of Object.entries(TOOL_NAME_ALIASES)) {
+      const aliases = byCanonical.get(canonical);
+      if (aliases) {
+        aliases.push(alias);
+      } else {
+        byCanonical.set(canonical, [alias]);
+      }
+    }
+    return byCanonical;
+  })();
+
+/**
+ * Every name that {@link resolveToolName} resolves to the given canonical tool
+ * name, including Claude Code's names (`Bash`, `Read`, `Write`). Exact names
+ * only: the meta-categories applied by {@link toolMatchesRuleToolName} (a
+ * `Read` rule also covering `grep_search`, a `Bash` rule also covering
+ * `monitor`) are not expanded here. Empty for a name the table does not know,
+ * such as an MCP tool.
+ */
+export function getToolNameAliases(canonicalName: string): readonly string[] {
+  return TOOL_NAME_ALIASES_BY_CANONICAL.get(canonicalName) ?? [];
+}
+
 /**
  * Determine the specifier kind for a given canonical tool name.
  * This tells the matching engine which algorithm to use for the specifier.

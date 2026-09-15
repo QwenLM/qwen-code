@@ -649,7 +649,13 @@ describe('deadlineOption — one grammar, help that names only the flags each co
       expect(text).toContain("Omit for the topology's default");
       expect(text).toContain('`none` records no wall');
       expect(text).toContain('is refused up front');
-      expect(text).toContain('QWEN_REVIEW_DEADLINE_EPOCH');
+      // The idle tolerance, quoted from the gate (pinned in deadline.test).
+      expect(text).toContain(
+        'Pauses count against the wall and also price the next round; the Review Deadline section of the code-review docs gives the ceilings (about 3h20m / 5h20m / 7h20m on the 8h / 12h / 16h defaults).',
+      );
+      expect(text).toContain(
+        'QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over the flag and the default.',
+      );
       expect(text).toContain('the default does not.');
     }
   });

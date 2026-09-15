@@ -34,6 +34,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   DaemonHttpError,
+  parseDaemonBackgroundTurn,
   DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
@@ -327,6 +328,9 @@ export function getConnectionAfterSessionClear(
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
+    delete next.backgroundTurn;
+    delete next.finishedBackgroundTurnId;
+    delete next.backgroundTurnObservedAt;
     delete next.standaloneSession;
     // Drop the session-scoped raw snapshots (both carry the cleared
     // sessionId), which also makes the effect's canReuseSessionMetadata
@@ -988,6 +992,9 @@ export function createDaemonSessionActions({
           clientId: undefined,
           displayName: undefined,
           titleSource: undefined,
+          backgroundTurn: undefined,
+          finishedBackgroundTurnId: undefined,
+          backgroundTurnObservedAt: undefined,
           goalState: undefined,
           error: undefined,
           errorStatus: undefined,
@@ -1043,10 +1050,46 @@ export function createDaemonSessionActions({
         workspaceCwd: sessionRef.current?.workspaceCwd,
         sessionId: sessionRef.current?.sessionId,
       },
+      backgroundTurn,
+      requestStartedAt,
     ) {
+      backgroundTurn = parseDaemonBackgroundTurn(backgroundTurn);
+      const connection = getConnection();
+      const backstopSession = sessionRef.current;
+      if (
+        connection.sessionId === owner.sessionId &&
+        backstopSession?.sessionId === owner.sessionId &&
+        backstopSession?.workspaceCwd === owner.workspaceCwd &&
+        requestStartedAt !== undefined &&
+        requestStartedAt <= (connection.backgroundTurnObservedAt ?? -Infinity)
+      )
+        return;
       const previous = daemonActivePromptRef.current;
       daemonActivePromptRef.current = { active, ...owner };
-      const backstopSession = sessionRef.current;
+      if (
+        active !== undefined &&
+        backstopSession?.sessionId === owner.sessionId &&
+        backstopSession?.workspaceCwd === owner.workspaceCwd
+      ) {
+        setConnection((current) => {
+          const nextBackgroundTurn =
+            current.finishedBackgroundTurnId === backgroundTurn?.turnId
+              ? undefined
+              : backgroundTurn;
+          return current.backgroundTurn === nextBackgroundTurn
+            ? current
+            : {
+                ...current,
+                backgroundTurn: nextBackgroundTurn,
+                backgroundTurnObservedAt:
+                  requestStartedAt ?? current.backgroundTurnObservedAt,
+                finishedBackgroundTurnId:
+                  current.backgroundTurn && !nextBackgroundTurn
+                    ? current.backgroundTurn.turnId
+                    : current.finishedBackgroundTurnId,
+              };
+        });
+      }
       // A fresh `false` is a settle signal even when this provider has not seen
       // the preceding `true`; that is how a restored prompt is released after
       // the first post-attach live-state poll. The bridge withholds cached
@@ -1088,7 +1131,12 @@ export function createDaemonSessionActions({
         return;
       }
       const settledRestoredPrompt = settleRestoredActivePrompt();
-      if (!lostAuthority && !settledRestoredPrompt) return;
+      if (
+        !lostAuthority &&
+        !settledRestoredPrompt &&
+        !connection.backgroundTurn
+      )
+        return;
       // Commit the buffered batch before reading the store. Without this the
       // read races the 16ms window: a chunk burst still buffered at flip time
       // lands *after* the `assistant.done` below, and the reducer mints a fresh
@@ -1133,7 +1181,10 @@ export function createDaemonSessionActions({
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus('waiting');
       const ctrl = new AbortController();
-      activePromptsRef.current.set(sessionId, { controller: ctrl });
+      activePromptsRef.current.set(sessionId, {
+        controller: ctrl,
+        replayedTurnEvents: new Map(),
+      });
       try {
         // Normalize images once and pass the same array to both calls
         const normalizedImages: Array<{ data: string; mimeType: string }> = (
@@ -1268,6 +1319,8 @@ export function createDaemonSessionActions({
             optimisticBlockId = store.getSnapshot().blocks.at(-1)?.id;
           }
         }
+        const active = activePromptsRef.current.get(sessionId);
+        if (active?.controller === ctrl) active.promptId = accepted.promptId;
         onPromptAdmitted?.(session, {
           promptId: accepted.promptId,
           label: text,
@@ -2192,6 +2245,9 @@ export function createDaemonSessionActions({
             status: 'connected',
             sessionId: nextSession.sessionId,
             sessionContext: createdSessionContext,
+            backgroundTurn: undefined,
+            finishedBackgroundTurnId: undefined,
+            backgroundTurnObservedAt: undefined,
             goalState: undefined,
             ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
             workspaceCwd:
@@ -2307,6 +2363,9 @@ export function createDaemonSessionActions({
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
+        backgroundTurn: undefined,
+        finishedBackgroundTurnId: undefined,
+        backgroundTurnObservedAt: undefined,
         goalState: undefined,
         missingSession: false,
         error: undefined,
@@ -2442,11 +2501,40 @@ export function createDaemonSessionActions({
       // Mirrors getStats: a missing session rethrows raw without a notice.
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
+      const before = getConnection();
+      const modelGeneration = modelMutationGeneration;
+      const { syncCounters, ...requestOptions } = opts ?? {};
       try {
-        return await withActionTimeout(
-          session.contextUsage(opts),
+        const snapshot = await withActionTimeout(
+          session.contextUsage(opts ? requestOptions : undefined),
           'Load context usage timed out',
         );
+        if (
+          syncCounters &&
+          snapshot.sessionId === session.sessionId &&
+          snapshot.usage.totalTokens > 0 &&
+          snapshot.usage.contextWindowSize > 0
+        ) {
+          setConnection((current) =>
+            sessionRef.current === session &&
+            current.sessionId === session.sessionId &&
+            current.workspaceCwd === before.workspaceCwd &&
+            current.status === 'connected' &&
+            !current.loadingTranscript &&
+            !current.catchingUp &&
+            modelMutationGeneration === modelGeneration &&
+            current.currentModel === before.currentModel &&
+            current.tokenCount === before.tokenCount &&
+            current.contextWindow === before.contextWindow &&
+            current.tokenUsage === before.tokenUsage
+              ? {
+                  ...current,
+                  tokenCount: snapshot.usage.totalTokens,
+                }
+              : current,
+          );
+        }
+        return snapshot;
       } catch (error) {
         // Opt-in silence for surfaces that re-collect automatically (the
         // context panel): notifying there would stack identical notices for
