@@ -64,6 +64,68 @@ afterEach(() => {
 });
 
 describe('startSpeculation', () => {
+  it('discards failed-attempt tool calls after model fallback', async () => {
+    const getToolRegistry = vi.fn();
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry,
+    } as unknown as Config;
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'stale-call',
+                      name: 'read_file',
+                      args: { path: 'stale.ts' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      };
+      yield {
+        type: 'model_fallback',
+        info: {
+          fromModel: 'primary',
+          toModel: 'fallback',
+          fallbackIndex: 1,
+        },
+      };
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [{ content: { parts: [{ text: 'current answer' }] } }],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'inspect the repository');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    expect(getToolRegistry).not.toHaveBeenCalled();
+    expect(state.messages).toEqual([
+      expect.objectContaining({ role: 'user' }),
+      { role: 'model', parts: [{ text: 'current answer' }] },
+    ]);
+
+    await abortSpeculation(state);
+  });
+
   it('does not start when the session-scoped lookup returns null', async () => {
     const config = {
       getSessionId: vi.fn().mockReturnValue('spec-session'),

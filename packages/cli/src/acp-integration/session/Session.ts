@@ -66,6 +66,7 @@ import {
   parseModelReasoningCapabilities,
   ApprovalMode,
   CompressionStatus,
+  StreamEventType,
   isCompressionFailureStatus,
   RUNTIME_SNAPSHOT_PREFIX,
   detectLoopSentinel,
@@ -82,7 +83,6 @@ import {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createDebugLogger,
   DiscoveredMCPTool,
-  StreamEventType,
   ToolConfirmationOutcome,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -114,6 +114,7 @@ import {
   isValidCronTaskRoutingId,
   MessageBusType,
   MessageDisplayDispatcher,
+  ModelStreamAttemptState,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getOutputStyleTurnReminder,
@@ -6492,12 +6493,10 @@ export class Session implements SessionContext {
                   return { stopReason: 'cancelled' };
                 }
 
-                const functionCalls: FunctionCall[] = [];
+                const attemptState = new ModelStreamAttemptState();
                 const preparationTracker = new ToolCallPreparationTracker(
                   this.toolCallEmitter,
                 );
-                let usageMetadata: GenerateContentResponseUsageMetadata | null =
-                  null;
                 const streamStartTime = Date.now();
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   pendingSend.signal,
@@ -6576,17 +6575,9 @@ export class Session implements SessionContext {
                         return { stopReason: 'cancelled' };
                       }
 
-                      if (
-                        resp.type === StreamEventType.CHUNK &&
-                        resp.value.candidates &&
-                        resp.value.candidates.length > 0
-                      ) {
-                        const candidate = resp.value.candidates[0];
-                        for (const part of candidate.content?.parts ?? []) {
-                          if (!part.text) {
-                            continue;
-                          }
-
+                      const transition = attemptState.accept(resp);
+                      if (transition.type === 'chunk') {
+                        for (const part of transition.textParts) {
                           this.messageEmitter.emitMessage(
                             part.text,
                             'assistant',
@@ -6602,36 +6593,18 @@ export class Session implements SessionContext {
                           }
                         }
                         responseCapture.agentOutput.observeFinishReason(
-                          candidate.finishReason,
+                          transition.finishReason,
                         );
-                      }
-
-                      if (
-                        resp.type === StreamEventType.CHUNK &&
-                        resp.value.usageMetadata
-                      ) {
-                        usageMetadata = resp.value.usageMetadata;
-                      }
-
-                      if (resp.type === StreamEventType.CHUNK) {
-                        await preparationTracker.observe(resp.value);
-                        if (resp.value.functionCalls) {
-                          preparationTracker.resolve(resp.value.functionCalls);
-                          functionCalls.push(...resp.value.functionCalls);
+                        await preparationTracker.observe(transition.response);
+                        if (transition.functionCalls.length > 0) {
+                          preparationTracker.resolve(transition.functionCalls);
                         }
-                      }
-                      if (
-                        resp.type === StreamEventType.RETRY ||
-                        resp.type === StreamEventType.MODEL_FALLBACK
-                      ) {
+                      } else if (transition.type === 'attempt_reset') {
                         responseCapture.agentOutput.restartAttempt(
-                          resp.type === StreamEventType.RETRY &&
-                            resp.isContinuation === true,
+                          transition.preserveText,
                         );
-                        if (
-                          resp.type === StreamEventType.MODEL_FALLBACK ||
-                          !resp.isContinuation
-                        ) {
+                        messageDisplay?.restartAttempt(transition.preserveText);
+                        if (!transition.preserveText) {
                           rewindChannelDeliveryResponseBlock(
                             channelDeliveryResponseBlock,
                             channelDeliveryCheckpoint,
@@ -6640,9 +6613,8 @@ export class Session implements SessionContext {
                         await finalizeToolCallPreparations(
                           preparationTracker,
                           true,
-                          `main prompt ${resp.type}`,
+                          `main prompt ${transition.reason}`,
                         );
-                        functionCalls.length = 0;
                       }
                       if (resp.type === StreamEventType.COMPRESSED) {
                         // In-send compression rewrote the shared history;
@@ -6738,14 +6710,19 @@ export class Session implements SessionContext {
                   await messageDisplay?.finish();
                 }
 
+                const attempt = attemptState.snapshot();
+
                 commitChannelDeliveryResponseBlock(
                   responseCapture,
                   channelDeliveryResponseBlock,
-                  functionCalls.length > 0,
+                  attempt.functionCalls.length > 0,
                 );
 
-                if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
+                if (attempt.usageMetadata) {
+                  this.#recordPromptTokenCount(
+                    attempt.usageMetadata,
+                    requestRouteKey,
+                  );
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(pendingSend.signal);
@@ -6753,20 +6730,20 @@ export class Session implements SessionContext {
 
                   const durationMs = Date.now() - streamStartTime;
                   await this.messageEmitter.emitUsageMetadata(
-                    usageMetadata,
+                    attempt.usageMetadata,
                     '',
                     durationMs,
                   );
                 }
 
-                if (functionCalls.length > 0) {
+                if (attempt.functionCalls.length > 0) {
                   const toolRun = await this.#runWithFullTurnModel(
                     fullTurnModelOverride,
                     () =>
                       this.runToolCalls(
                         pendingSend.signal,
                         promptId,
-                        functionCalls,
+                        attempt.functionCalls,
                         toolLoopState,
                         onFullTurnModel,
                       ),
@@ -7364,11 +7341,10 @@ export class Session implements SessionContext {
         };
       }
 
-      const functionCalls: FunctionCall[] = [];
+      const attemptState = new ModelStreamAttemptState();
       const preparationTracker = new ToolCallPreparationTracker(
         this.toolCallEmitter,
       );
-      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
       const streamStartTime = Date.now();
       let streamFailed = false;
       let guardForThisSend = nextGuardContinuation;
@@ -7728,14 +7704,9 @@ export class Session implements SessionContext {
             };
           }
 
-          if (
-            response.type === StreamEventType.CHUNK &&
-            response.value.candidates &&
-            response.value.candidates.length > 0
-          ) {
-            const candidate = response.value.candidates[0];
-            for (const part of candidate.content?.parts ?? []) {
-              if (!part.text) continue;
+          const transition = attemptState.accept(response);
+          if (transition.type === 'chunk') {
+            for (const part of transition.textParts) {
               if (
                 !options.responseCapture?.backgroundResponse ||
                 part.thought
@@ -7756,35 +7727,18 @@ export class Session implements SessionContext {
               }
             }
             options.responseCapture?.agentOutput.observeFinishReason(
-              candidate.finishReason,
+              transition.finishReason,
             );
-          }
-
-          if (
-            response.type === StreamEventType.CHUNK &&
-            response.value.usageMetadata
-          ) {
-            usageMetadata = response.value.usageMetadata;
-          }
-          if (response.type === StreamEventType.CHUNK) {
-            await preparationTracker.observe(response.value);
-            if (response.value.functionCalls) {
-              preparationTracker.resolve(response.value.functionCalls);
-              functionCalls.push(...response.value.functionCalls);
+            await preparationTracker.observe(transition.response);
+            if (transition.functionCalls.length > 0) {
+              preparationTracker.resolve(transition.functionCalls);
             }
-          }
-          if (
-            response.type === StreamEventType.RETRY ||
-            response.type === StreamEventType.MODEL_FALLBACK
-          ) {
+          } else if (transition.type === 'attempt_reset') {
             options.responseCapture?.agentOutput.restartAttempt(
-              response.type === StreamEventType.RETRY &&
-                response.isContinuation === true,
+              transition.preserveText,
             );
-            if (
-              response.type === StreamEventType.MODEL_FALLBACK ||
-              !response.isContinuation
-            ) {
+            messageDisplay?.restartAttempt(transition.preserveText);
+            if (!transition.preserveText) {
               rewindChannelDeliveryResponseBlock(
                 channelDeliveryResponseBlock,
                 channelDeliveryCheckpoint,
@@ -7793,9 +7747,8 @@ export class Session implements SessionContext {
             await finalizeToolCallPreparations(
               preparationTracker,
               true,
-              `daemon continuation ${response.type}`,
+              `daemon continuation ${transition.reason}`,
             );
-            functionCalls.length = 0;
           }
           if (response.type === StreamEventType.COMPRESSED) {
             // In-send compression rewrote the shared history; invalidate
@@ -7870,10 +7823,12 @@ export class Session implements SessionContext {
         }
       }
 
+      const attempt = attemptState.snapshot();
+
       commitChannelDeliveryResponseBlock(
         options.responseCapture,
         channelDeliveryResponseBlock,
-        functionCalls.length > 0,
+        attempt.functionCalls.length > 0,
       );
       if (options.responseCapture?.backgroundResponse) {
         await options.responseCapture.backgroundResponse(
@@ -7881,24 +7836,24 @@ export class Session implements SessionContext {
         );
       }
 
-      if (usageMetadata) {
-        this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
+      if (attempt.usageMetadata) {
+        this.#recordPromptTokenCount(attempt.usageMetadata, requestRouteKey);
         const durationMs = Date.now() - streamStartTime;
         await this.messageEmitter.emitUsageMetadata(
-          usageMetadata,
+          attempt.usageMetadata,
           '',
           durationMs,
         );
       }
 
-      if (functionCalls.length > 0) {
+      if (attempt.functionCalls.length > 0) {
         const toolRun = await this.#runWithFullTurnModel(
           options.getModelOverride?.(),
           () =>
             this.runToolCalls(
               pendingSend.signal,
               toolPromptId,
-              functionCalls,
+              attempt.functionCalls,
               toolLoopState,
               options.onFullTurnModel,
             ),
@@ -9971,12 +9926,10 @@ export class Session implements SessionContext {
                   return;
                 }
 
-                const functionCalls: FunctionCall[] = [];
+                const attemptState = new ModelStreamAttemptState();
                 const preparationTracker = new ToolCallPreparationTracker(
                   this.toolCallEmitter,
                 );
-                let usageMetadata: GenerateContentResponseUsageMetadata | null =
-                  null;
                 const streamStartTime = Date.now();
                 const sendResult =
                   await this.#sendMessageStreamWithAutoCompression(
@@ -10023,14 +9976,9 @@ export class Session implements SessionContext {
                       return;
                     }
 
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.candidates &&
-                      resp.value.candidates.length > 0
-                    ) {
-                      const candidate = resp.value.candidates[0];
-                      for (const part of candidate.content?.parts ?? []) {
-                        if (!part.text) continue;
+                    const transition = attemptState.accept(resp);
+                    if (transition.type === 'chunk') {
+                      for (const part of transition.textParts) {
                         this.messageEmitter.emitMessage(
                           part.text,
                           'assistant',
@@ -10046,36 +9994,18 @@ export class Session implements SessionContext {
                         }
                       }
                       responseCapture.agentOutput.observeFinishReason(
-                        candidate.finishReason,
+                        transition.finishReason,
                       );
-                    }
-
-                    if (
-                      resp.type === StreamEventType.CHUNK &&
-                      resp.value.usageMetadata
-                    ) {
-                      usageMetadata = resp.value.usageMetadata;
-                    }
-
-                    if (resp.type === StreamEventType.CHUNK) {
-                      await preparationTracker.observe(resp.value);
-                      if (resp.value.functionCalls) {
-                        preparationTracker.resolve(resp.value.functionCalls);
-                        functionCalls.push(...resp.value.functionCalls);
+                      await preparationTracker.observe(transition.response);
+                      if (transition.functionCalls.length > 0) {
+                        preparationTracker.resolve(transition.functionCalls);
                       }
-                    }
-                    if (
-                      resp.type === StreamEventType.RETRY ||
-                      resp.type === StreamEventType.MODEL_FALLBACK
-                    ) {
+                    } else if (transition.type === 'attempt_reset') {
                       responseCapture.agentOutput.restartAttempt(
-                        resp.type === StreamEventType.RETRY &&
-                          resp.isContinuation === true,
+                        transition.preserveText,
                       );
-                      if (
-                        resp.type === StreamEventType.MODEL_FALLBACK ||
-                        !resp.isContinuation
-                      ) {
+                      messageDisplay?.restartAttempt(transition.preserveText);
+                      if (!transition.preserveText) {
                         rewindChannelDeliveryResponseBlock(
                           channelDeliveryResponseBlock,
                           channelDeliveryCheckpoint,
@@ -10084,9 +10014,8 @@ export class Session implements SessionContext {
                       await finalizeToolCallPreparations(
                         preparationTracker,
                         true,
-                        `cron/loop tick ${resp.type}`,
+                        `cron/loop tick ${transition.reason}`,
                       );
-                      functionCalls.length = 0;
                     }
                     if (resp.type === StreamEventType.COMPRESSED) {
                       // In-send compression rewrote the shared history;
@@ -10115,30 +10044,35 @@ export class Session implements SessionContext {
                   }
                 }
 
+                const attempt = attemptState.snapshot();
+
                 commitChannelDeliveryResponseBlock(
                   responseCapture,
                   channelDeliveryResponseBlock,
-                  functionCalls.length > 0,
+                  attempt.functionCalls.length > 0,
                 );
 
-                if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
+                if (attempt.usageMetadata) {
+                  this.#recordPromptTokenCount(
+                    attempt.usageMetadata,
+                    requestRouteKey,
+                  );
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(ac.signal);
                   }
                   const durationMs = Date.now() - streamStartTime;
                   await this.messageEmitter.emitUsageMetadata(
-                    usageMetadata,
+                    attempt.usageMetadata,
                     '',
                     durationMs,
                   );
                 }
 
-                if (functionCalls.length > 0) {
+                if (attempt.functionCalls.length > 0) {
                   const toolRun = await this.runToolCalls(
                     ac.signal,
                     promptId,
-                    functionCalls,
+                    attempt.functionCalls,
                     toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel || ac.signal.aborted) {
@@ -11060,13 +10994,10 @@ export class Session implements SessionContext {
               return;
             }
 
-            const functionCalls: FunctionCall[] = [];
+            const attemptState = new ModelStreamAttemptState();
             const preparationTracker = new ToolCallPreparationTracker(
               this.toolCallEmitter,
             );
-            let usageMetadata: GenerateContentResponseUsageMetadata | null =
-              null;
-            let responseText = '';
             const streamStartTime = Date.now();
 
             const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -11103,14 +11034,9 @@ export class Session implements SessionContext {
                   return;
                 }
 
-                if (
-                  resp.type === StreamEventType.CHUNK &&
-                  resp.value.candidates &&
-                  resp.value.candidates.length > 0
-                ) {
-                  const candidate = resp.value.candidates[0];
-                  for (const part of candidate.content?.parts ?? []) {
-                    if (!part.text) continue;
+                const transition = attemptState.accept(resp);
+                if (transition.type === 'chunk') {
+                  for (const part of transition.textParts) {
                     if (part.thought) {
                       await this.messageEmitter.emitMessage(
                         part.text,
@@ -11118,36 +11044,20 @@ export class Session implements SessionContext {
                         true,
                       );
                     } else {
-                      responseText += part.text;
                       messageDisplay?.addChunk(part.text);
                     }
                   }
-                }
-
-                if (
-                  resp.type === StreamEventType.CHUNK &&
-                  resp.value.usageMetadata
-                ) {
-                  usageMetadata = resp.value.usageMetadata;
-                }
-
-                if (resp.type === StreamEventType.CHUNK) {
-                  await preparationTracker.observe(resp.value);
-                  if (resp.value.functionCalls) {
-                    preparationTracker.resolve(resp.value.functionCalls);
-                    functionCalls.push(...resp.value.functionCalls);
+                  await preparationTracker.observe(transition.response);
+                  if (transition.functionCalls.length > 0) {
+                    preparationTracker.resolve(transition.functionCalls);
                   }
-                }
-                if (
-                  resp.type === StreamEventType.RETRY ||
-                  resp.type === StreamEventType.MODEL_FALLBACK
-                ) {
+                } else if (transition.type === 'attempt_reset') {
+                  messageDisplay?.restartAttempt(transition.preserveText);
                   await finalizeToolCallPreparations(
                     preparationTracker,
                     true,
-                    `background notification ${resp.type}`,
+                    `background notification ${transition.reason}`,
                   );
-                  functionCalls.length = 0;
                 }
                 if (resp.type === StreamEventType.COMPRESSED) {
                   // In-send compression rewrote the shared history;
@@ -11173,27 +11083,31 @@ export class Session implements SessionContext {
               }
             }
 
-            await emitBackgroundResponse(responseText);
+            const attempt = attemptState.snapshot();
+            await emitBackgroundResponse(attempt.text);
 
             if (this.messageRewriter) {
               await this.messageRewriter.flushTurn(ac.signal);
             }
 
-            if (usageMetadata) {
-              this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
+            if (attempt.usageMetadata) {
+              this.#recordPromptTokenCount(
+                attempt.usageMetadata,
+                requestRouteKey,
+              );
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
-                usageMetadata,
+                attempt.usageMetadata,
                 '',
                 durationMs,
               );
             }
 
-            if (functionCalls.length > 0) {
+            if (attempt.functionCalls.length > 0) {
               const toolRun = await this.runToolCalls(
                 ac.signal,
                 promptId,
-                functionCalls,
+                attempt.functionCalls,
                 toolLoopState,
               );
               if (toolRun.stopAfterPermissionCancel || ac.signal.aborted) {
