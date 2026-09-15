@@ -30,7 +30,13 @@ import {
   SubagentExecutionEvent,
   type ToolCallEvent,
 } from '../types.js';
-import type { RumEvent, RumPayload } from './event-types.js';
+import type {
+  RumEvent,
+  RumExceptionEvent,
+  RumPayload,
+  RumResourceEvent,
+} from './event-types.js';
+import { clearKnownSecretValuesForTest } from '../sanitize.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -283,6 +289,217 @@ describe('QwenLogger', () => {
       expect(events[events.length - 1]?.name).toBe(
         `test-event-${TEST_ONLY.MAX_EVENTS + 9}`,
       );
+    });
+
+    it('should redact credentials in error text before queueing', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'tool',
+        name: 'tool_call',
+        message:
+          'Command: git clone https://x-access-token:ghs_abc@github.com/o/r\nError: fatal: Authentication failed',
+        properties: {
+          tool_name: 'run_shell_command',
+          error_message:
+            'Command: curl -H "Authorization: Bearer abc123" https://example.com',
+          // Not a blanket-covered key: the targeted pass must still mask
+          // credential shapes here (blanket handles only message /
+          // error_message / error_excerpt — #11649).
+          error:
+            'Hook failed: curl -H "Authorization: Bearer abc123" https://example.com',
+        },
+      };
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumResourceEvent[];
+      // message / error_message are blanket-replaced outright (#11649 on
+      // main); the targeted pass no longer sees partial text there.
+      expect(queued[queued.length - 1]?.message).toBe('***REDACTED***');
+      expect(queued[queued.length - 1]?.properties?.['error_message']).toBe(
+        '***REDACTED***',
+      );
+      expect(queued[queued.length - 1]?.properties?.['error']).toBe(
+        'Hook failed: curl -H "Authorization: ***" https://example.com',
+      );
+    });
+
+    it('should leave non-error properties untouched when redacting', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+
+      const event: RumEvent = {
+        timestamp: Date.now(),
+        event_type: 'action',
+        type: 'misc',
+        name: 'test-event',
+        properties: {
+          model: 'test-model',
+          duration_ms: 123,
+          error_type: 'CONNECTION_ERROR',
+        },
+      };
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumEvent[];
+      expect(queued[queued.length - 1]?.properties).toEqual({
+        model: 'test-model',
+        duration_ms: 123,
+        error_type: 'CONNECTION_ERROR',
+      });
+    });
+
+    it('should redact hook error text in properties.error before queueing', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'hook',
+        name: 'hook_call',
+        properties: {
+          hook_name: 'cleanup.bat',
+          error:
+            'Hook execution failed (hook: curl -H "Authorization: Bearer abc123" https://user:tok@hooks.internal/run)',
+        },
+      };
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumResourceEvent[];
+      const error = queued[queued.length - 1]?.properties?.['error'];
+      expect(typeof error).toBe('string');
+      expect(error).not.toContain('abc123');
+      expect(error).not.toContain('user:tok@');
+      expect(error).toContain('Authorization: ***');
+      expect(error).toContain('https://***REDACTED***@hooks.internal/run');
+      // Short non-matching text must stay byte-identical (pinned by the
+      // existing hook tests: `error: 'Command failed'`).
+    });
+
+    it('should keep the event when secret registration hits a pre-auth config', () => {
+      // Before auth initialization getContentGeneratorConfig() returns
+      // undefined despite its non-nullable declared type (the backing field
+      // is assigned only in refreshAuth); session_start fires on that path.
+      // Unlike the default mock, this one does not paper over it.
+      const preAuthGetter = (() =>
+        undefined) as unknown as Config['getContentGeneratorConfig'];
+      const preAuthConfig = makeFakeConfig({
+        getContentGeneratorConfig: preAuthGetter,
+      });
+      const logger = QwenLogger.getInstance(preAuthConfig)!;
+
+      logger.enqueueLogEvent({
+        timestamp: Date.now(),
+        event_type: 'action',
+        type: 'session',
+        name: 'session_start',
+      });
+
+      expect(logger['events'].size).toBe(1);
+      expect(debugLoggerSpy.error).not.toHaveBeenCalled();
+    });
+
+    it('should mask a process-held api key by exact value', () => {
+      const config = makeFakeConfig({
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          apiKey: 'sk-live-9f3ab207d18e',
+        }),
+      });
+      const logger = QwenLogger.getInstance(config)!;
+
+      const event = {
+        timestamp: Date.now(),
+        event_type: 'exception',
+        type: 'tool',
+        name: 'tool_call',
+        // `message` is blanket-replaced (#11649), so the exact-value
+        // masking is observable end-to-end on `stack` — a field only the
+        // targeted pass covers.
+        message: 'Request failed: Authorization sk-live-9f3ab207d18e rejected',
+        stack: 'Error: auth failed for sk-live-9f3ab207d18e in fetch',
+      } as RumResourceEvent & Pick<RumExceptionEvent, 'stack'>;
+      logger.enqueueLogEvent(event);
+
+      const queued = logger['events'].toArray() as RumResourceEvent[];
+      const queuedStack = (
+        queued[queued.length - 1] as RumResourceEvent &
+          Partial<Pick<RumExceptionEvent, 'stack'>>
+      )?.stack;
+      expect(queued[queued.length - 1]?.message).toBe('***REDACTED***');
+      expect(queuedStack).toBe('Error: auth failed for *** in fetch');
+    });
+
+    it('should register the credential half of a scheme-prefixed MCP header value', () => {
+      // The repo's MCP docs recommend `"Authorization": "Bearer <token>"`;
+      // the envelope alone would only mask whole-envelope echoes while a
+      // bare token echo ships.
+      const config = makeFakeConfig({
+        getMcpServers: () => ({
+          httpServerWithAuth: {
+            headers: { Authorization: 'Bearer sk-live-ABCDEFGH' },
+          },
+        }),
+      });
+      const logger = QwenLogger.getInstance(config)!;
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'tool',
+        name: 'tool_call',
+        message:
+          'tool call failed: {"error":"invalid api key sk-live-ABCDEFGH"}',
+      };
+      try {
+        logger.enqueueLogEvent(event);
+        const queued = logger['events'].toArray() as RumResourceEvent[];
+        expect(queued[queued.length - 1]?.message).not.toContain(
+          'sk-live-ABCDEFGH',
+        );
+      } finally {
+        clearKnownSecretValuesForTest();
+      }
+    });
+
+    it('should register a second session config passed to getInstance', () => {
+      // ACP builds one Config per session; the singleton binds the first
+      // one, so the second session's api key must still reach the registry
+      // or its error text ships verbatim.
+      const configA = makeFakeConfig({
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          apiKey: 'sk-live-AAAAAAAAAAAAAAAA',
+        }),
+      });
+      QwenLogger.getInstance(configA);
+      const configB = makeFakeConfig({
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          apiKey: 'sk-live-BBBBBBBBBBBBBBBB',
+        }),
+      });
+      const logger = QwenLogger.getInstance(configB)!;
+      // The singleton keeps session A's binding…
+      expect(logger).toBe(QwenLogger.getInstance(configA));
+
+      const event: RumResourceEvent = {
+        timestamp: Date.now(),
+        event_type: 'resource',
+        type: 'tool',
+        name: 'tool_call',
+        message: 'Incorrect API key provided: sk-live-BBBBBBBBBBBBBBBB',
+      };
+      try {
+        logger.enqueueLogEvent(event);
+        const queued = logger['events'].toArray() as RumResourceEvent[];
+        expect(queued[queued.length - 1]?.message).not.toContain(
+          'sk-live-BBBBBBBBBBBBBBBB',
+        );
+      } finally {
+        clearKnownSecretValuesForTest();
+      }
     });
 
     it('should handle enqueue errors gracefully', () => {
