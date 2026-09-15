@@ -9,10 +9,7 @@ import type * as vscode from 'vscode';
 import type { IMessageHandler } from './BaseMessageHandler.js';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
-import type {
-  PermissionResponseMessage,
-  AskUserQuestionResponseMessage,
-} from '../../types/webviewMessageTypes.js';
+import type { AskUserQuestionResponseMessage } from '../../types/webviewMessageTypes.js';
 import { SessionMessageHandler } from './SessionMessageHandler.js';
 import { FileMessageHandler } from './FileMessageHandler.js';
 import { EditorMessageHandler } from './EditorMessageHandler.js';
@@ -28,9 +25,6 @@ export class MessageRouter {
   private authHandler: AuthMessageHandler;
   private fileHandler: FileMessageHandler;
   private currentConversationId: string | null = null;
-  private permissionHandler:
-    | ((message: PermissionResponseMessage) => void)
-    | null = null;
   private askUserQuestionHandler:
     | ((message: AskUserQuestionResponseMessage) => void)
     | null = null;
@@ -92,14 +86,6 @@ export class MessageRouter {
   async route(message: { type: string; data?: unknown }): Promise<void> {
     logger.log('[MessageRouter] Routing message:', message.type);
 
-    // Handle permission response specially
-    if (message.type === 'permissionResponse') {
-      if (this.permissionHandler) {
-        this.permissionHandler(message as PermissionResponseMessage);
-      }
-      return;
-    }
-
     // Handle ask user question response specially
     if (message.type === 'askUserQuestionResponse') {
       if (this.askUserQuestionHandler) {
@@ -146,15 +132,6 @@ export class MessageRouter {
    */
   getCurrentConversationId(): string | null {
     return this.currentConversationId;
-  }
-
-  /**
-   * Set permission handler
-   */
-  setPermissionHandler(
-    handler: (message: PermissionResponseMessage) => void,
-  ): void {
-    this.permissionHandler = handler;
   }
 
   /**

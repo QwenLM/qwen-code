@@ -239,7 +239,7 @@ export class QwenAgentManager {
             '',
         };
       }
-      return { optionId: this.resolvePermissionOptionId(data) || '' };
+      return { optionId: 'cancel' };
     };
 
     this.connection.onAskUserQuestion = async (

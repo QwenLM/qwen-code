@@ -11,16 +11,9 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
-import type {
-  RequestPermissionRequest,
-  AvailableCommand,
-  ModelInfo,
-} from '@agentclientprotocol/sdk';
+import type { AvailableCommand, ModelInfo } from '@agentclientprotocol/sdk';
 import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
-import type {
-  PermissionResponseMessage,
-  AskUserQuestionResponseMessage,
-} from '../../types/webviewMessageTypes.js';
+import type { AskUserQuestionResponseMessage } from '../../types/webviewMessageTypes.js';
 import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
@@ -151,11 +144,6 @@ export class WebViewProvider {
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
   private isSyncingToVSCode = false; // Guard to prevent config change loop
-  // Track a pending permission request and its resolver so extension commands
-  // can "simulate" user choice from the command palette (e.g. after accepting
-  // a diff, auto-allow read/execute, or auto-reject on cancel).
-  private pendingPermissionRequest: RequestPermissionRequest | null = null;
-  private pendingPermissionResolve: ((optionId: string) => void) | null = null;
   private readonly webShellPermissionOwners = new Map<vscode.Webview, string>();
   // Track a pending ask user question request and its resolver
   private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
@@ -213,11 +201,6 @@ export class WebViewProvider {
         }
       }
       // Panel dispose callback — unblock any pending ACP Promises
-      if (this.pendingPermissionResolve) {
-        this.pendingPermissionResolve('cancel');
-        this.pendingPermissionResolve = null;
-        this.pendingPermissionRequest = null;
-      }
       if (this.pendingAskUserQuestionResolve) {
         this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
         this.pendingAskUserQuestionResolve = null;
@@ -543,18 +526,6 @@ export class WebViewProvider {
         }
       }
 
-      const pendingToolCallId =
-        this.pendingPermissionRequest?.toolCall?.toolCallId;
-      const updateToolCallId = updateData.toolCallId;
-      const updateStatus = updateData.status;
-      if (
-        typeof updateToolCallId === 'string' &&
-        updateToolCallId === pendingToolCallId &&
-        (updateStatus === 'completed' || updateStatus === 'failed')
-      ) {
-        this.pendingPermissionResolve?.('cancel');
-      }
-
       this.sendMessageToWebView({
         type: 'toolCall',
         data: {
@@ -571,158 +542,6 @@ export class WebViewProvider {
         data: { entries },
       });
     });
-
-    this.agentManager.onPermissionRequest(
-      async (request: RequestPermissionRequest) => {
-        // Notify the user immediately (dot + optional system notification)
-        const toolTitle = (request.toolCall as { title?: string } | undefined)
-          ?.title;
-        this.handleAgentNeedsAttention(toolTitle);
-
-        // Send permission request to WebView
-        this.sendMessageToWebView({
-          type: 'permissionRequest',
-          data: request,
-        });
-
-        // If a previous permission request is still pending, cancel it so its
-        // promise settles instead of leaking (issue: handler overwrite leak).
-        if (this.pendingPermissionResolve) {
-          this.pendingPermissionResolve('cancel');
-        }
-
-        // Wait for user response
-        return new Promise((resolve) => {
-          // Cache the pending request and its resolver so extension commands
-          // (e.g. diff accept/cancel) can resolve it externally.
-          this.pendingPermissionRequest = request;
-          this.pendingPermissionResolve = (optionId: string) => {
-            // Clear pending state BEFORE resolving to prevent re-entrant calls
-            this.pendingPermissionRequest = null;
-            this.pendingPermissionResolve = null;
-            // Resolve the ACP promise
-            resolve(optionId);
-            // Instruct the webview UI to close its drawer
-            this.sendMessageToWebView({
-              type: 'permissionResolved',
-              data: { optionId },
-            });
-            // NOTE: Diff management (closeAll, suppressBriefly) is handled
-            // exclusively in the message handler below to avoid double execution.
-          };
-
-          const handler = (message: PermissionResponseMessage) => {
-            if (message.type !== 'permissionResponse') {
-              return;
-            }
-            if (!this.pendingPermissionResolve) return;
-
-            const optionId = message.data.optionId || '';
-
-            // Resolve the optionId back to ACP so the agent isn't blocked
-            this.pendingPermissionResolve?.(optionId);
-
-            const isCancel =
-              optionId === 'cancel' ||
-              optionId.toLowerCase().includes('reject');
-
-            // For switch_mode (exit_plan_mode), cancel means "reject
-            // the plan and stay in plan mode" — the agent keeps running.
-            const isSwitchMode =
-              (request.toolCall as { kind?: string } | undefined)?.kind ===
-              'switch_mode';
-            const isWorkflowApproval =
-              (
-                request.toolCall as
-                  | { _meta?: { workflowApproval?: unknown } }
-                  | undefined
-              )?._meta?.workflowApproval === true;
-
-            // Always close open qwen-diff editors after any permission decision
-            void vscode.commands.executeCommand('qwen.diff.closeAll');
-
-            if (isCancel) {
-              // Fire and forget — for normal tool calls, cancel generation and
-              // end the stream; for switch_mode, keep the session alive but
-              // still mark the permission tool call as failed in the UI.
-              void (async () => {
-                if (!isSwitchMode && !isWorkflowApproval) {
-                  try {
-                    await this.agentManager.cancelCurrentPrompt();
-                  } catch (err) {
-                    logger.warn(
-                      '[WebViewProvider] cancelCurrentPrompt error:',
-                      err,
-                    );
-                  }
-
-                  this.agentStartTime = null;
-                  this.idleNotificationSent = false;
-                  this.sendMessageToWebView({
-                    type: 'streamEnd',
-                    data: { timestamp: Date.now(), reason: 'user_cancelled' },
-                  });
-                }
-
-                // Synthesize a failed tool_call_update to match CLI UX
-                try {
-                  const toolCallId =
-                    (request.toolCall as { toolCallId?: string } | undefined)
-                      ?.toolCallId || '';
-                  const title =
-                    (request.toolCall as { title?: string } | undefined)
-                      ?.title || '';
-                  let kind = ((
-                    request.toolCall as { kind?: string } | undefined
-                  )?.kind || 'execute') as string;
-                  if (!kind && title) {
-                    const t = title.toLowerCase();
-                    if (t.includes('read') || t.includes('cat')) {
-                      kind = 'read';
-                    } else if (t.includes('write') || t.includes('edit')) {
-                      kind = 'edit';
-                    } else {
-                      kind = 'execute';
-                    }
-                  }
-
-                  this.sendMessageToWebView({
-                    type: 'toolCall',
-                    data: {
-                      type: 'tool_call_update',
-                      toolCallId,
-                      title,
-                      kind,
-                      status: 'failed',
-                      rawInput: (request.toolCall as { rawInput?: unknown })
-                        ?.rawInput,
-                      locations: (
-                        request.toolCall as {
-                          locations?: Array<{
-                            path: string;
-                            line?: number | null;
-                          }>;
-                        }
-                      )?.locations,
-                    },
-                  });
-                } catch (err) {
-                  logger.warn(
-                    '[WebViewProvider] failed to synthesize failed tool_call_update:',
-                    err,
-                  );
-                }
-              })();
-            } else {
-              // Allowed/proceeded — suppress diff re-open briefly
-              void vscode.commands.executeCommand('qwen.diff.suppressBriefly');
-            }
-          };
-          // Store handler in message handler
-          this.messageHandler.setPermissionHandler(handler);
-        });
-      },
-    );
 
     this.agentManager.onAskUserQuestion(
       async (request: AskUserQuestionRequest) => {
@@ -2473,9 +2292,7 @@ export class WebViewProvider {
    * Whether there is a pending permission decision awaiting an option.
    */
   hasPendingPermission(): boolean {
-    return (
-      this.webShellPermissionOwners.size > 0 || !!this.pendingPermissionResolve
-    );
+    return this.webShellPermissionOwners.size > 0;
   }
 
   /**
@@ -2514,11 +2331,10 @@ export class WebViewProvider {
   }
 
   /**
-   * Simulate selecting a permission option while a request drawer is open.
-   * The choice can be a concrete optionId or a shorthand intent.
+   * Forward a permission decision from a managed diff to its owning web shell.
    */
   respondToPendingPermission(
-    choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
+    choice: 'accept' | 'allow' | 'reject' | 'cancel',
     context?: { fromDiffEditor?: boolean; permissionRequestId?: string },
   ): void {
     // Web-shell approvals are bound to the request id stored on the managed
@@ -2548,69 +2364,6 @@ export class WebViewProvider {
         });
       }
       return;
-    }
-    if (!this.pendingPermissionResolve || !this.pendingPermissionRequest) {
-      return; // nothing to do
-    }
-
-    const options = this.pendingPermissionRequest.options || [];
-
-    const pickByKind = (substr: string, preferOnce = false) => {
-      const lc = substr.toLowerCase();
-      const filtered = options.filter((o) =>
-        (o.kind || '').toLowerCase().includes(lc),
-      );
-      if (preferOnce) {
-        const once = filtered.find((o) =>
-          (o.optionId || '').toLowerCase().includes('once'),
-        );
-        if (once) {
-          return once.optionId;
-        }
-      }
-      return filtered[0]?.optionId;
-    };
-
-    const pickByOptionId = (substr: string) =>
-      options.find((o) => (o.optionId || '').toLowerCase().includes(substr))
-        ?.optionId;
-
-    let optionId: string | undefined;
-
-    if (typeof choice === 'object') {
-      optionId = choice.optionId;
-    } else {
-      const c = choice.toLowerCase();
-      if (c === 'accept' || c === 'allow') {
-        // Prefer an allow_once/proceed_once style option, then any allow/proceed
-        optionId =
-          pickByKind('allow', true) ||
-          pickByOptionId('proceed_once') ||
-          pickByKind('allow') ||
-          pickByOptionId('proceed') ||
-          options[0]?.optionId; // last resort: first option
-      } else if (c === 'cancel' || c === 'reject') {
-        // Prefer explicit cancel, then a reject option
-        optionId =
-          options.find((o) => o.optionId === 'cancel')?.optionId ||
-          pickByKind('reject') ||
-          pickByOptionId('cancel') ||
-          pickByOptionId('reject') ||
-          'cancel';
-      }
-    }
-
-    if (!optionId) {
-      return;
-    }
-
-    try {
-      this.pendingPermissionResolve(optionId);
-    } catch (_error) {
-      logger.warn(
-        '[WebViewProvider] respondToPendingPermission failed:',
-        _error,
-      );
     }
   }
 
@@ -2903,11 +2656,6 @@ export class WebViewProvider {
    */
   dispose(): void {
     // Unblock any pending ACP Promises before tearing down
-    if (this.pendingPermissionResolve) {
-      this.pendingPermissionResolve('cancel');
-      this.pendingPermissionResolve = null;
-      this.pendingPermissionRequest = null;
-    }
     if (this.pendingAskUserQuestionResolve) {
       this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
       this.pendingAskUserQuestionResolve = null;

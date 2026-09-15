@@ -297,8 +297,6 @@ export async function activate(context: vscode.ExtensionContext) {
                 fromDiffEditor: true,
                 permissionRequestId,
               });
-            } else if (provider?.hasPendingPermission()) {
-              provider.respondToPendingPermission('allow');
             }
           }
         } catch (err) {
@@ -329,8 +327,6 @@ export async function activate(context: vscode.ExtensionContext) {
                 fromDiffEditor: true,
                 permissionRequestId,
               });
-            } else if (provider?.hasPendingPermission()) {
-              provider.respondToPendingPermission('cancel');
             }
           }
         } catch (err) {
