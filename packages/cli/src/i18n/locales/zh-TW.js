@@ -1007,6 +1007,8 @@ export default {
   '{{count}} hooks configured': '{{count}} 個 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此選單為只讀。要添加或修改 Hook，請直接編輯 settings.json 或詢問 Qwen Code。',
+  'Hooks are reloaded from settings files each time this menu opens.':
+    '每次開啟此選單時，都會從設定檔重新載入 Hook。',
   'Enter to select · Esc to cancel': 'Enter 選擇 · Esc 取消',
   'Exit codes:': '退出碼：',
   'Configured hooks:': '已配置的 Hook：',

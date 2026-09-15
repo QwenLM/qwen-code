@@ -60,10 +60,15 @@ export function HooksListStep({
         <Text color={theme.text.secondary}>{` · ${hooksConfiguredText}`}</Text>
       </Box>
 
-      <Box marginBottom={1}>
+      <Box marginBottom={1} flexDirection="column">
         <Text color={theme.text.secondary}>
           {t(
             'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+          )}
+        </Text>
+        <Text color={theme.text.secondary}>
+          {t(
+            'Hooks are reloaded from settings files each time this menu opens.',
           )}
         </Text>
       </Box>

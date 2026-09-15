@@ -1495,6 +1495,10 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 }
 ```
 
+### Browsing your hooks
+
+Run `/hooks` to browse the configured hooks. Each time the menu opens, Qwen Code re-reads the settings files and reloads the hooks it runs, so hooks added, changed or removed since the session started take effect without a restart, and `/hooks list` in the same session shows the reloaded set. The same rules as at startup apply: project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected by the reload.
+
 ## Hook Execution
 
 ### Parallel vs Sequential Execution
@@ -1727,6 +1731,8 @@ sys.exit(0)
    - `[HTTP_HOOK_RUNNER]`, `[URL_VALIDATOR]`, `[PROMPT_HOOK_RUNNER]`, `[FUNCTION_HOOK_RUNNER]`, `[SKILL_HOOKS]`, `[SESSION_HOOKS_MANAGER]`, `[ASYNC_HOOK_REGISTRY]` and `[HOOK_AGGREGATOR]`: details from the individual runners and registries
 
    Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
+
+6. **Edited during the session.** Hooks are read when the session starts. After editing a settings file, open `/hooks` once to reload them, or restart Qwen Code.
 
 ### Other checks
 

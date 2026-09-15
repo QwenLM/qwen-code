@@ -740,6 +740,8 @@ export default {
   '{{count}} hooks configured': '{{count}} хуков настроено',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
+  'Hooks are reloaded from settings files each time this menu opens.':
+    'Хуки перезагружаются из файлов настроек при каждом открытии этого меню.',
   'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',
   // Hooks - Detail Step
   'Exit codes:': 'Коды выхода:',

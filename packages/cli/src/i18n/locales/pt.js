@@ -730,6 +730,8 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurados',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Este menu é somente leitura. Para adicionar ou modificar hooks, edite settings.json diretamente ou pergunte ao Qwen Code.',
+  'Hooks are reloaded from settings files each time this menu opens.':
+    'Os hooks são recarregados a partir dos arquivos de configuração sempre que este menu é aberto.',
   'Enter to select · Esc to cancel':
     'Enter para selecionar · Esc para cancelar',
   // Hooks - Detail Step

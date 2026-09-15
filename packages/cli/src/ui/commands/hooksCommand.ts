@@ -13,12 +13,49 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import type {
+  Config,
   HookRegistryEntry,
   SessionHookEntry,
   HookEventName,
 } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { supportsMatchers } from '../components/hooks/constants.js';
 import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
+import { loadSettings } from '../../config/settings.js';
+import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
+
+const debugLogger = createDebugLogger('HOOKS_COMMAND');
+
+/**
+ * Re-reads the settings files and reloads the hook registry, so hooks added,
+ * changed or removed since startup run without a restart. The hook fields are
+ * resolved exactly as at startup (bare and safe mode load none; project hooks
+ * only in a trusted folder). Session hooks registered by skills, the SDK or
+ * `/goal` live outside the registry and are unaffected.
+ */
+async function reloadHooksFromSettings(config: Config): Promise<void> {
+  const hookSystem = config.getHookSystem();
+  if (!hookSystem) {
+    return;
+  }
+  // Settings are re-read for their hooks only: leave the process environment
+  // and the startup corruption markers alone.
+  const settings = loadSettings(config.getWorkingDir(), {
+    consumeCorruptionEnvVars: false,
+    skipLoadEnvironment: true,
+  });
+  config.setHooksFromSettings(
+    resolveHookSettingsForConfig(
+      settings.merged.hooks,
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
+      config.getBareMode() || config.isSafeMode(),
+    ),
+  );
+  await hookSystem.reload();
+}
 
 /**
  * Format hook source for display
@@ -204,6 +241,15 @@ export const hooksCommand: SlashCommand = {
   ): Promise<SlashCommandActionReturn> => {
     const executionMode = context.executionMode ?? 'interactive';
     if (executionMode === 'interactive') {
+      const { config } = context.services;
+      if (config) {
+        try {
+          await reloadHooksFromSettings(config);
+        } catch (error) {
+          // The menu still opens on the hooks loaded so far.
+          debugLogger.warn(`Failed to reload hooks for /hooks: ${error}`);
+        }
+      }
       return {
         type: 'dialog',
         dialog: 'hooks',

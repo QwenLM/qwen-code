@@ -143,6 +143,18 @@ describe('HooksListStep', () => {
     expect(output).toContain('settings.json');
   });
 
+  it('says hooks are reloaded each time the menu opens', () => {
+    const hooks: HookEventDisplayInfo[] = [
+      createMockHookInfo(HookEventName.PreToolUse),
+    ];
+
+    const { lastFrame } = render(
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
+    );
+
+    expect(lastFrame()).toContain('reloaded');
+  });
+
   it('should show keyboard hints', () => {
     const hooks: HookEventDisplayInfo[] = [
       createMockHookInfo(HookEventName.PreToolUse),

@@ -800,6 +800,8 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurés',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Ce menu est en lecture seule. Pour ajouter ou modifier des hooks, éditez settings.json directement ou demandez à Qwen Code.',
+  'Hooks are reloaded from settings files each time this menu opens.':
+    'Les hooks sont rechargés depuis les fichiers de paramètres à chaque ouverture de ce menu.',
   'Enter to select · Esc to cancel':
     'Enter pour sélectionner · Esc pour annuler',
   'Exit codes:': 'Codes de sortie :',

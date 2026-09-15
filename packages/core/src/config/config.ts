@@ -2910,11 +2910,11 @@ export class Config {
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
-  private readonly userHooks?: Record<string, unknown>;
+  private userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
-  private readonly projectHooks?: Record<string, unknown>;
+  private projectHooks?: Record<string, unknown>;
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
-  private readonly hooks?: Record<string, unknown>;
+  private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
@@ -9203,6 +9203,24 @@ export class Config {
     // Prefer new userHooks field, fall back to hooks for backward compatibility
     const hooks = this.userHooks ?? this.hooks;
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
+  /**
+   * Replaces the settings-derived hook maps captured at construction. The CLI
+   * calls this after re-reading the settings files so that
+   * `HookSystem.reload()` sees edits made since startup. All three fields are
+   * replaced together, as at construction, so a stale legacy `hooks` snapshot
+   * can never resurface through the fallback in the getters. The bare, safe
+   * mode and folder trust gates in the getters still apply.
+   */
+  setHooksFromSettings(hooks: {
+    userHooks?: Record<string, unknown>;
+    projectHooks?: Record<string, unknown>;
+    hooks?: Record<string, unknown>;
+  }): void {
+    this.userHooks = hooks.userHooks;
+    this.projectHooks = hooks.projectHooks;
+    this.hooks = hooks.hooks;
   }
 
   getExtensions(): Extension[] {

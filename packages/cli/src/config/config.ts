@@ -59,6 +59,7 @@ import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
+import { resolveHookSettingsForConfig } from './hook-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -2496,12 +2497,11 @@ export async function loadCliConfig(
       settings.modelFallbacks,
     ),
     // Use separated hooks if provided, otherwise fall back to merged hooks
-    userHooks:
-      bareMode || safeMode
-        ? undefined
-        : (hooksConfig?.userHooks ?? settings.hooks),
-    projectHooks: bareMode || safeMode ? undefined : hooksConfig?.projectHooks,
-    hooks: bareMode || safeMode ? undefined : settings.hooks,
+    ...resolveHookSettingsForConfig(
+      settings.hooks,
+      hooksConfig,
+      bareMode || safeMode,
+    ),
     disableAllHooks:
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
