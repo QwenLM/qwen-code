@@ -191,6 +191,87 @@ describe('StandaloneApp', () => {
     expect(reloadUrl).toContain('workspace=workspace-1');
   });
 
+  it('passes no theme or language opinion when URL and localStorage are unset (#11955)', () => {
+    // "No opinion" (undefined) lets App resolve the daemon's effective
+    // ui.theme / general.language. Concrete fallbacks here (dark +
+    // navigator.language) are what shadowed settings.json in #11955.
+    window.localStorage.clear();
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.theme).toBeUndefined();
+    expect(testState.props?.webShellProps.language).toBeUndefined();
+  });
+
+  it('keeps the stored theme and language as the entry opinion', () => {
+    // Regression guard for the host-override contract: a value the user
+    // previously chose in-app must keep winning over settings.json.
+    window.localStorage.setItem('qwen-code-web-shell-theme', 'light');
+    window.localStorage.setItem('qwen-code-web-shell-language', 'zh-CN');
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.theme).toBe('light');
+    expect(testState.props?.webShellProps.language).toBe('zh-CN');
+    window.localStorage.clear();
+  });
+
+  it('syncs document chrome to settings-resolved values without adopting them as its opinion', () => {
+    window.localStorage.clear();
+    // The jsdom document is shared across tests in this file; start from the
+    // pre-paint-less state a fresh load would have.
+    document.documentElement.classList.remove(
+      'theme-dark',
+      'theme-light',
+      'dark',
+    );
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    expect(document.documentElement.classList.contains('theme-light')).toBe(
+      false,
+    );
+
+    act(() => {
+      testState.props?.webShellProps.onThemeResolved?.('light');
+    });
+
+    expect(document.documentElement.classList.contains('theme-light')).toBe(
+      true,
+    );
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+    // The resolved value stays settings-owned: never re-issued as a host
+    // prop and never written to localStorage, or the next settings.json
+    // edit would be shadowed by the stale copy.
+    expect(testState.props?.webShellProps.theme).toBeUndefined();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-theme'),
+    ).toBeNull();
+
+    act(() => {
+      testState.props?.webShellProps.onLanguageResolved?.('zh-CN');
+    });
+
+    expect(testState.props?.webShellProps.language).toBeUndefined();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-language'),
+    ).toBeNull();
+  });
+
+  it('adopts and persists an in-app theme choice as the entry opinion', () => {
+    window.localStorage.clear();
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    act(() => {
+      testState.props?.webShellProps.onThemeChange?.('light');
+    });
+
+    expect(testState.props?.webShellProps.theme).toBe('light');
+    expect(window.localStorage.getItem('qwen-code-web-shell-theme')).toBe(
+      'light',
+    );
+    expect(document.documentElement.classList.contains('theme-light')).toBe(
+      true,
+    );
+    window.localStorage.clear();
+  });
+
   it.each([
     [null, true],
     ['false', false],
