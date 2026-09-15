@@ -1057,6 +1057,7 @@ describe('mcp and extension feeds', () => {
             },
             mcpServers: { a: {}, b: {} },
             skills: [{}],
+            workflows: [{}, {}],
           },
           {
             name: 'proj-ext',
@@ -1072,7 +1073,7 @@ describe('mcp and extension feeds', () => {
       version: '1.2.3',
       source: 'https://github.com/a/b',
       origin: 'GitHub',
-      components: '2 MCP · 1 Skills',
+      components: '2 MCP · 1 Skills · 2 Workflows',
     });
     expect(rows[1]).toMatchObject({
       favorite: false,

@@ -55,6 +55,8 @@ interface RegisterDaemonStatusRoutesDeps {
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  getCommittedAcpChildCount?: () => number;
+  childAdmissionEnforced?: boolean;
 }
 
 export function registerDaemonStatusRoutes(
@@ -97,6 +99,8 @@ export function registerDaemonStatusRoutes(
           getTotalSessionAdmissionSnapshot:
             deps.getTotalSessionAdmissionSnapshot,
           getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+          getCommittedAcpChildCount: deps.getCommittedAcpChildCount,
+          childAdmissionEnforced: deps.childAdmissionEnforced,
         }),
       );
     } catch (err) {

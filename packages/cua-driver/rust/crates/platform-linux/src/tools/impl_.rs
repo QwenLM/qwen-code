@@ -841,13 +841,19 @@ impl Tool for GetWindowStateTool {
         let query_for_walk = query.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let tree_result = Some(crate::atspi::walk_tree_bounded(
+            let mut tree = crate::atspi::walk_tree_bounded(
                 pid,
                 xid,
                 query_for_walk.as_deref(),
                 max_elements,
                 max_depth,
-            ));
+            );
+            // Compact model observations only. Internal browser setup/consent
+            // matching needs the original label boundaries from the native tree.
+            if revision_request_for_capture.is_some() {
+                tree.nodes = crate::atspi::projection::compact(tree.nodes);
+            }
+            let tree_result = Some(tree);
             // Bounds and element indices come from the same captured AT-SPI
             // traversal. Joining two live walks by ordinal mis-associated
             // Chromium controls when its lazy subtree changed between walks.
@@ -1051,7 +1057,7 @@ impl Tool for GetWindowStateTool {
                             // the text from a caller reading the structured side,
                             // leaving it only in tree_markdown. See the macOS
                             // get_window_state builder for the rationale.
-                            if let Some(value) = n.value.clone().filter(|v| !v.is_empty()) {
+                            if let Some(value) = n.value.clone() {
                                 entry["value"] = json!(value);
                             }
                             if let Some(enabled) = n.enabled {
@@ -1059,6 +1065,9 @@ impl Tool for GetWindowStateTool {
                             }
                             if !n.actions.is_empty() {
                                 entry["actions"] = json!(n.actions);
+                            }
+                            if let Some(focused) = n.focused {
+                                entry["focused"] = json!(focused);
                             }
                             if let Some(selected) = n.selected {
                                 entry["selected"] = json!(selected);
@@ -1653,7 +1662,7 @@ fn chromium_family_program(program: &str) -> bool {
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
-/// Resolve an AT-SPI element's center in window-local coordinates.
+/// Resolve a visible AT-SPI element point in window-local coordinates.
 ///
 /// Returns `(xid, window_local_x, window_local_y)`.
 /// Looks up element bounds via native AT-SPI, finds the owning window
@@ -1665,10 +1674,7 @@ fn resolve_element_local_coords(
     idx: usize,
     xid_hint: Option<u64>,
 ) -> anyhow::Result<(u64, f64, f64)> {
-    let (bx, by, bw, bh) = crate::atspi::get_element_bounds(pid, idx)?;
-    let screen_cx = bx as f64 + bw as f64 / 2.0;
-    let screen_cy = by as f64 + bh as f64 / 2.0;
-    screen_point_to_window_local(pid, xid_hint, screen_cx, screen_cy)
+    resolve_element_local_coords_exact(pid, idx, xid_hint, None)
 }
 
 fn resolve_element_local_coords_exact(
@@ -1676,21 +1682,6 @@ fn resolve_element_local_coords_exact(
     idx: usize,
     xid_hint: Option<u64>,
     identity: Option<crate::atspi::AtspiIdentity>,
-) -> anyhow::Result<(u64, f64, f64)> {
-    let (bx, by, bw, bh) = match identity {
-        Some(identity) => crate::atspi::get_element_bounds_exact(pid, idx, identity)?,
-        None => crate::atspi::get_element_bounds(pid, idx)?,
-    };
-    let screen_cx = bx as f64 + bw as f64 / 2.0;
-    let screen_cy = by as f64 + bh as f64 / 2.0;
-    screen_point_to_window_local(pid, xid_hint, screen_cx, screen_cy)
-}
-
-fn screen_point_to_window_local(
-    pid: u32,
-    xid_hint: Option<u64>,
-    screen_cx: f64,
-    screen_cy: f64,
 ) -> anyhow::Result<(u64, f64, f64)> {
     let xid = if let Some(x) = xid_hint {
         x
@@ -1707,14 +1698,14 @@ fn screen_point_to_window_local(
             .map(|w| w.xid)
             .ok_or_else(|| anyhow::anyhow!("No windows for pid {pid}"))?
     };
+    let bounds = crate::atspi::native::get_element_bounds_in_window(pid, idx, xid, identity)?;
 
     if crate::wayland::wayland_input_enabled() {
         let (window_x, window_y, window_width, window_height) =
             crate::wayland::window_geometry(xid)
                 .ok_or_else(|| anyhow::anyhow!("No Wayland geometry for window {xid}"))?;
-        if window_width == 0 || window_height == 0 {
-            anyhow::bail!("Wayland window {xid} has no usable geometry");
-        }
+        let (screen_cx, screen_cy) =
+            visible_element_point(bounds, (window_x, window_y, window_width, window_height))?;
         return Ok((
             xid,
             screen_cx - window_x as f64,
@@ -1727,24 +1718,80 @@ fn screen_point_to_window_local(
     use x11rb::rust_connection::RustConnection;
     let (conn, screen_num) = RustConnection::connect(None)?;
     let root = conn.setup().roots[screen_num].root;
+    if !crate::x11::window_belongs_to_pid(xid, pid) {
+        anyhow::bail!("window {xid} no longer belongs to pid {pid}");
+    }
     let reply = conn
         .translate_coordinates(xid as u32, root, 0, 0)?
         .reply()?;
+    let geometry = conn.get_geometry(xid as u32)?.reply()?;
+    let (screen_cx, screen_cy) = visible_element_point(
+        bounds,
+        (
+            reply.dst_x.into(),
+            reply.dst_y.into(),
+            geometry.width.into(),
+            geometry.height.into(),
+        ),
+    )?;
     let local_x = screen_cx - reply.dst_x as f64;
     let local_y = screen_cy - reply.dst_y as f64;
     Ok((xid, local_x, local_y))
 }
 
+fn visible_element_point(
+    element: (i32, i32, u32, u32),
+    window: (i32, i32, u32, u32),
+) -> anyhow::Result<(f64, f64)> {
+    let left = i64::from(element.0).max(i64::from(window.0));
+    let top = i64::from(element.1).max(i64::from(window.1));
+    let right = (i64::from(element.0) + i64::from(element.2))
+        .min(i64::from(window.0) + i64::from(window.2));
+    let bottom = (i64::from(element.1) + i64::from(element.3))
+        .min(i64::from(window.1) + i64::from(window.3));
+    if right <= left || bottom <= top {
+        anyhow::bail!("element has no visible area inside the target window");
+    }
+    Ok((
+        (left + (right - left) / 2) as f64,
+        (top + (bottom - top) / 2) as f64,
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn element_pointer_stays_inside_the_requested_window() {
+    let window = (70, 102, 440, 300);
+    assert_eq!(
+        visible_element_point((90, 160, 700, 700), window).unwrap(),
+        (300.0, 281.0)
+    );
+    assert!(visible_element_point((520, 410, 50, 50), window).is_err());
+    assert!(visible_element_point((90, 160, 0, 40), window).is_err());
+    assert_eq!(
+        visible_element_point((509, 401, 100, 100), window).unwrap(),
+        (509.0, 401.0)
+    );
+    assert_eq!(
+        visible_element_point((-200, -200, 300, 300), (-100, -100, 50, 50)).unwrap(),
+        (-75.0, -75.0)
+    );
+}
+
 fn element_screen_center_exact(
     pid: u32,
     idx: usize,
+    xid_hint: Option<u64>,
     identity: Option<crate::atspi::AtspiIdentity>,
 ) -> anyhow::Result<(f64, f64)> {
-    let (bx, by, bw, bh) = match identity {
-        Some(identity) => crate::atspi::get_element_bounds_exact(pid, idx, identity)?,
-        None => crate::atspi::get_element_bounds(pid, idx)?,
-    };
-    Ok((bx as f64 + bw as f64 / 2.0, by as f64 + bh as f64 / 2.0))
+    let (xid, x, y) = resolve_element_local_coords_exact(pid, idx, xid_hint, identity)?;
+    if crate::wayland::wayland_input_enabled() {
+        let (ox, oy, _, _) = crate::wayland::window_geometry(xid)
+            .ok_or_else(|| anyhow::anyhow!("No Wayland geometry for window {xid}"))?;
+        Ok((x + f64::from(ox), y + f64::from(oy)))
+    } else {
+        window_local_to_screen(xid, x, y)
+    }
 }
 
 fn cached_atspi_identity(
@@ -1846,27 +1893,15 @@ fn non_ax_escalation() -> Value {
 /// `effect` tri-state. Linux's AT-SPI `insertText` return value acknowledges
 /// the method call but does not read the widget value back, so it and every
 /// keystroke / XSendEvent / XTest / Wayland rung are `"unverifiable"` (the
-/// caller confirms through a separate observation) and
-/// carries a `foreground` escalation, because the field IS in the AT-SPI tree —
-/// it's a delivery/focus problem, not a missing element. The foreground rung
-/// itself (`key_events_fg`) is already the last resort, so it emits no
-/// escalation. Mirrors the macOS `type_text` contract.
+/// caller confirms through a separate observation). An acknowledgement without
+/// readback does not establish failed delivery or require another input.
 fn type_text_structured(path: &str, characters: usize, verified: bool) -> Value {
-    let mut s = json!({
+    json!({
         "path": path,
         "characters": characters,
         "verified": verified,
         "effect": if verified { "confirmed" } else { "unverifiable" },
-    });
-    if !verified && path != "key_events_fg" {
-        s["escalation"] = json!({
-            "recommended": "foreground",
-            "reason": "background insert could not be confirmed — re-call with \
-                       delivery_mode:\"foreground\" if a screenshot shows the text \
-                       didn't land."
-        });
-    }
-    s
+    })
 }
 
 /// Structured payload for the Electron/Chromium AX-echo case: the AT-SPI
@@ -2194,7 +2229,13 @@ fn x11_pixel_click_no_focus_steal(
 }
 
 fn linux_input_error(error: anyhow::Error) -> ToolResult {
-    if crate::input::is_uinput_unavailable(&error) {
+    if crate::atspi::native::input_was_dispatched(&error) {
+        ToolResult::error(format!("{error:#}")).with_structured(json!({
+            "code": "atspi_input_unconfirmed",
+            "effect": "unverifiable",
+            "input_dispatched": true,
+        }))
+    } else if crate::input::is_uinput_unavailable(&error) {
         ToolResult::error(error.to_string()).with_structured(json!({
             "code": crate::input::UINPUT_UNAVAILABLE_CODE,
         }))
@@ -2746,7 +2787,7 @@ impl Tool for ClickTool {
             // Previously perform_action ran inside this spawn_blocking, so the
             // app updated before the cursor visibly arrived.
             let (xid, sx, sy) = tokio::task::spawn_blocking(move || -> (u64, f64, f64) {
-                let (cx, cy) = element_screen_center_exact(pid, idx, identity_for_center)
+                let (cx, cy) = element_screen_center_exact(pid, idx, xid_hint, identity_for_center)
                     .unwrap_or((0.0, 0.0));
                 let xid = xid_hint
                     .or_else(|| {
@@ -2774,12 +2815,22 @@ impl Tool for ClickTool {
 
             // Chromium can execute a genuine AT-SPI action without focus. Try
             // that route before applying its background synthetic-input gate.
-            if modifiers.is_empty() {
-                let ax_result = tokio::task::spawn_blocking(move || match exact_identity {
+            if button == 1 && count == 1 && modifiers.is_empty() {
+                let identity_for_action = exact_identity.clone();
+                let ax_result = tokio::task::spawn_blocking(move || match identity_for_action {
                     Some(identity) => crate::atspi::perform_action_exact(pid, idx, identity),
                     None => crate::atspi::perform_action(pid, idx),
                 })
                 .await;
+                let ax_result = match ax_result {
+                    Ok(Err(error)) if crate::atspi::native::input_was_dispatched(&error) => {
+                        return linux_input_error(error);
+                    }
+                    Err(error) => {
+                        return ToolResult::error(format!("AT-SPI action task failed: {error}"))
+                    }
+                    result => result,
+                };
                 if let Ok(Ok((_action, suspected_noop))) = ax_result {
                     let mut structured = json!({
                         "path": "ax",
@@ -2800,7 +2851,8 @@ impl Tool for ClickTool {
             // The AX route was unavailable. Fall back to a target-addressed
             // X11 event for toolkits that accept it.
             let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                let (xid2, lx, ly) = resolve_element_local_coords(pid, idx, xid_hint)?;
+                let (xid2, lx, ly) =
+                    resolve_element_local_coords_exact(pid, idx, xid_hint, exact_identity.clone())?;
                 let modifier_refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
                 if crate::wayland::wayland_input_enabled() && !modifier_refs.is_empty() {
                     anyhow::bail!(
@@ -2815,6 +2867,8 @@ impl Tool for ClickTool {
                 // clicks made those rows addressable but not selectable.
                 if delivery.is_foreground() && !crate::wayland::wayland_input_enabled() {
                     crate::input::with_x11_foreground(xid2, 80, || {
+                        let (sx, sy) =
+                            element_screen_center_exact(pid, idx, Some(xid2), exact_identity)?;
                         crate::input::send_click_xtest_desktop_with_modifiers(
                             sx.round() as i32,
                             sy.round() as i32,
@@ -2940,10 +2994,13 @@ impl Tool for ClickTool {
                 // working. (x,y) are screen coords here, matching the frames in
                 // `get_window_state`. Miss → fall through to the injection paths.
                 if !delivery.is_foreground() && button == 1 && count == 1 {
-                    if let Ok(Some(_)) =
-                        crate::atspi::perform_action_at_screen_point(pid, xid, output_x, output_y)
+                    match crate::atspi::perform_action_at_screen_point(pid, xid, output_x, output_y)
                     {
-                        return Ok("wayland_atspi");
+                        Ok(Some(_)) => return Ok("wayland_atspi"),
+                        Err(error) if crate::atspi::native::input_was_dispatched(&error) => {
+                            return Err(error)
+                        }
+                        _ => {}
                     }
                 }
                 if crate::wayland::is_inject_mode() {
@@ -2968,8 +3025,12 @@ impl Tool for ClickTool {
             // click (the agent's escalation when background didn't land).
             let inject = |fg: bool| -> anyhow::Result<&'static str> {
                 if !fg && button == 1 && count == 1 && modifiers_for_task.is_empty() {
-                    if let Ok(Some(_)) = crate::atspi::perform_action_at_point(pid, xi, yi) {
-                        return Ok("x11_atspi");
+                    match crate::atspi::perform_action_at_point(pid, xi, yi) {
+                        Ok(Some(_)) => return Ok("x11_atspi"),
+                        Err(error) if crate::atspi::native::input_was_dispatched(&error) => {
+                            return Err(error)
+                        }
+                        _ => {}
                     }
                 }
                 if fg {
@@ -3291,7 +3352,7 @@ impl Tool for TypeTextTool {
             );
             let identity_for_center = exact_identity.clone();
             if let Ok(Ok((screen_x, screen_y))) = tokio::task::spawn_blocking(move || {
-                element_screen_center_exact(pid, idx, identity_for_center)
+                element_screen_center_exact(pid, idx, Some(xid), identity_for_center)
             })
             .await
             {
@@ -3319,8 +3380,17 @@ impl Tool for TypeTextTool {
                 type_into_atspi_target(pid, idx, identity_for_type, &text_at)
             })
             .await;
-            if let Ok(Ok(())) = targeted {
-                return type_text_ax_result(pid, text_len, "via targeted AT-SPI");
+            match targeted {
+                Ok(Ok(())) => {
+                    return type_text_ax_result(pid, text_len, "via targeted AT-SPI");
+                }
+                Ok(Err(error)) if crate::atspi::native::input_was_dispatched(&error) => {
+                    return linux_input_error(error);
+                }
+                Err(error) => {
+                    return ToolResult::error(format!("AT-SPI typing task failed: {error}"))
+                }
+                _ => {}
             }
         }
         // The private nested compositor can target the owning Wayland client
@@ -3443,13 +3513,20 @@ impl Tool for TypeTextTool {
                 Ok(Ok(())) => {
                     return type_text_ax_result(pid, text_len, "via targeted AT-SPI");
                 }
-                Ok(Err(_)) | Err(_)
+                Ok(Err(error)) if crate::atspi::native::input_was_dispatched(&error) => {
+                    return linux_input_error(error);
+                }
+                Err(error) => {
+                    return ToolResult::error(format!("AT-SPI typing task failed: {error}"))
+                }
+                Ok(Err(_))
                     if !delivery.is_foreground() && crate::wayland::wayland_input_enabled() =>
                 {
                     return crate::input::delivery::background_unavailable_error(
                         crate::input::delivery::BackgroundUnavailable::FocusedInputOnly,
                     );
                 }
+                Ok(Err(error)) if !delivery.is_foreground() => return linux_input_error(error),
                 _ => {}
             }
         }
@@ -3545,7 +3622,11 @@ impl Tool for TypeTextTool {
         // and WebKitGTK can acknowledge an accessibility write without
         // producing the renderer input event, so web embedders use real XTest
         // key events. Native toolkits keep their verifiable AT-SPI path below.
-        if delivery.is_foreground() && (is_chromium_embedder(pid) || is_webkitgtk_embedder(pid)) {
+        if delivery.is_foreground()
+            && (resolved_elem_idx.is_some()
+                || is_chromium_embedder(pid)
+                || is_webkitgtk_embedder(pid))
+        {
             let text_f = text.clone();
             let idx = resolved_elem_idx;
             let identity_for_focus = exact_identity.clone();
@@ -3637,6 +3718,10 @@ impl Tool for TypeTextTool {
                 // observing it, so the confirm is suppressed there (mirrors macOS).
                 return type_text_ax_result(pid, text_len, "via AT-SPI");
             }
+            Ok(Err(error)) if crate::atspi::native::input_was_dispatched(&error) => {
+                return linux_input_error(error);
+            }
+            Err(error) => return ToolResult::error(format!("AT-SPI typing task failed: {error}")),
             _ => {
                 // AT-SPI failed (no editable exposed). Qt5 doesn't expose widgets
                 // when unfocused, so try the synthetic-focus workaround.
@@ -3656,16 +3741,25 @@ impl Tool for TypeTextTool {
             let result = crate::atspi::type_into_editable(pid, &text_clone2);
 
             // Restore state with FocusOut
-            crate::input::send_focus_out(xid)?;
+            let restore = crate::input::send_focus_out(xid);
 
-            result
+            Ok::<_, anyhow::Error>((result, restore))
         })
         .await;
 
         match qt5_result {
-            Ok(Ok(())) => {
+            Ok(Ok((Ok(()), Ok(())))) => {
                 return type_text_ax_result(pid, text_len, "via AT-SPI with focus workaround");
             }
+            Ok(Ok((Err(error), _))) if crate::atspi::native::input_was_dispatched(&error) => {
+                return linux_input_error(error);
+            }
+            Ok(Ok((_, Err(error)))) => {
+                return ToolResult::error(format!(
+                    "AT-SPI typing focus restoration failed: {error}; observe before retrying"
+                ));
+            }
+            Err(error) => return ToolResult::error(format!("AT-SPI typing task failed: {error}")),
             _ => {
                 // AT-SPI still didn't work. Fall back to X11 XSendEvent.
             }
@@ -3688,8 +3782,12 @@ impl Tool for TypeTextTool {
             // focused widget, so background XSendEvent typing doesn't land. Fill
             // the editable field via AT-SPI instead — focus-free and toolkit-
             // agnostic. Fall back to Tk send or XSendEvent when no a11y field is exposed.
-            if crate::atspi::insert_text(pid, &text).unwrap_or(false) {
-                return Ok("ax");
+            match crate::atspi::insert_text(pid, &text) {
+                Ok(true) => return Ok("ax"),
+                Err(error) if crate::atspi::native::input_was_dispatched(&error) => {
+                    return Err(error)
+                }
+                _ => {}
             }
             // Tk apps: use Tk's `send` command (no AT-SPI bridge, so AT-SPI above
             // returned false). This is the Tk-specific override, like CDP for Chromium.
@@ -3729,7 +3827,7 @@ impl Tool for TypeTextTool {
                 "Typed {text_len} character(s) (via X11, delivery_mode={mode_label})."
             ))
             .with_structured(type_text_structured(path, text_len, false)),
-            Ok(Err(e)) => ToolResult::error(e.to_string()),
+            Ok(Err(e)) => linux_input_error(e),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }
@@ -4537,7 +4635,7 @@ impl Tool for SetValueTool {
         // be resolved or the overlay is disabled.
         let identity_for_center = exact_identity.clone();
         if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
-            element_screen_center_exact(pid, idx, identity_for_center)
+            element_screen_center_exact(pid, idx, Some(xid), identity_for_center)
         })
         .await
         {
@@ -4557,7 +4655,7 @@ impl Tool for SetValueTool {
         .await;
         match result {
             Ok(Ok(())) => ToolResult::text(format!("Set value of element [{idx}] to '{value}'.")),
-            Ok(Err(e)) => ToolResult::error(e.to_string()),
+            Ok(Err(e)) => linux_input_error(e),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }
@@ -4857,6 +4955,15 @@ impl Tool for ScrollTool {
                     None => crate::atspi::scroll_element(pid, idx, &direction_for_ax, amount),
                 })
                 .await;
+                let ax_result = match ax_result {
+                    Ok(Err(error)) if crate::atspi::native::input_was_dispatched(&error) => {
+                        return linux_input_error(error);
+                    }
+                    Err(error) => {
+                        return ToolResult::error(format!("AT-SPI scroll task failed: {error}"))
+                    }
+                    result => result,
+                };
                 if matches!(ax_result, Ok(Ok(()))) {
                     let mode = if delivery.is_foreground() {
                         "foreground"
@@ -5024,6 +5131,12 @@ impl Tool for ScrollTool {
         let cursor_id_for_task = cursor_id.clone();
         let direction_for_wayland = direction.clone();
         let amount_u32 = amount as u32;
+        let element_index = match &resolved {
+            cua_driver_core::element_token::ResolvedElement::Element { element_index, .. } => {
+                Some(*element_index)
+            }
+            _ => None,
+        };
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if crate::wayland::wayland_input_enabled() {
                 return crate::wayland::scroll(xid, &direction_for_wayland, amount_u32);
@@ -5072,15 +5185,19 @@ impl Tool for ScrollTool {
                 crate::input::send_click(xid, local_x as i32, local_y as i32, amount, button)
             };
             if delivery.is_foreground() {
-                let point = element_point
-                    .and_then(|(_, screen)| screen)
-                    .or_else(|| {
-                        window_screen_center(xid)
-                            .ok()
-                            .map(|(x, y)| (x as f64, y as f64))
-                    })
-                    .ok_or_else(|| anyhow::anyhow!("could not resolve foreground scroll point"))?;
                 crate::input::with_x11_foreground(xid, 80, || {
+                    let point = match element_index {
+                        Some(idx) => {
+                            element_screen_center_exact(pid, idx, Some(xid), exact_identity)?
+                        }
+                        None => match element_point {
+                            Some(((x, y), _)) => window_local_to_screen(xid, x, y)?,
+                            None => {
+                                let (x, y) = window_screen_center(xid)?;
+                                (f64::from(x), f64::from(y))
+                            }
+                        },
+                    };
                     crate::input::send_click_xtest_desktop(
                         point.0 as i32,
                         point.1 as i32,
@@ -5215,8 +5332,9 @@ impl Tool for DoubleClickTool {
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
+                    let identity_for_overlay = exact_identity.clone();
                     if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
-                        element_screen_center_exact(pid, idx, exact_identity)
+                        element_screen_center_exact(pid, idx, Some(xid), identity_for_overlay)
                     })
                     .await
                     {
@@ -5245,7 +5363,12 @@ impl Tool for DoubleClickTool {
                         }
                         if delivery.is_foreground() {
                             return crate::input::with_x11_foreground(xid, 80, || {
-                                let (sx, sy) = window_local_to_screen(xid, lxi as f64, lyi as f64)?;
+                                let (sx, sy) = element_screen_center_exact(
+                                    pid,
+                                    idx,
+                                    Some(xid),
+                                    exact_identity,
+                                )?;
                                 crate::input::send_click_xtest_desktop(
                                     sx.round() as i32,
                                     sy.round() as i32,
@@ -5469,8 +5592,9 @@ impl Tool for RightClickTool {
             .await;
             return match result {
                 Ok(Ok((xid, lx, ly))) => {
+                    let identity_for_overlay = exact_identity.clone();
                     if let Ok(Ok((sx, sy))) = tokio::task::spawn_blocking(move || {
-                        element_screen_center_exact(pid, idx, exact_identity)
+                        element_screen_center_exact(pid, idx, Some(xid), identity_for_overlay)
                     })
                     .await
                     {
@@ -5499,7 +5623,12 @@ impl Tool for RightClickTool {
                         }
                         if delivery.is_foreground() {
                             return crate::input::with_x11_foreground(xid, 80, || {
-                                let (sx, sy) = window_local_to_screen(xid, lxi as f64, lyi as f64)?;
+                                let (sx, sy) = element_screen_center_exact(
+                                    pid,
+                                    idx,
+                                    Some(xid),
+                                    exact_identity,
+                                )?;
                                 crate::input::send_click_xtest_desktop(
                                     sx.round() as i32,
                                     sy.round() as i32,
