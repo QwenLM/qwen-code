@@ -109,12 +109,14 @@ const SHARED_ACCESS_FIELD_KEYS = new Set([
   'dmPolicy',
 ]);
 const SHARED_SESSION_FIELD_KEYS = new Set([
+  'outputMode',
   'sessionScope',
   'multiSession',
   'instructions',
 ]);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
+  outputMode: 'channels.editor.field.shared.outputMode',
   senderPolicy: 'channels.editor.field.shared.senderPolicy',
   allowedUsers: 'channels.editor.field.shared.allowedUsers',
   groupPolicy: 'channels.editor.field.shared.groupPolicy',

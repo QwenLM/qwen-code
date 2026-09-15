@@ -3153,6 +3153,12 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
+  it('rejects unwired admission before creating the app', () => {
+    expect(() =>
+      createServeAppImpl({ ...baseOpts, childHeapMode: 'admit' }),
+    ).toThrow('managed child process wiring');
+  });
+
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {
@@ -11010,6 +11016,25 @@ describe('createServeApp', () => {
           taskKind: 'workflow',
           context: { clientId: 'client-1' },
         },
+      ]);
+    });
+
+    it('passes a percent-encoded extension workflow name through decoded', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .get(`/session/s-1/saved-workflows/${encodeURIComponent('gcp:audit')}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ sessionId: 's-1', name: 'gcp:audit' });
+      expect(bridge.sessionSavedWorkflowCalls).toEqual([
+        { sessionId: 's-1', name: 'gcp:audit' },
       ]);
     });
 
