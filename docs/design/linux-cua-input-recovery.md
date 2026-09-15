@@ -1,5 +1,7 @@
 # Linux CUA input recovery
 
+[简体中文](linux-cua-input-recovery.zh-CN.md)
+
 Linux's semantic-input fallback currently treats failure after dispatch as if
 the semantic route were unavailable. A native action can mutate the application
 and then lose its D-Bus reply; the click tool subsequently sends a pixel click.
@@ -66,7 +68,10 @@ retry could then repeat all four. Retry complete root-only or empty trees for
 lazy toolkit registration, but return failed or incomplete reads immediately.
 Preserve the native partial tree and diagnostic, or the X11 fallback when no
 tree exists. Direct native consumers receive the first failure rather than
-implicitly retrying it. The SDK keeps its existing single read retry.
+implicitly retrying it. The SDK keeps one retry for short read failures, but
+returns deadline-exhausted partial captures without starting another full walk.
+The companion [observation design](linux-observation-memory-and-compaction.md)
+covers structural compaction and bounded LibreOffice collection.
 
 ## Validation
 

@@ -13,6 +13,7 @@ use anyhow::Result;
 
 pub mod cache;
 pub mod native;
+pub(crate) mod projection;
 pub mod revision;
 pub use cache::ElementCache;
 pub use native::ensure_listener_active;
@@ -23,7 +24,7 @@ pub struct AtspiIdentity {
     pub object_path: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AtspiNode {
     pub element_index: Option<usize>,
     pub role: String,
@@ -35,6 +36,7 @@ pub struct AtspiNode {
     pub enabled: Option<bool>,
     /// Toggle/selection state for selectable controls.
     pub selected: Option<bool>,
+    pub focused: Option<bool>,
     pub description: Option<String>,
     pub actions: Vec<String>,
     /// For AT-SPI: element_key = element_index as u64.
@@ -87,7 +89,13 @@ impl AtspiTreeResult {
                 || (self.truncated
                     && !self.incomplete_notes.is_empty()
                     && self.incomplete_notes.iter().all(|note| {
-                        matches!(note.as_str(), "max_elements_reached" | "max_depth_reached")
+                        matches!(
+                            note.as_str(),
+                            "max_elements_reached"
+                                | "max_depth_reached"
+                                | "managed_descendants_omitted"
+                                | "hidden_menu_subtrees_omitted"
+                        )
                     })))
     }
 }
@@ -393,6 +401,7 @@ fn walk_via_x11_properties(xid: u64, query: Option<&str>) -> AtspiTreeResult {
         checked: None,
         enabled: None,
         selected: None,
+        focused: None,
         description: if wm_class.is_empty() {
             None
         } else {
@@ -454,6 +463,9 @@ pub(crate) fn format_revision_body(node: &AtspiNode) -> String {
     }
     if node.enabled == Some(false) {
         fields.push("disabled".into());
+    }
+    if node.focused == Some(true) {
+        fields.push("focused".into());
     }
     if node.selected.or(node.checked) == Some(true) {
         fields.push("selected".into());
@@ -579,6 +591,7 @@ mod retry_tests {
                     checked: None,
                     enabled: None,
                     selected: None,
+                    focused: None,
                     description: None,
                     actions: Vec::new(),
                     element_key: index as u64,

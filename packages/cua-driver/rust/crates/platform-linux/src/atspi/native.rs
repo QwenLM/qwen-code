@@ -421,14 +421,15 @@ async fn canonical_unique_owner(
         .map(|owner| owner.to_string())
 }
 
-/// Read Accessible.GetChildren without deserializing the bus-name field as a
+/// Read one child without deserializing the bus-name field as a
 /// `UniqueName`. WebKitGTK's embedded WebProcess exposes a well-known name
 /// containing a UUID; D-Bus can address it, but the stricter AT-SPI wrapper
 /// rejects it as an invalid unique name.
-async fn raw_children(
+async fn raw_child(
     conn: &atspi::zbus::Connection,
     oref: &RawObjectRef,
-) -> Result<Vec<RawObjectRef>> {
+    index: i32,
+) -> Result<RawObjectRef> {
     let proxy = atspi::zbus::Proxy::new(
         conn,
         oref.name.as_str(),
@@ -437,17 +438,14 @@ async fn raw_children(
     )
     .await
     .map_err(|e| anyhow!("Accessible proxy unavailable: {e}"))?;
-    let refs: Vec<(String, atspi::zbus::zvariant::OwnedObjectPath)> = proxy
-        .call("GetChildren", &())
+    let (name, path): (String, atspi::zbus::zvariant::OwnedObjectPath) = proxy
+        .call("GetChildAtIndex", &(index,))
         .await
-        .map_err(|e| anyhow!("Accessible.GetChildren failed: {e}"))?;
-    Ok(refs
-        .into_iter()
-        .map(|(name, path)| RawObjectRef {
-            name,
-            path: path.to_string(),
-        })
-        .collect())
+        .map_err(|e| anyhow!("Accessible.GetChildAtIndex failed: {e}"))?;
+    Ok(RawObjectRef {
+        name,
+        path: path.to_string(),
+    })
 }
 
 /// Resolve the process id behind an application accessible's D-Bus name.
@@ -771,6 +769,28 @@ async fn resolve_window_frame(
     resolved
 }
 
+fn hidden_native_menu(role: &str, state: Option<&StateSet>, in_web_doc: bool) -> bool {
+    !in_web_doc
+        && matches!(
+            role,
+            "menu" | "menu item" | "check menu item" | "radio menu item"
+        )
+        && state.is_some_and(|state| {
+            !state.contains(State::Showing)
+                && !state.contains(State::Focused)
+                && !state.contains(State::Selected)
+                && !state.contains(State::Expanded)
+        })
+}
+
+struct WalkEntry {
+    object: RawObjectRef,
+    depth: usize,
+    in_web_doc: bool,
+    frame_ordinal: usize,
+    children: Option<std::ops::Range<i32>>,
+}
+
 /// `collect_visited` with caller-supplied caps.
 /// - `max_elements = None` keeps the historical 5 000-node budget.
 /// - `max_depth = None` keeps depth uncapped (the historical behaviour);
@@ -784,19 +804,93 @@ async fn collect_visited_bounded<'a>(
     max_elements: Option<usize>,
     max_depth: Option<usize>,
 ) -> Result<Option<(Vec<Visited<'a>>, Option<usize>, WalkStatus)>> {
+    collect_visited_until(
+        conn,
+        pid,
+        xid,
+        max_elements,
+        max_depth,
+        tokio::time::Instant::now() + OP_TIMEOUT,
+    )
+    .await
+}
+
+struct WalkProgress<'a> {
+    visited: Vec<Visited<'a>>,
+    scoped_frame: Option<usize>,
+    status: WalkStatus,
+}
+
+async fn collect_visited_until<'a>(
+    conn: &'a AccessibilityConnection,
+    pid: u32,
+    xid: u64,
+    max_elements: Option<usize>,
+    max_depth: Option<usize>,
+    deadline: tokio::time::Instant,
+) -> Result<Option<(Vec<Visited<'a>>, Option<usize>, WalkStatus)>> {
+    // Keep completed nodes outside the cancellable future. A slow later node
+    // must not discard the useful prefix or turn it into a complete snapshot.
+    let mut progress = WalkProgress {
+        visited: Vec::new(),
+        scoped_frame: None,
+        status: WalkStatus::complete(),
+    };
+    match before_snapshot_deadline(
+        deadline,
+        collect_visited_into(
+            conn,
+            pid,
+            xid,
+            max_elements,
+            max_depth,
+            deadline,
+            &mut progress,
+        ),
+    )
+    .await
+    {
+        Ok(result) => {
+            if !result? {
+                return Ok(None);
+            }
+        }
+        Err(_) => progress.status.truncate("walk_deadline_reached"),
+    }
+    dlog!("walked pid {pid}: {} node(s)", progress.visited.len());
+    Ok(Some((
+        progress.visited,
+        progress.scoped_frame,
+        progress.status,
+    )))
+}
+
+async fn collect_visited_into<'a>(
+    conn: &'a AccessibilityConnection,
+    pid: u32,
+    xid: u64,
+    max_elements: Option<usize>,
+    max_depth: Option<usize>,
+    deadline: tokio::time::Instant,
+    progress: &mut WalkProgress<'a>,
+) -> Result<bool> {
+    let WalkProgress {
+        visited,
+        scoped_frame,
+        status,
+    } = progress;
     let app = match app_for_pid(conn, pid).await? {
         Some(a) => a,
-        None => return Ok(None),
+        None => return Ok(false),
     };
     let zconn = conn.connection();
     let dbus = atspi::zbus::fdo::DBusProxy::new(zconn)
         .await
         .map_err(|error| anyhow!("DBus proxy unavailable: {error}"))?;
-    let mut status = WalkStatus::complete();
 
-    // Stack of (object ref, depth, in_web_doc, frame_ordinal). Seed with the
-    // app's windows; push children reversed so siblings pop left-to-right and
-    // each subtree completes before the next sibling (pre-order). `in_web_doc`
+    // Seed with the app's windows in reverse order. Child cursors retain only
+    // the next sibling so each subtree finishes in preorder without allocating
+    // a provider's complete child list. `in_web_doc`
     // is inherited from ancestors so editables in page content can be told from
     // chrome. `frame_ordinal` is the seed's position in `get_children()` order
     // and is likewise inherited, so every node carries the identity of the
@@ -816,7 +910,7 @@ async fn collect_visited_bounded<'a>(
     // child list the walk is about to seed from. Re-reading `get_children()`
     // later could observe a different window set, and an ordinal resolved
     // against one list but applied to another names the wrong window.
-    let scoped_frame = if xid == 0 {
+    *scoped_frame = if xid == 0 {
         None
     } else {
         resolve_window_frame(conn, pid, xid, &seeds).await
@@ -825,26 +919,22 @@ async fn collect_visited_bounded<'a>(
         status.incomplete("window_scope_unresolved");
     }
 
-    let mut stack: Vec<(RawObjectRef, usize, bool, usize)> = seeds
+    let mut stack: Vec<WalkEntry> = seeds
         .into_iter()
         .enumerate()
-        .map(|(ordinal, r)| (r, 0usize, false, ordinal))
+        .map(|(ordinal, object)| WalkEntry {
+            object,
+            depth: 0,
+            in_web_doc: false,
+            frame_ordinal: ordinal,
+            children: None,
+        })
         .rev()
         .collect();
 
-    let mut visited: Vec<Visited<'a>> = Vec::new();
     // Guard against pathological/looping trees. Defaults to 5 000 (the
     // historical hard-coded budget); callers can override via max_elements.
     let mut budget = max_elements.unwrap_or(5000usize);
-    // Time budget alongside the node budget: when an app is unresponsive to
-    // AT-SPI (most commonly because it holds a modal grab and isn't servicing
-    // D-Bus), every per-node `call()` burns the full CALL_TIMEOUT before being
-    // skipped, so the walk would otherwise grind for minutes. Callers that lack
-    // their own OP_TIMEOUT (snapshot bounds, insert_text) relied on this
-    // never happening — bound it here so the walk returns partial within
-    // OP_TIMEOUT for every caller, instead of hanging get_window_state/type_text
-    // on modal dialogs (#1936).
-    let deadline = std::time::Instant::now() + OP_TIMEOUT;
     // Fast bail for an app that has stopped answering AT-SPI entirely (modal
     // grab): if several consecutive nodes each burn the full CALL_TIMEOUT, the
     // app is unresponsive and the remaining ~OP_TIMEOUT of walking would all
@@ -853,18 +943,45 @@ async fn collect_visited_bounded<'a>(
     let mut consecutive_timeouts = 0u32;
     let mut owner_cache: HashMap<String, Option<String>> = HashMap::new();
 
-    while let Some((oref, depth, inherited_web_doc, frame_ordinal)) = stack.pop() {
+    while let Some(WalkEntry {
+        object: mut oref,
+        depth,
+        in_web_doc: inherited_web_doc,
+        frame_ordinal,
+        children,
+    }) = stack.pop()
+    {
         if budget == 0 {
             dlog!("node budget exhausted; truncating walk");
             status.truncate("max_elements_reached");
             break;
         }
-        if std::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             dlog!("collect_visited time budget exhausted; returning partial walk");
             status.truncate("walk_deadline_reached");
             break;
         }
         budget -= 1;
+        if let Some(mut children) = children {
+            let index = children.next().expect("nonempty child cursor");
+            let child = call(raw_child(zconn, &oref, index)).await;
+            if !children.is_empty() {
+                stack.push(WalkEntry {
+                    object: oref,
+                    depth,
+                    in_web_doc: inherited_web_doc,
+                    frame_ordinal,
+                    children: Some(children),
+                });
+            }
+            oref = match child {
+                Some(Ok(child)) => child,
+                _ => {
+                    status.incomplete("children_unavailable");
+                    continue;
+                }
+            };
+        }
         // WebKitGTK publishes its embedded page on a distinct WebProcess
         // D-Bus peer and can expose blank role names for the entire subtree.
         // The peer identity is therefore the reliable document boundary when
@@ -899,9 +1016,12 @@ async fn collect_visited_bounded<'a>(
             }
         };
 
-        // Interfaces gate every other query; if even this times out the node is
-        // unreachable, so skip it rather than stall.
-        let ifaces = match call(acc.get_interfaces()).await {
+        let (role_r, state_r, ifaces_r) = tokio::join!(
+            call(acc.get_role_name()),
+            call(acc.get_state()),
+            call(acc.get_interfaces()),
+        );
+        let ifaces = match ifaces_r {
             Some(Ok(i)) => {
                 consecutive_timeouts = 0;
                 i
@@ -928,41 +1048,38 @@ async fn collect_visited_bounded<'a>(
                 continue;
             }
         };
+        if !matches!(&role_r, Some(Ok(_))) {
+            status.incomplete("role_unavailable");
+        }
+        if !matches!(&state_r, Some(Ok(_))) {
+            status.incomplete("state_unavailable");
+        }
+        let role = role_r.and_then(Result::ok).unwrap_or_default();
+        // Closed native menus can expose thousands of unrealized commands.
+        // Read their visibility before names, interfaces' details or children;
+        // opening a menu makes its items eligible on the next observation.
+        if hidden_native_menu(
+            &role,
+            state_r.as_ref().and_then(|state| state.as_ref().ok()),
+            in_web_doc,
+        ) {
+            status.truncate("hidden_menu_subtrees_omitted");
+            continue;
+        }
         let has_action = ifaces.contains(Interface::Action);
         let has_editable = ifaces.contains(Interface::EditableText);
         let has_value = ifaces.contains(Interface::Value);
         let has_component = ifaces.contains(Interface::Component);
         let has_text = ifaces.contains(Interface::Text);
 
-        // These four are independent — issue them concurrently to cut the
-        // per-node round-trip cost (large trees like Chromium's have hundreds
-        // of nodes, so sequential reads dominate the walk time).
-        let (role_r, name_r, state_r, children_r) = tokio::join!(
-            call(acc.get_role_name()),
-            call(acc.name()),
-            call(acc.get_state()),
-            call(raw_children(zconn, &oref)),
-        );
-        if !matches!(&role_r, Some(Ok(_))) {
-            status.incomplete("role_unavailable");
-        }
+        let (name_r, children_r) = tokio::join!(call(acc.name()), call(acc.child_count()));
         if !matches!(&name_r, Some(Ok(_))) {
             status.incomplete("name_unavailable");
         }
-        if !matches!(&state_r, Some(Ok(_))) {
-            status.incomplete("state_unavailable");
-        }
-        if !matches!(&children_r, Some(Ok(_))) {
+        if !matches!(&children_r, Some(Ok(count)) if *count >= 0) {
             status.incomplete("children_unavailable");
         }
-        let role = match role_r {
-            Some(Ok(r)) => r,
-            _ => String::new(),
-        };
-        let mut name = match name_r {
-            Some(Ok(n)) => n,
-            _ => String::new(),
-        };
+        let mut name = name_r.and_then(Result::ok).unwrap_or_default();
         let focused = matches!(state_r.as_ref(), Some(Ok(s)) if s.contains(State::Focused));
         let role_lower = role.to_ascii_lowercase();
         let checked = if role_lower.contains("check") {
@@ -1067,22 +1184,34 @@ async fn collect_visited_bounded<'a>(
         // Children inherit web-document context, plus this node's own role.
         let child_in_web_doc = in_web_doc || is_document_role(&role);
 
-        // Enqueue children (fetched above) before moving `acc` into `visited`.
-        // Honor max_depth (#22865): skip enqueueing descendants whose depth
-        // would exceed the cap.
-        let descend = max_depth.map(|d| depth + 1 <= d).unwrap_or(true);
-        if descend {
-            match &children_r {
-                Some(Ok(children)) => {
-                    for c in children.iter().rev().cloned() {
-                        stack.push((c, depth + 1, child_in_web_doc, frame_ordinal));
-                    }
+        // Calc exposes over a billion virtual children. Never request the
+        // whole array: one cursor per ancestor preserves preorder while the
+        // node/depth budget is checked before each GetChildAtIndex request.
+        if let Some(Ok(count)) = children_r {
+            if count > 0 {
+                // AT-SPI says managed descendants should not be enumerated.
+                // Calc creates new exported cell objects even for repeated
+                // GetChildAtIndex calls, retaining memory in the application.
+                if !matches!(state_r.as_ref(), Some(Ok(_))) {
+                    // Without state, virtual-child ownership is unknown.
+                    status.incomplete("state_unavailable");
+                } else if matches!(state_r.as_ref(), Some(Ok(state)) if state.contains(State::ManagesDescendants))
+                {
+                    status.truncate("managed_descendants_omitted");
+                } else if max_depth.is_some_and(|limit| depth >= limit) {
+                    status.truncate("max_depth_reached");
+                } else if budget == 0 {
+                    status.truncate("max_elements_reached");
+                } else {
+                    stack.push(WalkEntry {
+                        object: oref.clone(),
+                        depth: depth + 1,
+                        in_web_doc: child_in_web_doc,
+                        frame_ordinal,
+                        children: Some(0..count),
+                    });
                 }
-                Some(Err(error)) => dlog!("  get_children failed: {error:#}"),
-                None => dlog!("  get_children timed out"),
             }
-        } else if matches!(&children_r, Some(Ok(children)) if !children.is_empty()) {
-            status.truncate("max_depth_reached");
         }
 
         let unique_owner = match owner_cache.get(&oref.name) {
@@ -1123,8 +1252,7 @@ async fn collect_visited_bounded<'a>(
         });
     }
 
-    dlog!("walked pid {pid}: {} node(s)", visited.len());
-    Ok(Some((visited, scoped_frame, status)))
+    Ok(true)
 }
 
 /// Render visited nodes into the markdown + node list `walk_tree` returns.
@@ -1172,6 +1300,26 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 .find_map(|d| parent_at_depth.get(d).copied().flatten())
         };
 
+        let element_index = is_indexable(v).then_some(idx);
+        if emit {
+            nodes.push(AtspiNode {
+                element_index,
+                role: v.role.clone(),
+                name: (!v.name.is_empty()).then(|| v.name.clone()),
+                value: v.value.clone(),
+                checked: v.checked,
+                enabled: v.enabled,
+                selected: v.selected,
+                focused: Some(v.focused),
+                description: None,
+                actions: v.actions.clone(),
+                element_key: element_index.unwrap_or_default() as u64,
+                depth: v.depth,
+                parent_element_index,
+                in_web_content: v.in_web_doc,
+                identity: v.identity.clone(),
+            });
+        }
         if is_indexable(v) {
             if !emit {
                 // Consume the index without emitting: indices stay aligned with
@@ -1189,26 +1337,6 @@ fn render(visited: &[Visited<'_>], only_frame: Option<usize>) -> (String, Vec<At
                 role = v.role,
                 name = v.name,
             ));
-            nodes.push(AtspiNode {
-                element_index: Some(idx),
-                role: v.role.clone(),
-                name: if v.name.is_empty() {
-                    None
-                } else {
-                    Some(v.name.clone())
-                },
-                value: v.value.clone(),
-                checked: v.checked,
-                enabled: v.enabled,
-                selected: v.selected,
-                description: None,
-                actions: v.actions.clone(),
-                element_key: idx as u64,
-                depth: v.depth,
-                parent_element_index,
-                in_web_content: v.in_web_doc,
-                identity: v.identity.clone(),
-            });
             // Record this actionable index at its depth, and invalidate any
             // deeper entries from a previous subtree.
             while parent_at_depth.len() <= v.depth {
@@ -1378,34 +1506,28 @@ pub(super) fn walk_tree_bounded_with_timeout(
         // deadline for both phases so a dead AT-SPI peer cannot outlive the
         // operation timeout while resolving geometry.
         let deadline = tokio::time::Instant::now() + timeout;
-        let walk = async {
-            let conn = shared_connection().await?;
-            collect_visited_bounded(conn, pid, xid, max_elements, max_depth).await
-        };
-        let walked = match before_snapshot_deadline(deadline, walk).await {
+        let conn = match before_snapshot_deadline(deadline, shared_connection()).await {
             Ok(result) => result?,
-            Err(_) => {
-                dlog!("walk_tree timed out for pid {pid}");
-                return Ok(None);
-            }
+            Err(_) => return Ok(None),
         };
+        let walked =
+            collect_visited_until(conn, pid, xid, max_elements, max_depth, deadline).await?;
         let Some((visited, scoped_frame, mut status)) = walked else {
             return Ok(None);
         };
         let (markdown, nodes) = render(&visited, scoped_frame);
-        let bounds = match before_snapshot_deadline(
-            deadline,
-            element_bounds_for_visited(&visited, pid, xid),
-        )
-        .await
-        {
-            Ok(bounds) => bounds,
-            Err(_) => {
-                dlog!("element bounds timed out for pid {pid}");
-                status.incomplete("element_bounds_timeout");
-                Vec::new()
-            }
-        };
+        let mut bounds = Vec::new();
+        if !matches!(
+            before_snapshot_deadline(
+                deadline,
+                element_bounds_for_visited(&visited, pid, xid, deadline, &mut bounds),
+            )
+            .await,
+            Ok(true)
+        ) {
+            dlog!("element bounds timed out for pid {pid}");
+            status.incomplete("element_bounds_timeout");
+        }
         // Bounds are keyed by the application-wide element index, so drop the
         // entries for windows this snapshot no longer shows.
         let bounds = if scoped_frame.is_some() {
@@ -3002,7 +3124,12 @@ async fn element_bounds_for_visited(
     visited: &[Visited<'_>],
     pid: u32,
     xid: u64,
-) -> Vec<(usize, i32, i32, u32, u32)> {
+    deadline: tokio::time::Instant,
+    out: &mut Vec<(usize, i32, i32, u32, u32)>,
+) -> bool {
+    if tokio::time::Instant::now() >= deadline {
+        return false;
+    }
     // Query WINDOW-relative extents and add a deterministic screen offset
     // (X11 window origin + GTK4 CSD inset). This fixes GTK4 — whose
     // CoordType::Screen reports every element at (0,0) — by using the
@@ -3109,21 +3236,13 @@ async fn element_bounds_for_visited(
     }
 
     let action_nodes: Vec<&Visited> = visited.iter().filter(|v| is_indexable(v)).collect();
-    // Hard wall-clock budget for the whole collection: on pathological
-    // trees individual D-Bus calls each burn up to CALL_TIMEOUT (geany's
-    // unrealized nodes did exactly that). Return whatever was collected
-    // in time, but do not impose an index-based node cap: a cap silently
-    // stripped frames from valid controls later in renderer trees and
-    // made PX targeting depend on DOM order.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    let mut out = Vec::with_capacity(action_nodes.len());
     for (idx, node) in action_nodes.iter().enumerate() {
-        if std::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             dlog!(
-                "snapshot bounds: 20s budget exhausted at node {idx}; returning {} bound(s)",
+                "snapshot bounds: budget exhausted at node {idx}; returning {} bound(s)",
                 out.len()
             );
-            break;
+            return false;
         }
         if !node.has_component {
             continue;
@@ -3161,7 +3280,7 @@ async fn element_bounds_for_visited(
             ));
         }
     }
-    out
+    true
 }
 
 #[cfg(test)]
@@ -3313,12 +3432,41 @@ mod coord_tests {
     use super::parse_gtk_frame_extents;
     use super::{
         activation_index, before_snapshot_deadline, combine_wayland_content_offsets,
-        is_activation_action, is_enabled_state, is_indexable_capabilities, is_passive_role,
-        is_web_process_bus, prefer_authoritative_wayland_origin, rebase_renderer_window_offset,
-        screen_extent_rebase, select_click_target, ApplicationSelection,
+        hidden_native_menu, is_activation_action, is_enabled_state, is_indexable_capabilities,
+        is_passive_role, is_web_process_bus, prefer_authoritative_wayland_origin,
+        rebase_renderer_window_offset, screen_extent_rebase, select_click_target,
+        ApplicationSelection,
     };
     use atspi::{State, StateSet};
     use std::time::Duration;
+
+    #[test]
+    fn closed_native_menu_commands_wait_until_the_menu_is_open() {
+        let closed: StateSet = [State::Enabled, State::Visible].into_iter().collect();
+        for role in ["menu", "menu item", "check menu item", "radio menu item"] {
+            assert!(hidden_native_menu(role, Some(&closed), false));
+            for active in [
+                State::Showing,
+                State::Focused,
+                State::Selected,
+                State::Expanded,
+            ] {
+                let mut open = closed;
+                open.insert(active);
+                assert!(!hidden_native_menu(role, Some(&open), false));
+            }
+        }
+    }
+
+    #[test]
+    fn menu_pruning_preserves_web_content_other_roles_and_unknown_visibility() {
+        let hidden: StateSet = [State::Visible].into_iter().collect();
+        assert!(!hidden_native_menu("menu", Some(&hidden), true));
+        assert!(!hidden_native_menu("menu item", None, false));
+        for role in ["menu bar", "frame", "panel", "table", "push button", "text"] {
+            assert!(!hidden_native_menu(role, Some(&hidden), false));
+        }
+    }
 
     #[test]
     fn duplicate_pid_prefers_populated_application_after_empty_registration() {

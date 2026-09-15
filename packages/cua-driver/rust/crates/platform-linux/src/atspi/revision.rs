@@ -271,6 +271,7 @@ mod tests {
             checked: None,
             enabled: Some(true),
             selected: None,
+            focused: None,
             description: None,
             actions: vec!["click".into()],
             element_key: 0,
@@ -301,7 +302,12 @@ mod tests {
 
     #[test]
     fn budget_captures_retain_lineage_but_failures_and_coverage_changes_invalidate_it() {
-        for reason in ["max_elements_reached", "max_depth_reached"] {
+        for reason in [
+            "max_elements_reached",
+            "max_depth_reached",
+            "managed_descendants_omitted",
+            "hidden_menu_subtrees_omitted",
+        ] {
             let revisions = LinuxObservationRevisions::new();
             let mut bounded = tree(vec![node("/button", "Before")]);
             bounded.complete = false;
@@ -486,6 +492,68 @@ mod tests {
         control.actions.pop();
         assert_ne!(format_revision_body(&control), secondary);
         assert_eq!(control.actions, ["activate"]);
+    }
+
+    #[test]
+    fn compact_static_text_changes_are_visible_without_remapping_controls() {
+        let revisions = LinuxObservationRevisions::new();
+        let capture = |message: &str| {
+            let mut root = node("/window", "Dialog");
+            root.role = "dialog".into();
+            root.element_index = None;
+            root.actions.clear();
+            let mut text = node("/message", message);
+            text.role = "label".into();
+            text.element_index = None;
+            text.actions.clear();
+            text.depth = 1;
+            let mut button = node("/ok", "OK");
+            button.element_index = Some(17);
+            button.depth = 1;
+            tree(super::super::projection::compact(vec![root, text, button]))
+        };
+        let first = revisions
+            .observe(session(), 10, 20, 50, 5, &capture("Saved"), &request(None))
+            .unwrap();
+        let unchanged = revisions
+            .observe(
+                session(),
+                10,
+                20,
+                50,
+                5,
+                &capture("Saved"),
+                &request(Some(first.revision_id.clone())),
+            )
+            .unwrap();
+        assert_eq!(unchanged.mode, ObservationMode::NoChange);
+        let changed = revisions
+            .observe(
+                session(),
+                10,
+                20,
+                50,
+                5,
+                &capture("Failed to save"),
+                &request(Some(unchanged.revision_id)),
+            )
+            .unwrap();
+        assert!(changed.text.contains("Failed to save"));
+        let control =
+            |result: &cua_driver_core::observation_revision::ObservationRevisionResult| {
+                result
+                    .nodes
+                    .iter()
+                    .find(|node| node.actionable_index == Some(17))
+                    .unwrap()
+                    .element_id
+            };
+        assert_eq!(control(&first), control(&changed));
+        assert!(changed
+            .nodes
+            .iter()
+            .filter(|node| node.actionable_index.is_some())
+            .all(|node| node.actionable_index == Some(17)));
     }
 
     #[test]

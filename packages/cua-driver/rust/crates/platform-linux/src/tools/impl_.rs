@@ -841,13 +841,19 @@ impl Tool for GetWindowStateTool {
         let query_for_walk = query.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let tree_result = Some(crate::atspi::walk_tree_bounded(
+            let mut tree = crate::atspi::walk_tree_bounded(
                 pid,
                 xid,
                 query_for_walk.as_deref(),
                 max_elements,
                 max_depth,
-            ));
+            );
+            // Compact model observations only. Internal browser setup/consent
+            // matching needs the original label boundaries from the native tree.
+            if revision_request_for_capture.is_some() {
+                tree.nodes = crate::atspi::projection::compact(tree.nodes);
+            }
+            let tree_result = Some(tree);
             // Bounds and element indices come from the same captured AT-SPI
             // traversal. Joining two live walks by ordinal mis-associated
             // Chromium controls when its lazy subtree changed between walks.
@@ -1059,6 +1065,9 @@ impl Tool for GetWindowStateTool {
                             }
                             if !n.actions.is_empty() {
                                 entry["actions"] = json!(n.actions);
+                            }
+                            if let Some(focused) = n.focused {
+                                entry["focused"] = json!(focused);
                             }
                             if let Some(selected) = n.selected {
                                 entry["selected"] = json!(selected);
