@@ -390,9 +390,7 @@ describe('BackgroundTaskRegistry', () => {
       );
       // The cancelled-but-unfinalized entry still occupies its slot, so the
       // slot accounting stays continuous across the race.
-      expect(registry.listUnfinalizedBackgroundAgentIds()).toContain(
-        'test-1',
-      );
+      expect(registry.listUnfinalizedBackgroundAgentIds()).toContain('test-1');
     } finally {
       patchSpy.mockRestore();
     }
