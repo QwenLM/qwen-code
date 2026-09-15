@@ -22,9 +22,8 @@
 137297 ci.yml
 1482 codeql.yml
 9389 comment-attachment-guard.yml
-2033 desktop-packaging-check.yml
-4134 desktop-release-sync.yml
-36981 desktop-release.yml
+1634 desktop-packaging-check.yml
+35684 desktop-release.yml
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
 23879 e2e.yml
