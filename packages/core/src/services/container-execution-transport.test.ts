@@ -7,6 +7,7 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import {
+  chmod,
   lstat,
   mkdtemp,
   mkdir,
@@ -19,7 +20,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import { findProjectRoot } from '../utils/projectRoot.js';
@@ -142,14 +143,17 @@ describe.skipIf(process.platform === 'win32')(
 
     afterEach(async () => {
       vi.useRealTimers();
-      await environment?.dispose();
-      for (const process of children) {
-        process.stdin.destroy();
-        process.stdout.destroy();
-        process.stderr.destroy();
+      try {
+        await environment?.dispose();
+      } finally {
+        for (const process of children) {
+          process.stdin.destroy();
+          process.stdout.destroy();
+          process.stderr.destroy();
+        }
+        await rm(root, { recursive: true, force: true });
+        vi.clearAllMocks();
       }
-      await rm(root, { recursive: true, force: true });
-      vi.clearAllMocks();
     });
 
     const prepare = (id: string) =>
@@ -171,6 +175,122 @@ describe.skipIf(process.platform === 'win32')(
       expect(volume).toBeDefined();
       return volume!.slice(0, -suffix.length);
     };
+
+    it.each(['primary', 'installation'])(
+      'retries failed %s removal at session shutdown without reopening execution',
+      async (kind) => {
+        if (kind === 'installation') await prepareInstall();
+        const creates = runtime.execFile.mock.calls.filter(
+          (call) => call[1][0] === 'create',
+        );
+        const args = creates.at(-1)![1];
+        const failedName = args[args.indexOf('--name') + 1];
+        const entry = join(root, 'workspace', '.git');
+        const temporary = dirname(environment.outputDirectory);
+        const output = join(environment.outputDirectory, 'keep.txt');
+        await writeFile(output, 'retained output');
+        let failurePending = true;
+        const originalRuntime = runtime.execFile.getMockImplementation()!;
+        runtime.execFile.mockImplementation(
+          (program, command, options, callback) => {
+            if (
+              command[0] === 'rm' &&
+              command[2] === failedName &&
+              failurePending
+            ) {
+              failurePending = false;
+              callback(
+                new Error('runtime unavailable'),
+                '',
+                'runtime unavailable',
+              );
+            } else originalRuntime(program, command, options, callback);
+          },
+        );
+        const owner = new Config({
+          targetDir: join(root, 'workspace'),
+          cwd: join(root, 'workspace'),
+          debugMode: false,
+          deferTelemetryInitialization: true,
+        });
+        owner.registerExecutionEnvironment(Promise.resolve(environment));
+        try {
+          const first = environment.dispose();
+          expect(environment.dispose()).toBe(first);
+          await expect(first).rejects.toThrow('runtime unavailable');
+          expect(await readdir(entry)).toEqual([]);
+          expect(await readFile(output, 'utf8')).toBe('retained output');
+          expect(await readdir(gitMask(creates[0][1]))).toEqual([]);
+          const createCount = creates.length;
+          await expect(prepareInstall()).rejects.toThrow('closed');
+          expect(
+            runtime.execFile.mock.calls.filter(
+              (call) => call[1][0] === 'create',
+            ),
+          ).toHaveLength(createCount);
+          await expect(
+            owner.shutdownExecutionEnvironments(),
+          ).resolves.toBeUndefined();
+          await expect(lstat(entry)).rejects.toMatchObject({ code: 'ENOENT' });
+          await expect(lstat(temporary)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          expect(
+            runtime.execFile.mock.calls.filter(
+              (call) => call[1][0] === 'rm' && call[1][2] === failedName,
+            ),
+          ).toHaveLength(2);
+          const removals = runtime.execFile.mock.calls.filter(
+            (call) => call[1][0] === 'rm',
+          ).length;
+          await environment.dispose();
+          expect(
+            runtime.execFile.mock.calls.filter((call) => call[1][0] === 'rm'),
+          ).toHaveLength(removals);
+        } finally {
+          runtime.execFile.mockImplementation(originalRuntime);
+          await environment.dispose().catch(() => undefined);
+          await rm(temporary, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.getuid?.() === 0).each(['mount point', 'output'])(
+      'retries failed %s deletion without releasing another sibling lease',
+      async (target) => {
+        const workspace = join(root, 'workspace');
+        const entry = join(workspace, '.git');
+        const temporary = dirname(environment.outputDirectory);
+        const protectedDirectory =
+          target === 'mount point' ? workspace : environment.outputDirectory;
+        await writeFile(
+          join(environment.outputDirectory, 'keep.txt'),
+          'output',
+        );
+        let sibling: ContainerExecutionEnvironment | undefined;
+        try {
+          if (target === 'output') sibling = await createEnvironment();
+          await chmod(protectedDirectory, 0o500);
+          await expect(environment.dispose()).rejects.toMatchObject({
+            code: expect.stringMatching(/EACCES|EPERM/),
+          });
+          await chmod(protectedDirectory, 0o700);
+          sibling ??= await createEnvironment();
+          await environment.dispose();
+          expect(await readdir(entry)).toEqual([]);
+          await expect(lstat(temporary)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await sibling.dispose();
+          await expect(lstat(entry)).rejects.toMatchObject({ code: 'ENOENT' });
+        } finally {
+          await chmod(protectedDirectory, 0o700).catch(() => undefined);
+          await environment.dispose().catch(() => undefined);
+          await sibling?.dispose().catch(() => undefined);
+          await rm(temporary, { recursive: true, force: true });
+        }
+      },
+    );
 
     it('removes its empty mount point after disposal so project-root discovery recovers', async () => {
       await mkdir(join(root, '.git'));

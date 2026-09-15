@@ -25,8 +25,11 @@ siblings. This is subagent execution policy, not whole-session confinement.
 
 The trusted CLI operator requires container execution with
 `QWEN_AGENT_EXECUTION_BACKEND=docker` or `podman`. Repository-sourced environment
-values cannot enable or configure the runtime. Agent has no `execution_backend`
-parameter. Definitions can request `executionBackend: container`; omission
+values cannot enable or configure the runtime. Project `.env` and settings
+values are excluded from initial loading and reload for this selector; reloading
+or deleting a project value cannot overwrite or relabel an operator requirement.
+Agent has no `execution_backend` parameter. Definitions can request
+`executionBackend: container`; omission
 inherits the operator policy, and no definition value can weaken it. Without
 either requirement execution stays local. The existing image override selects
 the image; model arguments cannot select images, mounts, runtime endpoints, or
@@ -224,8 +227,12 @@ environments in the same CLI process share its ownership. After all owning
 workers have stopped, the last environment removes only that same empty directory
 with a non-recursive removal. Pre-existing entries, replacements and directories
 that gained contents are preserved. Failed worker cleanup retains ownership and
-the backing mask. A hard exit can leave the mount point behind; there is no
-crash reaper or coordination between independent CLI processes. Do not run
+the backing mask. A later disposal call, including root-session shutdown after
+agent cleanup failed, retries failed removals without reopening execution.
+Concurrent calls share the current attempt; successful removals and lease
+releases are not repeated. Filesystem cleanup can also be retried without
+releasing another sibling's lease. A hard exit can leave the mount point behind;
+there is no crash reaper or coordination between independent CLI processes. Do not run
 independent CLI processes concurrently in the same non-Git workspace. While in
 use, the placeholder is visible to host-side repository discovery too.
 

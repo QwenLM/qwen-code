@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeEnvironment,
+  isFileSourcedEnvKey,
   loadEnvironment,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
@@ -21,8 +22,13 @@ import {
 } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
 import { TrustLevel } from './trustedFolders.js';
+import {
+  AGENT_EXECUTION_BACKEND_ENV,
+  agentExecutionBackend,
+} from './agent-execution.js';
 
 const TRACKED_ENV = [
+  AGENT_EXECUTION_BACKEND_ENV,
   'CLOUD_SHELL',
   'GOOGLE_CLOUD_PROJECT',
   'RUNTIME_DOTENV',
@@ -152,6 +158,75 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   tmpDirs = [];
+});
+
+describe('operator container requirement across environment reload', () => {
+  it.each(
+    ['.env', '.qwen/.env', 'settings.env'].flatMap((source) =>
+      ['', 'docker', 'podman'].map((value) => ({ source, value })),
+    ),
+  )(
+    'preserves the operator requirement with $source = $value',
+    ({ source, value }) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      process.env[key] = 'docker';
+      const settings = testSettings({});
+      if (source === 'settings.env') {
+        settings.env = { [key]: value, RUNTIME_SETTINGS_ONLY: 'before' };
+      } else {
+        const file = path.join(workspace, source);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, `${key}=${value}\nRUNTIME_DOTENV=before\n`);
+      }
+      loadEnvironment(settings, workspace);
+      expect(agentExecutionBackend()).toBe('container');
+      const reloaded = reloadEnvironment(settings, workspace, true);
+      expect(process.env[key]).toBe('docker');
+      expect(isFileSourcedEnvKey(key)).toBe(false);
+      expect(agentExecutionBackend()).toBe('container');
+      expect(reloaded.updatedKeys).not.toContain(key);
+      expect(
+        buildRuntimeEnvironment(settings, workspace, {}, true).effectiveEnv[
+          key
+        ],
+      ).toBeUndefined();
+      if (source === 'settings.env')
+        settings.env = { RUNTIME_SETTINGS_ONLY: 'after' };
+      else
+        fs.writeFileSync(
+          path.join(workspace, source),
+          'RUNTIME_DOTENV=after\n',
+        );
+      const deleted = reloadEnvironment(settings, workspace, true);
+      expect(deleted.removedKeys).not.toContain(key);
+      expect(process.env[key]).toBe('docker');
+      expect(agentExecutionBackend()).toBe('container');
+      expect(
+        process.env[
+          source === 'settings.env' ? 'RUNTIME_SETTINGS_ONLY' : 'RUNTIME_DOTENV'
+        ],
+      ).toBe('after');
+    },
+  );
+
+  it('keeps initial home-file provenance while freezing the selector on reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const file = path.join(os.homedir(), '.env');
+    const key = AGENT_EXECUTION_BACKEND_ENV;
+    fs.writeFileSync(file, `${key}=podman\n`);
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env[key]).toBe('podman');
+    expect(isFileSourcedEnvKey(key)).toBe(true);
+    expect(agentExecutionBackend()).toBeUndefined();
+    fs.writeFileSync(file, `${key}=docker\n`);
+    reloadEnvironment(testSettings({}), workspace, true);
+    expect(process.env[key]).toBe('podman');
+    expect(isFileSourcedEnvKey(key)).toBe(true);
+    expect(agentExecutionBackend()).toBeUndefined();
+  });
 });
 
 describe('relaunch environment provenance', () => {

@@ -206,12 +206,13 @@ async function acquireGitMountPoint(workspace: string) {
     // Siblings may share a workspace; only the last owner removes its target.
     const owned = point;
     owned.users++;
+    let released = false;
     return {
       directory,
       release: () =>
         gitMountPointMutex.runExclusive(async () => {
-          if (--owned.users > 0) return;
-          try {
+          if (released) return;
+          if (owned.users === 1) {
             const current = await lstat(path).catch(
               (error: NodeJS.ErrnoException) => {
                 if (error.code !== 'ENOENT') throw error;
@@ -228,9 +229,10 @@ async function acquireGitMountPoint(workspace: string) {
                   throw error;
               });
             }
-          } finally {
             gitMountPoints.delete(path);
           }
+          owned.users--;
+          released = true;
         }),
     };
   });
@@ -407,7 +409,10 @@ class ContainerWorker {
 
   dispose(): Promise<void> {
     this.fail(new Error('Container executor disposed.'));
-    this.disposal ??= this.remove();
+    this.disposal ??= this.remove().catch((error: unknown) => {
+      this.disposal = undefined;
+      throw error;
+    });
     return this.disposal;
   }
 
@@ -438,6 +443,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
   private readonly invocations = new Map<string, ContainerWorker>();
   private disposal?: Promise<void>;
   private releaseGitMountPoint?: () => Promise<void>;
+  private closed = false;
   private constructor(
     private readonly options: ContainerExecutionOptions,
     private readonly workerOptions: ExecutionWorkerOptions,
@@ -580,7 +586,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     request: ExecutionPreparation,
     signal: AbortSignal,
   ): Promise<PreparedExecution> {
-    if (this.disposal) throw new Error('Container executor is closed.');
+    if (this.closed) throw new Error('Container executor is closed.');
     let worker = this.primary;
     if (
       request.toolName === ToolNames.SHELL &&
@@ -731,6 +737,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     );
   }
   dispose(): Promise<void> {
+    this.closed = true;
     this.disposal ??= (async () => {
       const resources = `${[...this.workers].map((worker) => worker.name).join(', ')} (${this.options.runtime}); temporary directory ${this.temporaryDirectory}`;
       const notice = setTimeout(() => {
@@ -759,7 +766,10 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
       } finally {
         clearTimeout(notice);
       }
-    })();
+    })().catch((error: unknown) => {
+      this.disposal = undefined;
+      throw error;
+    });
     return this.disposal;
   }
 }
