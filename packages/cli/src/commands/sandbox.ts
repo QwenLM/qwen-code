@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import type { CommandModule } from 'yargs';
 import { DEFAULT_COMMAND_OPTIONS } from '../config/top-level-options.js';
 import { resolvePath } from '../utils/resolvePath.js';
@@ -302,6 +303,17 @@ export const sandboxCommand: CommandModule = {
       return;
     }
 
+    let hostPidNamespace: string;
+    try {
+      hostPidNamespace = fs.readlinkSync('/proc/self/ns/pid');
+    } catch (error) {
+      writeStderrLine(
+        `Cannot verify sandbox PID namespace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+
     writeStdoutLine('');
     // EROFS only, deliberately not `Permission denied` as well. Writing to a
     // root-owned directory as an ordinary user yields EACCES with or without
@@ -338,14 +350,11 @@ export const sandboxCommand: CommandModule = {
       },
       {
         name: 'payload shares the host PID namespace',
-        // `$$`, not a process count: a threshold on the host's process
-        // count measures host load, and an idle host fails it with no PID
-        // namespace anywhere. The payload is PID 1 exactly when a namespace
-        // isolates it.
-        argv: ['sh', '-c', 'test "$$" -ne 1'],
+        argv: ['readlink', '/proc/self/ns/pid'],
         expectation:
           'no PID namespace, so cross-process ownership records stay meaningful',
-        check: ({ status }) => status === 0,
+        check: ({ status, stdout }) =>
+          status === 0 && stdout.trim() === hostPidNamespace,
       },
       {
         name:

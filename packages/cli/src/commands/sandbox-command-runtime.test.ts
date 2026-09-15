@@ -410,6 +410,7 @@ describe('qwen sandbox command runtime contract', () => {
   });
 
   it('supplies runtime markers and C locale to mocked verification commands', async () => {
+    vi.spyOn(fs, 'readlinkSync').mockReturnValue('pid:[4026531836]');
     await run({ verify: true });
     expect(backendCalls().length).toBeGreaterThan(0);
     for (const call of backendCalls()) {

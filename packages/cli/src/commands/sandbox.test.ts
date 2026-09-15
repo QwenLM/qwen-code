@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs from 'yargs';
 
@@ -61,6 +62,7 @@ async function run(args: Record<string, unknown> = {}): Promise<void> {
 
 describe('qwen sandbox', () => {
   beforeEach(() => {
+    vi.spyOn(fs, 'readlinkSync').mockReturnValue('pid:[4026531836]');
     vi.stubEnv('SANDBOX', undefined);
     vi.stubEnv('SANDBOX_ENFORCEMENT', undefined);
     vi.stubEnv('QWEN_CODE_SIMPLE', undefined);
@@ -81,6 +83,7 @@ describe('qwen sandbox', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.clearAllMocks();
     vi.unstubAllEnvs();
     process.exitCode = undefined;
@@ -408,7 +411,10 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });
@@ -423,7 +429,10 @@ describe('qwen sandbox', () => {
       respond([
         [/proc\/net\/dev/, { status: 0, stdout: 'lo\neth0\n', stderr: '' }],
         [/usr\/local\/bin/, { status: 0, stdout: '', stderr: '' }],
-        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });
@@ -448,7 +457,10 @@ describe('qwen sandbox', () => {
             stderr: "touch: cannot touch '/usr/local/bin/x': Permission denied",
           },
         ],
-        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });
@@ -464,13 +476,54 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/\$\$/, { status: 1, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026532444]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });
 
       expect(report()).toContain('FAIL  payload shares the host PID namespace');
       expect(process.exitCode).toBe(1);
+    });
+
+    it.each([
+      { status: 0, stdout: '', stderr: '' },
+      { status: 0, stdout: '', stderr: 'pid:[4026531836]' },
+      { status: 1, stdout: 'pid:[4026531836]', stderr: 'readlink failed' },
+      { status: null, stdout: '', stderr: 'probe could not start' },
+    ])(
+      'fails when the PID namespace probe is unavailable: %j',
+      async (result) => {
+        respond([
+          [/proc\/net\/dev/, { status: 0, stdout: 'lo\neth0\n', stderr: '' }],
+          [
+            /usr\/local\/bin/,
+            { status: 1, stdout: '', stderr: 'Read-only file system' },
+          ],
+          [/proc\/self\/ns\/pid/, result],
+        ]);
+        await run({ verify: true });
+        expect(report()).toContain(
+          'FAIL  payload shares the host PID namespace',
+        );
+        expect(report()).toContain('1 of 4 checks failed.');
+        expect(process.exitCode).toBe(1);
+      },
+    );
+
+    it('fails before probing when the host PID namespace cannot be read', async () => {
+      vi.mocked(fs.readlinkSync).mockImplementationOnce(() => {
+        throw new Error('host namespace unavailable');
+      });
+      await run({ verify: true });
+      expect(process.exitCode).toBe(1);
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+      expect(report()).not.toContain('Confinement verified');
+      expect(writeStderrLineMock).toHaveBeenCalledWith(
+        'Cannot verify sandbox PID namespace: host namespace unavailable',
+      );
     });
 
     // glibc renders strerror() in the child's locale, so a non-English
@@ -484,7 +537,10 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });
@@ -514,7 +570,10 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });
@@ -533,7 +592,10 @@ describe('qwen sandbox', () => {
             /usr\/local\/bin/,
             { status: 1, stdout: '', stderr: 'Read-only file system' },
           ],
-          [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+          [
+            /proc\/self\/ns\/pid/,
+            { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+          ],
         ]);
         await run({ verify: true });
         expect(report()).toContain(
@@ -553,7 +615,10 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });
@@ -572,7 +637,10 @@ describe('qwen sandbox', () => {
           /usr\/local\/bin/,
           { status: 1, stdout: '', stderr: 'Read-only file system' },
         ],
-        [/\$\$/, { status: 0, stdout: '', stderr: '' }],
+        [
+          /proc\/self\/ns\/pid/,
+          { status: 0, stdout: 'pid:[4026531836]\n', stderr: '' },
+        ],
       ]);
 
       await run({ verify: true });

@@ -474,7 +474,7 @@ Use `QWEN_SANDBOX=bwrap qwen sandbox` from the project directory on the host to 
 - `qwen sandbox <cmd>…` — run one command through the resolved backend and
   report the outcome (the `codex sandbox` equivalent).
 - `qwen sandbox --verify` — the behavior battery: write outside the workspace
-  must fail; write inside must succeed; host `/proc` must stay visible (the regression guard for D6);
+  must fail; write inside must succeed; the payload must report the same `/proc/self/ns/pid` identity as the host (the regression guard for D6); unreadable identities fail verification;
   network checks inspect interface visibility: `closed` must expose only `lo`, while `open`/`proxied` must expose a non-loopback interface. They do not test Internet reachability, proxy availability, or exclusive proxy routing; those require separate integration checks.
 
 ### Review follow-up contract
