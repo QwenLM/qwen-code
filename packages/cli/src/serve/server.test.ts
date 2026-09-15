@@ -3173,6 +3173,12 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
+  it('rejects unwired admission before creating the app', () => {
+    expect(() =>
+      createServeAppImpl({ ...baseOpts, childHeapMode: 'admit' }),
+    ).toThrow('managed child process wiring');
+  });
+
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {
@@ -10962,6 +10968,25 @@ describe('createServeApp', () => {
           taskKind: 'workflow',
           context: { clientId: 'client-1' },
         },
+      ]);
+    });
+
+    it('passes a percent-encoded extension workflow name through decoded', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .get(`/session/s-1/saved-workflows/${encodeURIComponent('gcp:audit')}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ sessionId: 's-1', name: 'gcp:audit' });
+      expect(bridge.sessionSavedWorkflowCalls).toEqual([
+        { sessionId: 's-1', name: 'gcp:audit' },
       ]);
     });
 
@@ -24039,6 +24064,87 @@ describe('createServeApp', () => {
     });
 
     describe('session source filter', () => {
+      it('includes an active Qwen Live task before transcript persistence', async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440210';
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              sourceType: 'qwen-live',
+              clientCount: 1,
+              hasActivePrompt: true,
+            },
+          ],
+        });
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          {
+            sourceType: 'default',
+            view: 'organized',
+            group: 'all',
+          },
+        );
+        expect(result.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'qwen-live',
+            hasActivePrompt: true,
+          }),
+        ]);
+      });
+
+      it.each([undefined, 'organized'] as const)(
+        'lists persisted Qwen Live tasks in the default catalog (%s)',
+        async (view) => {
+          const sessionId = '550e8400-e29b-41d4-a716-446655440209';
+          await writeStoredSession({
+            sessionId,
+            cwd: WS_BOUND,
+            timestamp: '2026-05-17T12:00:00.000Z',
+            prompt: 'voice delegated task',
+            mtime: new Date('2026-05-17T12:00:00.000Z'),
+            sourceType: 'qwen-live',
+            sourceId: 'voice-1',
+          });
+          for (const sourceType of ['default', 'qwen-live', 'channel']) {
+            const result = await listWorkspaceSessionsForResponse(
+              fakeBridge(),
+              WS_BOUND,
+              {
+                sourceType,
+                ...(view ? { view, group: 'all' } : {}),
+              },
+            );
+            expect(
+              result.sessions.filter((row) => row.sessionId === sessionId),
+            ).toEqual(
+              sourceType === 'channel'
+                ? []
+                : [
+                    expect.objectContaining({
+                      sessionId,
+                      sourceType: 'qwen-live',
+                      sourceId: 'voice-1',
+                    }),
+                  ],
+            );
+          }
+          const mismatch = await listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            {
+              sourceType: 'default',
+              sourceId: 'other',
+              ...(view ? { view, group: 'all' } : {}),
+            },
+          );
+          expect(mismatch.sessions).toEqual([]);
+        },
+      );
+
       it('includes legacy sessions in the default source filter', async () => {
         const legacyId = '550e8400-e29b-41d4-a716-446655440201';
         const defaultId = '550e8400-e29b-41d4-a716-446655440202';
@@ -41585,6 +41691,66 @@ describe('Live conversation runtime lifecycle', () => {
       'standalone_session_options_v1',
     );
   });
+
+  it.each([
+    { clientCount: 1, hasActivePrompt: false },
+    { clientCount: 0, hasActivePrompt: true },
+  ])(
+    'does not grant Live call protection to client-declared source metadata %j',
+    async (activity) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440211';
+      const summary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        sourceType: 'qwen-live',
+        ...activity,
+      };
+      const bridge = fakeBridge({
+        listImpl: () => [summary],
+        summaryImpl: (id) => {
+          if (id !== sessionId) throw new SessionNotFoundError(id);
+          return summary;
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          boundWorkspace: WS_BOUND,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'live-source-test',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              bridge,
+            }),
+          ]),
+        },
+      );
+      const workspaceId = encodeURIComponent(WS_BOUND);
+      const responses = [
+        await request(app)
+          .delete('/session/' + sessionId)
+          .set('Host', '127.0.0.1:' + baseOpts.port),
+      ];
+      for (const prefix of ['', '/workspaces/' + workspaceId]) {
+        for (const action of ['delete', 'archive']) {
+          responses.push(
+            await request(app)
+              .post(prefix + '/sessions/' + action)
+              .set('Host', '127.0.0.1:' + baseOpts.port)
+              .send({ sessionIds: [sessionId] }),
+          );
+        }
+      }
+      expect(responses.map((response) => response.status)).toEqual([
+        204, 200, 200, 200, 200,
+      ]);
+      expect(bridge.closeCalls.length).toBeGreaterThan(0);
+    },
+  );
 
   it('blocks REST close and archive for active Live sessions until the call stops', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();

@@ -853,19 +853,18 @@ export interface DaemonStatusReport {
     maxJournalEvents: number;
     maxJournalBytes: number;
     /**
-     * The daemon's resolved memory figures, observed and reported only.
+     * The daemon's resolved memory model and admission policy.
      * Additive — older daemons omit it, and it is `null` on paths that resolve
      * none.
      */
     memory?: {
       /**
-       * False, and required — scoped to the child-heap model: nothing in
-       * this section except `journalGrowth` is applied to a process.
+       * False, and required: modeled child heap ceilings are not applied.
+       * Count enforcement is reported separately by `childHeap.admissionEnforced`.
        */
       enforced: false;
       /**
-       * Adaptive live-journal growth derived from the budget — the one
-       * figure with runtime effect: session journal caps really do grow
+       * Adaptive live-journal growth derived from the budget: session journal caps really do grow
        * within this daemon-wide pool mid-turn. `null` when growth is
        * disabled; absent on daemons predating it.
        */
@@ -880,7 +879,8 @@ export interface DaemonStatusReport {
        * `null` when no policy was built; absent on daemons predating it.
        */
       childHeap?: {
-        mode: 'off' | 'observe';
+        mode: 'off' | 'observe' | 'admit';
+        admissionEnforced?: boolean;
         /**
          * `null` under `off`, which models nothing — distinct from `0`,
          * a computed answer meaning the pool hosts no child.
@@ -905,7 +905,7 @@ export interface DaemonStatusReport {
       availableMemoryMb: number;
       availableMemorySource: 'constrained' | 'host';
       insufficientMemory: boolean;
-      /** Derived figures for a capacity policy that has not shipped. */
+      /** Memory model used for child-count admission, not reserved memory. */
       modeled: {
         rootReserveMb: number;
         childPoolMb: number;
@@ -980,6 +980,7 @@ export interface DaemonStatusReport {
        * started even if the child has not exited. Not a process-tree count.
        */
       activeAcpChildren: number;
+      committedAcpChildren?: number | null;
       /**
        * Which children the daemon's RSS sampling covers, and only while an
        * SSE/WS watcher is active; with no client observing, nothing is
@@ -1529,6 +1530,8 @@ export interface DaemonSessionExportResult {
 }
 
 export interface DaemonSessionTranscriptPageOptions {
+  /** Projection of persisted replay; defaults to full. */
+  compactedReplayMode?: 'full' | 'summary';
   cursor?: string;
   /** Start a forward page containing this persisted navigation turn UUID. */
   atRecordId?: string;
@@ -1675,7 +1678,7 @@ export interface DaemonSessionListPageOptions {
    * opaque and activity-based.
    */
   parentSessionId?: string;
-  /** Restrict the page to sessions attributed to this source type. */
+  /** Filter by source; `default` includes legacy and `qwen-live` tasks. */
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
@@ -2936,10 +2939,16 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    workflowStepId: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
-    source: 'project' | 'user';
+    /** `extension` definitions are named `<extension>:<workflow>`. */
+    source: 'project' | 'user' | 'extension';
   }>;
 }
 
@@ -2956,7 +2965,7 @@ export interface DaemonSessionSavedWorkflowDetail {
   v: 1;
   sessionId: string;
   name: string;
-  source: 'project' | 'user';
+  source: 'project' | 'user' | 'extension';
   /** Absolute path of the `.js` file the definition was read from. */
   scriptPath: string;
   /** Full script source, `export const meta` included. */
@@ -3082,6 +3091,8 @@ export type DaemonWorkflowDispatchStatus =
   | 'cached';
 
 export interface DaemonWorkflowDispatchStatusEntry {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -3146,7 +3157,37 @@ export type DaemonWorkflowEvent =
       error: string;
     });
 
+/**
+ * A workflow run's large-run flag: the first size threshold it crossed. Mirrors
+ * the daemon's `ServeWorkflowSizeWarning`.
+ */
+export interface DaemonWorkflowSizeWarning {
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduledAgents: number;
+  totalTokens: number;
+  projectedTokens: number;
+  agentCap: number;
+  tokenCap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  capFromGuideline: boolean;
+  at: number;
+}
+
+export interface DaemonWorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
 export interface DaemonSessionWorkflowTaskStatus {
+  sourceRef?: { id: string; revision: string };
+  workflowCalls?: DaemonWorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */
@@ -3172,6 +3213,8 @@ export interface DaemonSessionWorkflowTaskStatus {
   agentsCompleted: number;
   /** Calls re-run from a prior failed or interrupted attempt. */
   agentsRespawned?: number;
+  /** Present once the run crossed a large-run threshold. */
+  sizeWarning?: DaemonWorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];

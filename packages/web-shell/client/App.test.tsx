@@ -37979,6 +37979,42 @@ describe('App /goal command', () => {
     });
   });
 
+  it.each(['/goal set first objective', 'hello', '!pwd'])(
+    'preserves a cold-session draft when capacity rejects %s',
+    async (prompt) => {
+      mockConnection.sessionId = undefined;
+      mockSessionActions.createSession.mockRejectedValueOnce(
+        new DaemonHttpError(
+          503,
+          { code: 'acp_child_capacity_exhausted' },
+          'capacity reached',
+        ),
+      );
+      const onToast = vi.fn();
+      renderApp({ language: 'zh-CN', onToast });
+      await flush();
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = testState.latestChatEditorProps?.onSubmit(
+          prompt,
+          undefined,
+          undefined,
+          editorCommit,
+        );
+      });
+      await flush();
+      expect(accepted).toBe(false);
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
+      );
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      expect(editorCommit).not.toHaveBeenCalled();
+      expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
   it('creates a goal as the first command while the new session is still committing', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockResolvedValueOnce({
