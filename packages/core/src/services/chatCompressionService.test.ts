@@ -5808,6 +5808,7 @@ describe('issue #9455: compression request admission', () => {
       config,
       consecutiveFailures: 0,
       originalTokenCount: 60_000,
+      originalTokenCountIsEstimated: true,
     });
 
     expect(result.info.compressionStatus).toBe(
@@ -5815,6 +5816,37 @@ describe('issue #9455: compression request admission', () => {
     );
     expect(result.newHistory).toBeNull();
     expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses an authoritative provider count to admit dense-CJK cold input', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: '保'.repeat(120_000) }] },
+      { role: 'model', parts: [{ text: 'latest response' }] },
+    ];
+    const { chat, config } = makeFixture(history, 128_000);
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 91_101,
+          candidatesTokenCount: 2_000,
+          totalTokenCount: 93_101,
+        },
+      } as never);
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 66_688,
+      originalTokenCountIsEstimated: false,
+    });
+
+    expect(coldSpy).toHaveBeenCalledOnce();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
   });
 
   it('accepts CJK-dense cold input that fits the calibrated estimate', async () => {
