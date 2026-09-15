@@ -63,6 +63,13 @@ describe('StandaloneApp', () => {
     testState.tokenSurvivesReload = true;
     testState.renderCount = 0;
     window.history.replaceState(null, '', '/');
+    // jsdom's document is shared across the file; never let one test's
+    // document chrome leak into the next test's assertions.
+    document.documentElement.classList.remove(
+      'theme-dark',
+      'theme-light',
+      'dark',
+    );
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
