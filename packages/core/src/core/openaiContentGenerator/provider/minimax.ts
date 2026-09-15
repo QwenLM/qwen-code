@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
@@ -38,25 +39,23 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     }
   }
 
-  /**
-   * Also matches routings whose hostname gives no MiniMax hint: aggregating
-   * gateways proxy MiniMax backends under their own host and forward the
-   * `invalid params, function parameters is empty (2013)` rejection verbatim,
-   * leaving the model id as the only usable signal (#11834).
-   *
-   * `wireModel` is the model actually sent (`request.model ||
-   * contentGeneratorConfig.model`). A request-level override decides which
-   * backend answers, so gating on the config model alone would desync from
-   * the request — same reasoning as the `enable_thinking` gate in pipeline.ts.
-   */
-  static isMiniMaxRouting(
-    config: ContentGeneratorConfig,
-    wireModel?: string,
-  ): boolean {
-    return (
-      MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config) ||
-      /minimax/i.test(wireModel ?? config.model ?? '')
+  override buildRequest(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+    userPromptId: string,
+  ): OpenAI.Chat.ChatCompletionCreateParams {
+    const baseRequest = super.buildRequest(request, userPromptId);
+    baseRequest.tools = baseRequest.tools?.map((tool) =>
+      tool.function.parameters === undefined
+        ? {
+            ...tool,
+            function: {
+              ...tool.function,
+              parameters: { type: 'object', properties: {} },
+            },
+          }
+        : tool,
     );
+    return baseRequest;
   }
 
   override getResponseParsingOptions(): OpenAIResponseParsingOptions {

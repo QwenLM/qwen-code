@@ -364,7 +364,6 @@ function isStrictlyValidSchema(schema: object): boolean {
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
-  options: { keepParameterlessParameters?: boolean } = {},
 ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
   const openAITools: OpenAI.Chat.ChatCompletionTool[] = [];
 
@@ -448,19 +447,7 @@ export async function convertLlmToolsToOpenAI(
                 PARAMETERLESS_SCHEMA_KEYS.has(key),
               )
             ) {
-              // Dropping the key is the default because llama.cpp cannot
-              // compile a grammar over an empty `properties` map (#10080) and
-              // strict OpenAI-contract validators such as LM Studio reject
-              // `parameters: {"type":"object"}` without `properties` (#11410).
-              // MiniMax rejects the omission instead — every request carrying
-              // the always-registered `list_agents` answers `400 invalid
-              // params, function parameters is empty (2013)` (#11834) — so
-              // that routing opts back into an explicit empty object schema,
-              // the shape the Anthropic wire substitutes for a missing
-              // `inputSchema`.
-              parameters = options.keepParameterlessParameters
-                ? { type: 'object', properties: {} }
-                : undefined;
+              parameters = undefined;
             }
           }
 

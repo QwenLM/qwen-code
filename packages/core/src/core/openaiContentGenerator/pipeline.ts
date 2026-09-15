@@ -20,7 +20,6 @@ import {
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
-import { MiniMaxOpenAICompatibleProvider } from './provider/minimax.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -1088,21 +1087,6 @@ export class ContentGenerationPipeline {
       baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
         request.config.tools,
         this.contentGeneratorConfig.schemaCompliance ?? 'auto',
-        {
-          // MiniMax answers `400 invalid params, function parameters is empty
-          // (2013)` when a zero-argument tool ships without `parameters`
-          // (#11834), which the always-registered `list_agents` does by
-          // default. Gateways that proxy MiniMax under their own host are
-          // caught via the model id, since their hostname carries no hint —
-          // and the model id must be the *wire* model (`context.model`), the
-          // same source the `enable_thinking` gate below uses: a request-level
-          // model override decides which backend answers.
-          keepParameterlessParameters:
-            MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-              this.contentGeneratorConfig,
-              context.model,
-            ),
-        },
       );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's

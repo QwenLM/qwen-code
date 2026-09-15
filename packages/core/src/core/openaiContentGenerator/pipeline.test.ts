@@ -605,7 +605,6 @@ describe('ContentGenerationPipeline', () => {
       expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
         request.config!.tools,
         'auto',
-        { keepParameterlessParameters: false },
       );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -614,110 +613,6 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: undefined,
         }),
-      );
-    });
-
-    it('keeps an empty parameters object when the wire model is MiniMax', async () => {
-      // Arrange — MiniMax rejects a function declaration with no
-      // `parameters` (#11834), and this route only reaches it by model id.
-      const request: GenerateContentParameters = {
-        model: 'MiniMax-M3',
-        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
-        config: {
-          tools: [
-            {
-              functionDeclarations: [
-                {
-                  name: 'test-function',
-                  description: 'Test function',
-                  parameters: { type: Type.OBJECT, properties: {} },
-                },
-              ],
-            },
-          ],
-        },
-      };
-
-      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
-        { role: 'user', content: 'Hello' },
-      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
-      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
-        { type: 'function', function: { name: 'test-function' } },
-      ] as OpenAI.Chat.ChatCompletionTool[]);
-      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
-        new GenerateContentResponse(),
-      );
-      (mockClient.chat.completions.create as Mock).mockResolvedValue({
-        id: 'response-id',
-        choices: [
-          { message: { content: 'Hello response' }, finish_reason: 'stop' },
-        ],
-      } as OpenAI.Chat.ChatCompletion);
-
-      // Act
-      await pipeline.execute(request, 'test-prompt-id');
-
-      // Assert
-      expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
-        request.config!.tools,
-        'auto',
-        { keepParameterlessParameters: true },
-      );
-    });
-
-    it('gates on the request model override rather than the config model', async () => {
-      // Arrange — a request-level override decides which backend answers, so
-      // a MiniMax config model answering a non-MiniMax request must not flip
-      // the shape (and vice versa; see the case above).
-      const overridePipeline = new ContentGenerationPipeline({
-        ...mockConfig,
-        contentGeneratorConfig: {
-          ...mockContentGeneratorConfig,
-          model: 'MiniMax-M2.5',
-        },
-      });
-      const request: GenerateContentParameters = {
-        model: 'llama-3.1-8b-instruct',
-        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
-        config: {
-          tools: [
-            {
-              functionDeclarations: [
-                {
-                  name: 'test-function',
-                  description: 'Test function',
-                  parameters: { type: Type.OBJECT, properties: {} },
-                },
-              ],
-            },
-          ],
-        },
-      };
-
-      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
-        { role: 'user', content: 'Hello' },
-      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
-      (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([
-        { type: 'function', function: { name: 'test-function' } },
-      ] as OpenAI.Chat.ChatCompletionTool[]);
-      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
-        new GenerateContentResponse(),
-      );
-      (mockClient.chat.completions.create as Mock).mockResolvedValue({
-        id: 'response-id',
-        choices: [
-          { message: { content: 'Hello response' }, finish_reason: 'stop' },
-        ],
-      } as OpenAI.Chat.ChatCompletion);
-
-      // Act
-      await overridePipeline.execute(request, 'test-prompt-id');
-
-      // Assert
-      expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
-        request.config!.tools,
-        'auto',
-        { keepParameterlessParameters: false },
       );
     });
 

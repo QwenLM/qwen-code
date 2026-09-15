@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type OpenAI from 'openai';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
@@ -119,67 +120,6 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
     });
   });
 
-  describe('isMiniMaxRouting', () => {
-    function createRoutedConfig(
-      model: string,
-      baseUrl?: string,
-    ): ContentGeneratorConfig {
-      return {
-        model,
-        apiKey: 'test-api-key',
-        ...(baseUrl ? { baseUrl } : {}),
-      } as ContentGeneratorConfig;
-    }
-
-    it('matches a gateway host when the model id names MiniMax', () => {
-      expect(
-        MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-          createRoutedConfig(
-            'MiniMax/MiniMax-M2.5',
-            'https://idealab.alibaba-inc.com/api/openai/v1',
-          ),
-        ),
-      ).toBe(true);
-      expect(
-        MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-          createRoutedConfig('bailian/MiniMax-M2.1'),
-        ),
-      ).toBe(true);
-      expect(
-        MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-          createRoutedConfig('MiniMax-M3'),
-        ),
-      ).toBe(true);
-    });
-
-    it('still matches official MiniMax hosts for any model id', () => {
-      expect(
-        MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-          createRoutedConfig('some-model', 'https://api.minimaxi.com/v1'),
-        ),
-      ).toBe(true);
-    });
-
-    it('does not match unrelated models on unrelated hosts', () => {
-      expect(
-        MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-          createRoutedConfig(
-            'qwen3.8-max',
-            'https://idealab.alibaba-inc.com/api/openai/v1',
-          ),
-        ),
-      ).toBe(false);
-      expect(
-        MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-          createRoutedConfig(
-            'llama-3.1-8b-instruct',
-            'http://127.0.0.1:8080/v1',
-          ),
-        ),
-      ).toBe(false);
-    });
-  });
-
   it('enables tagged thinking response parsing', () => {
     const provider = new MiniMaxOpenAICompatibleProvider(
       createConfig('https://api.minimaxi.com/v1'),
@@ -198,5 +138,28 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
     );
 
     expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
+  });
+
+  it('keeps parameters on zero-argument tools', () => {
+    const provider = new MiniMaxOpenAICompatibleProvider(
+      createConfig('https://api.minimaxi.com/v1'),
+      mockCliConfig,
+    );
+    const request: OpenAI.Chat.ChatCompletionCreateParams = {
+      model: 'MiniMax-M3',
+      messages: [{ role: 'user', content: 'Hello' }],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'cron_list', description: 'desc' },
+        },
+      ],
+    };
+
+    const result = provider.buildRequest(request, 'prompt-id');
+
+    expect(JSON.stringify(result.tools)).toContain(
+      '"parameters":{"type":"object","properties":{}}',
+    );
   });
 });

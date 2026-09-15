@@ -846,60 +846,6 @@ describe('LoggingContentGenerator', () => {
     expect(openaiError).toBeUndefined();
   });
 
-  it('keeps the logged tool shape in step with the wire model', async () => {
-    const wrapped = createWrappedGenerator(
-      vi
-        .fn()
-        .mockResolvedValue(
-          createResponse('resp-tool-shape', 'test-model', [{ text: 'ok' }]),
-        ),
-      vi.fn(),
-    );
-    const generatorConfig = {
-      model: 'MiniMax-M2.5',
-      authType: AuthType.USE_OPENAI,
-      enableOpenAILogging: true,
-      openAILoggingDir: 'logs',
-      schemaCompliance: 'openapi_30' as const,
-    };
-    const generator = new LoggingContentGenerator(
-      wrapped,
-      createConfig({ authType: AuthType.USE_ANTHROPIC }),
-      generatorConfig,
-    );
-    const tools = [
-      {
-        functionDeclarations: [
-          { name: 'cron_list', description: 'desc', parameters: {} },
-        ],
-      },
-    ];
-    const request = (model: string) =>
-      ({
-        model,
-        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
-        config: { tools },
-      }) as unknown as GenerateContentParameters;
-
-    // The request decides which backend answers, so the logged body has to
-    // follow the wire model rather than the configured one (#11834).
-    await generator.generateContent(request('llama-3.1-8b-instruct'), 'p-1');
-    await generator.generateContent(request('MiniMax-M3'), 'p-2');
-
-    expect(convertLlmToolsToOpenAISpy).toHaveBeenNthCalledWith(
-      1,
-      tools,
-      'openapi_30',
-      { keepParameterlessParameters: false },
-    );
-    expect(convertLlmToolsToOpenAISpy).toHaveBeenNthCalledWith(
-      2,
-      tools,
-      'openapi_30',
-      { keepParameterlessParameters: true },
-    );
-  });
-
   it('omits request_text and response_text from API telemetry when logPrompts is false', async () => {
     const wrapped = createWrappedGenerator(
       vi

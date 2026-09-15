@@ -41,7 +41,6 @@ import type {
   InputModalities,
 } from '../contentGenerator.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
-import { MiniMaxOpenAICompatibleProvider } from '../openaiContentGenerator/provider/minimax.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
@@ -1046,17 +1045,6 @@ export class LoggingContentGenerator implements ContentGenerator {
         await OpenAIContentConverter.convertLlmToolsToOpenAI(
           request.config.tools,
           this.schemaCompliance ?? 'auto',
-          {
-            // Mirror the pipeline's serialization (see pipeline.ts) so the
-            // logged body is the body actually sent — the MiniMax routing
-            // keeps `parameters` on zero-argument tools (#11834). Pass the
-            // request-level model so a model override logs what it sends.
-            keepParameterlessParameters:
-              MiniMaxOpenAICompatibleProvider.isMiniMaxRouting(
-                this.generatorConfig,
-                request.model,
-              ),
-          },
         );
     }
 
