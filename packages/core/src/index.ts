@@ -798,6 +798,12 @@ export {
   hookEventSupportsMatcher,
 } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export { buildHooksListing } from './hooks/hooks-listing.js';
+export type {
+  HooksListing,
+  HooksListingOrigin,
+  HooksListingRow,
+} from './hooks/hooks-listing.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   STOP_HOOK_BLOCK_CAP_ENV,

@@ -1076,6 +1076,20 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已开启，本会话不会运行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精简模式已开启，本会话不会运行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 设置禁用。',
+  'Timeout:': '超时：',
+  'Status message:': '状态消息：',
+  'Condition:': '条件：',
+  'Options:': '选项：',
+  'Skill:': '技能：',
+  'runs in background': '后台运行',
+  'runs once': '只运行一次',
+  sequential: '顺序执行',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
