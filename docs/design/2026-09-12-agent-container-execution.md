@@ -28,6 +28,10 @@ The trusted CLI operator requires container execution with
 values cannot enable or configure the runtime. Project `.env` and settings
 values are excluded from initial loading and reload for this selector; reloading
 or deleting a project value cannot overwrite or relabel an operator requirement.
+For this selector, a nonempty file-sourced value (including a home `.env` or
+inherited file provenance) is rejected with an instruction to export it in the
+launch environment. It must never silently become a local default. Home-file
+activation is not supported by this slice.
 Agent has no `execution_backend` parameter. Definitions can request
 `executionBackend: container`; omission
 inherits the operator policy, and no definition value can weaken it. Without
@@ -103,6 +107,10 @@ provision missing capability. This slice adds no CLI capability-only setting.
 
 Teams, Arena, workflows, external executors and retained regular/fork resumes
 have no container lifecycle and refuse when container execution is required.
+Workflow container refusals are run-level errors: sequential dispatch,
+`parallel()`, `pipeline()` and nested compositions reject instead of returning
+successful `null` slots. The journal does not record these policy refusals as
+admitted-agent failures or results.
 When the operator requires containers, Team creation and Arena startup refuse
 before creating or reclaiming team files, resetting tasks or inboxes, attaching
 team state, or provisioning Arena worktrees.
@@ -360,10 +368,14 @@ against hostile in-container code. Separating the endpoint and payload identitie
 requires a follow-up design that preserves workspace ownership and rootless
 runtime compatibility. No such separation is implemented in this slice.
 
-A hard host exit such as `SIGKILL` cannot run this cleanup. Exited containers and
-temporary output directories may remain; there is no startup sweeper in this
-slice. Operators must verify ownership and that execution has stopped before
-manual removal. A cross-session reaper requires separate ownership/race rules.
+A host exit before cleanup completes, including `SIGKILL` or an expired shutdown
+deadline, can leave containers, temporary output directories and a session-created
+empty workspace `.git` mount point. That empty entry can affect project-root
+discovery. Failed removal retains these resources for retry while the process is
+alive; they are released only after worker removal succeeds. There is no startup
+sweeper in this slice, and a later session preserves pre-existing `.git` entries.
+Operators must verify ownership and that execution has stopped before manual
+removal. A cross-session reaper requires separate ownership/race rules.
 
 ## Affected areas
 

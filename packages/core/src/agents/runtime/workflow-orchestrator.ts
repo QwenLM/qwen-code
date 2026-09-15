@@ -571,8 +571,11 @@ export function createProductionDispatch(
       resolveAgentExecutionBackend(config, agentIdentity.resolvedAgentType) ===
       'container'
     ) {
-      throw new Error(
-        'Container execution is required; workflow agents are unsupported. Start a regular subagent instead.',
+      throw Object.assign(
+        new Error(
+          'Container execution is required; workflow agents are unsupported. Start a regular subagent instead.',
+        ),
+        { __wfRunFailure: true },
       );
     }
     if (agentIdentity.resolvedAgentType?.executor !== undefined) {
@@ -2417,10 +2420,10 @@ async function settleToNullArray(
  * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
  * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
  * itself rejects when given invalid arguments (non-array / non-function
- * element), when the run is aborted, or when a token/agent-cap gate refuses a
- * dispatch. The result array is revived into the vm realm by the sandbox
- * wrapper (per-element JSON round-trip) — this host array never reaches the
- * script directly.
+ * element), when the run is aborted, or when a token/agent-cap or container
+ * policy gate refuses a dispatch. The sandbox wrapper revives the result array
+ * into the vm realm (per-element JSON round-trip) — this host array never
+ * reaches the script directly.
  */
 function makeParallelImpl(
   signal: AbortSignal | undefined,

@@ -23,9 +23,13 @@ function agentExecutionRuntime(
   env: NodeJS.ProcessEnv,
   fileSourced: (key: string) => boolean,
 ): 'docker' | 'podman' | undefined {
-  if (fileSourced(AGENT_EXECUTION_BACKEND_ENV)) return undefined;
   const runtime = env[AGENT_EXECUTION_BACKEND_ENV]?.trim().toLowerCase();
   if (!runtime) return undefined;
+  if (fileSourced(AGENT_EXECUTION_BACKEND_ENV)) {
+    throw new Error(
+      `${AGENT_EXECUTION_BACKEND_ENV} cannot be loaded from an environment file. Export it in the launch environment instead.`,
+    );
+  }
   if (runtime !== 'docker' && runtime !== 'podman') {
     throw new Error(`${AGENT_EXECUTION_BACKEND_ENV} must be docker or podman.`);
   }

@@ -31,14 +31,20 @@ describe('agent execution capability', () => {
     },
   );
 
-  it('does not establish a requirement from absent or file-sourced values', () => {
+  it('does not establish a requirement from absent values', () => {
     expect(agentExecutionBackend({}, () => false)).toBeUndefined();
-    expect(
+    expect(agentExecutionBackend({}, () => true)).toBeUndefined();
+  });
+
+  it('rejects a file-sourced requirement instead of defaulting to local execution', () => {
+    expect(() =>
       agentExecutionBackend(
         { [AGENT_EXECUTION_BACKEND_ENV]: 'docker' },
         () => true,
       ),
-    ).toBeUndefined();
+    ).toThrow(
+      `${AGENT_EXECUTION_BACKEND_ENV} cannot be loaded from an environment file`,
+    );
   });
 
   it('rejects invalid trusted policy even if a daemon handoff disables the factory', () => {
@@ -85,15 +91,20 @@ describe('agent execution capability', () => {
       Object.defineProperty(process, 'platform', platform);
     }
   });
-  it('does not opt in by default or from repository environment files', () => {
+  it('does not opt in by default', () => {
     expect(agentExecutionFactory({}, () => false)).toBeUndefined();
-    expect(
-      agentExecutionFactory(
-        { [AGENT_EXECUTION_BACKEND_ENV]: 'docker' },
-        () => true,
-      ),
-    ).toBeUndefined();
   });
+  it.skipIf(process.platform === 'win32')(
+    'rejects a file-sourced runtime',
+    () => {
+      expect(() =>
+        agentExecutionFactory(
+          { [AGENT_EXECUTION_BACKEND_ENV]: 'docker' },
+          () => true,
+        ),
+      ).toThrow('Export it in the launch environment instead');
+    },
+  );
   it
     .skipIf(process.platform === 'win32')
     .each(['docker', 'podman', ' Docker '])(

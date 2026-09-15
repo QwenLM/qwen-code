@@ -1618,6 +1618,46 @@ describe('WorkflowOrchestrator', () => {
     return { journal, entries };
   }
 
+  it.each([
+    ['direct', `agent('a')`],
+    ['parallel', `parallel([() => agent('a'), () => agent('b')])`],
+    ['pipeline', `pipeline(['a', 'b'], (_previous, prompt) => agent(prompt))`],
+    [
+      'nested',
+      `parallel([() => pipeline(['a', 'b'], (_previous, prompt) => agent(prompt))])`,
+    ],
+  ])(
+    'rejects the %s workflow when container policy refuses dispatch',
+    async (_kind, expression) => {
+      const config = {
+        getAgentExecutionBackend: () => 'container' as const,
+      } as Config;
+      const { journal, entries } = memoryJournal();
+      const createdBefore = created.length;
+      const worktreesBefore = worktreeStubs.instances.length;
+      const orchestrator = new WorkflowOrchestrator(
+        createProductionDispatch(config),
+      );
+
+      await expect(
+        orchestrator.run({
+          script: `return await ${expression};`,
+          args: undefined,
+          journal,
+        }),
+      ).rejects.toThrow('workflow agents are unsupported');
+
+      expect(entries.some((entry) => entry.type === 'started')).toBe(true);
+      expect(
+        entries.some(
+          (entry) => entry.type === 'failed' || entry.type === 'result',
+        ),
+      ).toBe(false);
+      expect(created).toHaveLength(createdBefore);
+      expect(worktreeStubs.instances).toHaveLength(worktreesBefore);
+    },
+  );
+
   // The sandbox normalizes effort and disallowedTools before the resume key is
   // derived: spelling the same request differently must replay, and a
   // genuinely different request must not.
@@ -3734,38 +3774,48 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     };
   }
 
-  it('refuses a container definition before workflow worktree or runtime creation', async () => {
-    const onCreate = vi.fn(async () => ({
-      finalText: 'host execution must not start',
-      terminateMode: 'GOAL',
-    }));
-    const lookup = vi.fn(async () => ({
-      name: 'contained-reviewer',
-      description: 'Container reviewer',
-      systemPrompt: 'Review the work.',
-      level: 'user',
-      executionBackend: 'container' as const,
-    }));
-    const { config, calls } = fakeConfigWithMgr({
-      findSubagentByName: lookup,
-      onCreate,
-    });
-    const createRegistry = vi.spyOn(config, 'createToolRegistry');
+  it.each([
+    `agent('review work', args)`,
+    `parallel([() => agent('review work', args)])`,
+    `pipeline(['review work'], (_previous, prompt) => agent(prompt, args))`,
+  ])(
+    'refuses a container definition before workflow worktree or runtime creation: %s',
+    async (expression) => {
+      const onCreate = vi.fn(async () => ({
+        finalText: 'host execution must not start',
+        terminateMode: 'GOAL',
+      }));
+      const lookup = vi.fn(async () => ({
+        name: 'contained-reviewer',
+        description: 'Container reviewer',
+        systemPrompt: 'Review the work.',
+        level: 'user',
+        executionBackend: 'container' as const,
+      }));
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: lookup,
+        onCreate,
+      });
+      const createRegistry = vi.spyOn(config, 'createToolRegistry');
 
-    await expect(
-      createProductionDispatch(config)('review work', {
-        agentType: 'contained-reviewer',
-        isolation: 'worktree',
-        schema: { type: 'object' },
-      }),
-    ).rejects.toThrow('workflow agents are unsupported');
+      await expect(
+        new WorkflowOrchestrator(createProductionDispatch(config)).run({
+          script: `return await ${expression};`,
+          args: {
+            agentType: 'contained-reviewer',
+            isolation: 'worktree',
+            schema: { type: 'object' },
+          },
+        }),
+      ).rejects.toThrow('workflow agents are unsupported');
 
-    expect(lookup).toHaveBeenCalledOnce();
-    expect(calls).toHaveLength(0);
-    expect(onCreate).not.toHaveBeenCalled();
-    expect(createRegistry).not.toHaveBeenCalled();
-    expect(worktreeStubs.instances).toHaveLength(0);
-  });
+      expect(lookup).toHaveBeenCalledOnce();
+      expect(calls).toHaveLength(0);
+      expect(onCreate).not.toHaveBeenCalled();
+      expect(createRegistry).not.toHaveBeenCalled();
+      expect(worktreeStubs.instances).toHaveLength(0);
+    },
+  );
 
   it.each([
     { label: 'plain', options: {}, tokenLimit: null },

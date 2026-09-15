@@ -221,22 +221,64 @@ describe('operator container requirement across environment reload', () => {
     },
   );
 
-  it('keeps initial home-file provenance while freezing the selector on reload', () => {
-    resetEnvironmentTrackingForTesting();
-    const workspace = makeWorkspace();
-    const file = path.join(os.homedir(), '.env');
-    const key = AGENT_EXECUTION_BACKEND_ENV;
-    fs.writeFileSync(file, `${key}=podman\n`);
-    loadEnvironment(testSettings({}), workspace);
-    expect(process.env[key]).toBe('podman');
-    expect(isFileSourcedEnvKey(key)).toBe(true);
-    expect(agentExecutionBackend()).toBeUndefined();
-    fs.writeFileSync(file, `${key}=docker\n`);
-    reloadEnvironment(testSettings({}), workspace, true);
-    expect(process.env[key]).toBe('podman');
-    expect(isFileSourcedEnvKey(key)).toBe(true);
-    expect(agentExecutionBackend()).toBeUndefined();
-  });
+  it.each(['.env', '.qwen/.env'])(
+    'rejects the home %s requirement across reload and relaunch',
+    async (source) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const file = path.join(os.homedir(), source);
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${key}=podman\n`);
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env[key]).toBe('podman');
+      expect(isFileSourcedEnvKey(key)).toBe(true);
+      expect(() => agentExecutionBackend()).toThrow(
+        'Export it in the launch environment instead',
+      );
+      fs.writeFileSync(file, `${key}=docker\n`);
+      reloadEnvironment(testSettings({}), workspace, true);
+      expect(process.env[key]).toBe('podman');
+      expect(isFileSourcedEnvKey(key)).toBe(true);
+      expect(() => agentExecutionBackend()).toThrow(
+        'Export it in the launch environment instead',
+      );
+      fs.rmSync(file);
+      vi.resetModules();
+      const child = await import('./environment.js');
+      const childExecution = await import('./agent-execution.js');
+      child.loadEnvironment(testSettings({}), workspace);
+      child.reloadEnvironment(testSettings({}), workspace, true);
+      expect(process.env[key]).toBe('podman');
+      expect(child.isFileSourcedEnvKey(key)).toBe(true);
+      expect(() => childExecution.agentExecutionBackend()).toThrow(
+        'Export it in the launch environment instead',
+      );
+      child.resetEnvironmentTrackingForTesting();
+    },
+  );
+
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'does not acquire a requirement from project %s',
+    (source) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      const settings = testSettings({});
+      if (source === 'settings.env') settings.env = { [key]: 'docker' };
+      else {
+        const file = path.join(workspace, source);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, `${key}=docker\n`);
+      }
+      loadEnvironment(settings, workspace);
+      expect(process.env[key]).toBeUndefined();
+      expect(agentExecutionBackend()).toBeUndefined();
+      reloadEnvironment(settings, workspace, true);
+      expect(process.env[key]).toBeUndefined();
+      expect(agentExecutionBackend()).toBeUndefined();
+    },
+  );
 });
 
 describe('relaunch environment provenance', () => {
