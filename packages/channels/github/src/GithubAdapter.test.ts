@@ -1113,14 +1113,12 @@ describe('GithubChannel', () => {
       expect(config.allowedUsers).toEqual(['alice']);
     });
 
-    it('forces final-only delivery and appends the publication policy', () => {
+    it('appends the publication policy', () => {
       const config = makeConfig({
-        blockStreaming: 'on',
         instructions: 'Respond in Chinese.',
       });
       new TestableGithubChannel('test-github', config, makeBridge());
 
-      expect(config.blockStreaming).toBe('off');
       expect(config.instructions).toContain('GitHub publication policy:');
       expect(config.instructions).toContain('<no-reply/>');
       expect(config.instructions).toContain('Respond in Chinese.');
@@ -1461,7 +1459,6 @@ describe('GithubChannel', () => {
       await initWithoutLoop({
         senderPolicy: 'allowlist',
         allowedUsers: ['maintainer', 'bob'],
-        messagePrefix: '/review',
       });
       channel.usePreflight = true;
       mockOctokit.paginate
@@ -1508,12 +1505,11 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         threadId: 'pr:99',
         isMentioned: true,
-        bypassMessagePrefix: true,
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
         threadId: 'pr:99',
-        text: 'check this review note',
+        text: ' /review check this review note',
         isMentioned: true,
       });
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
@@ -1527,9 +1523,6 @@ describe('GithubChannel', () => {
       );
       expect(channel.inboundEnvelopes[0]!.text).toBe(
         'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
-      );
-      expect(channel.inboundEnvelopes[0]!.displayText).toBe(
-        'Review requested: feat: divide',
       );
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'For review_requested, return a formal review summary',
@@ -1666,7 +1659,6 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         isMentioned: true,
         text: 'Triage this issue and respond with the next action.',
-        displayText: 'Issue assigned: broken build',
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
@@ -1715,14 +1707,11 @@ describe('GithubChannel', () => {
         );
         expect(channel.inboundEnvelopes[0]!.text).toContain('@alice: first');
         expect(channel.inboundEnvelopes[0]!.text).toContain('@bob: second');
-        expect(channel.inboundEnvelopes[0]!.displayText).toBe(
-          '- @alice: first\n- @bob: second',
-        );
       },
     );
 
-    it('filters each aggregated comment and consumes unmatched comments', async () => {
-      await initWithoutLoop({ messagePrefix: '/review' });
+    it('aggregates ordinary comments and preserves literal slash-prefixed text', async () => {
+      await initWithoutLoop();
       channel.usePreflight = true;
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -1744,10 +1733,9 @@ describe('GithubChannel', () => {
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]).toMatchObject({
-        displayText: '- @bob: inspect this',
-        bypassMessagePrefix: true,
-      });
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '- @bob: /review inspect this',
+      );
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
     });
 
@@ -2095,7 +2083,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toContain('latest');
     });
 
-    it('sanitizes crafted comment bodies in the aggregate display projection', async () => {
+    it('sanitizes crafted comment bodies in the aggregate prompt', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -2112,16 +2100,13 @@ describe('GithubChannel', () => {
 
       await pollOnce();
 
-      const displayText = channel.inboundEnvelopes[0]!.displayText!;
+      const text = channel.inboundEnvelopes[0]!.text;
       // eslint-disable-next-line no-control-regex
       const craftedChars = /[\u202a-\u202e\u2066-\u2069\u200b\u0007\r]/;
-      expect(displayText).not.toMatch(craftedChars);
+      expect(text).not.toMatch(craftedChars);
       // Newlines and brackets are display content and must survive.
-      expect(displayText).toContain('line one');
-      expect(displayText).toContain('\nline two [BUG] kept');
-      expect(channel.inboundEnvelopes[0]!.text).toContain(
-        displayText.slice('- @alice: '.length),
-      );
+      expect(text).toContain('line one');
+      expect(text).toContain('\nline two [BUG] kept');
     });
 
     it('truncates aggregated comments on code-point boundaries', async () => {
@@ -2141,10 +2126,10 @@ describe('GithubChannel', () => {
 
       await pollOnce();
 
-      const displayText = channel.inboundEnvelopes[0]!.displayText!;
-      expect(displayText).toContain('a'.repeat(399) + '\ud83c\udf89');
-      expect(displayText).not.toContain('tail');
-      expect(displayText).not.toMatch(
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain('a'.repeat(399) + '\ud83c\udf89');
+      expect(text).not.toContain('tail');
+      expect(text).not.toMatch(
         /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
       );
     });

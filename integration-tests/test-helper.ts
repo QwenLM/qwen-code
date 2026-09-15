@@ -225,8 +225,11 @@ export class TestRig {
   ) {
     this.testName = testName;
     const sanitizedName = sanitizeTestName(testName);
-    this.testDir = join(env['INTEGRATION_TEST_FILE_DIR']!, sanitizedName);
-    // Two cases that set up under the same name share this directory, and
+    this.testDir = join(
+      env['INTEGRATION_TEST_FILE_DIR']!,
+      `${sanitizedName}-${process.pid}`,
+    );
+    // Same-name cases in one worker share this directory, and
     // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
     // sets. Reset it so a case never inherits the previous one's files; see the
     // SDK helper, where exactly that made a suite pass locally and fail in CI.
@@ -271,16 +274,24 @@ export class TestRig {
    * between using the bundled gemini.js (the default) and using the installed
    * 'qwen' (used to verify npm bundles).
    */
-  private _getCommandAndArgs(extraInitialArgs: string[] = []): {
+  private _getCommandAndArgs(
+    extraInitialArgs: string[] = [],
+    options: { chatRecording?: boolean } = {},
+  ): {
     command: string;
     initialArgs: string[];
   } {
     const isNpmReleaseTest =
       process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
     const command = isNpmReleaseTest ? 'qwen' : 'node';
+    // Runs leave no conversation behind by default. A test that drives
+    // `--continue` has to opt back in: without a recorded session there is
+    // nothing to resume, and the resumed run then looks indistinguishable
+    // from a fresh one.
+    const recordingArgs = options.chatRecording ? [] : ['--no-chat-recording'];
     const initialArgs = isNpmReleaseTest
-      ? ['--no-chat-recording', ...extraInitialArgs]
-      : [this.bundlePath, '--no-chat-recording', ...extraInitialArgs];
+      ? [...recordingArgs, ...extraInitialArgs]
+      : [this.bundlePath, ...recordingArgs, ...extraInitialArgs];
     return { command, initialArgs };
   }
 
@@ -891,6 +902,18 @@ export class TestRig {
     return apiRequests.pop() || null;
   }
 
+  // Unlike waitForTelemetryEvent's boolean poll, this exposes the latest
+  // matching payload so integration tests can assert event semantics.
+  readTelemetryEvent(eventName: string): ParsedLog | null {
+    const logs = this._readAndParseTelemetryLog();
+    const events = logs.filter(
+      (logData) =>
+        logData.attributes &&
+        logData.attributes['event.name'] === `qwen-code.${eventName}`,
+    );
+    return events.pop() || null;
+  }
+
   readMetric(metricName: string): Record<string, unknown> | null {
     const logs = this._readAndParseTelemetryLog();
     for (const logData of logs) {
@@ -925,10 +948,26 @@ export class TestRig {
     ptyProcess: pty.IPty;
     promise: Promise<{ exitCode: number; signal?: number; output: string }>;
   } {
+    return this.runInteractiveWith({}, ...args);
+  }
+
+  /**
+   * `runInteractive` with the launch knobs it does not expose. Currently just
+   * `chatRecording`, which a `--continue` test needs so the first session is
+   * on disk for the second one to resume.
+   */
+  runInteractiveWith(
+    options: { chatRecording?: boolean },
+    ...args: string[]
+  ): {
+    ptyProcess: pty.IPty;
+    promise: Promise<{ exitCode: number; signal?: number; output: string }>;
+  } {
     const renderer = pickE2eRenderer();
-    const { command: cliCommand, initialArgs } = this._getCommandAndArgs([
-      '--yolo',
-    ]);
+    const { command: cliCommand, initialArgs } = this._getCommandAndArgs(
+      ['--yolo'],
+      options,
+    );
     // The renderer matrix swaps node for bun only when driving the repo
     // bundle directly; installed-release runs keep their own launcher and
     // still get the pinned QWEN_TUI_RENDERER below.

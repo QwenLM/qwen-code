@@ -180,15 +180,24 @@ export function AskUserQuestion({
   const handleSubmit = useCallback(
     (submittedAnswers?: Record<string, string>) => {
       if (submittedRef.current) return;
+      const result = submittedAnswers ?? buildResult();
+      if (!questions.every((_, idx) => hasCustomAnswer(result[String(idx)]))) {
+        return;
+      }
       const submitOption = request.options.find((o) => o.kind === 'allow_once');
       if (!submitOption) {
         const message = t('askUser.submitOptionUnavailable');
         onError(new Error(message), message);
         return;
       }
-      void submitDecision(submitOption.id, submittedAnswers ?? buildResult());
+      void submitDecision(submitOption.id, result);
     },
-    [buildResult, onError, request.options, submitDecision, t],
+    [buildResult, onError, questions, request.options, submitDecision, t],
+  );
+
+  const currentAnswers = buildResult();
+  const allQuestionsAnswered = questions.every((_, idx) =>
+    hasCustomAnswer(currentAnswers[String(idx)]),
   );
 
   const handleCancel = useCallback(() => {
@@ -703,14 +712,16 @@ export function AskUserQuestion({
             aria-label={collapsed ? t('common.expand') : t('common.collapse')}
             title={collapsed ? t('common.expand') : t('common.collapse')}
           >
+            {collapsed ? t('common.expand') : t('common.collapse')}
             <svg
+              aria-hidden="true"
               viewBox="0 0 16 16"
               className={`${styles.collapseIcon} ${
                 collapsed ? styles.collapseIconCollapsed : ''
               }`}
             >
               <path
-                d="M4 6l4 4 4-4"
+                d="M4 10l4-4 4 4"
                 fill="none"
                 stroke="currentColor"
                 strokeLinecap="round"
@@ -935,7 +946,7 @@ export function AskUserQuestion({
             <button
               type="button"
               className={`${styles.button} ${styles.submitButton}`}
-              disabled={submitting}
+              disabled={submitting || !allQuestionsAnswered}
               aria-busy={submitting}
               aria-keyshortcuts="Control+Enter Meta+Enter"
               data-shortcut={submitShortcutLabel}

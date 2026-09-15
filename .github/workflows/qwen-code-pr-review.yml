@@ -196,7 +196,7 @@ jobs:
           # A command-triggered run executes against the base branch, so its
           # `review-pr` check attaches to main's commit and never shows under
           # this PR's checks — the link here is the only way to watch it.
-          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is running in [workflow run](%s). A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued for an available runner; follow the [workflow run](%s) for progress. A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
           # One ack per PR, and it must sit right under the command that asked
           # for it. Editing the previous ack in place kept the count at one but
           # left the notice wherever the FIRST request landed — on a 15-comment
@@ -495,7 +495,9 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # The schedule switches hk1/hk2 to `ecs-review` at 17:00 Asia/Shanghai
+    # and back to CI at 05:00. Reviews queue while the pool is closed.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -993,9 +995,11 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           AUTO_REVIEW: '${{ steps.context.outputs.auto_review }}'
+          QWEN_REVIEW_AUTOMATIC: '${{ steps.context.outputs.auto_review }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
           TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
           # Timeout headroom for CI reviews, measured against the PR 8507
@@ -1671,6 +1675,23 @@ jobs:
             mkdir -p "$QWEN_HOME"
             printf '%s\n' '{"tools":{"shell":{"defaultTimeoutMs":2400000}}}' \
               > "$QWEN_HOME/settings.json"
+          fi
+          # vars.QWEN_PR_REVIEW_EFFORT is to model.reasoningEffort what
+          # vars.QWEN_PR_REVIEW_MODEL is to --model (low|medium|high|xhigh|
+          # max); the CLI has no flag for it, so it goes in the same per-run
+          # settings file, merged so it composes with the cover above. Unset
+          # keeps the provider's default. This is the model's thinking depth,
+          # not /review's own --effort (which --comment pins to high).
+          if [ -n "${QWEN_PR_REVIEW_EFFORT:-}" ]; then
+            mkdir -p "$QWEN_HOME"
+            node -e '
+              const fs = require("node:fs");
+              const [file, effort] = process.argv.slice(1);
+              let s = {};
+              try { s = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+              s.model = { ...s.model, reasoningEffort: effort };
+              fs.writeFileSync(file, JSON.stringify(s) + "\n");
+            ' "$QWEN_HOME/settings.json" "$QWEN_PR_REVIEW_EFFORT"
           fi
 
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
@@ -3024,7 +3045,21 @@ jobs:
                 "${GIT_SAFE[@]}" branch -D "$review_ref" ||
                   echo "::warning::could not remove review branch: $review_ref"
               done || true
-          rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
+          # Both locations: leases moved to `.qwen/review-leases` (out of the
+          # directory the review sandbox mounts read-write), and a runner whose
+          # workspace persists can still be holding one written by an older
+          # build in the old place. The lease name matches no `review-pr-*`
+          # glob above, and a reviewed PR can leave a DIRECTORY — or a
+          # mode-000 one — at a lease's name: a bare `rm -rf` fails on that
+          # shape, and discarding its stderr and status would leave the
+          # residue to wedge every later job on this runner with nothing in
+          # the log. One loop over both globs, through the same repair ladder
+          # the trees get: a survivor is repaired away or named in a warning,
+          # never silently kept.
+          for lease in .qwen/review-leases/qwen-review-lease-pr-*.json .qwen/tmp/qwen-review-lease-pr-*.json; do
+            [ -e "$lease" ] || [ -L "$lease" ] || continue
+            remove_review_tree "$lease"
+          done
           echo "review worktrees cleaned"
 
   # A review job that dies abnormally — runner crash, host loss, or the
@@ -3118,6 +3153,24 @@ jobs:
           if [ -z "$PR_NUMBER" ]; then
             echo "Could not determine the PR number; skipping fallback comment." >> "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+          # A review-pr job no runner ever picked up has no runner and no
+          # steps: GitHub ends a job queued for 24 hours (as failure or
+          # cancelled), and the `ecs-review` pool is closed by day
+          # (qwen-review-runner-schedule.yml). The generic body's "did not
+          # complete successfully / retried automatically" would both be
+          # false, and silence is not the alternative: ack-review-request
+          # already promised this requester a result here, and a head nobody
+          # pushes again never queues another run. So it gets its own body
+          # below. An unreadable job list keeps the generic comment (fail
+          # toward telling the author something).
+          never_started="unknown"
+          if [ "$REVIEW_PR_RESULT" = "failure" ] || [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+            never_started="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:?}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "review-pr")] | if length == 0 then "unknown" elif all(.[]; (.runner_name // "") == "" and ((.steps // []) | length) == 0) then "true" else "false" end' 2>/dev/null)" || never_started="unknown"
+            if [ "$never_started" = "true" ]; then
+              echo "review-pr in run ${GITHUB_RUN_ID} was never started by a runner (queue expired); posting the queue-expiry body." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           # A push landing mid-review leaves this comment pointing at a dead
           # run while a fresh review of the new head already queues (per-run
@@ -3244,7 +3297,9 @@ jobs:
           # gets one body accurate for both flavors. It keeps the
           # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
           # anchors on, and the retry instruction the timeout flavor needs.
-          if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+          if [ "$never_started" = "true" ]; then
+            body="**Qwen Code review never started.** No runner picked up the review job before GitHub ended it at the 24-hour queue limit, so no review ran for this head and nothing picks it up on its own. This step cannot see WHY no runner was available: \`ecs-review\` is switched by \`qwen-review-runner-schedule.yml\`, so check its latest run — a pool that is closed by schedule, empty, or all-offline expires the next request the same way. Re-request with \`@qwen-code /review\` once that run shows the pool open. See [workflow logs](${RUN_URL})."
+          elif [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
             body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           else
             body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
@@ -3808,7 +3863,6 @@ jobs:
           # not abort the step under set -e and swallow the only failure signal.
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${WORKDIR}/report.md" ||
             echo "::warning::Resolve was skipped, but posting the skip-reason comment failed."
-
 
   # Publishes what the agent job produced — verification, push and the result
   # comment — on a runner that never executed the agent. It starts from a

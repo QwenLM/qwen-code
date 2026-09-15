@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SessionSourcesSnapshot } from './session-sources.js';
+
 import { type Config } from '../config/config.js';
+import {
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
+} from '../utils/background-turn-context.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -275,6 +282,8 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
 }
 
 export interface ChatRecord {
+  /** Daemon admission identity, distinct from CLI file-history prompt IDs. */
+  daemonPromptId?: string;
   /** Unique identifier for this logical message */
   uuid: string;
   /** UUID of the parent message; null for root (first message in session) */
@@ -297,6 +306,7 @@ export interface ChatRecord {
     | 'at_command'
     | 'attribution_snapshot'
     | 'notification'
+    | 'background_task_completed'
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
@@ -307,10 +317,12 @@ export interface ChatRecord {
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
     | 'agent_retry'
+    | 'agent_session_ready'
     | 'file_history_snapshot'
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
+    | 'session_sources_snapshot'
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
@@ -320,6 +332,7 @@ export interface ChatRecord {
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
   goalContext?: GoalTurnPermit;
+  backgroundTurn?: BackgroundNotificationTurn;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -371,10 +384,12 @@ export interface ChatRecord {
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
     | AgentRetryRecordPayload
+    | AgentSessionReadyRecordPayload
     | FileHistorySnapshotRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
+    | SessionSourcesSnapshot
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | TurnResultRecordPayload;
@@ -421,6 +436,7 @@ export interface NotificationRecordPayload {
     status: string;
     kind: 'agent' | 'monitor' | 'shell' | 'workflow';
     toolUseId?: string;
+    sourceTurnId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
     commandLabel?: string;
@@ -431,8 +447,9 @@ export interface NotificationRecordPayload {
 
 export interface UserPromptRecordPayload {
   /**
-   * TUI submittedPrompt projection when available; otherwise the expanded
-   * pre-hook prompt.
+   * Core/headless: submitted projection, otherwise expanded pre-hook text.
+   * ACP: display projection or raw request text before expansion. ACP omits
+   * this payload when neither a projection nor attachment references exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
@@ -467,6 +484,11 @@ export interface AgentBootstrapRecordPayload {
    * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
+}
+
+export interface AgentSessionReadyRecordPayload {
+  callId: string;
+  subagentSessionReady: boolean;
 }
 
 export interface AgentRetryRecordPayload {
@@ -757,6 +779,8 @@ export interface TurnResultRecordPayload {
   error?: TurnResultErrorPayload;
   /** Epoch ms the turn started executing (agent clock). */
   startedAt?: number;
+  /** Epoch ms the user-cancel signal was received (agent clock). */
+  cancelledAt?: number;
   /** Epoch ms the turn settled (agent clock). */
   endedAt: number;
   promptText?: string;
@@ -798,6 +822,7 @@ export function isTurnResultRecordPayload(
   if (
     !optionalString('stopReason', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
     !optionalTimestamp('startedAt') ||
+    !optionalTimestamp('cancelledAt') ||
     !optionalString('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('promptTextTruncated') ||
     !optionalString('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
@@ -1255,7 +1280,15 @@ export class ChatRecordingService {
     type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
     const cwd = this.config.getProjectRoot();
+    const background = backgroundTurnContext.getStore();
+    const backgroundTurn =
+      background?.active &&
+      background.sessionId === this.getSessionId() &&
+      !getCurrentAgentId()
+        ? background.turn
+        : undefined;
     return {
+      ...(backgroundTurn ? { backgroundTurn } : {}),
       uuid: randomUUID(),
       parentUuid: this.lastRecordUuid,
       sessionId: this.getSessionId(),
@@ -1880,12 +1913,14 @@ export class ChatRecordingService {
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
+    daemonPromptId?: string,
   ): void {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
@@ -1965,6 +2000,20 @@ export class ChatRecordingService {
       undefined,
       goalContext,
     );
+  }
+
+  recordBackgroundTaskCompleted(payload: NotificationRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        subtype: 'background_task_completed',
+        systemPayload: payload,
+      };
+      delete record.backgroundTurn;
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving background task completion:', error);
+    }
   }
 
   /**
@@ -2085,6 +2134,34 @@ export class ChatRecordingService {
     const { tokens } = this.goalTurnSpend;
     this.goalTurnSpend = undefined;
     return tokens;
+  }
+
+  /**
+   * Evidence-bearing tool results recorded in the Goal turn that is currently
+   * open. Single entry for the same reason the spend is.
+   */
+  private goalTurnToolResults?: { turnId: string; count: number };
+
+  private accumulateGoalTurnToolResult(turnId: string): void {
+    if (this.goalTurnToolResults?.turnId !== turnId) {
+      this.goalTurnToolResults = { turnId, count: 0 };
+    }
+    this.goalTurnToolResults.count += 1;
+  }
+
+  /**
+   * The evidence-bearing tool results `turnId` recorded, consuming them so a
+   * turn is counted once.
+   *
+   * `get_goal` and `update_goal` results are excluded: they are the Goal
+   * runtime talking to itself, and a turn that only reads its own state is
+   * exactly the idling this count exists to notice.
+   */
+  takeGoalTurnToolResults(turnId: string): number {
+    if (this.goalTurnToolResults?.turnId !== turnId) return 0;
+    const { count } = this.goalTurnToolResults;
+    this.goalTurnToolResults = undefined;
+    return count;
   }
 
   /**
@@ -2356,6 +2433,9 @@ export class ChatRecordingService {
         record.toolCallResult = recordingToolCallResult;
       }
 
+      if (options?.goalContext && options.provenance !== 'goal_runtime') {
+        this.accumulateGoalTurnToolResult(options.goalContext.turnId);
+      }
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving tool result:', error);
@@ -2959,6 +3039,17 @@ export class ChatRecordingService {
       ...this.createBaseRecord('system'),
       type: 'system',
       subtype: 'session_artifact_snapshot',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, { updateActiveTail: false });
+  }
+  async recordSessionSourcesSnapshot(
+    payload: SessionSourcesSnapshot,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });

@@ -256,6 +256,26 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).not.toContain('.qwen/tmp');
   });
 
+  it('does not capture the worktree leases, which moved out of .qwen/tmp', () => {
+    // The lease moved to `.qwen/review-leases` to get host-trusted state out of
+    // the directory the sandbox mounts read-write, and the filter kept naming
+    // its directories by hand — so a checkout holding a lease captured that
+    // lease JSON (session id, prompt id, worktree path, branch) as the user's
+    // untracked change. A lease is rewritten on every acquisition, so an
+    // interleaved local round re-reviewed the churned lease forever instead of
+    // ever reporting "no changes": the pathology the `.qwen/tmp` arm exists to
+    // prevent, on the directory that moved out of it.
+    write(
+      '.qwen/review-leases/qwen-review-lease-pr-1.json',
+      '{"sessionId":"s","promptId":"p"}\n',
+    );
+    write('real.ts', 'export const r = 1;\n');
+
+    const res = capture();
+    expect(res.untracked).toEqual(['real.ts']);
+    expect(res.text).not.toContain('review-leases');
+  });
+
   it('excludes plumbing a round in ANOTHER directory wrote', () => {
     // The three `paths.ts` constants are cwd-relative for EVERY invocation,
     // so a round run from `sub/` writes `sub/.qwen/…`. A filter built from

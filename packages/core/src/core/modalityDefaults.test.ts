@@ -12,6 +12,10 @@ import {
 } from './modalityDefaults.js';
 
 describe('defaultModalities', () => {
+  it('does not infer modalities for an unrecognized batch route', () => {
+    expect(defaultModalities('google/gemini-2.5-flash:batch')).toEqual({});
+  });
+
   describe('Google Gemini', () => {
     it('returns full multimodal for gemini-3-pro', () => {
       expect(defaultModalities('gemini-3-pro-preview')).toEqual({

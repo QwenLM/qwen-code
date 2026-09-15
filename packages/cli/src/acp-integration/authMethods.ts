@@ -18,6 +18,15 @@ export function buildAuthMethods(): AuthMethod[] {
         args: ['--auth-type=openai'],
       },
     },
+    {
+      id: AuthType.USE_OPENAI_RESPONSES,
+      name: 'Use OpenAI Responses API key',
+      description: 'Requires setting the `OPENAI_API_KEY` environment variable',
+      _meta: {
+        type: 'terminal',
+        args: ['--auth-type=openai-responses'],
+      },
+    },
   ];
 }
 

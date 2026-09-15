@@ -4,6 +4,7 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import { parseChannelOutputMode } from '@qwen-code/channel-base';
 import {
   APPROVAL_MODES,
   isInternalSecretEnvVar,
@@ -227,22 +228,6 @@ function optionalBooleanField(
     );
   }
   return value;
-}
-
-function optionalPlainStringField(
-  channelName: string,
-  path: string,
-  value: unknown,
-): string | undefined {
-  if (value === undefined || value === null || value === '') {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    throw new Error(
-      `Channel "${channelName}" field "${path}" must be a string.`,
-    );
-  }
-  return value.trim() || undefined;
 }
 
 function requireObjectField(
@@ -481,6 +466,11 @@ export async function parseChannelConfig(
   }
 
   const resolvedRawConfig = { ...rawConfig };
+  const outputMode = parseChannelOutputMode(
+    name,
+    rawConfig['outputMode'],
+    plugin.supportsOutputMode === true,
+  );
   const envResolution = options.resolveEnvVars ?? true;
   const resolvedPluginFields = new Set<string>();
 
@@ -529,11 +519,6 @@ export async function parseChannelConfig(
     'multiSession',
     rawConfig['multiSession'],
   );
-  const messagePrefix = optionalPlainStringField(
-    name,
-    'messagePrefix',
-    rawConfig['messagePrefix'],
-  );
   const groups = (rawConfig['groups'] as ChannelConfig['groups']) || {};
   const webhooks = parseWebhookConfig(name, rawConfig);
 
@@ -561,7 +546,6 @@ export async function parseChannelConfig(
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
-    messagePrefix,
     identity: parseObjectStringFields(name, rawConfig, 'identity', [
       'id',
       'displayName',
@@ -569,6 +553,7 @@ export async function parseChannelConfig(
     ] as const) as ChannelConfig['identity'],
     memoryScope: parseMemoryScopeConfig(name, rawConfig),
     model: rawConfig['model'] as string | undefined,
+    outputMode,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
