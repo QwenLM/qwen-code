@@ -271,6 +271,26 @@ export class PromptQueueFullError extends Error {
 }
 
 /**
+ * Rejected by `sendPrompt` when a caller reuses an admitted `promptId`
+ * with a different payload. Same id + same fingerprint returns the
+ * original result instead of admitting a second turn.
+ */
+export class PromptIdConflictError extends Error {
+  readonly sessionId: string;
+  readonly promptId: string;
+
+  constructor(sessionId: string, promptId: string) {
+    super(
+      `Prompt "${promptId}" for session "${sessionId}" was already ` +
+        `accepted with different content`,
+    );
+    this.name = 'PromptIdConflictError';
+    this.sessionId = sessionId;
+    this.promptId = promptId;
+  }
+}
+
+/**
  * Rejected by `sendPrompt` when an accepted prompt exceeds its wallclock
  * deadline (`BridgeClientRequestContext.deadlineMs`). The bridge publishes a
  * `turn_error{code:'prompt_deadline_exceeded'}` terminal, releases the FIFO,

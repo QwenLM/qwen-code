@@ -38,6 +38,7 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  PromptIdConflictError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
@@ -876,6 +877,15 @@ export function sendBridgeError(
       sessionId: err.sessionId,
       limit: err.limit,
       pendingCount: err.pendingCount,
+    });
+    return;
+  }
+  if (err instanceof PromptIdConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'prompt_id_conflict',
+      sessionId: err.sessionId,
+      promptId: err.promptId,
     });
     return;
   }

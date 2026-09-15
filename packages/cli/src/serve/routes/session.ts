@@ -92,6 +92,7 @@ import {
   InvalidClientIdError,
   InvalidSessionMetadataError,
   PromptQueueFullError,
+  PromptIdConflictError,
   SessionArtifactValidationError,
   SessionArchivedError,
   SessionConflictError,
@@ -7904,6 +7905,14 @@ export function registerSessionRoutes(
           }
           requestDeadlineMs = rawRequestDeadline;
         }
+        const parsedPromptId = parseCallerSuppliedSessionId(body['promptId']);
+        if (parsedPromptId.kind === 'invalid') {
+          res.status(400).json({
+            error: '`promptId` must be a UUID',
+            code: 'invalid_prompt_id',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
@@ -7918,7 +7927,10 @@ export function registerSessionRoutes(
           }
         }
 
-        const promptId = crypto.randomUUID();
+        const promptId =
+          parsedPromptId.kind === 'valid'
+            ? parsedPromptId.sessionId
+            : crypto.randomUUID();
         if (delivery && deps.channelDeliveryAuthorizations) {
           deps.channelDeliveryAuthorizations.authorizePrompt(
             runtime.workspaceCwd,
@@ -7932,6 +7944,7 @@ export function registerSessionRoutes(
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
         delete forwardedBody['delivery'];
+        delete forwardedBody['promptId'];
         const forwardedMeta =
           typeof forwardedBody['_meta'] === 'object' &&
           forwardedBody['_meta'] !== null &&
@@ -8052,6 +8065,13 @@ export function registerSessionRoutes(
               ...(clientId !== undefined ? { clientId } : {}),
               limit: err.limit,
               pendingCount: err.pendingCount,
+            });
+          }
+          if (daemonLog && err instanceof PromptIdConflictError) {
+            daemonLog.warn('prompt admission rejected: prompt id conflict', {
+              sessionId,
+              promptId,
+              ...(clientId !== undefined ? { clientId } : {}),
             });
           }
           if (daemonLog && err instanceof InvalidClientIdError) {

@@ -129,6 +129,7 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  PromptIdConflictError,
   RestoreInProgressError,
   BridgeChannelQuarantinedError,
   SessionRestoreTimeoutError,
@@ -19304,6 +19305,38 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.context?.promptId).toBe(res.body.promptId);
     });
 
+    it('forwards a caller-supplied promptId and strips it from the ACP request', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const promptId = '11111111-1111-4111-8111-111111111111';
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          promptId: '11111111-1111-4111-8111-111111111111',
+        });
+      expect(res.status).toBe(202);
+      expect(res.body.promptId).toBe(promptId);
+      expect(bridge.promptCalls[0]?.context?.promptId).toBe(promptId);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('promptId');
+    });
+
+    it('400 when the caller-supplied promptId is not a UUID', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          promptId: 'not-a-uuid',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_prompt_id');
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
     it('accepts channel display text only from the workspace worker', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -19660,6 +19693,40 @@ describe('createServeApp', () => {
           sessionId: 'session-A',
           limit: 5,
           pendingCount: 5,
+        }),
+      );
+    });
+
+    it('409 without admitting when bridge rejects a promptId conflict', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new PromptIdConflictError(
+            'session-A',
+            '11111111-1111-4111-8111-111111111111',
+          );
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          promptId: '11111111-1111-4111-8111-111111111111',
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'prompt_id_conflict',
+        sessionId: 'session-A',
+        promptId: '11111111-1111-4111-8111-111111111111',
+      });
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'prompt admission rejected: prompt id conflict',
+        expect.objectContaining({
+          sessionId: 'session-A',
+          promptId: '11111111-1111-4111-8111-111111111111',
         }),
       );
     });

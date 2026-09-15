@@ -119,6 +119,7 @@ import {
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
+  PromptIdConflictError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   SessionShellClientRequiredError,
@@ -1258,6 +1259,15 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  /**
+   * Admitted `promptId` → original `sendPrompt` result. A retry with the
+   * same fingerprint returns this promise and must not abort the original
+   * turn; a different payload is `PromptIdConflictError`.
+   */
+  promptAdmissions: Map<
+    string,
+    { fingerprint: string; result: Promise<PromptResponse> }
+  >;
   /** Recent formal terminals bridge-published before transcript visibility. */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
   /**
@@ -7364,6 +7374,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingAgentNotificationCount: 0,
       ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
       pendingPromptList: [],
+      promptAdmissions: new Map(),
       terminalTurnStatuses: new Map(),
       enrichedTerminalPromptIds: new Set(),
       rewindGeneration: 0,
@@ -10414,6 +10425,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (entry.sourceType === 'managed-gateway') {
         throw new SessionNotFoundError(sessionId);
       }
+      if (!Array.isArray(req.prompt)) {
+        return Promise.reject(
+          RequestError.invalidParams(undefined, 'Prompt must be an array'),
+        );
+      }
+      const promptId = context?.promptId ?? randomUUID();
+      const fingerprint = JSON.stringify(req.prompt);
+      const existingAdmission = entry.promptAdmissions.get(promptId);
+      if (existingAdmission) {
+        if (existingAdmission.fingerprint !== fingerprint) {
+          throw new PromptIdConflictError(sessionId, promptId);
+        }
+        return existingAdmission.result;
+      }
       if (isClosingOrAuthorizingClose(entry)) {
         return Promise.reject(
           new SessionNotFoundError(
@@ -10436,11 +10461,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.managedConversationBinding?.released !== true
       ) {
         return Promise.reject(standaloneWorkingDirectoryMissingError());
-      }
-      if (!Array.isArray(req.prompt)) {
-        return Promise.reject(
-          RequestError.invalidParams(undefined, 'Prompt must be an array'),
-        );
       }
       const promotedMidTurn = context?.promotedMidTurn;
       const isPromotedMidTurn = promotedMidTurn !== undefined;
@@ -10487,7 +10507,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // genuinely queued (another prompt is already running/queued) —
       // the first prompt on an idle session starts immediately and
       // doesn't need a queue event.
-      const promptId = context?.promptId ?? randomUUID();
       const invocationContext: InvocationContextV1 = Object.freeze({
         version: 1,
         sessionId,
@@ -11152,6 +11171,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           schedulePromptSettledClose(entry);
         })
         .catch(() => {});
+      entry.promptAdmissions.set(promptId, { fingerprint, result });
       return result;
     },
 

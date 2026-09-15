@@ -18,7 +18,7 @@
 
 ## 2. 受理、终态和物理完成
 
-普通REST prompt仍返回已有202 `{promptId,lastEventId,eventEpoch}`，但Managed适配等待输入+唤醒的持久ACK后才响应。同步admission ticket仍先检查Session、队列、ID、workspace与用途；onPromptAdmitted/完成Promise的时机分别保留。客户端断线不等于撤销已接受输入，重复请求使用同业务ID查原结果。
+普通REST prompt仍返回已有202 `{promptId,lastEventId,eventEpoch}`，但Managed适配等待输入+唤醒的持久ACK后才响应。同步admission ticket仍先检查Session、队列、ID、workspace与用途；onPromptAdmitted/完成Promise的时机分别保留。客户端断线不等于撤销已接受输入，重复请求使用同业务ID查原结果。活会话 `POST /session/:id/prompt` 现接受 body `promptId`：相同内容返回原 turn，不同内容 409。
 
 authority投影维护 `turnId/promptId → inputId/terminal event/physical holds`。用户正式消息只出现一次；模型流preview带attemptId且可丢弃，模型完成内容和ToolOutcomeRef提交后才合并为正式历史。内容块、tool IDs、模型切换、用量、stopReason、附件和引用保持原形状；display裁剪不修改模型恢复内容。
 

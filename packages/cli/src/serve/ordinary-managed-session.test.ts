@@ -512,6 +512,70 @@ describe('ordinary REST session Managed owner', () => {
     });
   });
 
+  it('reuses the same ordinary promptId instead of admitting a second turn', async () => {
+    await startModelServer();
+    await writeSettings();
+    app = bootApp();
+    const sessionId = await createManagedSession();
+
+    let releaseHold!: () => void;
+    modelHold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+
+    const promptId = randomUUID();
+    const prompt = [{ type: 'text', text: 'same-turn' }];
+    const first = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ promptId, prompt });
+    expect(first.status).toBe(202);
+    expect(first.body.promptId).toBe(promptId);
+
+    const retry = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ promptId, prompt });
+    expect(retry.status).toBe(202);
+    expect(retry.body.promptId).toBe(promptId);
+
+    const pending = await request(app)
+      .get(`/session/${sessionId}/pending-prompts`)
+      .set('Host', host());
+    expect(pending.status).toBe(200);
+    expect(pending.body.pendingPrompts).toEqual([
+      expect.objectContaining({ promptId, state: 'running' }),
+    ]);
+
+    const conflict = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({
+        promptId,
+        prompt: [{ type: 'text', text: 'different-turn' }],
+      });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('prompt_id_conflict');
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+
+    releaseHold();
+    const turn = await waitForTurn(sessionId, promptId);
+    expect(turn.state).toBe('completed');
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+  });
+
   it('restores a cold ordinary Managed session after the daemon app restarts', async () => {
     await startModelServer();
     await writeSettings();

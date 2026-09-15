@@ -37,6 +37,7 @@ import {
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   PromptDeadlineExceededError,
   PromptQueueFullError,
+  PromptIdConflictError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionShellClientRequiredError,
@@ -18104,6 +18105,100 @@ describe('createAcpSessionBridge', () => {
         'end:second',
       ]);
 
+      await bridge.shutdown();
+    });
+
+    it('returns the original sendPrompt result for the same promptId', async () => {
+      let calls = 0;
+      let release: (() => void) | undefined;
+      const firstAdmitted = vi.fn();
+      const retryAdmitted = vi.fn();
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            calls += 1;
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const req = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text' as const, text: 'same' }],
+      };
+
+      const first = bridge.sendPrompt(session.sessionId, req, undefined, {
+        promptId: 'prompt-dup',
+        onPromptAdmitted: firstAdmitted,
+      });
+      const retryAbort = new AbortController();
+      const retry = bridge.sendPrompt(
+        session.sessionId,
+        req,
+        retryAbort.signal,
+        {
+          promptId: 'prompt-dup',
+          onPromptAdmitted: retryAdmitted,
+        },
+      );
+      expect(retry).toBe(first);
+      expect(firstAdmitted).toHaveBeenCalledOnce();
+      expect(retryAdmitted).not.toHaveBeenCalled();
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+
+      retryAbort.abort();
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect(calls).toBe(1);
+      release!();
+      await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(retry).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls).toBe(1);
+
+      await bridge.shutdown();
+    });
+
+    it('rejects a reused promptId with a different payload', async () => {
+      let release: (() => void) | undefined;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const first = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'original' }],
+        },
+        undefined,
+        { promptId: 'prompt-dup' },
+      );
+      expect(() =>
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'other' }],
+          },
+          undefined,
+          { promptId: 'prompt-dup' },
+        ),
+      ).toThrow(PromptIdConflictError);
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+
+      await vi.waitFor(() => expect(release).toBeDefined());
+      release!();
+      await first;
       await bridge.shutdown();
     });
 
