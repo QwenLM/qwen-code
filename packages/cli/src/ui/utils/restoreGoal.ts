@@ -28,8 +28,8 @@ export interface RestorableGoal {
  * is non-terminal (`set` or `checking`), or `null` if the last goal_status was
  * terminal/cancelled (achieved / failed / cleared / aborted) or none exists.
  *
- * The iteration count is carried so the MAX_GOAL_ITERATIONS safety cap survives
- * resume instead of resetting to zero. `checking` items persist the running
+ * The iteration count is carried so the restored card keeps its running count
+ * instead of resetting to zero. `checking` items persist the running
  * count (see useLlmStream's continuation handler); `set` items predate any
  * iteration, so they restore at 0.
  *

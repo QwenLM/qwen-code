@@ -6528,7 +6528,7 @@ describe('ContentGenerationPipeline', () => {
       expect(body.response_format).toEqual({ type: 'json_object' });
     });
 
-    it('falls back to json_object when required is partial (goalJudge shape)', () => {
+    it('falls back to json_object when required is partial', () => {
       const body = pipeline['buildResponseFormat']({
         model: 'test-model',
         contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
