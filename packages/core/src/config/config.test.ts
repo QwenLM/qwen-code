@@ -4020,7 +4020,7 @@ describe('Server Config (config.ts)', () => {
         expect.objectContaining({ cause: 'resume', goal_id: 'g-resumed' }),
       );
 
-      expect(runtime.getRecoveryCause()).toBe('pause');
+      expect(runtime.getRecoveryCause?.()).toBe('pause');
       await runtime.dispatch({
         action: 'pause',
         expectedGoalId: 'g-resumed',
