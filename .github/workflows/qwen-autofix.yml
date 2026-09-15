@@ -6395,14 +6395,17 @@ jobs:
                       CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
                       if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]]; then
                         # Review-in-flight hold for the loop's OWN report-time
-                        # head move (#10110): same probe pair as the scan's
-                        # dispatch gate (#8888), fail-open on probe errors.
-                        # The probe sees LIFECYCLE runs only: a command run
-                        # executes against the base branch, so its review-pr
-                        # check never shows under this PR's rollup, and the
-                        # runs fallback is event-scoped exactly like the scan
-                        # gate's (af-099) — an in-flight command review does
-                        # NOT hold the refresh (af-155).
+                        # head move (#10110), fail-open on probe errors. Wider
+                        # than the scan's dispatch gate (#8888), which holds
+                        # only on IN_PROGRESS now that a queued review can sit
+                        # out a whole closed `ecs-review` window; a hold here
+                        # only defers one stale-base merge the next round
+                        # retries. The probe sees LIFECYCLE runs only: a
+                        # command run executes against the base branch, so its
+                        # review-pr check never shows under this PR's rollup,
+                        # and the runs fallback is event-scoped to
+                        # pull_request_target — an in-flight command review
+                        # does NOT hold the refresh (af-155).
                         # Full rationale → qwen-autofix.md#af-155
                         ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
                         REVIEW_LIVE_R="$(jq -r '
