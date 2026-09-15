@@ -4679,8 +4679,17 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // An earlier revision published review-pr's reviewed head as a job output
     // and read it here. The guard no longer keys on the head at all, so the
     // wiring is gone rather than left as an untested chain whose silent
-    // breakage would restore the fresh-head comparison.
-    expect(doc.jobs['review-pr'].outputs).toBeUndefined();
+    // breakage would restore the fresh-head comparison. review-pr's only
+    // outputs are record-reviewed's three flags — no sha — and this job reads
+    // none of them.
+    expect(Object.keys(doc.jobs['review-pr'].outputs ?? {}).sort()).toEqual([
+      'review_completed',
+      'salvaged',
+      'unchanged_diff',
+    ]);
+    expect(JSON.stringify(doc.jobs['fallback-comment'])).not.toContain(
+      'needs.review-pr.outputs',
+    );
     expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
     expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
     expect(inJobStep.run).not.toContain('commit_id ==');
@@ -6990,6 +6999,9 @@ describe('review supersede salvage (#10110)', () => {
         cedeSupersededSource(),
         'PR_NUMBER=1; EXPECTED_HEAD_SHA=head-a',
         `SUPERSEDE_FILE="${supersedeFile}"`,
+        // The real step always has GITHUB_OUTPUT; the cede's planted-output
+        // overwrite (R2-2) writes it last.
+        `GITHUB_OUTPUT="${join(dir, 'gho')}"; : > "$GITHUB_OUTPUT"`,
         `GITHUB_STEP_SUMMARY="${summary}"; : > "$GITHUB_STEP_SUMMARY"`,
         'cede_superseded',
       ].join('\n');
@@ -7413,4 +7425,132 @@ describe('review supersede salvage (#10110)', () => {
       );
     },
   );
+});
+
+describe('qwen pr review unchanged-diff anchor', () => {
+  const anchorDoc = parse(workflow);
+  const skipScript = readFileSync(
+    '.github/scripts/review-unchanged-diff.sh',
+    'utf8',
+  );
+
+  it('stamps reviewed heads from its own job, never from review-pr', () => {
+    const doc = parse(workflow);
+    const reviewPr = doc.jobs['review-pr'];
+    // review-pr's checkout persists its GITHUB_TOKEN where the agent can
+    // read it, so it must not hold statuses: write.
+    expect(reviewPr.permissions.statuses).toBeUndefined();
+    expect(reviewPr.outputs.review_completed).toBe(
+      '${{ steps.review.outputs.review_completed }}',
+    );
+    expect(reviewPr.outputs.salvaged).toBe(
+      '${{ steps.review.outputs.salvaged }}',
+    );
+    expect(reviewPr.outputs.unchanged_diff).toBe(
+      '${{ steps.review.outputs.unchanged_diff }}',
+    );
+    const job = doc.jobs['record-reviewed'];
+    expect(job.needs).toEqual(['review-pr']);
+    expect(job.permissions).toEqual({ statuses: 'write' });
+    expect(job['runs-on']).toBe('ubuntu-latest');
+    expect(job.if).toContain("github.event_name == 'pull_request_target'");
+    expect(job.if).toContain("needs.review-pr.result == 'success'");
+    const [step] = job.steps;
+    // The event's head, never an output the agent's step could write.
+    expect(step.env.HEAD_SHA).toBe('${{ github.event.pull_request.head.sha }}');
+    expect(step.run).toContain("-f context='qwen-review/reviewed'");
+  });
+
+  it('checks for an unchanged diff on automatic synchronize runs only', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    expect(run).toContain('bash .github/scripts/review-unchanged-diff.sh');
+    expect(run).toContain('[ "${EVENT_ACTION:-}" = "synchronize" ]');
+  });
+
+  // R1-7. The skip is a three-link chain and only its ends were pinned: the
+  // gate that admits a skip into `record-reviewed` (the trust boundary),
+  // the event action the skip is keyed on, and the producer of the output
+  // the gate reads. Each assertion below fails if its link is dropped,
+  // including the `||` that joins the gate's two arms — a surviving arm
+  // alone is not the contract.
+  it('pins every link between the skip and the status it stamps', () => {
+    const reviewPr = anchorDoc.jobs['review-pr'];
+    const runStep = reviewPr.steps.find((s) => s.name === 'Run review');
+    // Whitespace-normalized: the gate is a YAML block scalar, so the line
+    // breaks around `||` are formatting, not the contract.
+    expect(anchorDoc.jobs['record-reviewed'].if.replace(/\s+/g, ' ')).toContain(
+      "(needs.review-pr.outputs.review_completed == 'true' &&" +
+        " needs.review-pr.outputs.salvaged != 'true') ||" +
+        " needs.review-pr.outputs.unchanged_diff == 'true'",
+    );
+    // Without this env entry EVENT_ACTION is unset in the step and the skip
+    // branch never opens.
+    expect(runStep.env.EVENT_ACTION).toBe("${{ github.event.action || '' }}");
+    // An output with no writer is never 'true', so the gate above admits
+    // nothing.
+    expect(runStep.run).toContain('echo "unchanged_diff=true"');
+  });
+
+  // R1-6. The reader's constants and the writer's identity are one contract
+  // split across two files; pin them to EACH OTHER, not each to itself, so
+  // moving either side alone reddens here instead of silently making every
+  // stamped status invisible to the lookup.
+  it('pins the status writer to the reader that has to find it', () => {
+    const [step] = anchorDoc.jobs['record-reviewed'].steps;
+    const context = skipScript.match(/STATUS_CONTEXT='([^']+)'/)?.[1];
+    const creator = skipScript.match(/STATUS_CREATOR='([^']+)'/)?.[1];
+    expect(context).toBeTruthy();
+    expect(creator).toBeTruthy();
+    expect(step.run).toContain(`-f context='${context}'`);
+    // github-actions[bot] is what the workflow's own GITHUB_TOKEN produces.
+    // A writer that moved to CI_BOT_PAT would stamp statuses the reader can
+    // never see — the skip would go dead without any test noticing.
+    expect(creator).toBe('github-actions[bot]');
+    expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
+  });
+
+  // R2-2. record-reviewed's evidence that a review happened is
+  // review_completed — an output of the very step the reviewed agent runs
+  // in, whose real $GITHUB_OUTPUT the agent can reach. Every post-agent
+  // cede must overwrite a planted value last: the false write can only
+  // suppress a stamp, never enable one.
+  it('overwrites a planted review_completed on every post-agent cede', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    const overwrite = 'echo "review_completed=false" >> "$GITHUB_OUTPUT"';
+    // The shared cede function: the write must land before the exit, so a
+    // planted value cannot survive it (last write wins within one step).
+    const cede = run.match(/cede_superseded\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(cede).not.toBe('');
+    expect(cede.indexOf(overwrite)).toBeGreaterThan(-1);
+    expect(cede.indexOf(overwrite)).toBeLessThan(cede.indexOf('exit 0'));
+    // The salvage-armed cede does not go through cede_superseded.
+    const salvageCede = run.match(
+      /Salvage-armed review attempt did not complete[\s\S]*?exit 0/,
+    )?.[0];
+    expect(salvageCede).toContain(overwrite);
+  });
+
+  // R1-3. The prose is what a reader has to go on, and both sites claimed
+  // more coverage than the comparison has: the fingerprint is the PR's OWN
+  // diff against the base, so main's delta in a file the PR never touches is
+  // excluded and a merge that changes code the PR calls out there is skipped.
+  // Both halves are pinned behaviorally in the skip's own suite ('a merge of
+  // main that leaves the diff identical is unchanged' / 'main editing a file
+  // the PR touches changes the diff even without conflict'); this pins the
+  // words to them, so the wider promise cannot come back unremarked.
+  it('describes the skip as the PR own diff, never as the merged tree', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    expect(run).not.toContain('has nothing new to review');
+    expect(run).toContain('has nothing new IN THAT DIFF to review');
+    expect(skipScript).not.toContain('that is the case a merge can break');
+    expect(skipScript).toContain(
+      "main's delta in a file the PR never touches is excluded",
+    );
+  });
 });
