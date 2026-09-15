@@ -960,36 +960,95 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('reports every missing archive under the runtime display label', async () => {
-    const { downloadRuntimeChecksums } = await import(
-      standaloneReleaseScriptUrl
-    );
+  it.each([
+    {
+      runtime: 'node',
+      label: 'Node.js',
+      distUrl: 'https://nodejs.org/dist/v22.0.0',
+      listedArchive: 'node-v22.0.0-mac-arm64.tar.gz',
+      missingArchives: [
+        'node-v22.0.0-linux-x64.tar.xz',
+        'node-v22.0.0-win-x64.zip',
+      ],
+    },
+    {
+      runtime: 'bun',
+      label: 'Bun',
+      distUrl: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14',
+      listedArchive: 'bun-darwin-aarch64.zip',
+      missingArchives: ['bun-linux-aarch64.zip', 'bun-linux-x64.zip'],
+    },
+  ])(
+    'reports every missing archive under the $label display label',
+    async ({ runtime, label, distUrl, listedArchive, missingArchives }) => {
+      const { downloadRuntimeChecksums } = await import(
+        standaloneReleaseScriptUrl
+      );
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+      const checksumsPath = path.join(tmpDir, `${runtime}-SHASUMS256.txt`);
+      const fetchImpl = vi.fn(
+        async () => new Response(`${'a'.repeat(64)}  ${listedArchive}\n`),
+      );
+
+      try {
+        await expect(
+          downloadRuntimeChecksums({
+            runtime,
+            distUrl,
+            checksumsPath,
+            expectedArchives: missingArchives,
+            fetchImpl,
+            sleepImpl: async () => {},
+          }),
+        ).rejects.toThrow(
+          `ERROR: ${label} SHASUMS256.txt does not list ${missingArchives.join(', ')}`,
+        );
+        expect(fetchImpl).toHaveBeenCalledTimes(3);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('verifies the runtime archive checksum after every download attempt', async () => {
+    const { downloadRuntimeArchive } = await import(standaloneReleaseScriptUrl);
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
-    const checksumsPath = path.join(tmpDir, 'node-SHASUMS256.txt');
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(`${'a'.repeat(64)}  node-v22.0.0-mac-arm64.tar.gz\n`),
-    );
+    const archivePath = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const archiveBytes = 'runtime-bytes';
+    const checksums = new Map([
+      [
+        'node-v22.0.0-linux-x64.tar.xz',
+        crypto.createHash('sha256').update(archiveBytes).digest('hex'),
+      ],
+    ]);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('truncated-bytes'))
+      .mockResolvedValueOnce(new Response(archiveBytes));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
-      await expect(
-        downloadRuntimeChecksums({
-          runtime: 'node',
-          distUrl: 'https://nodejs.org/dist/v22.0.0',
-          checksumsPath,
-          expectedArchives: [
-            'node-v22.0.0-linux-x64.tar.xz',
-            'node-v22.0.0-win-x64.zip',
-          ],
-          fetchImpl,
-          sleepImpl: async () => {},
-        }),
-      ).rejects.toThrow(
-        'ERROR: Node.js SHASUMS256.txt does not list ' +
-          'node-v22.0.0-linux-x64.tar.xz, node-v22.0.0-win-x64.zip',
+      await downloadRuntimeArchive({
+        archiveUrl:
+          'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        archivePath,
+        archiveName: 'node-v22.0.0-linux-x64.tar.xz',
+        checksums,
+        label: 'Node.js',
+        fetchImpl,
+        sleepImpl: async () => {},
+      });
+
+      // The truncated first download fails the checksum verify, so the retry
+      // re-fetches: dropping the verify wiring would accept the corrupt
+      // bytes after a single fetch and leave them on disk.
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[0][0]).toContain(
+        'Checksum verification failed for node-v22.0.0-linux-x64.tar.xz',
       );
-      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(readFileSync(archivePath, 'utf8')).toBe(archiveBytes);
     } finally {
+      warnSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
@@ -1012,16 +1071,24 @@ describe('standalone release packaging', () => {
 
   it('routes every standalone runtime download through the retry wrapper', () => {
     const releaseScript = readScript('scripts/build-standalone-release.js');
+    // Pin the wiring, not its spelling: strip comments and collapse
+    // whitespace so a reflow or an added comment cannot turn a source-text
+    // pin red while the wiring is intact. The archive leg's verify wiring is
+    // pinned behaviourally by the downloadRuntimeArchive test above.
+    const normalised = releaseScript
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/\s+/g, ' ');
 
     // The helper's own tests stay green even when the release path stops
     // calling it, so pin the wiring and the retry constants by source.
     expect(releaseScript.match(/await downloadWithRetry\(/g)).toHaveLength(2);
     expect(releaseScript.match(/await downloadFile\(/g)).toHaveLength(1);
-    // Counts alone never observe the archive leg's verifier: deleting the
-    // `verify:` option, or hoisting the check back out of the retry loop,
-    // leaves both counts — and the whole suite — green.
-    expect(releaseScript).toMatch(
-      /await downloadWithRetry\([\s\S]{0,200}?verify: \(\) =>[\s\S]{0,40}?verifyNodeArchive\(/,
+    // The checksum leg: emptying this derivation (expectedArchives: [])
+    // leaves the whole suite green while a truncated SHASUMS256.txt is
+    // accepted instead of re-downloaded.
+    expect(normalised).toMatch(
+      /downloadRuntimeChecksums\(\{[^;]*expectedArchives: RELEASE_TARGETS\.map/,
     );
     expect(releaseScript).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
     expect(releaseScript).toContain(

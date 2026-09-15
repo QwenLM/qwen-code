@@ -226,14 +226,12 @@ async function packageTarget({
   const archiveUrlBase = runtime === 'bun' ? bunDistUrl : nodeDistUrl;
   const archivePath = path.join(runtimeDir, archiveName);
 
-  await downloadWithRetry(`${archiveUrlBase}/${archiveName}`, archivePath, {
-    verify: () =>
-      verifyNodeArchive(
-        archivePath,
-        archiveName,
-        checksums,
-        runtimeLabel(runtime),
-      ),
+  await downloadRuntimeArchive({
+    archiveUrl: `${archiveUrlBase}/${archiveName}`,
+    archivePath,
+    archiveName,
+    checksums,
+    label: runtimeLabel(runtime),
   });
 
   const args = [
@@ -454,6 +452,25 @@ async function downloadWithRetry(
   }
 }
 
+// The archive leg's download-and-verify wiring, lifted out of packageTarget so
+// tests pin it behaviourally (a rejected download must be re-fetched) instead
+// of matching its source spelling.
+async function downloadRuntimeArchive({
+  archiveUrl,
+  archivePath,
+  archiveName,
+  checksums,
+  label,
+  fetchImpl,
+  sleepImpl,
+}) {
+  await downloadWithRetry(archiveUrl, archivePath, {
+    verify: () => verifyNodeArchive(archivePath, archiveName, checksums, label),
+    fetchImpl,
+    sleepImpl,
+  });
+}
+
 // The checksum list is the one download the archive legs cannot re-fetch, so
 // verify it inside the retry: a corrupt or truncated list is downloaded again
 // instead of poisoning every archive check that shares the parsed map.
@@ -647,6 +664,7 @@ function fail(message) {
 
 export {
   assertStandaloneOutput,
+  downloadRuntimeArchive,
   downloadRuntimeChecksums,
   downloadWithRetry,
   parseChecksums,
