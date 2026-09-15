@@ -82,15 +82,15 @@ Command hooks execute commands via child processes. Input JSON is passed through
 }
 ```
 
-> **Shell-specific variable syntax:** For bash hooks, use `$CLAUDE_PROJECT_DIR`, `$GEMINI_PROJECT_DIR`, or `$QWEN_PROJECT_DIR`, wrapped in double quotes wherever one forms part of a path (e.g. `"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh"`). For PowerShell hooks (default on Windows), use the `$env:VAR` form (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`). A bare undefined `$VAR` fails the hook with the variable name in the error (visible in debug logs); `$env:NAME` for an unset variable is quietly `$null`, so a hook that must fire on a missing environment variable needs an explicit `if (-not $env:NAME) { throw 'NAME' }`, and a `$VAR` interpolated inside a double-quoted string expands to empty without failing -- prefer `$env:VAR` everywhere under PowerShell.
+> **Shell-specific variable syntax:** For bash hooks, use `$CLAUDE_PROJECT_DIR`, `$GEMINI_PROJECT_DIR`, or `$QWEN_PROJECT_DIR`, wrapped in double quotes wherever one forms part of a path (e.g. `"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh"`). For PowerShell hooks (default on Windows), use the `$env:VAR` form (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`). A bare undefined `$VAR` fails the hook with the variable name in the error (visible in debug logs); `$env:NAME` for an unset variable is quietly `$null`, and a `$VAR` interpolated inside a double-quoted string expands to empty without failing -- prefer `$env:VAR` everywhere under PowerShell. A hook that must **block** on a missing environment variable needs `if (-not $env:NAME) { [Console]::Error.WriteLine('NAME is not set'); exit 2 }` -- a `throw` exits 1, which Qwen treats as a non-blocking error and allows (see Exit Code Behavior below).
 
-> **Migration:** `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR`, and `GEMINI_PROJECT_DIR` are exported in the environment of every command hook; the project-directory placeholders are no longer pre-substituted in the command text before it reaches the shell, so the shell's own rules now apply to them. A bare `$CLAUDE_PROJECT_DIR` word-splits when the project path contains spaces, and a single-quoted `'$CLAUDE_PROJECT_DIR'` no longer expands at all. Both forms worked in earlier releases; for bash hooks, double-quoting the reference is correct in every case (PowerShell needs `$env:VAR`, per the note above).
+> **Migration:** `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR`, and `GEMINI_PROJECT_DIR` are exported in the environment of every command hook; the project-directory placeholders are no longer pre-substituted in the command text before it reaches the shell, so the shell's own rules now apply to them. (A `$VAR`/`${VAR}` naming a variable that already exists in the environment is still substituted when settings loads -- the `$env:` prefix is not exempt from that.) A bare `$CLAUDE_PROJECT_DIR` word-splits when the project path contains spaces, and a single-quoted `'$CLAUDE_PROJECT_DIR'` no longer expands at all. Both forms worked in earlier releases; for bash hooks, double-quoting the reference is correct in every case (PowerShell needs `$env:VAR`, per the note above).
 
-> **PowerShell command syntax:** A quoted Windows path used as a command must be prefixed with the call operator `& ` (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- otherwise PowerShell echoes it instead of executing it. Hooks without a `shell` key on Windows previously ran such paths through `cmd.exe`, which executed them; they now reach PowerShell, so the guard rejects them with this instruction instead of letting them echo silently.
+> **PowerShell command syntax:** A quoted Windows path used as a command must be prefixed with the call operator `& ` (e.g. `& "$env:CLAUDE_PROJECT_DIR/scripts/setup.ps1"`) -- otherwise PowerShell echoes it instead of executing it. Hooks without a `shell` key on Windows previously ran such paths through `cmd.exe`, which executed them; they now reach PowerShell, so the guard rejects them with this instruction instead of letting them echo silently. The guard covers a single-line command that starts with a quoted path; other shapes (multi-line scripts, a quoted path used as pipeline input, names that merely contain an extension) are left to PowerShell itself, so those quoted-path-as-command mistakes can still fail silently -- prefer the `& ` form deliberately.
 
-> **Windows execution environment:** command hooks without a `shell` key now run through PowerShell instead of `cmd.exe`. The interpreter is discovered with `pwsh` preferred and Windows PowerShell 5.1 as fallback, always launched with `-NoProfile`, and every command is prefixed with `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop';`. Consequences: cmd-syntax hooks must be rewritten -- `&&`/`||` chains, `%VAR%` expansion, and cmd builtins such as `where`, `dir /b`, and `if exist` are interpreted by PowerShell; every non-terminating error (a missing file passed to `Remove-Item`, for instance) now aborts the hook instead of printing a warning and continuing; and statements that PowerShell requires at the head of a script (`param(...)`, `[CmdletBinding()]`, `using module`, `#Requires`) cannot lead a hook command because the prefix occupies that slot -- keep hook bodies free of those leading keywords. A `.ps1` **file** additionally obeys the machine's execution policy: stock Windows clients ship it `Restricted`, which refuses to load any script file, so relax it yourself (for example `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, plus `Unblock-File` for downloaded scripts) or keep the logic inline; inline commands and `.cmd`/`.bat` files are not affected by the policy.
+> **Windows execution environment:** on Windows, hook commands resolve to PowerShell instead of `cmd.exe`; `cmd` is not a configurable hook shell, and a command hook without a `shell` key on a cmd-default host runs through PowerShell too. The prefix, `-NoProfile`, and the exit-code propagation described here apply to **every** hook that resolves to PowerShell, including an explicit `"shell": "powershell"` on any platform. Interpreter choice: explicit-`powershell` and cmd-fallback hooks probe PATH with `pwsh` preferred over Windows PowerShell 5.1; a `ComSpec` that already names a PowerShell executable is used as-is, with no probing -- pin `ComSpec` to the interpreter your hooks are written for. Because `pwsh` can win, 5.1-only cmdlets (`Get-WmiObject`), the 5.1 `>`/`Out-File` UTF-16LE default, and profile-defined helpers are no longer guaranteed; import what you need explicitly, and avoid 7-only syntax (`&&`, ternaries) in settings shared with 5.1 hosts. Consequences for cmd-era commands, by failure class: SILENT, and the class to actively look for -- `where x` runs the `Where-Object` alias and exits 0 with empty output, and `%VAR%` is promoted literally; version-dependent -- `&&`/`||` parse under pwsh 7 but are syntax errors under 5.1; loud -- `dir /b` and `if exist` fail visibly. Every non-terminating error (a missing file passed to `Remove-Item`, for instance) now aborts the hook instead of printing a warning and continuing; an abort exits 1, which is non-blocking -- the tool call proceeds (see Exit Code Behavior below). The prefix is session state: it also governs any `.ps1` or function the command invokes with `&`; a script that needs the old tolerant behaviour must start with `Set-StrictMode -Off; $ErrorActionPreference = 'Continue'`. Statements PowerShell requires at the head of a script (`param(...)`, `[CmdletBinding()]`, `using module`, `#Requires`) cannot lead a hook command because the prefix occupies that slot. A `.ps1` **file** additionally obeys the machine's execution policy: stock Windows clients ship it `Restricted` and refuse to load script files -- Qwen deliberately does not bypass the policy, so running a `.ps1` means relaxing it yourself (`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, plus `Unblock-File` for downloaded scripts) or keeping the logic inline; inline commands and `.cmd`/`.bat` files are unaffected by the policy. Finally, hook exit codes on this lane: a failed last native command propagates its code (including a blocking 2); a script whose last statement is a cmdlet success exits 0; an explicit `exit N` in the hook wins.
 
-> **`shell: "bash"` on Windows:** outside a detected Git Bash session this resolves to whatever `bash` is on `PATH` -- which may be WSL's `bash.exe` rather than Git Bash, or nothing at all; write the hook for the shell you actually have.
+> **`shell: "bash"` on Windows:** the hook spawns the bare name `bash`, which Windows resolves through the executable search path -- the application directory, the hook's working directory, then `System32` -- **before** consulting `PATH`; so `C:\Windows\System32\bash.exe` (WSL's launcher) or a `bash.exe` committed in the project can win over a Git Bash on `PATH`, and reordering `PATH` does not fix that. The discovered absolute Git Bash path is used only inside a detected Git Bash session (`MSYSTEM`/`TERM`); outside one, write the hook for the shell you actually have.
 
 ### HTTP Hooks
 
@@ -991,6 +991,7 @@ For API errors, `error` is derived from the HTTP status and the error message: s
           {
             "type": "command",
             "command": "/path/to/rate-limit-alert.sh",
+            "shell": "bash",
             "name": "rate-limit-alerter"
           }
         ]
@@ -1130,6 +1131,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
           {
             "type": "command",
             "command": "/path/to/save-compact-summary.sh",
+            "shell": "bash",
             "name": "save-summary"
           }
         ]
@@ -1325,7 +1327,8 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.qwen/hooks/todo-validator.sh",
+            "command": "\"$HOME/.qwen/hooks/todo-validator.sh\"",
+            "shell": "bash",
             "name": "todo-validator",
             "timeout": 5
           }
@@ -1419,7 +1422,8 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.qwen/hooks/todo-completion-validator.sh",
+            "command": "\"$HOME/.qwen/hooks/todo-completion-validator.sh\"",
+            "shell": "bash",
             "name": "completion-validator",
             "timeout": 5
           }
@@ -1480,6 +1484,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
           {
             "type": "command",
             "command": "/path/to/security-check.sh",
+            "shell": "bash",
             "name": "security-check",
             "description": "Run security checks before tool execution",
             "timeout": 30

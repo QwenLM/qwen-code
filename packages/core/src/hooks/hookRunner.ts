@@ -50,15 +50,24 @@ export function resolvePowerShellExecutable(): string {
   if (cachedPowerShell !== undefined) {
     return cachedPowerShell;
   }
+  let probeError: Error | undefined;
   for (const name of ['pwsh', 'powershell']) {
-    const { path } = resolveCommandPath(name);
-    if (path !== null) {
-      cachedPowerShell = name;
-      return name;
+    const { path, error } = resolveCommandPath(name);
+    if (error) probeError ??= error;
+    // spawn the absolute hit; a bare Windows name searches cwd before PATH
+    const resolved = path?.split(/\r?\n/)[0]?.trim();
+    if (resolved) {
+      cachedPowerShell = resolved;
+      debugLogger.debug(`PowerShell probe: ${name} resolved to ${resolved}`);
+      return resolved;
     }
+    debugLogger.debug(
+      `PowerShell probe: ${name} ${error ? 'lookup failed' : 'not found'}`,
+    );
   }
   throw new Error(
-    'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+    'Could not resolve a PowerShell executable (looked for pwsh, powershell)' +
+      (probeError ? `: ${probeError.message}` : ''),
   );
 }
 
@@ -67,6 +76,31 @@ export function resolvePowerShellExecutable(): string {
  * Prevents memory issues from unbounded output
  */
 const MAX_OUTPUT_LENGTH = 1024 * 1024;
+
+/** strip terminal escapes from text promoted to model/transcript;
+ * terminalSequence is an escape channel by contract, left intact */
+function stripPromotedFields(out: HookOutput): HookOutput {
+  const strip = (s: string) =>
+    s
+      .split('\n')
+      .map((line) => stripAnsiAndControl(line))
+      .join('\n');
+  const cleaned: HookOutput = { ...out };
+  if (typeof cleaned.reason === 'string') {
+    cleaned.reason = strip(cleaned.reason);
+  }
+  if (typeof cleaned.systemMessage === 'string') {
+    cleaned.systemMessage = strip(cleaned.systemMessage);
+  }
+  const specific = cleaned.hookSpecificOutput;
+  if (specific && typeof specific['additionalContext'] === 'string') {
+    cleaned.hookSpecificOutput = {
+      ...specific,
+      additionalContext: strip(specific['additionalContext'] as string),
+    };
+  }
+  return cleaned;
+}
 
 const HOOK_TERMINATE_GRACE_MS = 2000;
 const HOOK_PROCESS_GROUP_POLL_MS = 50;
@@ -1222,11 +1256,12 @@ export class HookRunner {
       // Set-StrictMode makes undefined $VAR throw; ErrorActionPreference=Stop
       // turns that non-terminating error into a script abort, so a later
       // statement cannot mask the failure with exit 0.
-      // Narrow by design: multi-line commands and names that merely contain
-      // an extension (app.exe.log) opt out; they are legitimate usages.
       if (
         shellConfig.shell === 'powershell' &&
-        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![\s\S]*\n)/i.test(
+        // Narrow by design: multi-line commands and names that merely
+        // contain an extension (app.exe.log) opt out; a quoted path
+        // followed by '|' is pipeline input, not a command to invoke.
+        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![ \t]*["']\s*\|)(?![\s\S]*\n)/i.test(
           hookConfig.command,
         )
       ) {
@@ -1236,11 +1271,11 @@ export class HookRunner {
             `Example: & ${stripAnsiAndControl(hookConfig.command)}`,
         );
       }
-      // powershell -Command flattens native exit codes; propagate after the
-      // command so an explicit exit in the hook wins.
+      // propagate a failed last native command ($? captured before
+      // Test-Path resets it); explicit exit wins, cmdlet success exits 0
       const command =
         shellConfig.shell === 'powershell'
-          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }`
+          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
           : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
@@ -1552,7 +1587,7 @@ export class HookRunner {
             typeof parsed === 'object' &&
             !Array.isArray(parsed)
           ) {
-            output = parsed as HookOutput;
+            output = stripPromotedFields(parsed as HookOutput);
           } else {
             // Output shaped like a JSON object that fails to parse is a broken
             // structured payload, not context: as in Claude Code, it is kept

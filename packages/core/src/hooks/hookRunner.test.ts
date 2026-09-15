@@ -71,7 +71,7 @@ describe('HookRunner', () => {
     vi.spyOn(shellUtils, 'resolveCommandPath').mockImplementation(((
       name: string,
     ) => {
-      if (name === 'powershell') return { path: 'powershell' };
+      if (name === 'powershell') return { path: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' };
       return { path: null };
     }) as never);
     __resetPowerShellCacheForTests();
@@ -2671,11 +2671,11 @@ describe('HookRunner', () => {
       expect(mockSpawn).toHaveBeenCalled();
       const spawnArgs = mockSpawn.mock.calls[0];
       // Should use powershell executable with -NoProfile
-      expect(spawnArgs[0]).toBe('powershell');
+      expect(spawnArgs[0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
       expect(spawnArgs[1]).toEqual([
         '-NoProfile',
         '-Command',
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output test\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
       ]);
       expect(spawnArgs[2].shell).toBe(false);
     });
@@ -2694,11 +2694,11 @@ describe('HookRunner', () => {
           createMockInput(),
         );
         const spawnArgs = mockSpawn.mock.calls[0];
-        expect(spawnArgs[0]).toBe('powershell');
+        expect(spawnArgs[0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
         expect(spawnArgs[1]).toEqual([
           '-NoProfile',
           '-Command',
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; echo test\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
+          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; echo test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         ]);
         // #8649's literal repro shape: shell prefix + quoted path with a
         // space + argument. cmd.exe keeps the inner quotes, PowerShell does
@@ -2712,11 +2712,11 @@ describe('HookRunner', () => {
           HookEventName.PreToolUse,
           createMockInput(),
         );
-        expect(mockSpawn.mock.calls[1][0]).toBe('powershell');
+        expect(mockSpawn.mock.calls[1][0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
         expect(mockSpawn.mock.calls[1][1]).toEqual([
           '-NoProfile',
           '-Command',
-          `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; bash "C:/Program Files/app/script.sh" arg\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }`,
+          `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; bash "C:/Program Files/app/script.sh" arg\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`,
         ]);
       } finally {
         spy.mockRestore();
@@ -2736,9 +2736,9 @@ describe('HookRunner', () => {
         createMockInput({ cwd: '/test/project' }),
       );
       const spawnArgs = mockSpawn.mock.calls[0];
-      expect(spawnArgs[0]).toBe('powershell');
+      expect(spawnArgs[0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
       expect(spawnArgs[1][2]).toBe(
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
       );
     });
 
@@ -2771,10 +2771,10 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
         expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
         expect(explicitArgs[2]).toBe(
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output explicit\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
+          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output explicit\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         );
         expect(fallbackArgs[2]).toBe(
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output fallback\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
+          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output fallback\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         );
       } finally {
         spy.mockRestore();
@@ -2835,6 +2835,14 @@ describe('HookRunner', () => {
       [
         'bare-quoted path whose name merely contains .cmd',
         '"C:\\Scripts\\deploy.cmd.old" | Remove-Item',
+      ],
+      [
+        'bare-quoted .cmd piped as pipeline input',
+        '"C:\\Scripts\\deploy.cmd" | Remove-Item',
+      ],
+      [
+        'bare-quoted .ps1 piped as pipeline input',
+        '"C:\\hooks\\gate.ps1" | Get-Content',
       ],
     ])(
       'does not throw for a PowerShell command that is %s',
@@ -2923,7 +2931,7 @@ describe('HookRunner', () => {
       const spawnArgs = mockSpawn.mock.calls[0];
       // Pin: dropping either flag must fail here, not only the wrapping tests.
       expect(spawnArgs[1][2]).toMatch(
-        /^Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$CLAUDE_PROJECT_DIR\nif \(\(Test-Path -LiteralPath variable:\\LASTEXITCODE\)\) \{ exit \$LASTEXITCODE \}$/,
+        /^Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$CLAUDE_PROJECT_DIR\n\$__s = \$\?\nif \(\(Test-Path -LiteralPath variable:\\LASTEXITCODE\) -and \$LASTEXITCODE -ne 0 -and -not \$__s\) \{ exit \$LASTEXITCODE \}$/,
       );
       expect(result.success).toBe(false);
       expect(result.exitCode).toBe(1);
@@ -2938,6 +2946,69 @@ describe('HookRunner', () => {
       );
       expect(output.systemMessage).not.toContain('\u001b');
       expect(output.reason).not.toContain('\u001b');
+    });
+
+    it('strips escapes from exit-0 messages and blocking deny reasons', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(0, '\u001b[31mred\u001b[0m ok', ''),
+      );
+      const okRes = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'Write-Output colored',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(
+        (okRes.output as { systemMessage?: string }).systemMessage,
+      ).toBe('red ok');
+
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(2, '', '\u001b[31mno\u001b[0m'),
+      );
+      const denyRes = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'gate',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect((denyRes.output as { reason?: string }).reason).toBe('no');
+    });
+
+    it('strips escapes from promoted fields of parsed JSON output', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(
+          2,
+          '',
+          '{"decision":"deny","reason":"\\u001b[31mno\\u001b[0m","systemMessage":"\\u001b[2Jmsg","terminalSequence":"\\u001b]0;t\\u0007"}',
+        ),
+      );
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'npm test 2>&1 | Out-String | ConvertTo-Json',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const output = result.output as {
+        reason?: string;
+        systemMessage?: string;
+        terminalSequence?: string;
+      };
+      expect(output.reason).toBe('no');
+      expect(output.systemMessage).toBe('msg');
+      // terminalSequence is an escape channel by contract; it survives.
+      expect(output.terminalSequence).toBe('\u001b]0;t\u0007');
     });
   });
 
@@ -2954,7 +3025,7 @@ describe('HookRunner', () => {
         if (name === 'pwsh') return { path: '/usr/bin/pwsh' };
         return { path: null };
       }) as never);
-      expect(resolvePowerShellExecutable()).toBe('pwsh');
+      expect(resolvePowerShellExecutable()).toBe('/usr/bin/pwsh');
     });
 
     it('falls back to "powershell" when pwsh is missing', () => {
@@ -2962,13 +3033,13 @@ describe('HookRunner', () => {
         if (name === 'powershell') return { path: '/usr/bin/powershell' };
         return { path: null };
       }) as never);
-      expect(resolvePowerShellExecutable()).toBe('powershell');
+      expect(resolvePowerShellExecutable()).toBe('/usr/bin/powershell');
     });
 
     it('throws a precise error when neither executable is on PATH', () => {
       execSpy.mockImplementation((() => ({ path: null })) as never);
       expect(() => resolvePowerShellExecutable()).toThrow(
-        'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+        'Could not resolve a PowerShell executable (looked for pwsh, powershell)',
       );
     });
 
@@ -2983,13 +3054,31 @@ describe('HookRunner', () => {
     it('re-probes after a failed lookup instead of latching the failure', () => {
       execSpy.mockImplementation((() => ({ path: null })) as never);
       expect(() => resolvePowerShellExecutable()).toThrow(
-        'No PowerShell executable found on PATH (looked for pwsh, powershell)',
+        'Could not resolve a PowerShell executable (looked for pwsh, powershell)',
       );
       execSpy.mockImplementation(((name: string) =>
         name === 'pwsh' ? { path: '/usr/bin/pwsh' } : { path: null }) as never);
-      expect(resolvePowerShellExecutable()).toBe('pwsh');
+      expect(resolvePowerShellExecutable()).toBe('/usr/bin/pwsh');
       // Two failed candidates, then the next call re-probes and recovers.
       expect(execSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('resolves to the first match when the lookup lists several', () => {
+      execSpy.mockImplementation(
+        (() => ({ path: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\nD:\\shims\\pwsh.exe' })) as never,
+      );
+      expect(resolvePowerShellExecutable()).toBe(
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      );
+    });
+
+    it('names the lookup error when the probe failed rather than missed', () => {
+      execSpy.mockImplementation(
+        (() => ({ path: null, error: new Error('spawn where.exe EACCES') })) as never,
+      );
+      expect(() => resolvePowerShellExecutable()).toThrow(
+        /Could not resolve a PowerShell executable.*EACCES/,
+      );
     });
   });
 });
