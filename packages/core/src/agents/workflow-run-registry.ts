@@ -41,6 +41,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { buildFailureLines } from './workflow-failure-lines.js';
+import { parseExtensionWorkflowName } from './runtime/workflow-saved.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
@@ -1827,9 +1828,17 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
   const lines: string[] = [];
   const resume = buildResumeCall(entry);
   if (resume) {
-    const pathAdvice = entry.workflowName
-      ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
-      : 'Edit the generated script copy first if the script needs to change.';
+    // Only an extension workflow's name carries `<extension>:`. Its file is
+    // third-party and an extension update replaces it, so the copy has to
+    // land somewhere the user owns.
+    const extension = entry.workflowName
+      ? parseExtensionWorkflowName(entry.workflowName)
+      : null;
+    const pathAdvice = extension
+      ? `This reads the /${entry.workflowName} workflow the ${extension.extensionName} extension ships; copy it into .qwen/workflows before making a run-specific change.`
+      : entry.workflowName
+        ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
+        : 'Edit the generated script copy first if the script needs to change.';
     const journalAdvice = entry.journalPath
       ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
       : 'No journal was written for this run, so every agent() call runs live.';
@@ -1859,7 +1868,9 @@ function buildDiagnosticsLines(entry: WorkflowTask): string[] {
   if (resume) {
     lines.push(
       entry.workflowName
-        ? `Re-run the saved /${entry.workflowName} workflow: ${resume}`
+        ? parseExtensionWorkflowName(entry.workflowName)
+          ? `Re-run the /${entry.workflowName} extension workflow: ${resume}`
+          : `Re-run the saved /${entry.workflowName} workflow: ${resume}`
         : `Re-run after editing the generated script: ${resume}`,
     );
     if (hasUninlinableResumeArgs(entry)) {

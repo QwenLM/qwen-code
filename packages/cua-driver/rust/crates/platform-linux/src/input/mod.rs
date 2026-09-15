@@ -1010,7 +1010,7 @@ pub fn with_x11_foreground<T>(
     unsafe {
         x11::xlib::XGetInputFocus(display, &mut prior_core_focus, &mut prior_revert);
     }
-    let timeout = std::time::Duration::from_millis(settle_ms.max(400));
+    let timeout = std::time::Duration::from_millis(settle_ms.max(1000));
     let started = std::time::Instant::now();
     let deadline = started + timeout;
     let retry_at = started + timeout / 2;
