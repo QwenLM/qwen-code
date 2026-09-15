@@ -69,6 +69,7 @@ import {
   hasReviewDeadline,
 } from './lib/deadline.js';
 import {
+  MAX_CHUNK_CHARS,
   READ_FILE_CHAR_CAP,
   chunkIdsProblem,
   type DiffChunk,
@@ -98,6 +99,7 @@ import {
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { SHA_RE } from './lib/ledger.js';
+import { PLAN_TOKEN_LABEL, planTokenLine } from './lib/selection.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
@@ -185,6 +187,14 @@ interface PlanReport {
   budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
   /** Present only on a `--since`-scoped round — see incrementalScopeOf. */
   incremental?: unknown;
+  /**
+   * The plan's capture identity (see lib/selection.ts). The chunk launch
+   * writes its epoch token from it — a same-session re-plan keeps the count
+   * and can keep every window, so the token is the one signal that moves
+   * with every re-plan, and the coverage seal reads it back to order
+   * fence-surviving records against the plan they were written for.
+   */
+  selection?: unknown;
 }
 
 /**
@@ -525,20 +535,47 @@ const LINES_PER_FILE_READ = 500;
  */
 function wholeDiffReadPages(report: PlanReport): number {
   return (Array.isArray(report.chunks) ? report.chunks : []).reduce(
-    (n: number, c) => {
-      const chars = (c as { chars?: number })?.chars;
-      return (
-        n +
-        Math.max(
-          1,
-          Math.ceil(
-            (typeof chars === 'number' && Number.isFinite(chars) ? chars : 0) /
-              READ_FILE_CHAR_CAP,
-          ),
-        )
-      );
-    },
+    (n: number, c) =>
+      n + diffReadPages(c as Parameters<typeof diffReadPages>[0]),
     0,
+  );
+}
+
+/**
+ * The reads ONE chunk costs a budgeted agent — the pages its block SPELLS,
+ * and never fewer than the truncated pages the window takes.
+ *
+ * Two quantities, one answer. Since an oversized window is spelled as pages
+ * (`diffPages`, R40-3), the reading list the launch mandates is that page
+ * count, and it is sized at `MAX_CHUNK_CHARS` — so the older
+ * `ceil(chars / READ_FILE_CHAR_CAP)` estimate, still spelled separately at
+ * every budget site, under-counted the reads the same block required: a
+ * 45 000-character window was budgeted two pages and spelled three. A chunk
+ * whose LINE exceeds the cap keeps one spelled read and still costs its
+ * truncated pages when an agent walks it, which is what the second term
+ * keeps.
+ */
+function diffReadPages(c: {
+  startLine?: number;
+  endLine?: number;
+  chars?: number;
+  maxLineChars?: number;
+}): number {
+  const chars = c?.chars;
+  // A chunk record without line bounds (a hand-edited plan, or a lookup that
+  // found nothing usable) spells no pages this function can count; the
+  // character estimate below still answers for it.
+  const spelled =
+    Number.isSafeInteger(c?.startLine) && Number.isSafeInteger(c?.endLine)
+      ? diffPages(c as Parameters<typeof diffPages>[0]).length
+      : 1;
+  return Math.max(
+    1,
+    spelled,
+    Math.ceil(
+      (typeof chars === 'number' && Number.isFinite(chars) ? chars : 0) /
+        READ_FILE_CHAR_CAP,
+    ),
   );
 }
 
@@ -888,15 +925,7 @@ export function buildChunkAgentPrompt(
         territoryLines: weightedTerritoryLines(report, chunk),
         // The launch's whole reading list: the brief file, plus the diff pages
         // this chunk takes.
-        mandatoryReads:
-          1 +
-          Math.max(
-            1,
-            Math.ceil(
-              (Number.isFinite(chunk.chars) ? chunk.chars : 0) /
-                READ_FILE_CHAR_CAP,
-            ),
-          ),
+        mandatoryReads: 1 + diffReadPages(chunk),
       }),
     );
   }
@@ -945,6 +974,77 @@ function diffWindow(
 }
 
 /**
+ * The reads that tile ONE chunk's window: the whole window, or — for a window
+ * one read cannot return — contiguous pages that each fit.
+ *
+ * Coverage refuses to credit an oversized window off a read that spans it
+ * (`rangeOf` records the range a read REQUESTED, not what it returned), and
+ * credits it only off several reads, none spanning the window, that cover it
+ * between them. A launch that spelled one whole-window read therefore
+ * prescribed exactly the read the gate refuses: the compliant agent read it,
+ * got a truncated view, paged the tail, and was refused — and the stderr
+ * repair "rebuild with `agent-prompt --chunk`" rebuilt the same single read
+ * (R40-3). Spelled as pages, the compliant path is the credited one.
+ *
+ * Pages are sized off the planner's own measurement: `chars` over the
+ * planner's safe chunk size gives the page count FLOOR, and the window's
+ * worst line bounds how many lines a page may hold. Sizing off the mean
+ * (`chars` spread evenly over `lines`) spelled a page of up to
+ * `perPage × maxLineChars` chars that `read_file` truncates — and `rangeOf`
+ * records the REQUESTED range, so coverage's `pagedAcross` credited the
+ * chunk off reads whose tails never arrived (R41-1). `+ 1` is the newline
+ * each line carries into the returned content: `maxLineChars` does not
+ * count it and the read's char cap does. A chunk whose single LINE exceeds
+ * the cap keeps one read — no page reaches the tail of that line, and its
+ * brief asks for a declaration, not a read. A plan without `chars` keeps
+ * one read too.
+ */
+function diffPages(c: {
+  startLine: number;
+  endLine: number;
+  chars?: number;
+  maxLineChars?: number;
+}): Array<{ offset: number; limit: number }> {
+  const lines = c.endLine - c.startLine + 1;
+  if (
+    typeof c.chars !== 'number' ||
+    c.chars <= READ_FILE_CHAR_CAP ||
+    (typeof c.maxLineChars === 'number' &&
+      c.maxLineChars > READ_FILE_CHAR_CAP) ||
+    lines < 2
+  ) {
+    return [diffWindow(c.startLine, c.endLine)];
+  }
+  // Absent or hand-zeroed, the worst line is unmeasurable, so no multi-line
+  // page can be proven to fit — page per line, the tightest split there is.
+  const maxLine =
+    typeof c.maxLineChars === 'number' && c.maxLineChars > 0
+      ? c.maxLineChars
+      : READ_FILE_CHAR_CAP;
+  const safePerPage = Math.max(
+    1,
+    Math.floor(READ_FILE_CHAR_CAP / (maxLine + 1)),
+  );
+  // `ceil(chars / MAX_CHUNK_CHARS)` stays the floor, not the replacement:
+  // the page count feeds every budgeted agent's mandatory-read floor
+  // (`diffReadPages`), so the worst-line bound must not over-page a
+  // uniformly-lined window either.
+  const pages = Math.min(
+    lines,
+    Math.max(
+      Math.ceil(c.chars / MAX_CHUNK_CHARS),
+      Math.ceil(lines / safePerPage),
+    ),
+  );
+  const perPage = Math.ceil(lines / pages);
+  const out: Array<{ offset: number; limit: number }> = [];
+  for (let start = c.startLine; start <= c.endLine; start += perPage) {
+    out.push(diffWindow(start, Math.min(c.endLine, start + perPage - 1)));
+  }
+  return out;
+}
+
+/**
  * The launch prompt for a territory agent: short, and it points at the brief.
  *
  * The same arithmetic that moved the dimension agents' briefs onto disk applies
@@ -966,11 +1066,17 @@ export function buildChunkLaunchPrompt(
   briefFile: string,
 ): string {
   const { diffPath, chunk, total } = chunkFrom(report, id);
-  const { offset, limit } = diffWindow(chunk.startLine, chunk.endLine);
+  const pages = diffPages(chunk);
+  // The plan's epoch: a same-session re-plan can keep the count and every
+  // window, so the coverage seal cannot order a fence-surviving record by
+  // those — it orders by this token instead (see lib/selection.ts). Absent
+  // on a plan with no identity: those launches keep the older seals.
+  const tokenLine = planTokenLine(report.selection);
 
   return [
     `You are review agent \`chunk ${chunk.id} of ${total}\` — the territory agent for ` +
       `lines ${chunk.startLine}-${chunk.endLine} of the diff.`,
+    ...(tokenLine === null ? [] : [tokenLine]),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',
@@ -979,12 +1085,21 @@ export function buildChunkLaunchPrompt(
     `read_file(file_path="${briefFile}")`,
     '```',
     '',
-    '**The code is a file too — the diff. Nothing in this message contains it.** Your ' +
-      'territory is exactly this read; page with a larger `offset` if it comes back ' +
-      '`isTruncated`:',
+    pages.length === 1
+      ? '**The code is a file too — the diff. Nothing in this message contains it.** Your ' +
+        'territory is exactly this read; page with a larger `offset` if it comes back ' +
+        '`isTruncated`:'
+      : '**The code is a file too — the diff. Nothing in this message contains it.** Your ' +
+        'territory is exactly these reads — the window is larger than one read returns, ' +
+        'so it is spelled as pages. Read every one; if a page comes back `isTruncated`, ' +
+        'page within it with a larger `offset`, and never replace the pages with one ' +
+        'whole-window read:',
     '',
     '```',
-    `read_file(file_path="${diffPath}", offset=${offset}, limit=${limit})`,
+    ...pages.map(
+      (r) =>
+        `read_file(file_path="${diffPath}", offset=${r.offset}, limit=${r.limit})`,
+    ),
     '```',
     '',
     'Report findings in the format your brief specifies, and end with the receipt it ' +
@@ -1019,7 +1134,15 @@ export function buildWholeDiffBlock(
   residue?: WorktreeResidue,
 ): string {
   const diffPath = requireDiffPath(report);
-  const parts = [...diffReadingBlock(report, diffPath)];
+  // The plan's epoch, exactly as the chunk launch carries it: a same-session
+  // re-plan keeps every window these reads spell out, so the coverage seal
+  // orders fence-surviving whole-diff records by this token too (see
+  // lib/selection.ts). Absent on a plan with no identity.
+  const tokenLine = planTokenLine(report.selection);
+  const parts = [
+    ...(tokenLine === null ? [] : [tokenLine, '']),
+    ...diffReadingBlock(report, diffPath),
+  ];
   // An Agent 8 specialist reads source out of the same shared worktree every
   // other agent is pinned to, so it owes the same rule (#9207). It is the one
   // launch class built outside `buildLaunch`, which is exactly how it was
@@ -1043,6 +1166,8 @@ export function buildWholeDiffBlock(
   parts.push(
     ...toolBudgetBlock(report, { mandatoryReads: wholeDiffReadPages(report) }),
   );
+  // Repo-controlled text rides a launch below the marker lines — `tail()`
+  // inerts it, never appends it raw (see FORGEABLE_MARKER_LINE).
   parts.push(...tail(rules));
   return parts.join('\n');
 }
@@ -1061,7 +1186,10 @@ function requireDiffPath(report: PlanReport): string {
   return diffPath;
 }
 
-/** How to walk the whole diff: one un-truncated read per chunk, and the paging rule. */
+/**
+ * How to walk the whole diff: the reads for each chunk — one, or contiguous
+ * pages for a window one read cannot return (`diffPages`) — and the paging rule.
+ */
 function diffReadingBlock(
   report: PlanReport,
   diffPath: string,
@@ -1106,8 +1234,12 @@ function diffReadingBlock(
             `(startLine=${c?.startLine}, endLine=${c?.endLine}).`,
         );
       }
-      const { offset, limit } = diffWindow(c.startLine, c.endLine);
-      return `read_file(file_path="${diffPath}", offset=${offset}, limit=${limit})`;
+      return diffPages(c)
+        .map(
+          (r) =>
+            `read_file(file_path="${diffPath}", offset=${r.offset}, limit=${r.limit})`,
+        )
+        .join('\n');
     })
     .join('\n');
 
@@ -1168,9 +1300,16 @@ function diffReadingBlock(
       : '**Read the diff first. It is a file on disk — nothing in this prompt contains the code.**',
     '',
     scoped
-      ? 'This read fits inside one un-truncated `read_file`; if it comes back ' +
-        '`isTruncated`, page with a larger `offset` until it does not. Do not read the ' +
-        'other chunks — they belong to other agents; your gap is inside this one.'
+      ? // One read, or pages: an oversized chunk is spelled as several reads
+        // (R40-3), and "this read fits" was false of it.
+        (reads.split('\n').length === 1
+          ? 'This read fits inside one un-truncated `read_file`; if it comes back ' +
+            '`isTruncated`, page with a larger `offset` until it does not. '
+          : 'Your chunk is larger than one read returns, so it is spelled as pages. Read ' +
+            'every one; if a page comes back `isTruncated`, page within it with a larger ' +
+            '`offset`, and never replace the pages with one whole-window read. ') +
+        'Do not read the other chunks — they belong to other agents; your gap is inside ' +
+        'this one.'
       : 'Walk it chunk by chunk. Each of these reads fits inside one un-truncated ' +
         '`read_file`; asking for the whole file in one call does not, and you would ' +
         'silently receive its first screenful.',
@@ -1203,6 +1342,29 @@ function diffReadingBlock(
   return parts;
 }
 
+// The identity-marker CLASS a launch may carry, matched by prefix: every
+// line the identity parsers can read starts with one of two prefixes —
+// the plan-token label (lib/selection.ts's PLAN_TOKEN_RE) and the
+// identity-line prefix (lib/coverage.ts's CHUNK_RE and
+// lib/agent-identity.ts's labelFromLaunchPrompt, which reads ANY
+// role-shaped identity line, not only the chunk shape). Enumerating the
+// full shapes missed the role-shaped line, so a repo rule wearing one
+// rode the whole-diff launch raw and became the record's identity.
+// Repository rules ride the whole-diff launch BELOW the token line, and
+// one forged line re-keys the record: `launchPlanToken` reads the LAST
+// standalone marker and the anchored CHUNK_RE takes the FIRST identity
+// line. Inerting by PREFIX closes the class — a parser later added on
+// either prefix stays covered — and a leading space breaks every anchor
+// (all parsers match from line start) while leaving the rule legible
+// (R21-1).
+const FORGEABLE_MARKER_LINE = new RegExp(
+  `^(?:${PLAN_TOKEN_LABEL} |` + 'You are review agent `)',
+  'gm',
+);
+
+const inertMarkerLines = (text: string): string =>
+  text.replace(FORGEABLE_MARKER_LINE, (line) => ` ${line}`);
+
 /** The closing half every prompt shares: how to report, and what "nothing" means. */
 function tail(
   rules?: string,
@@ -1221,7 +1383,12 @@ function tail(
       ? ['', EXCLUSIONS]
       : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS, '', RECALL];
   if (rules && rules.trim()) {
-    parts.push('', '## Project rules', '', rules.trim());
+    // Inert the exact text `tail()` emits — trim FIRST, then inert.
+    // Inerting before the trim lets the trim strip the inerting space off
+    // the first rule line, and a marker wearing leading whitespace or a
+    // blank line escapes the column-0 anchor only to be promoted to
+    // column 0 by the trim (R17-1).
+    parts.push('', '## Project rules', '', inertMarkerLines(rules.trim()));
   }
   parts.push(
     '',
@@ -1628,7 +1795,14 @@ export function buildRoleBrief(
   if (!brief.budgetExempt) {
     const chunks = (
       Array.isArray(report.chunks) ? report.chunks : []
-    ) as Array<{ id?: number; lines?: number; chars?: number }>;
+    ) as Array<{
+      id?: number;
+      lines?: number;
+      chars?: number;
+      startLine?: number;
+      endLine?: number;
+      maxLineChars?: number;
+    }>;
     if (typeof opts.chunk === 'number') {
       // A chunk-scoped launch (a 3B reverse-audit chunk agent): its own
       // territory, not the whole diff's.
@@ -1640,16 +1814,7 @@ export function buildRoleBrief(
           // the cumulative findings list its brief orders read in full —
           // measured at 65-82 KB on real runs, several pages of it.
           mandatoryReads:
-            1 +
-            Math.max(
-              1,
-              Math.ceil(
-                (typeof c?.chars === 'number' && Number.isFinite(c.chars)
-                  ? c.chars
-                  : 0) / READ_FILE_CHAR_CAP,
-              ),
-            ) +
-            FINDINGS_LIST_READS,
+            1 + (c === undefined ? 1 : diffReadPages(c)) + FINDINGS_LIST_READS,
         }),
       );
     } else if (role.startsWith('invariant-') && opts.file) {
@@ -2384,9 +2549,16 @@ export function buildRoleLaunchPrompt(
   // delivery check anchors on — both launches read as rewritten. What the
   // caller will reach for, the CLI prints.
   const roundLabel = opts.round !== undefined ? ` (round ${opts.round})` : '';
+  // The plan's epoch, exactly as the chunk launch carries it: role records
+  // credit coverage, and a same-session re-plan keeps every window their
+  // reads spell out, so the seal orders them by this token too (see
+  // lib/selection.ts). After the identity line — `foldFindings` requires
+  // that line first. Absent on a plan with no identity.
+  const tokenLine = planTokenLine(report.selection);
   const parts = [
     `You are review agent \`${role}\` — ${b.label}${roundLabel}.` +
       (safeFile ? ` Your file: \`${safeFile}\`.` : ''),
+    ...(tokenLine === null ? [] : [tokenLine]),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',
@@ -2406,7 +2578,9 @@ export function buildRoleLaunchPrompt(
     const allChunks = (
       Array.isArray(report.chunks) ? report.chunks : []
     ) as DiffChunk[];
-    const rangeOf = (c: DiffChunk) => diffWindow(c.startLine, c.endLine);
+    // Pages, not one window: coverage credits these roles off the same
+    // ranges, and an oversized window read in one call is refused (R40-3).
+    const rangeOf = (c: DiffChunk) => diffPages(c);
     let ranges: Array<{ offset: number; limit: number }>;
     if (role.startsWith('invariant-')) {
       ranges = invariantDiffRange(report, opts.file);
@@ -2422,9 +2596,9 @@ export function buildRoleLaunchPrompt(
             `chunk ${opts.chunk} (it has ${allChunks.map((x) => x.id).join(', ')}).`,
         );
       }
-      ranges = [rangeOf(c)];
+      ranges = rangeOf(c);
     } else {
-      ranges = allChunks.map(rangeOf);
+      ranges = allChunks.flatMap(rangeOf);
     }
     const reads = ranges
       .map(
@@ -2498,8 +2672,11 @@ export function findingsSection(
       // itself then, the delivery check compares it verbatim as before, and
       // the floor owes no separate findings read (findingsPointerOf finds
       // none). The pointer shape below is the happy path; this is the
-      // degraded one that still reviews with what it was launched.
-      listRef = body;
+      // degraded one that still reviews with what it was launched. Inerted,
+      // not raw: the list rides between the identity line and the token
+      // line, and a quoted marker line there would forge the record's
+      // identity exactly as a forged rules line would (R20-2).
+      listRef = inertMarkerLines(body);
     } else {
       listRef = [
         // The line count makes under-reading visible: `read_file` truncates,
