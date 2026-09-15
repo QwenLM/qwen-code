@@ -14,6 +14,10 @@
 
 import type { Config } from '../config/config.js';
 import {
+  resolveReasoningForModel,
+  resolveReasoningCapabilities,
+} from '../core/reasoning-overrides.js';
+import {
   createContentGenerator,
   type AuthType,
   type ContentGeneratorConfig,
@@ -27,7 +31,6 @@ import type { ResolvedModelConfig } from './types.js';
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
-  parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   reasoningEffortsForCapability,
   setGeneratorReasoningEffort,
@@ -145,6 +148,17 @@ function offeredReasoningEfforts(
   base: Config,
   target: Pick<ContentGeneratorConfig, 'authType' | 'model' | 'baseUrl'>,
 ): readonly ReasoningEffort[] {
+  if ('reasoningSnapshot' in target && target.reasoningSnapshot) {
+    const resolved = resolveReasoningForModel(
+      base,
+      target as ContentGeneratorConfig,
+    );
+    if (resolved) return reasoningEffortsForCapability(resolved);
+    return (
+      getGptReasoningCapabilities(target.model)?.efforts ??
+      REASONING_EFFORT_TIERS
+    );
+  }
   if (target.authType && target.model) {
     const models = base.getModelsConfig();
     // Exact id + baseUrl first, then any entry with the same id: a gateway or
@@ -154,7 +168,8 @@ function offeredReasoningEfforts(
       (target.baseUrl !== undefined
         ? models.getResolvedModel(target.authType, target.model, target.baseUrl)
         : undefined) ?? models.getResolvedModel(target.authType, target.model);
-    const declared = parseModelReasoningCapabilities(
+    const declared = resolveReasoningCapabilities(
+      target,
       resolved?.capabilities?.reasoning,
     );
     if (declared) return reasoningEffortsForCapability(declared);
@@ -256,6 +271,13 @@ function buildInheritedAgentContentGeneratorConfig(
     authOverrides.authType,
     'apiKey',
   );
+  if (
+    !sameProvider ||
+    nextConfig.model !== parentConfig.model ||
+    (authOverrides.baseUrl !== undefined &&
+      authOverrides.baseUrl !== parentConfig.baseUrl)
+  )
+    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
   nextConfig.baseUrl =
     authOverrides.baseUrl ??
     resolveCredentialField(
@@ -321,6 +343,7 @@ function applyResolvedModelConfig(
       (resolvedModel.baseUrl === parentConfig.baseUrl &&
         resolvedModel.envKey === parentConfig.apiKeyEnvKey));
   if (!inheritCredentials) targetConfig.customHeaders = undefined;
+  targetConfig.reasoningRouteBaseUrl = resolvedModel.registryBaseUrl ?? null;
   targetConfig.model = resolvedModel.id;
   targetConfig.authType = resolvedModel.authType;
   targetConfig.baseUrl =
