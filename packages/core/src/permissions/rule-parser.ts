@@ -884,20 +884,9 @@ export interface CompoundCommandSegment {
  * See {@link splitCompoundCommand} for the string-only form and for examples;
  * this is the same split, and that function is a projection of this one.
  *
- * The input is scanned twice, once per {@link BackslashReading}, and split
- * wherever either scan found an operator. bash's reading is the right one for a
- * real quoted string — it is what splits `echo 'a\' ; rm -rf x`. But this
- * scanner models no `#` comment, backtick body or heredoc body, and bash does
- * not read the quote characters inside those as quotes at all, so there neither
- * reading is right and each one stays unquoted over spellings the other does
- * not. For `echo done # note 'a\''`, a newline and `rm -rf x`, bash runs two
- * commands: the escape-everywhere reading closes `'a\''` at its third quote and
- * splits at the newline, while bash's reading closes it at the second, re-opens
- * a string at the third and swallows the `rm` into the `echo`'s segment, where
- * an `echo` allow rule would cover it. Taking both sets of boundaries means the
- * plain-quote rule never costs a boundary the scanner found before it; a
- * spelling that fools both readings, such as `# it's`, belongs to the comment
- * and heredoc gaps tracked on their own (#11815, #9417).
+ * Scanned twice and split wherever either scan finds an operator: comments,
+ * backtick bodies and heredocs are not modelled, and quotes inside them can
+ * fool bash's backslash reading where the pre-fix reading still splits.
  */
 export function splitCompoundCommandSegments(
   command: string,
@@ -910,8 +899,6 @@ export function splitCompoundCommandSegments(
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
   for (const { start, end, operator } of boundaries) {
-    // Already inside an operator taken from the other scan — the same one,
-    // found by both readings, or one overlapping it.
     if (start < lastSplit) {
       continue;
     }
@@ -931,27 +918,14 @@ export function splitCompoundCommandSegments(
   return segments;
 }
 
-/** An operator a scan found outside every quote, spanning `[start, end)`. */
 interface OperatorBoundary {
   start: number;
   end: number;
   operator: string;
 }
 
-/**
- * How a scan reads a backslash inside a plain `'…'` string. Everywhere else,
- * ANSI-C `$'…'` included, both readings take it as an escape.
- *
- * - `'bash'`: a literal character, which is what bash does.
- * - `'escape-everywhere'`: an escape, which is how this scanner read every
- *   backslash before it learned the plain-quote rule. Kept for the regions the
- *   scanner cannot see — see {@link splitCompoundCommandSegments}.
- */
 type BackslashReading = 'bash' | 'escape-everywhere';
 
-/**
- * Find the unquoted operators in `command` under one {@link BackslashReading}.
- */
 function findOperatorBoundaries(
   command: string,
   reading: BackslashReading,
@@ -959,12 +933,7 @@ function findOperatorBoundaries(
   const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
   let inDouble = false;
-  // Whether the open single-quoted string is bash's ANSI-C form, `$'…'`, in
-  // which a backslash escapes — the opposite of a plain `'…'`, where it is a
-  // literal character.
   let inAnsiC = false;
-  // A `$` still able to introduce `$'…'`: unquoted, unescaped, and not
-  // already spent as the second half of the `$$` PID expansion.
   let dollarPending = false;
   let escaped = false;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
@@ -973,8 +942,6 @@ function findOperatorBoundaries(
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
-    // Consumed by this character: only a `$` immediately before an opening
-    // quote introduces `$'…'`.
     const ansiCIntroducer: boolean = dollarPending;
     dollarPending = false;
 
@@ -982,34 +949,13 @@ function findOperatorBoundaries(
       escaped = false;
       continue;
     }
-    // In bash's reading a backslash is a literal character inside a plain
-    // `'…'` string and an escape everywhere else, ANSI-C `$'…'` included.
-    // Without the plain-quote exception, `echo 'a\' ; rm -rf x` reads the
-    // closing quote as escaped and stays inside the quote to the end of the
-    // input — which is why the escape-everywhere reading cannot find that `;`
-    // and this one has to. Applying the exception to `$'…'` as well loses a
-    // boundary the other way round: there the backslash really does escape,
-    // so the quote after it belongs to the string and `$'a\''` only closes at
-    // its third quote. The escape-everywhere reading still splits a line whose
-    // only string is `$'a\''`, but not one that also holds a plain `'c\'`, so
-    // `echo 'c\' $'a\'' ; rm -rf x` is split by this reading or not at all.
+    // In bash a backslash is literal inside a plain `'…'` (so `'a\'` closes)
+    // but escapes inside ANSI-C `$'…'` (so `$'a\''` closes at the third quote).
     if (
       ch === '\\' &&
       (reading === 'escape-everywhere' || !(inSingle && !inAnsiC))
     ) {
-      // A backslash-newline is a line continuation, which bash elides before
-      // it decides anything else about the line — so `$\<newline>'…'` still
-      // opens ANSI-C quoting, and the pending `$` has to survive the pair.
-      // Treating it as an ordinary escape instead lost the `$`, read the
-      // string as a plain `'…'`, and swallowed its real closing quote, which
-      // is the bypass this exception exists to close, re-entered through a
-      // continuation. The pair is consumed here rather than left to the
-      // `escaped` flag because that route returns to the top of the loop,
-      // where `dollarPending` is reset before the newline is skipped, so the
-      // pending `$` is lost; taking both characters here carries it across.
-      // Consuming the newline is what keeps `echo a\<newline>b` whole, and
-      // the `escaped` route would do that much on its own — it is only the
-      // `$` that needs this branch.
+      // `$\⏎'…'` is still ANSI-C, so the pending `$` survives a continuation.
       if (command[i + 1] === '\n') {
         dollarPending = ansiCIntroducer;
         i++;
@@ -1031,8 +977,7 @@ function findOperatorBoundaries(
       continue;
     }
     if (ch === '$') {
-      // `$$` expands to the PID and spends both characters, so the second one
-      // cannot open an ANSI-C string; `\$` and `"$"` never reach here.
+      // The second `$` of `$$` (the PID) cannot open `$'…'`.
       dollarPending = !ansiCIntroducer;
       continue;
     }
