@@ -271,6 +271,7 @@ mod tests {
             checked: None,
             enabled: Some(true),
             selected: None,
+            focused: None,
             description: None,
             actions: vec!["click".into()],
             element_key: 0,
@@ -301,7 +302,12 @@ mod tests {
 
     #[test]
     fn budget_captures_retain_lineage_but_failures_and_coverage_changes_invalidate_it() {
-        for reason in ["max_elements_reached", "max_depth_reached"] {
+        for reason in [
+            "max_elements_reached",
+            "max_depth_reached",
+            "managed_descendants_omitted",
+            "hidden_menu_subtrees_omitted",
+        ] {
             let revisions = LinuxObservationRevisions::new();
             let mut bounded = tree(vec![node("/button", "Before")]);
             bounded.complete = false;
@@ -415,6 +421,139 @@ mod tests {
         assert_eq!(changed.mode, ObservationMode::Diff);
         assert_eq!(changed.lineage_id, initial.lineage_id);
         assert_eq!(changed.nodes[0].element_id, initial.nodes[0].element_id);
+    }
+
+    #[test]
+    fn named_editable_changes_and_clearing_remain_visible() {
+        let revisions = LinuxObservationRevisions::new();
+        let mut captured = tree(
+            (0..8)
+                .map(|index| {
+                    let mut item = node(&format!("/field/{index}"), "Name");
+                    item.element_index = Some(index);
+                    item.role = "entry".into();
+                    item.value = Some(String::new());
+                    item
+                })
+                .collect(),
+        );
+        let mut base = None;
+        let mut element_id = None;
+        for (value, mode) in [
+            ("", ObservationMode::Full),
+            ("prefix|X", ObservationMode::Diff),
+            ("prefix|X", ObservationMode::NoChange),
+            ("", ObservationMode::Diff),
+        ] {
+            captured.nodes[0].value = Some(value.into());
+            let observation = revisions
+                .observe(
+                    session(),
+                    10,
+                    20,
+                    5000,
+                    usize::MAX,
+                    &captured,
+                    &request(base),
+                )
+                .unwrap();
+            assert_eq!(observation.mode, mode);
+            assert!(observation.nodes[0]
+                .body
+                .contains(&format!("value={value:?}")));
+            if let Some(id) = &element_id {
+                assert_eq!(&observation.nodes[0].element_id, id);
+            }
+            element_id = Some(observation.nodes[0].element_id.clone());
+            base = Some(observation.revision_id);
+        }
+    }
+
+    #[test]
+    fn compact_rows_preserve_text_state_and_secondary_actions() {
+        let mut control = node("/entry", "Line 1\n\"Line 2\"");
+        control.role = "entry".into();
+        control.value = control.name.clone();
+        control.enabled = Some(false);
+        control.selected = Some(true);
+        control.actions = vec!["activate".into(), "showContextMenu".into()];
+        let body = format_revision_body(&control);
+        assert_eq!(
+            body,
+            "<entry> \"Line 1\\n\\\"Line 2\\\"\" disabled selected actions=[\"showContextMenu\"]"
+        );
+        let disabled = body.clone();
+        control.enabled = Some(true);
+        assert_ne!(format_revision_body(&control), disabled);
+        let selected = format_revision_body(&control);
+        control.selected = Some(false);
+        assert_ne!(format_revision_body(&control), selected);
+        let secondary = format_revision_body(&control);
+        control.actions.pop();
+        assert_ne!(format_revision_body(&control), secondary);
+        assert_eq!(control.actions, ["activate"]);
+    }
+
+    #[test]
+    fn compact_static_text_changes_are_visible_without_remapping_controls() {
+        let revisions = LinuxObservationRevisions::new();
+        let capture = |message: &str| {
+            let mut root = node("/window", "Dialog");
+            root.role = "dialog".into();
+            root.element_index = None;
+            root.actions.clear();
+            let mut text = node("/message", message);
+            text.role = "label".into();
+            text.element_index = None;
+            text.actions.clear();
+            text.depth = 1;
+            let mut button = node("/ok", "OK");
+            button.element_index = Some(17);
+            button.depth = 1;
+            tree(super::super::projection::compact(vec![root, text, button]))
+        };
+        let first = revisions
+            .observe(session(), 10, 20, 50, 5, &capture("Saved"), &request(None))
+            .unwrap();
+        let unchanged = revisions
+            .observe(
+                session(),
+                10,
+                20,
+                50,
+                5,
+                &capture("Saved"),
+                &request(Some(first.revision_id.clone())),
+            )
+            .unwrap();
+        assert_eq!(unchanged.mode, ObservationMode::NoChange);
+        let changed = revisions
+            .observe(
+                session(),
+                10,
+                20,
+                50,
+                5,
+                &capture("Failed to save"),
+                &request(Some(unchanged.revision_id)),
+            )
+            .unwrap();
+        assert!(changed.text.contains("Failed to save"));
+        let control =
+            |result: &cua_driver_core::observation_revision::ObservationRevisionResult| {
+                result
+                    .nodes
+                    .iter()
+                    .find(|node| node.actionable_index == Some(17))
+                    .unwrap()
+                    .element_id
+            };
+        assert_eq!(control(&first), control(&changed));
+        assert!(changed
+            .nodes
+            .iter()
+            .filter(|node| node.actionable_index.is_some())
+            .all(|node| node.actionable_index == Some(17)));
     }
 
     #[test]

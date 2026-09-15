@@ -32,6 +32,7 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
+import { AcpChildCapacityExceededError } from './bridgeErrors.js';
 import { EventEmitter, getEventListeners } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
@@ -679,6 +680,66 @@ describe('createSpawnChannelFactory child-heap observation', () => {
   afterEach(() => {
     process.argv[1] = originalArgv1;
     delete process.env['QWEN_CLI_ENTRY'];
+  });
+
+  it('shares the final slot across factories and releases rejected reservations', async () => {
+    const registry = new ProcessRegistry();
+    const policy = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+      mode: 'admit',
+    });
+    const first = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: policy,
+    });
+    const second = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: policy,
+    });
+    const results = await Promise.allSettled([
+      first('/tmp/a'),
+      second('/tmp/b'),
+    ]);
+    expect(results[0].status).toBe('fulfilled');
+    expect(results[1]).toMatchObject({
+      status: 'rejected',
+      reason: {
+        code: 'acp_child_capacity_exhausted',
+        maxConcurrentChildren: 1,
+        committedAcpChildren: 1,
+      },
+    });
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(registry.committedProcessCount).toBe(1);
+    expect(policy.snapshot().refusals).toBe(1);
+    await expect(second('/tmp/b')).rejects.toBeInstanceOf(
+      AcpChildCapacityExceededError,
+    );
+    expect(registry.committedProcessCount).toBe(1);
+    const child = mockSpawn.mock.results[0].value as ChildProcess;
+    child.emit('exit', 0, null);
+    expect(registry.committedProcessCount).toBe(0);
+    await expect(second('/tmp/b')).resolves.toBeDefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the admitted child arguments identical to legacy spawning', async () => {
+    const policy = createChildHeapPolicy({ budget, mode: 'admit' });
+    await createSpawnChannelFactory({
+      processRegistry: new ProcessRegistry(),
+      childHeapPolicy: policy,
+    })('/tmp/a');
+    const admittedArgs = mockSpawn.mock.calls[0][1];
+    await createSpawnChannelFactory()('/tmp/a');
+    expect(mockSpawn.mock.calls[1][1]).toEqual(admittedArgs);
+  });
+
+  it('requires explicit shared registry wiring for admission', () => {
+    const policy = createChildHeapPolicy({ budget, mode: 'admit' });
+    expect(() =>
+      createSpawnChannelFactory({ childHeapPolicy: policy }),
+    ).toThrow('shared process registry');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('leaves argv byte-identical while counting what it would have refused', async () => {

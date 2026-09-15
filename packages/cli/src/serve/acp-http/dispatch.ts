@@ -47,6 +47,7 @@ import type {
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
+import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
 import {
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
@@ -76,6 +77,7 @@ import {
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
+  AcpChildCapacityExceededError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -655,6 +657,20 @@ export function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const capacityError =
+    err instanceof WorkspaceRuntimeInitializationError ? err.cause : err;
+  if (capacityError instanceof AcpChildCapacityExceededError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: capacityError.message,
+      data: {
+        errorKind: capacityError.code,
+        httpStatus: 503,
+        maxConcurrentChildren: capacityError.maxConcurrentChildren,
+        committedAcpChildren: capacityError.committedAcpChildren,
+      },
+    };
+  }
   if (err instanceof InvalidRequestedSessionIdError) {
     return {
       code: RPC.INVALID_PARAMS,
@@ -695,8 +711,9 @@ export function toRpcError(err: unknown): {
     };
   }
   if (err instanceof StandaloneSessionServiceError) {
-    const httpStatus =
-      err.code === 'invalid_request'
+    const httpStatus = err.capacity
+      ? 503
+      : err.code === 'invalid_request'
         ? 400
         : err.code === 'standalone_session_not_found'
           ? 404
@@ -715,6 +732,7 @@ export function toRpcError(err: unknown): {
         errorKind: err.code,
         httpStatus,
         retryable: err.retryable,
+        ...(err.capacity ? { capacity: err.capacity } : {}),
         ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
       },
     };

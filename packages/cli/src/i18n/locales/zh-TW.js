@@ -145,6 +145,7 @@ export default {
   'from {{marketplace}}': '來自 {{marketplace}}',
   installed: '已安裝',
   '{{count}} Agents': '{{count}} 個智能體',
+  '{{count}} Workflows': '{{count}} 個工作流程',
   '{{count}} Commands': '{{count}} 個命令',
   '{{count}} MCP': '{{count}} 個 MCP',
   '{{count}} Skills': '{{count}} 個技能',
@@ -851,6 +852,8 @@ export default {
   'This extension will install the following skills:': '此擴展將安裝以下技能：',
   'This extension will install the following subagents:':
     '此擴展將安裝以下子智能體：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此擴展將安裝以下工作流程（可啟動子智能體的 JavaScript 腳本）：',
   'Installation cancelled for "{{name}}".': '已取消安裝 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安裝來自 {{originSource}} 的擴展。某些功能可能無法完美兼容 Qwen Code。',
@@ -922,6 +925,7 @@ export default {
   'Context files:': '上下文檔案：',
   'Skills:': '技能：',
   'Agents:': '智能體：',
+  'Workflows:': '工作流程：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '連結擴展安裝失敗。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1021,6 +1025,20 @@ export default {
   'No hook config selected': '未選擇 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或刪除此 Hook，請直接編輯 settings.json 或詢問 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已開啟，本會話不會執行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精簡模式已開啟，本會話不會執行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 設定停用。',
+  'Timeout:': '逾時：',
+  'Status message:': '狀態訊息：',
+  'Condition:': '條件：',
+  'Options:': '選項：',
+  'Skill:': '技能：',
+  'runs in background': '在背景執行',
+  'runs once': '只執行一次',
+  sequential: '依序執行',
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
     '所有 Hook 當前已禁用。您有 {{count}} 未運行。',
@@ -2349,6 +2367,8 @@ export default {
   '{{count}} skills': '{{count}} 個技能',
   '{{count}} agent': '{{count}} 個代理',
   '{{count}} agents': '{{count}} 個代理',
+  '{{count}} workflow': '{{count}} 個工作流程',
+  '{{count}} workflows': '{{count}} 個工作流程',
   '{{count}} hook': '{{count}} 個鉤子',
   '{{count}} hooks': '{{count}} 個鉤子',
   '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',
