@@ -20,11 +20,13 @@ function configCountFor(hook: HookEventDisplayInfo): number {
 interface HooksListStepProps {
   hooks: HookEventDisplayInfo[];
   selectedIndex: number;
+  hooksReloadable: boolean;
 }
 
 export function HooksListStep({
   hooks,
   selectedIndex,
+  hooksReloadable,
 }: HooksListStepProps): React.JSX.Element {
   const { columns: terminalWidth } = useTerminalSize();
 
@@ -66,11 +68,13 @@ export function HooksListStep({
             'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
           )}
         </Text>
-        <Text color={theme.text.secondary}>
-          {t(
-            'Hooks are reloaded from settings files each time this menu opens.',
-          )}
-        </Text>
+        {hooksReloadable && (
+          <Text color={theme.text.secondary}>
+            {t(
+              'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.',
+            )}
+          </Text>
+        )}
       </Box>
 
       {hooks.map((hook, index) => {

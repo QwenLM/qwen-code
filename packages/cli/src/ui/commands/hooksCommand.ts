@@ -21,7 +21,8 @@ import type {
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { supportsMatchers } from '../components/hooks/constants.js';
 import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
-import { loadSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import { MessageType } from '../types.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 
 const debugLogger = createDebugLogger('HOOKS_COMMAND');
@@ -33,17 +34,26 @@ const debugLogger = createDebugLogger('HOOKS_COMMAND');
  * only in a trusted folder). Session hooks registered by skills, the SDK or
  * `/goal` live outside the registry and are unaffected.
  */
-async function reloadHooksFromSettings(config: Config): Promise<void> {
+async function reloadHooksFromSettings(
+  config: Config,
+  settings: LoadedSettings,
+): Promise<void> {
   const hookSystem = config.getHookSystem();
   if (!hookSystem) {
     return;
   }
-  // Settings are re-read for their hooks only: leave the process environment
-  // and the startup corruption markers alone.
-  const settings = loadSettings(config.getWorkingDir(), {
-    consumeCorruptionEnvVars: false,
-    skipLoadEnvironment: true,
-  });
+  // Keep the startup settings paths after --worktree changes cwd, and never
+  // run startup corruption recovery while refreshing an active session.
+  if (
+    !settings.reloadScopesFromDiskAtomically([
+      SettingScope.User,
+      SettingScope.Workspace,
+    ])
+  ) {
+    throw new Error(
+      'Settings could not be read; the previous hooks are still active.',
+    );
+  }
   config.setHooksFromSettings(
     resolveHookSettingsForConfig(
       settings.merged.hooks,
@@ -241,13 +251,22 @@ export const hooksCommand: SlashCommand = {
   ): Promise<SlashCommandActionReturn> => {
     const executionMode = context.executionMode ?? 'interactive';
     if (executionMode === 'interactive') {
-      const { config } = context.services;
+      const { config, settings } = context.services;
       if (config) {
         try {
-          await reloadHooksFromSettings(config);
+          await reloadHooksFromSettings(config, settings);
         } catch (error) {
           // The menu still opens on the hooks loaded so far.
           debugLogger.warn(`Failed to reload hooks for /hooks: ${error}`);
+          context.ui.addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Failed to reload hook definitions: {{error}}', {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            },
+            Date.now(),
+          );
         }
       }
       return {

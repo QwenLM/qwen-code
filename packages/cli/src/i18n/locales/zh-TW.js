@@ -1013,8 +1013,10 @@ export default {
   '{{count}} hooks configured': '{{count}} 個 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此選單為只讀。要添加或修改 Hook，請直接編輯 settings.json 或詢問 Qwen Code。',
-  'Hooks are reloaded from settings files each time this menu opens.':
-    '每次開啟此選單時，都會從設定檔重新載入 Hook。',
+  'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.':
+    '重新開啟此選單可重新載入 Hook 定義。Hook 控制項與 HTTP 安全設定需要重新啟動後生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新載入 Hook 定義失敗：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 選擇 · Esc 取消',
   'Exit codes:': '退出碼：',
   'Configured hooks:': '已配置的 Hook：',

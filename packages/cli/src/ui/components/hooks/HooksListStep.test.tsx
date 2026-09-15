@@ -79,7 +79,7 @@ describe('HooksListStep', () => {
 
   it('should render empty state when no hooks', () => {
     const { lastFrame } = render(
-      <HooksListStep hooks={[]} selectedIndex={0} />,
+      <HooksListStep hooks={[]} selectedIndex={0} hooksReloadable />,
     );
 
     expect(lastFrame()).toContain('No hook events found');
@@ -92,7 +92,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
@@ -108,7 +108,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
@@ -122,7 +122,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
@@ -135,7 +135,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
@@ -143,16 +143,28 @@ describe('HooksListStep', () => {
     expect(output).toContain('settings.json');
   });
 
-  it('says hooks are reloaded each time the menu opens', () => {
+  it('explains how to reload definitions and which settings require a restart', () => {
     const hooks: HookEventDisplayInfo[] = [
       createMockHookInfo(HookEventName.PreToolUse),
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
-    expect(lastFrame()).toContain('reloaded');
+    expect(lastFrame()?.replace(/\s+/g, ' ')).toContain(
+      'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.',
+    );
+  });
+
+  it('omits the reload notice when no hook system can reload', () => {
+    const hooks = [createMockHookInfo(HookEventName.PreToolUse)];
+    const { lastFrame } = render(
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable={false} />,
+    );
+
+    expect(lastFrame()).toContain('read-only');
+    expect(lastFrame()).not.toContain('Reopen this menu');
   });
 
   it('should show keyboard hints', () => {
@@ -161,7 +173,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
@@ -176,7 +188,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
@@ -189,7 +201,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
@@ -202,7 +214,7 @@ describe('HooksListStep', () => {
       .map((_, i) => createMockHookInfo(`${i}` as HookEventName));
 
     const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
+      <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
     const output = lastFrame();
