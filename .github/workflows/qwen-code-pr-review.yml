@@ -3298,7 +3298,7 @@ jobs:
           # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
           # anchors on, and the retry instruction the timeout flavor needs.
           if [ "$never_started" = "true" ]; then
-            body="**Qwen Code review never started.** The job ended before a runner picked it up, so no review ran for this head. This can happen when a queued run is cancelled or expires; this step cannot determine the cause. Check the [workflow logs](${RUN_URL}) and the latest \`qwen-review-runner-schedule.yml\` run. If you still want a review, re-request with \`@qwen-code /review\` when the \`ecs-review\` pool is available."
+            body="**Qwen Code review never started.** The job ended before a runner picked it up, so no review ran for this head. This can happen when a queued run is cancelled or expires; this step cannot determine the cause. See [workflow logs](${RUN_URL}). Check the latest \`qwen-review-runner-schedule.yml\` run. If you still want a review, re-request with \`@qwen-code /review\` when the \`ecs-review\` pool is available."
           elif [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
             body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           else
