@@ -584,10 +584,25 @@ function handleBoundedLine(
     throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
   }
   const isResponse = isJsonRpcResponseMessage(parsed);
-  if (
-    (!isResponse && !hasBoundedJsonStructure(parsed)) ||
-    (validateInboundMessage && !validateInboundMessage(parsed))
-  ) {
+  // Responses are exempt from the inbound node/depth/array-length cap: the
+  // local side already admitted the matching request, so a large result is
+  // expected (session/load replay, etc.). Requests stay fail-closed.
+  //
+  // Notifications are fire-and-forget. A session-start
+  // `available_commands_update` with a large skill library can exceed
+  // MAX_JSON_NODES well under the 64MiB byte budget. Throwing
+  // NdJsonInvalidMessageError here used to SIGKILL the ACP child, after
+  // which every later request 404s "No session with id" (issue #11908).
+  // Drop the oversized snapshot, log bounded metadata, and keep the
+  // channel up. Malformed JSON and invalid envelopes still tear down.
+  if (!isResponse && !hasBoundedJsonStructure(parsed)) {
+    if (isJsonRpcNotificationMessage(parsed)) {
+      logDroppedOversizedNotification(parsed.method, lineBytes);
+      return;
+    }
+    throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
+  }
+  if (validateInboundMessage && !validateInboundMessage(parsed)) {
     throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
   }
   if (
@@ -718,6 +733,12 @@ function isJsonRpcRequestMessage(
   );
 }
 
+function isJsonRpcNotificationMessage(
+  value: AnyMessage,
+): value is AnyMessage & { method: string } {
+  return 'method' in value && !('id' in value);
+}
+
 function isJsonRpcResponseMessage(
   value: AnyMessage,
 ): value is AnyMessage & { id: string | number | null } {
@@ -829,6 +850,24 @@ function logBoundedInvalidMessage(
     payloadOmitted: true,
   });
   return new NdJsonInvalidMessageError(errorKind, bytes);
+}
+
+function logDroppedOversizedNotification(
+  method: string,
+  lineBytes: Uint8Array,
+): void {
+  const bytes = jsonPayloadByteLength(lineBytes);
+  const digest = createHash('sha256')
+    .update(lineBytes.subarray(0, bytes))
+    .digest('hex');
+  // eslint-disable-next-line no-console -- bounded metadata only
+  console.error('Dropped oversized JSON-RPC notification:', {
+    errorKind: 'ndjson_oversized_notification',
+    method,
+    bytes,
+    sha256: digest,
+    payloadOmitted: true,
+  });
 }
 
 function reportReceivedMessage(
