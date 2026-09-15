@@ -13,6 +13,7 @@ import {
   MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS,
   MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
 } from './workflow-extension.js';
+import { computeWorkflowScriptDigest } from './workflow-saved.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -67,6 +68,7 @@ describe('loadExtensionWorkflows', () => {
         extensionDisplayName: 'Google Cloud',
         scriptPath: path.join(root, 'workflows', 'a-review.js'),
         description: 'Runs a-review',
+        contentDigest: expect.stringMatching(/^[0-9a-f]{16}$/),
       },
       {
         name: 'gcp:b-audit',
@@ -74,8 +76,23 @@ describe('loadExtensionWorkflows', () => {
         extensionDisplayName: 'Google Cloud',
         scriptPath: path.join(root, 'workflows', 'b-audit.js'),
         description: 'Runs b-audit',
+        contentDigest: expect.stringMatching(/^[0-9a-f]{16}$/),
       },
     ]);
+  });
+
+  // Install consent compares this digest, so it has to move with the code
+  // even when the meta block, and so the consent text, stays the same.
+  it('records a content digest that follows the script code', async () => {
+    const source = workflowSource('audit');
+    await write('workflows/audit.js', source);
+    const [first] = await loadExtensionWorkflows(root, owner, undefined);
+    expect(first?.contentDigest).toBe(computeWorkflowScriptDigest(source));
+
+    await write('workflows/audit.js', source.replace('return 1;', 'return 2;'));
+    const [second] = await loadExtensionWorkflows(root, owner, undefined);
+    expect(second?.description).toBe(first?.description);
+    expect(second?.contentDigest).not.toBe(first?.contentDigest);
   });
 
   it('reads one directory level only', async () => {
