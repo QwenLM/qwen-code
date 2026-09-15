@@ -96,6 +96,154 @@ function makeSettings(initial: SettingsShape = {}) {
 }
 
 describe('createLoadedSettingsAdapter', () => {
+  it.each([
+    { sameBucket: true, headers: false, rotate: true, urlPlaceholder: true },
+    { sameBucket: false, headers: false, rotate: true, urlPlaceholder: true },
+    { sameBucket: false, headers: true, rotate: false, urlPlaceholder: true },
+    { sameBucket: false, headers: true, rotate: true, urlPlaceholder: true },
+    { sameBucket: false, headers: true, rotate: true, urlPlaceholder: false },
+    {
+      sameBucket: false,
+      headers: true,
+      rotate: true,
+      urlPlaceholder: true,
+      failRefresh: true,
+    },
+  ])(
+    'preserves mapped placeholder winners and rejects same-bucket ambiguity (%j)',
+    async ({ sameBucket, headers, rotate, urlPlaceholder, failRefresh }) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mapped-duplicates-'));
+      temporaryRoots.push(root);
+      vi.stubEnv('QWEN_HOME', root);
+      vi.stubEnv('FIRST_URL', 'https://duplicate.example/v1');
+      vi.stubEnv('SECOND_URL', 'https://duplicate.example/v1');
+      vi.stubEnv('FIRST_KEY', 'test-only-first');
+      vi.stubEnv('SECOND_KEY', 'test-only-second');
+      const first = {
+        id: 'same',
+        name: 'same',
+        baseUrl: urlPlaceholder
+          ? '${FIRST_URL}'
+          : 'https://duplicate.example/v1',
+        envKey: 'FIRST_KEY',
+        ...(headers && {
+          generationConfig: { customHeaders: { 'X-Key': '${FIRST_KEY}' } },
+        }),
+      };
+      const second = {
+        ...first,
+        baseUrl: urlPlaceholder
+          ? '${SECOND_URL}'
+          : 'https://duplicate.example/v1',
+        envKey: 'SECOND_KEY',
+        ...(headers && {
+          generationConfig: { customHeaders: { 'X-Key': '${SECOND_KEY}' } },
+        }),
+      };
+      const apiKey = rotate ? 'test-only-new' : 'test-only-first';
+      const settingsPath = path.join(root, 'settings.json');
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({
+          $version: 4,
+          env: { FIRST_KEY: 'test-only-first', SECOND_KEY: 'test-only-second' },
+          modelProviders: sameBucket
+            ? { first: [first, second] }
+            : { first: [first], second: [second] },
+          providerProtocol: { first: 'openai', second: 'openai' },
+        }),
+      );
+      const before = fs.readFileSync(settingsPath, 'utf8');
+      try {
+        const loaded = loadSettings(root, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: true,
+        });
+        const plan = buildInstallPlan(
+          customProvider,
+          {
+            baseUrl: process.env['FIRST_URL']!,
+            modelIds: ['same'],
+            apiKey,
+          },
+          getModelsForProviderProtocol(
+            loaded.merged.modelProviders,
+            AuthType.USE_OPENAI,
+            loaded.merged.providerProtocol,
+          ),
+        );
+        expect(plan.env).toEqual({ FIRST_KEY: apiKey });
+        const originalMerged = structuredClone(loaded.merged);
+        const reloadModelProviders = vi.fn();
+        const install = applyProviderInstallPlan(plan, {
+          settings: createLoadedSettingsAdapter(loaded, SettingScope.User),
+          doRefreshAuth: Boolean(failRefresh),
+          reloadModelProviders,
+          refreshAuth: vi.fn().mockRejectedValue(new Error('refresh failed')),
+        });
+        if (sameBucket || failRefresh) {
+          await expect(install).rejects.toThrow(
+            sameBucket
+              ? 'Cannot preserve placeholders in an ambiguous model configuration'
+              : 'refresh failed',
+          );
+          expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+          expect(process.env['FIRST_KEY']).toBe('test-only-first');
+          expect(loaded.merged).toEqual(originalMerged);
+          if (failRefresh) {
+            expect(reloadModelProviders).toHaveBeenCalledTimes(2);
+            expect(
+              reloadModelProviders.mock.calls[0]?.[0].first[0],
+            ).toMatchObject({
+              generationConfig: { customHeaders: { 'X-Key': apiKey } },
+            });
+            expect(reloadModelProviders).toHaveBeenLastCalledWith(
+              originalMerged.modelProviders,
+            );
+          }
+          return;
+        }
+        const result = await install;
+        const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        expect(saved.modelProviders.openai).toEqual([
+          { ...first, wireApi: 'chat-completions' },
+        ]);
+        expect(saved.modelProviders.first).toEqual([first]);
+        expect(saved.modelProviders.second).toEqual([second]);
+        expect(saved.env).toEqual({
+          FIRST_KEY: apiKey,
+          SECOND_KEY: 'test-only-second',
+        });
+        expect(saved.providerProtocol).toEqual({
+          first: 'openai',
+          second: 'openai',
+        });
+        const expected = {
+          baseUrl: process.env['FIRST_URL'],
+          envKey: 'FIRST_KEY',
+          ...(headers && {
+            generationConfig: { customHeaders: { 'X-Key': apiKey } },
+          }),
+        };
+        expect(loaded.merged.modelProviders?.['openai']?.[0]).toMatchObject(
+          expected,
+        );
+        expect(loaded.merged.modelProviders?.['first']?.[0]).toMatchObject(
+          expected,
+        );
+        expect(
+          getModelsForProviderProtocol(
+            result.updatedModelProviders,
+            AuthType.USE_OPENAI,
+            loaded.merged.providerProtocol,
+          )[0],
+        ).toMatchObject(expected);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it.each([SettingScope.User, SettingScope.Workspace])(
     'canonicalizes a released route in %s while preserving placeholders and the other scope',
     async (scope) => {
@@ -140,6 +288,9 @@ describe('createLoadedSettingsAdapter', () => {
         id: 'keep',
         baseUrl: '${RELEASED_URL}',
         envKey: 'SIBLING_KEY',
+        generationConfig: {
+          customHeaders: { 'X-Rotated': '${RELEASED_KEY}' },
+        },
       };
       fs.writeFileSync(
         target,
@@ -182,6 +333,11 @@ describe('createLoadedSettingsAdapter', () => {
         expect(saved.providerProtocol.gateway).toBe('openai-responses');
         expect(saved.env.RELEASED_KEY).toBe('test-only-new');
         expect(fs.readFileSync(other, 'utf8')).toBe(otherBytes);
+        expect(loaded.merged.modelProviders?.['gateway']?.[0]).toMatchObject({
+          generationConfig: {
+            customHeaders: { 'X-Rotated': 'test-only-new' },
+          },
+        });
         expect(loaded.merged.modelProviders?.['openai']?.[0]?.baseUrl).toBe(
           process.env['RELEASED_URL'],
         );

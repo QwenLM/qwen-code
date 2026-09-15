@@ -41,6 +41,60 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
 }
 
 describe('buildInstallPlan', () => {
+  it.each([false, true])(
+    'preserves each preset API and its selected route (same-id siblings: %s)',
+    (siblings) => {
+      const config = makeConfig({
+        models: [{ id: 'model-a', enableThinking: true }, { id: 'model-b' }],
+      });
+      const inputs = {
+        baseUrl: 'https://api.test.com/v1',
+        apiKey: 'test-only-new',
+        modelIds: ['model-a', 'model-b'],
+      };
+      const chat = buildInstallPlanSrc(config, inputs).modelProviders![0]!
+        .models;
+      const responses = buildInstallPlanSrc(config, {
+        ...inputs,
+        wireApi: 'responses',
+      }).modelProviders![0]!.models;
+      const existing = [
+        chat[0]!,
+        ...(siblings ? [responses[0]!] : []),
+        responses[1]!,
+      ];
+      const before = structuredClone(existing);
+      const plan = buildInstallPlanSrc(config, inputs, existing, {
+        id: 'model-b',
+        baseUrl: inputs.baseUrl,
+        authType: AuthType.USE_OPENAI_RESPONSES,
+      });
+      expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(plan.modelSelection).toMatchObject({ modelId: 'model-b' });
+      expect(plan.modelProviders![0]!.models).toEqual(existing);
+      expect(plan.providerState).toEqual({
+        'providerMetadata.test': { version: undefined },
+      });
+      expect(existing).toEqual(before);
+      const explicit = buildInstallPlanSrc(
+        config,
+        {
+          ...inputs,
+          wireApi: 'chat-completions',
+        },
+        existing,
+        {
+          id: 'model-b',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+        },
+      );
+      expect(explicit.authType).toBe(AuthType.USE_OPENAI);
+      expect(
+        explicit.modelProviders![0]!.models.map((model) => model.wireApi),
+      ).toEqual(['chat-completions', 'chat-completions']);
+    },
+  );
+
   it.each(['generated', 'prebuilt', 'preserved'] as const)(
     'rejects a final Responses voice model (%s)',
     (source) => {
@@ -413,8 +467,11 @@ describe('buildInstallPlan', () => {
     expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
   });
 
-  it('keeps omitted wireApi on Chat when the same model has a Responses entry', () => {
-    const config = makeConfig({ models: undefined });
+  it('keeps omitted custom wireApi on Chat when the same model has a Responses entry', () => {
+    const config = makeConfig({
+      models: undefined,
+      protocolOptions: [AuthType.USE_OPENAI],
+    });
     const plan = buildInstallPlan(
       config,
       {

@@ -77,6 +77,7 @@ export function preserveModelProviderPlaceholders(
         return resolved
           ? [
               {
+                providerId,
                 resolved,
                 source: entry,
                 raw: rawProviders[providerId]?.[index] ?? entry,
@@ -94,9 +95,14 @@ export function preserveModelProviderPlaceholders(
         tryResolveModelProtocol(provider, resolved, mapping) ===
           tryResolveModelProtocol(provider, model, mapping),
     );
+    // The registry uses the first bucket for duplicate identities. Only
+    // duplicates inside that winning bucket make placeholder recovery ambiguous.
+    const sourceMatches = matches.filter(
+      (pair) => pair.providerId === matches[0]?.providerId,
+    );
     if (
-      matches.length > 1 &&
-      matches.some(
+      sourceMatches.length > 1 &&
+      sourceMatches.some(
         (pair) => JSON.stringify(pair.raw) !== JSON.stringify(pair.source),
       )
     ) {

@@ -41,12 +41,9 @@ import {
   clearPersistedAuth,
 } from '../../services/settingsWriter.js';
 import {
-  AuthType,
   buildInstallPlan,
   getModelsForProviderProtocol,
   type ProviderProtocolConfig,
-  resolveModelSelectionAuthType,
-  resolveOwnsModel,
   parseInsightMessage,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
@@ -1507,44 +1504,19 @@ export class WebViewProvider {
           | ProviderProtocolConfig
           | undefined,
       );
-      let installInputs = inputs;
-      if (
-        protocol === AuthType.USE_OPENAI &&
-        !providerConfig.protocolOptions &&
-        inputs.wireApi === undefined
-      ) {
-        const owns = resolveOwnsModel(providerConfig);
-        const existingModels = existingModelsForProtocol.filter(
-          (model) => owns?.(model) && model.baseUrl === inputs.baseUrl,
-        );
-        const saved = resolvedSnapshot as {
-          model?: { name?: string; baseUrl?: string };
-          security?: { auth?: { selectedType?: string } };
-        } | null;
-        const selectedId = saved?.model?.name;
-        const isSavedSelection =
-          selectedId !== undefined &&
-          inputs.modelIds.includes(selectedId) &&
-          existingModels?.some((model) => model.id === selectedId) &&
-          (!saved?.model?.baseUrl || saved.model.baseUrl === inputs.baseUrl);
-        const selectedAuth = saved?.security?.auth?.selectedType;
-        const authType = resolveModelSelectionAuthType(
-          isSavedSelection && selectedAuth === AuthType.USE_OPENAI_RESPONSES
-            ? selectedAuth
-            : AuthType.USE_OPENAI,
-          isSavedSelection ? selectedId : inputs.modelIds[0],
-          { openai: existingModels ?? [] },
-          undefined,
-          inputs.baseUrl,
-        );
-        if (authType === AuthType.USE_OPENAI_RESPONSES) {
-          installInputs = { ...inputs, wireApi: 'responses' };
-        }
-      }
+      const saved = resolvedSnapshot as {
+        model?: { name?: string; baseUrl?: string };
+        security?: { auth?: { selectedType?: string } };
+      } | null;
       const plan = buildInstallPlan(
         providerConfig,
-        installInputs,
+        inputs,
         existingModelsForProtocol,
+        {
+          authType: saved?.security?.auth?.selectedType,
+          id: saved?.model?.name,
+          baseUrl: saved?.model?.baseUrl,
+        },
       );
       await applyProviderInstallPlanToFile(plan);
 

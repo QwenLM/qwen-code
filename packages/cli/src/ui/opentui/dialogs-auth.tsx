@@ -857,6 +857,11 @@ function AuthDialogFlow({
             inputs.protocol ?? providerConfig.protocol,
             settings.merged.providerProtocol,
           ),
+          {
+            authType: settings.merged.security?.auth?.selectedType,
+            id: settings.merged.model?.name,
+            baseUrl: settings.merged.model?.baseUrl,
+          },
         );
         protocol = plan.authType;
         await applyProviderInstallPlan(plan, {
@@ -902,6 +907,11 @@ function AuthDialogFlow({
     handleProviderSubmit,
     settings.merged.modelProviders,
     settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
   );
 
   // -- Navigation (AuthDialog parity) ---------------------------------------

@@ -116,6 +116,7 @@ export function useProviderSetupFlow(
   ) => Promise<void>,
   modelProviders?: ModelProvidersConfig,
   providerProtocol?: ProviderProtocolConfig,
+  selection?: Parameters<typeof buildInstallPlan>[3],
 ) {
   const [provider, setProvider] = useState<ProviderConfig | null>(null);
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
@@ -325,13 +326,7 @@ export function useProviderSetupFlow(
       const hasAdvanced = thinkingEnabled || modalityEnabled || ctxSize > 0;
       return {
         protocol: provider?.protocolOptions ? protocol : undefined,
-        // Keep a Responses API prefilled from an existing install even when
-        // the provider has no API step to render (only the custom provider
-        // shows one) — dropping it would silently move a working Responses
-        // route back to Chat Completions on re-authentication.
-        ...(provider &&
-        (shouldShowStep(provider, 'wireApi', protocol) ||
-          (wireApi === 'responses' && protocol === AuthType.USE_OPENAI))
+        ...(provider && shouldShowStep(provider, 'wireApi', protocol)
           ? { wireApi }
           : {}),
         baseUrl: baseUrl.trim(),
@@ -491,6 +486,7 @@ export function useProviderSetupFlow(
         inputs.protocol ?? provider.protocol,
         providerProtocol,
       ),
+      selection,
     );
     return JSON.stringify(
       {

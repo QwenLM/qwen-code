@@ -20790,6 +20790,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         modelIds: ['deepseek-chat'],
       }),
       settings.merged.modelProviders?.['openai'] ?? [],
+      { authType: undefined, id: undefined, baseUrl: undefined },
     );
     expect(applyProviderInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: 'deepseek' }),
@@ -21018,7 +21019,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     'qwen/providers/connect forwards OpenAI API selection: %j',
     async (selection) => {
       const { agent, agentPromise } = await bootCoreSettingsAgent(
-        makeSessionSettings(),
+        makeSessionSettings({
+          model: { name: 'saved', baseUrl: 'https://saved.example/v1' },
+          security: { auth: { selectedType: AuthType.USE_OPENAI_RESPONSES } },
+        }),
       );
       try {
         await expect(
@@ -21034,6 +21038,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           expect.anything(),
           expect.objectContaining(selection),
           [],
+          {
+            authType: AuthType.USE_OPENAI_RESPONSES,
+            id: 'saved',
+            baseUrl: 'https://saved.example/v1',
+          },
         );
       } finally {
         mockConnectionState.resolve();
@@ -21688,6 +21697,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           wireApi: 'responses',
         }),
         settings.merged.modelProviders!['openai'],
+        { authType: undefined, id: undefined, baseUrl: undefined },
       );
       await expect(
         agent.extMethod('qwen/providers/connect', {
@@ -21742,6 +21752,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({ apiKey: 'sk-existing' }),
       settings.merged.modelProviders?.['openai'],
+      { authType: undefined, id: undefined, baseUrl: undefined },
     );
 
     mockConnectionState.resolve();
@@ -21789,6 +21800,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           expect.objectContaining({ id: 'custom-openai-compatible' }),
           expect.objectContaining({ apiKey: 'stored-service-secret' }),
           models,
+          { authType: undefined, id: undefined, baseUrl: undefined },
         );
         vi.mocked(buildInstallPlan).mockClear();
         await expect(
@@ -21870,6 +21882,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         baseUrl: secondBaseUrl,
       }),
       settings.merged.modelProviders?.['openai'],
+      { authType: undefined, id: undefined, baseUrl: undefined },
     );
     expect(buildInstallPlan).not.toHaveBeenCalledWith(
       expect.anything(),

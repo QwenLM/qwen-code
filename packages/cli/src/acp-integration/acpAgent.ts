@@ -9245,6 +9245,11 @@ class QwenAgent implements Agent {
             inputs.protocol ?? providerConfig.protocol,
             this.settings.merged.providerProtocol,
           ),
+          {
+            authType: this.settings.merged.security?.auth?.selectedType,
+            id: this.settings.merged.model?.name,
+            baseUrl: this.settings.merged.model?.baseUrl,
+          },
         );
         const adapter = createLoadedSettingsAdapter(
           this.settings,

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
 import {
   findModelConfiguration,
   findModelConfigurationForDeletion,
@@ -22,6 +23,7 @@ import {
   loadSettings,
   SettingScope,
 } from '../../config/settings.js';
+import { buildRuntimeEnvironment } from '../../config/environment.js';
 import {
   getOwnKeyScope,
   getWritableScopes,
@@ -62,6 +64,7 @@ function scopeToWire(scope: SettingScope): string {
 export interface WorkspaceModelsRouteDeps {
   boundWorkspace: string;
   env?: Readonly<Record<string, string | undefined>>;
+  baseEnv?: Readonly<Record<string, string | undefined>>;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
@@ -397,15 +400,24 @@ export function registerWorkspaceModelsRoutes(
               ],
             ),
           );
+          const selectionEnv =
+            activeScope === SettingScope.User
+              ? buildRuntimeEnvironment(
+                  userSettings,
+                  os.homedir(),
+                  deps.baseEnv ?? {},
+                  false,
+                ).effectiveEnv
+              : (deps.env ?? {});
           const selectedAuthType =
             settings.security?.auth?.selectedType ??
-            getAuthTypeFromEnv(deps.env ?? {});
+            getAuthTypeFromEnv(selectionEnv);
           const activeSelection = selectedAuthType
             ? resolveCliGenerationConfig({
                 argv: {},
                 settings: { ...settings, modelProviders: validProviders },
                 selectedAuthType,
-                env: deps.env ?? {},
+                env: selectionEnv,
               })
             : undefined;
           const activeAuthType = activeSelection?.authType;

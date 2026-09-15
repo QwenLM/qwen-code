@@ -53,6 +53,7 @@ import type {
 } from '@qwen-code/acp-bridge/ndJsonStream';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
+import { getEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
@@ -7735,6 +7736,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      modelSelectionBaseEnv: getEnvironmentBeforeLoad() ?? daemonRuntimeBaseEnv,
       runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
@@ -7843,6 +7845,11 @@ async function runQwenServeImpl(
                 inputs.protocol ?? provider.protocol,
                 fresh.merged.providerProtocol,
               ),
+              {
+                authType: fresh.merged.security?.auth?.selectedType,
+                id: fresh.merged.model?.name,
+                baseUrl: fresh.merged.model?.baseUrl,
+              },
             );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(

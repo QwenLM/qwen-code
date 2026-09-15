@@ -131,17 +131,61 @@ describe('useProviderSetupFlow API selection', () => {
     expect(submit.mock.calls[0]![1]).not.toHaveProperty('wireApi');
   });
 
-  it('keeps the prefilled Responses API for a preset provider with no API step', () => {
-    // Re-authenticating a preset that holds a Responses install must not
-    // silently drop the field and move the user to Chat Completions.
-    const submit = vi.fn().mockResolvedValue(undefined);
-    const { result } = renderHook(() => useProviderSetupFlow(submit));
-    act(() => result.current.start(preset, AuthType.USE_OPENAI_RESPONSES));
-    expect(result.current.state.wireApi).toBe('responses');
-    act(() => result.current.submitApiKey('sk-secret-test'));
-    expect(submit).toHaveBeenCalledOnce();
-    expect(submit.mock.calls[0]![1]).toMatchObject({ wireApi: 'responses' });
-  });
+  it.each([false, true])(
+    'preserves saved preset APIs without broadcasting a hidden choice (mixed: %s)',
+    (mixed) => {
+      const config = {
+        ...preset,
+        models: mixed
+          ? [{ id: 'deepseek-v4' }, { id: 'deepseek-pro' }]
+          : preset.models,
+        showAdvancedConfig: true,
+      };
+      const models = [
+        {
+          id: 'deepseek-v4',
+          name: '[DeepSeek] Tuned',
+          envKey: 'DEEPSEEK_API_KEY',
+          baseUrl: 'https://api.deepseek.com/v1',
+          wireApi: 'responses' as const,
+        },
+        ...(mixed
+          ? [
+              {
+                id: 'deepseek-pro',
+                name: '[DeepSeek] Pro',
+                envKey: 'DEEPSEEK_API_KEY',
+                baseUrl: 'https://api.deepseek.com/v1',
+              },
+            ]
+          : []),
+      ];
+      const selection = {
+        id: 'deepseek-v4',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+      };
+      const submit = vi.fn().mockResolvedValue(undefined);
+      const { result } = renderHook(() =>
+        useProviderSetupFlow(submit, { openai: models }, undefined, selection),
+      );
+      act(() => result.current.start(config, AuthType.USE_OPENAI_RESPONSES));
+      expect(result.current.state.step).toBe('apiKey');
+      act(() => result.current.submitApiKey('sk-secret-test'));
+      act(() => result.current.submitAdvancedConfig());
+      const preview = JSON.parse(result.current.state.previewJson);
+      act(() => result.current.submit());
+      expect(submit).toHaveBeenCalledOnce();
+      const [provider, inputs] = submit.mock.calls[0]!;
+      expect(inputs).not.toHaveProperty('wireApi');
+      const plan = buildInstallPlan(provider, inputs, models, selection);
+      expect(plan.modelProviders![0]!.models).toEqual(models);
+      expect(preview.modelProviders.openai).toEqual(models);
+      expect(preview.security.auth.selectedType).toBe(plan.authType);
+      expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(preview.model.name).toBe(plan.modelSelection!.modelId);
+      expect(result.current.state.previewJson).not.toContain(inputs.apiKey);
+    },
+  );
 
   it('omits api when re-authenticating a preset with no Responses install', () => {
     // A preset re-authentication that carries no Responses install must submit

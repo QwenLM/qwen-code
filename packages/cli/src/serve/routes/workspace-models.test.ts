@@ -51,6 +51,7 @@ function readWorkspaceSettings(): Record<string, unknown> {
 function makeApp(
   overrides: {
     env?: Readonly<Record<string, string | undefined>>;
+    baseEnv?: Readonly<Record<string, string | undefined>>;
     parseAndValidateClientId?: (
       req: express.Request,
       res: express.Response,
@@ -98,6 +99,7 @@ function makeApp(
   registerWorkspaceModelsRoutes(app, {
     boundWorkspace: workspace,
     env: overrides.env,
+    baseEnv: overrides.baseEnv ?? overrides.env,
     isWorkspaceTrusted: () => overrides.trusted ?? true,
     mutate,
     safeBody: (req) =>
@@ -1098,6 +1100,50 @@ describe('DELETE /workspace/models', () => {
       model: { name: 'gpt-4o', baseUrl },
     });
   });
+
+  it.each(['gpt-4o', 'claude-other'])(
+    'does not use workspace-only env to preserve a deleted User selection (%s)',
+    async (modelId) => {
+      const baseUrl = 'https://api.example/v1';
+      writeUserSettings({
+        modelProviders: { openai: [{ id: 'gpt-4o', baseUrl }] },
+        model: { name: 'gpt-4o', baseUrl },
+      });
+      const { app } = makeApp({
+        baseEnv: {},
+        env: {
+          ANTHROPIC_API_KEY: 'test-only-key',
+          ANTHROPIC_MODEL: modelId,
+          ANTHROPIC_BASE_URL: baseUrl,
+        },
+      });
+      const res = await request(app).delete('/workspace/models').send({
+        authType: 'openai',
+        modelId: 'gpt-4o',
+        baseUrl,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.clearedActiveModel).toBe(false);
+      expect(readUserSettings()).toMatchObject({
+        model: { name: '', baseUrl: '' },
+        modelProviders: { openai: [] },
+      });
+      expect(readWorkspaceSettings()).toMatchObject({
+        model: { name: 'gpt-4o', baseUrl },
+      });
+      const otherWorkspace = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-other-ws-'),
+      );
+      try {
+        expect(
+          loadSettings(otherWorkspace, { skipLoadEnvironment: true }).merged
+            .model,
+        ).toMatchObject({ name: '', baseUrl: '' });
+      } finally {
+        fs.rmSync(otherWorkspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps a non-OpenAI settings selection when deleting a same-id OpenAI entry', async () => {
     const baseUrl = 'https://api.example/v1';

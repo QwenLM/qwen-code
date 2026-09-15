@@ -181,6 +181,11 @@ export const useAuthCommand = (
             inputs.protocol ?? providerConfig.protocol,
             settings.merged.providerProtocol,
           ),
+          {
+            authType: settings.merged.security?.auth?.selectedType,
+            id: settings.merged.model?.name,
+            baseUrl: settings.merged.model?.baseUrl,
+          },
         );
         protocol = plan.authType;
         setPendingAuthType(protocol);

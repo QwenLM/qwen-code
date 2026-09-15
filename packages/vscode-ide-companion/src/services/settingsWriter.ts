@@ -464,6 +464,8 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
   const resolvedProviders =
     (resolveProviderSettings(data)['modelProviders'] as ModelProvidersConfig) ??
     {};
+  let writeProviders: ModelProvidersConfig = {};
+  let rawWriteProviders: ModelProvidersConfig = {};
   let backupData: Record<string, unknown> | null = null;
 
   return {
@@ -483,16 +485,17 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
         key.split('.').length === 2 &&
         Array.isArray(value)
       ) {
+        const provider = key.slice('modelProviders.'.length);
+        // Pruning filters the latest write view; install patches instead carry
+        // models resolved before env rotation. Compare against their own view.
+        const fromWriteView = value.every((model) =>
+          writeProviders[provider]?.includes(model),
+        );
         value = preserveModelProviderPlaceholders(
           value,
-          key.slice('modelProviders.'.length),
-          key === 'modelProviders.openai'
-            ? resolvedProviders
-            : ((resolveProviderSettings(data)['modelProviders'] ??
-                {}) as ModelProvidersConfig),
-          key === 'modelProviders.openai'
-            ? originalProviders
-            : ((data['modelProviders'] ?? {}) as ModelProvidersConfig),
+          provider,
+          fromWriteView ? writeProviders : resolvedProviders,
+          fromWriteView ? rawWriteProviders : originalProviders,
           resolveProviderSettings(data)['providerProtocol'] as
             | ProviderProtocolConfig
             | undefined,
@@ -553,9 +556,13 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
 
     getModelProvidersForWrite() {
       const resolved = resolveProviderSettings(data);
+      writeProviders = (resolved['modelProviders'] ??
+        {}) as ModelProvidersConfig;
+      rawWriteProviders = structuredClone(
+        data['modelProviders'] ?? {},
+      ) as ModelProvidersConfig;
       return {
-        modelProviders: (resolved['modelProviders'] ??
-          {}) as ModelProvidersConfig,
+        modelProviders: writeProviders,
         providerProtocol: resolved['providerProtocol'] as
           | ProviderProtocolConfig
           | undefined,

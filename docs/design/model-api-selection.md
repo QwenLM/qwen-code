@@ -115,13 +115,34 @@ ends that startup mapping, including before the first generator is created.
 ACP persists User's own OpenAI wire choice independently of Workspace-derived
 runtime authentication. Deletion validates each writable scope against its own
 effective settings and preserves valid Workspace selections that inherit fields
-from a cleared User selection. A survivor must be the first registered route
-and eligible for conversation use.
+from a cleared User selection. Both fast and full startup capture the environment
+before loading workspace values. User selection validation uses that immutable
+snapshot with User's own settings and home-level `.env` files, discovered from
+home rather than the workspace or its ancestors. Shell and home credentials
+remain valid global inputs; workspace-only values cannot preserve a stale User
+selection. This snapshot is used only for deletion validation, not to change the
+daemon or Workspace runtime environment. A survivor must be the first registered
+route and eligible for conversation use.
 
 Preview and submission use the same canonical view of existing models, including
 released declarations without modifying the source settings. Preset
-reconnection without an API picker preserves the identified saved route at the
-same endpoint; generic custom-provider setup keeps its visible API choice.
+reconnection without an explicit API input preserves each saved model's API at
+the exact same endpoint, including both APIs for the same model id. The shared
+install builder performs this preservation for every entry point. The saved
+selection determines the plan's active route, not the API of other models;
+generic custom-provider setup keeps its visible API choice. New models retain
+the preset defaults. Installs with preserved API stamps retire template-version
+metadata that an unstamped template cannot reproduce.
+
+Credential rotation preserves `${...}` references by comparing each write with
+the same resolved snapshot that produced its input. Legacy pruning uses its own
+latest write snapshot; final runtime reads resolve the newly stored environment.
+The CLI refreshes all provider buckets in the writable scope after a model write,
+so duplicate mapped routes cannot retain stale headers after credential rotation.
+Placeholder recovery follows the registry's first-wins ordering across provider
+buckets while still rejecting ambiguous references within the winning bucket.
+Explicit credential references are never migrated automatically.
+
 `protocolOptions` controls SDK protocol selection, not whether a model may use
 `wireApi`. Voice transcription currently supports Chat Completions only:
 Responses voice configurations are rejected before writes, including prebuilt

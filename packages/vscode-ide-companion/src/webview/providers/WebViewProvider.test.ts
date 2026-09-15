@@ -2212,7 +2212,7 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
       expected: 'openai',
     },
   ])(
-    'preserves only the identified preset wire: $name',
+    'preserves preset routes and selects the identified wire: $name',
     async ({ sibling, savedAuth, otherEndpoint, explicitChat, expected }) => {
       const model = {
         id: inputs.modelIds[0],
@@ -2248,11 +2248,67 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
       expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
       const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
       expect(plan.authType).toBe(expected);
-      if (expected === 'openai-responses') {
-        expect(plan.modelProviders[0].models).toEqual([model]);
+      if (!otherEndpoint && !explicitChat) {
+        expect(plan.modelProviders[0].models).toEqual([
+          ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+          model,
+        ]);
+      } else {
+        expect(plan.modelProviders[0].models).toHaveLength(1);
+        expect(plan.modelProviders[0].models[0]).toMatchObject({
+          id: model.id,
+          baseUrl: otherEndpoint
+            ? 'https://another.example/v1'
+            : inputs.baseUrl,
+          ...(explicitChat ? { wireApi: 'chat-completions' } : {}),
+        });
+        if (otherEndpoint) {
+          expect(plan.modelProviders[0].models[0].wireApi).toBeUndefined();
+        }
       }
     },
   );
+
+  it('reconnects a mixed preset without changing either API or the selected model', async () => {
+    const models = [
+      {
+        id: 'deepseek-v4-pro',
+        name: '[DeepSeek] Pro',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+      },
+      {
+        id: 'deepseek-v4-flash',
+        name: '[DeepSeek] Flash',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        wireApi: 'responses',
+      },
+    ];
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: models },
+      model: { name: 'deepseek-v4-flash', baseUrl: inputs.baseUrl },
+      security: { auth: { selectedType: 'openai-responses' } },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](
+      { ...providerConfig, models: models.map(({ id }) => ({ id })) },
+      { ...inputs, modelIds: models.map(({ id }) => id) },
+    );
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+    expect(plan.modelProviders[0].models).toEqual(models);
+    expect(plan.authType).toBe('openai-responses');
+    expect(plan.modelSelection).toEqual({ modelId: 'deepseek-v4-flash' });
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
 
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };

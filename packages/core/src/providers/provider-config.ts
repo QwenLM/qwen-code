@@ -318,6 +318,7 @@ export function buildInstallPlan(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
   existingModels: readonly ProviderModelConfig[] = [],
+  selection?: { authType?: string; id?: string; baseUrl?: string },
 ): ProviderInstallPlan {
   const inputProtocol = inputs.protocol ?? config.protocol;
   const protocol = resolveModelProtocol(inputProtocol, inputs)!;
@@ -335,11 +336,46 @@ export function buildInstallPlan(
   const providerOwns = resolveOwnsModel(config);
   const builtModels =
     inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  const preserveSavedApis =
+    isOpenAI && !config.protocolOptions && wireApi === undefined;
   let models = wireApi
     ? builtModels.map((model) =>
         model.wireApi === undefined ? { ...model, wireApi } : model,
       )
     : builtModels;
+  if (preserveSavedApis && existingModels.length) {
+    const responsesModels =
+      inputs.prebuiltModels ??
+      buildModelConfigs(config, {
+        ...inputs,
+        wireApi: 'responses',
+      });
+    models = builtModels.flatMap((model, index) => {
+      if (model.wireApi !== undefined) return [model];
+      const saved = existingModels.filter(
+        (entry) =>
+          providerOwns?.(entry) &&
+          entry.id === model.id &&
+          entry.baseUrl === model.baseUrl &&
+          tryResolveModelProtocol(savedProtocol, entry) !== undefined,
+      );
+      if (!saved.length) return [model];
+      const seen = new Set<AuthType>();
+      return saved.flatMap((entry) => {
+        const route = resolveModelProtocol(savedProtocol, entry)!;
+        if (seen.has(route)) return [];
+        seen.add(route);
+        return [
+          {
+            ...(route === AuthType.USE_OPENAI_RESPONSES
+              ? responsesModels[index]!
+              : model),
+            ...(entry.wireApi !== undefined ? { wireApi: entry.wireApi } : {}),
+          },
+        ];
+      });
+    });
+  }
   const providerState = resolveProviderState(config, inputs.baseUrl, models);
   if (
     config.id === 'custom-openai-compatible' &&
@@ -479,9 +515,23 @@ export function buildInstallPlan(
       );
     }
   }
-  const firstModel = models.find(
-    (model) => !model.imageOnly && !model.voiceOnly,
-  );
+  const selectedModels =
+    preserveSavedApis && selection?.id
+      ? models.filter(
+          (model) =>
+            !model.imageOnly &&
+            !model.voiceOnly &&
+            model.id === selection.id &&
+            (!selection.baseUrl || model.baseUrl === selection.baseUrl),
+        )
+      : [];
+  const firstModel =
+    selectedModels.find(
+      (model) =>
+        resolveModelProtocol(savedProtocol, model) === selection?.authType,
+    ) ??
+    selectedModels[0] ??
+    models.find((model) => !model.imageOnly && !model.voiceOnly);
   if (models.length === 0) {
     throw new Error(
       `No models configured for provider "${config.id}". Check model list or provider configuration.`,
@@ -519,7 +569,8 @@ export function buildInstallPlan(
     // would let a version from an earlier default-route install survive, so
     // the retire shape deletes it instead.
     providerState:
-      wireApi === undefined && protocol === config.protocol
+      models.every((model) => model.wireApi === undefined) &&
+      protocol === config.protocol
         ? providerState
         : retireProviderState(config),
   };

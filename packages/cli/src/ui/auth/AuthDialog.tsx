@@ -141,6 +141,11 @@ export function AuthDialog(): React.JSX.Element {
     handleProviderSubmit,
     settings.merged.modelProviders,
     settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
   );
 
   // -- Navigation -----------------------------------------------------------

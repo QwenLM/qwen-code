@@ -115,10 +115,10 @@ export function createLoadedSettingsAdapter(
         settings.merged.providerProtocol,
       );
       settings.setValue(persistScope, key, persisted);
-      settingsFile.settings.modelProviders = {
-        ...settingsFile.settings.modelProviders,
-        [provider]: resolveEnvVarsInObject(persisted, getHomeEnvFallbackVars()),
-      };
+      settingsFile.settings.modelProviders = resolveEnvVarsInObject(
+        settingsFile.originalSettings.modelProviders,
+        getHomeEnvFallbackVars(),
+      );
       settings.recomputeMerged();
     },
 
