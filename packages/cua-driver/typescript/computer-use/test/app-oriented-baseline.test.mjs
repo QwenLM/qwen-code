@@ -23,7 +23,7 @@ function fixture(action) {
   const calls = [];
   const driver = {
     async listToolsJson() {
-      return JSON.stringify({ tools: [] });
+      return JSON.stringify({ platform: "macos", tools: [] });
     },
     async getWindowState(input) {
       calls.push({ method: "getWindowState", input });

@@ -57,7 +57,17 @@ import type {
   BackgroundTaskInfo,
   CronJobInfo,
 } from './types.js';
-import { HookPhase, PermissionMode } from './types.js';
+import {
+  createHookOutput,
+  HookPhase,
+  PermissionMode,
+  PreToolUseHookOutput,
+} from './types.js';
+import {
+  MessageBusType,
+  type HookProgress,
+  type HookProgressOutcome,
+} from '../confirmation-bus/types.js';
 import { approvalModeToPermissionMode } from './permission-mode.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -68,6 +78,94 @@ import type { CronJob } from '../services/cronScheduler.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+/** Longest prompt text used as a hook's display name. */
+const HOOK_DISPLAY_NAME_MAX_LENGTH = 80;
+
+/**
+ * Maps one hook's execution result to the outcome reported on the bus. A hook
+ * that exits cleanly but decides to block or deny is reported as blocked, so a
+ * consumer does not have to re-parse the output.
+ */
+function toProgressOutcome(
+  eventName: HookEventName,
+  result: HookExecutionResult,
+): { outcome: HookProgressOutcome; blockedReason?: string } {
+  switch (result.outcome) {
+    case 'timeout':
+      return { outcome: 'timeout' };
+    case 'cancelled':
+      return { outcome: 'cancelled' };
+    case 'blocking':
+      return {
+        outcome: 'blocked',
+        blockedReason: blockedReasonOf(eventName, result),
+      };
+    case 'non_blocking_error':
+      return { outcome: 'error' };
+    case 'success':
+    case undefined:
+      break;
+    default: {
+      const exhaustive: never = result.outcome;
+      return exhaustive;
+    }
+  }
+  if (!result.success) {
+    return { outcome: 'error' };
+  }
+  if (result.output) {
+    const output = createHookOutput(eventName, result.output);
+    const denied =
+      output instanceof PreToolUseHookOutput
+        ? output.isDenied()
+        : output.isBlockingDecision();
+    if (denied) {
+      return {
+        outcome: 'blocked',
+        blockedReason: blockedReasonOf(eventName, result),
+      };
+    }
+  }
+  return { outcome: 'success' };
+}
+
+function blockedReasonOf(
+  eventName: HookEventName,
+  result: HookExecutionResult,
+): string | undefined {
+  if (!result.output) {
+    return undefined;
+  }
+  const output = createHookOutput(eventName, result.output);
+  const reason =
+    output instanceof PreToolUseHookOutput
+      ? output.getPermissionDecisionReason()
+      : output.stopReason || output.reason;
+  return reason || undefined;
+}
+
+function getHookDisplayName(config: HookConfig): string {
+  if (config.name) {
+    return config.name;
+  }
+  switch (config.type) {
+    case 'command':
+      return config.command || 'command hook';
+    case 'http':
+      return config.url || 'http hook';
+    case 'function':
+      return config.id || 'function hook';
+    case 'prompt': {
+      const prompt = config.prompt.replace(/\s+/g, ' ').trim();
+      return prompt.length > HOOK_DISPLAY_NAME_MAX_LENGTH
+        ? `${prompt.slice(0, HOOK_DISPLAY_NAME_MAX_LENGTH - 1)}…`
+        : prompt || 'prompt hook';
+    }
+    default:
+      return 'hook';
+  }
+}
 
 function normalizeQuestionHookResponse(
   toolName: string,
@@ -914,13 +1012,52 @@ export class HookEventHandler {
         debugLogger.debug(
           `Hook ${hookName} started for event ${eventName} (${index + 1}/${totalHooks})`,
         );
+        this.publishHookProgress({
+          phase: 'start',
+          eventName,
+          hookName: getHookDisplayName(config),
+          hookType: config.type,
+          index,
+          total: totalHooks,
+          ...(config.statusMessage
+            ? { statusMessage: config.statusMessage }
+            : {}),
+        });
       };
 
-      const onHookEnd = (config: HookConfig, result: HookExecutionResult) => {
+      const onHookEnd = (
+        config: HookConfig,
+        result: HookExecutionResult,
+        index: number,
+      ) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
           `Hook ${hookName} ended for event ${eventName}: ${result.success ? 'success' : 'failed'}`,
         );
+        const { outcome, blockedReason } = toProgressOutcome(eventName, result);
+        const systemMessage = result.output?.systemMessage;
+        this.publishHookProgress({
+          phase: 'end',
+          eventName,
+          hookName: getHookDisplayName(config),
+          hookType: config.type,
+          index,
+          total: totalHooks,
+          ...(config.statusMessage
+            ? { statusMessage: config.statusMessage }
+            : {}),
+          durationMs: result.duration,
+          outcome,
+          ...(result.error ? { error: result.error.message } : {}),
+          ...(result.exitCode !== undefined
+            ? { exitCode: result.exitCode }
+            : {}),
+          ...(typeof systemMessage === 'string' && systemMessage
+            ? { systemMessage }
+            : {}),
+          ...(blockedReason ? { blockedReason } : {}),
+          ...(result.isAsync === true ? { async: true } : {}),
+        });
       };
 
       // Execute hooks according to the merged strategy
@@ -967,6 +1104,27 @@ export class HookEventHandler {
         failClosedResult.finalOutput.reason = `${failClosedResult.finalOutput.reason}: ${normalizedError.message}`;
       }
       return failClosedResult;
+    }
+  }
+
+  /**
+   * Publishes a hook's start or end on the MessageBus. Progress is only
+   * observed, so a missing bus or a failing subscriber never affects the hook
+   * or its result.
+   */
+  private publishHookProgress(message: Omit<HookProgress, 'type'>): void {
+    const bus = this.config.getMessageBus?.();
+    if (!bus) {
+      return;
+    }
+    try {
+      void Promise.resolve(
+        bus.publish({ type: MessageBusType.HOOK_PROGRESS, ...message }),
+      ).catch((error: unknown) => {
+        debugLogger.debug(`Failed to publish hook progress: ${error}`);
+      });
+    } catch (error) {
+      debugLogger.debug(`Failed to publish hook progress: ${error}`);
     }
   }
 
