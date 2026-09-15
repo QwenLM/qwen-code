@@ -33143,11 +33143,9 @@ describe('Session', () => {
         });
 
         it('pauses the canonical Goal runtime when the blocking cap fires', async () => {
-          // `abortGoalForStopHookCap` only reads the legacy
-          // `activeGoalStore`, which has no writer for daemon sessions --
-          // so on its own the cap stops nothing here: the goal stays active,
-          // the runtime mints the next continuation, and a Stop hook that
-          // always blocks loops the session forever.
+          // Without the pause the goal stays active, the runtime mints the
+          // next continuation, and a Stop hook that always blocks loops the
+          // session forever.
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',
             revision: 3,
