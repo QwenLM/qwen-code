@@ -16,7 +16,7 @@ import {
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  resolveContainedCwd,
+  resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -183,25 +183,31 @@ export function registerWorkspaceQualifiedGitLogRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git/log', (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/log';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    void handleLogList(
+    const cwd = resolveSessionManagedGitCwdForRoute(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      runtime,
+      route,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/log',
     );
+    if (cwd === undefined) return;
+    void handleLogList(req, res, cwd, deps.sendBridgeError, route);
   });
   app.get('/workspaces/:workspace/git/log/commit', (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/log/commit';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    void handleCommitDetail(
+    const cwd = resolveSessionManagedGitCwdForRoute(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      runtime,
+      route,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/log/commit',
     );
+    if (cwd === undefined) return;
+    void handleCommitDetail(req, res, cwd, deps.sendBridgeError, route);
   });
 }

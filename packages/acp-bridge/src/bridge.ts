@@ -11494,7 +11494,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
       }
       const isSideTask = source.sourceType === 'side_task';
-      const restoreBranch = isSideTask || req.atRecordId === undefined;
+      const restoreBranch =
+        !req.persistOnly && (isSideTask || req.atRecordId === undefined);
 
       if (context?.clientId !== undefined) {
         resolveTrustedClientId(entry, context.clientId);
@@ -11531,7 +11532,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         assertFreshSessionsAvailable();
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
-        if (restoreBranch) {
+        if (restoreBranch || req.persistOnly) {
           if (
             byId.size +
               inFlightSpawns.size +
@@ -11541,6 +11542,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ) {
             throw new SessionLimitExceededError(maxSessions);
           }
+        }
+        if (restoreBranch) {
           admission = reserveFreshSession({
             operation: 'branch',
             workspaceCwd: boundWorkspace,
@@ -11572,6 +11575,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               name: req.name,
               ...(req.atRecordId !== undefined
                 ? { atRecordId: req.atRecordId }
+                : {}),
+              ...(req.targetSessionId !== undefined
+                ? { targetSessionId: req.targetSessionId }
                 : {}),
             },
           );
@@ -11612,6 +11618,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(
               `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
+            );
+          }
+          if (
+            req.targetSessionId !== undefined &&
+            result.newSessionId !== req.targetSessionId
+          ) {
+            throw new Error(
+              'branchSession: agent returned a different target session id',
             );
           }
           // The fork is durably committed at this point, including the
@@ -12625,6 +12639,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return toSessionSummary(entry);
+    },
+
+    getSessionExecutionSnapshot(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return {
+        workspaceCwd: entry.workspaceCwd,
+        effectiveCwd: entry.effectiveCwd,
+        ...(entry.worktree ? { worktree: { ...entry.worktree } } : {}),
+      };
     },
 
     recordHeartbeat(sessionId, context) {

@@ -7,6 +7,7 @@
 import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
+  DaemonBranchSessionRequest,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -676,10 +677,7 @@ export interface DaemonSessionActions {
   listSources(): Promise<SessionSourcesResult>;
   upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult>;
   removeSource(sourceId: string): Promise<SessionSourceRemoveResult>;
-  branchSession(
-    name?: string,
-    atRecordId?: string,
-  ): Promise<{
+  branchSession(options?: DaemonBranchSessionRequest): Promise<{
     sessionId: string;
     displayName: string;
     switchStarted: boolean;
