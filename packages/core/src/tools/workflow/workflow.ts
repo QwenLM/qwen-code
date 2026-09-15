@@ -83,6 +83,12 @@ import type {
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
 import {
+  buildWorkflowSizeGuidelineParagraph,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuidelineSetting,
+} from '../../agents/runtime/workflow-size.js';
+import { scanWorkflowScriptShape } from '../../agents/runtime/workflow-script-shape.js';
+import {
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringSurface,
   toolSearchRevealSentence,
@@ -1001,6 +1007,12 @@ const CONFIRM_ARGS_CHARS = 300;
 /** Phases listed individually before the remainder becomes a count. */
 const CONFIRM_MAX_PHASES = 12;
 
+/** Rows of the script's static structure shown in the approval dialog. */
+const CONFIRM_MAX_STRUCTURE_ROWS = 12;
+/** Says what a row's number is, so no reader takes it for an agent count. */
+const CONFIRM_STRUCTURE_HEADING =
+  'Structure (where the script calls agent(); a loop or a fan-out runs each call many times):';
+
 /**
  * Sanitize a value that will be rendered on one line of the approval dialog.
  *
@@ -1185,6 +1197,14 @@ function buildConfirmationPrompt(
     }
   }
 
+  const structureSource = params.script || loaded?.script;
+  if (structureSource) {
+    const structure = buildConfirmationStructure(structureSource);
+    if (structure.length > 0) {
+      lines.push('', CONFIRM_STRUCTURE_HEADING, ...structure);
+    }
+  }
+
   if (params.resumeFromRunId) {
     lines.push('', `Resuming run: ${sanitizeLine(params.resumeFromRunId)}`);
   }
@@ -1214,6 +1234,37 @@ function buildConfirmationPrompt(
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Where the script's agents are, read statically: one row per run of step
+ * calls, per fan-out and per loop, with the first prompts of each. Declared
+ * phases say what the author meant; this says what the code does, and a reader
+ * approving a run that may dispatch hundreds of agents needs both. A row counts
+ * `agent()` call sites, never agents: a loop or a fan-out over `args` has no
+ * static count, so a number shaped like one would read as a promise.
+ */
+function buildConfirmationStructure(script: string): string[] {
+  const shape = scanWorkflowScriptShape(script);
+  const shown = shape.rows.slice(0, CONFIRM_MAX_STRUCTURE_ROWS);
+  const lines = shown.map((row) => {
+    const label =
+      row.kind === 'loop'
+        ? `loop ${sanitizeLine(row.condition ?? '')}`
+        : row.kind;
+    if (row.count === 0) {
+      return `  ${label} — runs functions built elsewhere in the script`;
+    }
+    const sites = row.count > 1 ? `, ${row.count} agent() call sites` : '';
+    const prompts = row.prompts
+      .map((prompt) => `"${sanitizeLine(prompt)}"`)
+      .join(', ');
+    return prompts ? `  ${label}${sites} — ${prompts}` : `  ${label}${sites}`;
+  });
+  if (shape.rows.length > shown.length) {
+    lines.push(`  … and ${shape.rows.length - shown.length} more`);
+  }
+  return lines;
 }
 
 /** The rule key an "always allow" pins a saved workflow's content under. */
@@ -1462,18 +1513,28 @@ const WORKFLOW_AUTHORING_INLINE_NOTE =
 export function buildWorkflowToolDescription(
   surface: WorkflowAuthoringSurface,
   reference: WorkflowAuthoringReference | null = readWorkflowAuthoringReference(),
+  sizeGuideline: WorkflowSizeGuidelineSetting | null = null,
 ): string {
-  const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_TOOL_RUNTIME}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+  // The size guideline is one more number the model plans a run around, so it
+  // sits with the runtime facts. The inline shape has no runtime section and
+  // carries it right after the decision instead.
+  const size = sizeGuideline
+    ? buildWorkflowSizeGuidelineParagraph(sizeGuideline)
+    : null;
+  const runtime = size
+    ? `${WORKFLOW_TOOL_RUNTIME}\n\n${size}`
+    : WORKFLOW_TOOL_RUNTIME;
+  const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${runtime}\n\n${WORKFLOW_AUTHORING_POINTER}`;
   switch (surface) {
     case 'pointer':
       return pointer;
     case 'pointer-via-tool-search':
       return `${pointer}${WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE}`;
     case 'withheld':
-      return `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_TOOL_RUNTIME}`;
+      return `${WORKFLOW_TOOL_DECISION}\n\n${runtime}`;
     case 'inline':
       return reference
-        ? `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_AUTHORING_INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`
+        ? `${WORKFLOW_TOOL_DECISION}\n\n${size ? `${size}\n\n` : ''}${WORKFLOW_AUTHORING_INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`
         : pointer;
     default: {
       // Unreachable while every surface has a case above. Typed `never` so a
@@ -1579,7 +1640,12 @@ export class WorkflowTool extends BaseDeclarativeTool<
     super(
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
-      buildWorkflowToolDescription(surface),
+      buildWorkflowToolDescription(
+        surface,
+        undefined,
+        config.getWorkflowSizeGuideline?.() ??
+          resolveWorkflowSizeGuidelineSetting(undefined),
+      ),
       Kind.Other,
       buildWorkflowParamSchema(surface),
       /* isOutputMarkdown */ true,
