@@ -8688,7 +8688,8 @@ export function App({
     }
   });
   const collaborationThreadId =
-    collaborationThread?.server === workspace.baseUrl
+    collaborationThread !== undefined &&
+    collaborationThread.server === workspace.baseUrl
       ? collaborationThread.id
       : undefined;
   const [collaborationTitle, setCollaborationTitle] = useState<{
@@ -17246,23 +17247,35 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const handleCollaborationThreadOpen = useCallback(
+    (id: string, cwd: string) => {
+      setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+      setMainView('chat');
+      setActivePanel(null);
+    },
+    [workspace.baseUrl],
+  );
+  const handleCollaborationThreadError = useCallback(
+    (message: string) => pushToast('error', message),
+    [pushToast],
+  );
   const agentChatEntry = useAgentChatEntry({
     enabled:
       isChatEmptyState &&
       Boolean(
-        workspace.capabilities?.features.includes('agent_collaboration_v1'),
+        workspace.capabilities?.features?.includes('agent_collaboration_v1'),
       ),
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,
     onSubmit: handleEditorSubmit,
-    onOpen: (id, cwd) => {
-      setCollaborationThread({ id, cwd, server: workspace.baseUrl });
-      setMainView('chat');
-      setActivePanel(null);
-    },
-    onError: (message) => pushToast('error', message),
+    onOpen: handleCollaborationThreadOpen,
+    onError: handleCollaborationThreadError,
   });
+  const composerAtProviders = useMemo(
+    () => [...(atProviders ?? []), ...agentChatEntry.providers],
+    [atProviders, agentChatEntry.providers],
+  );
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
@@ -20097,7 +20110,7 @@ export function App({
                           builtinAtProviders={
                             workspaceContextActive ? builtinAtProviders : false
                           }
-                          atProviders={[...(atProviders ?? []), ...agentChatEntry.providers]}
+                          atProviders={composerAtProviders}
                           composerTagIcons={composerTagIcons}
                           voiceTarget={
                             activePanel !== null || mainView !== 'chat'

@@ -23,7 +23,7 @@ export function ThreadConversations({
   const cwd =
     connection.workspaceCwd ??
     workspace.capabilities?.workspaces?.find((entry) => entry.primary)?.cwd;
-  const enabled = workspace.capabilities?.features.includes(
+  const enabled = workspace.capabilities?.features?.includes(
     'agent_collaboration_v1',
   );
   const api = useMemo(

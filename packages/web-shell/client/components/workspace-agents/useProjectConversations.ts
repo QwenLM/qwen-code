@@ -7,7 +7,7 @@ export const COLLABORATION_SOURCE = 'workspace_collaboration';
 export function useProjectConversations(cwds: readonly string[]) {
   const workspace = useWorkspace();
   const key = JSON.stringify([...new Set(cwds)].sort());
-  const enabled = workspace.capabilities?.features.includes(
+  const enabled = workspace.capabilities?.features?.includes(
     'agent_collaboration_v1',
   );
   const [snapshot, setSnapshot] = useState<{
