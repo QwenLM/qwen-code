@@ -3283,6 +3283,8 @@ describe('BackgroundAgentResumeService', () => {
           timestamp: '2026-04-20T00:00:00.700Z',
           type: 'user',
           message: { role: 'user', parts: [{ text: 'one final constraint' }] },
+        }),
+        JSON.stringify({
           uuid: 'nested-call',
           timestamp: '2026-04-20T00:00:00.600Z',
           parentUuid: 'u2',
