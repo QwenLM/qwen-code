@@ -34,6 +34,7 @@ import {
   validateNdJsonStreamLimits,
 } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
+import { AcpChildCapacityExceededError } from './bridgeErrors.js';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
 import type { ChildHeapPolicy } from './child-heap-policy.js';
@@ -430,6 +431,14 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
+  if (
+    !options.processRegistry &&
+    options.childHeapPolicy?.snapshot().mode === 'admit'
+  ) {
+    throw new TypeError(
+      'ACP admission requires an explicit shared process registry.',
+    );
+  }
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
   const factory: ChannelFactory = async (
     workspaceCwd,
@@ -470,10 +479,18 @@ export function createSpawnChannelFactory(
     // reject the spawn while leaving the reservation held forever, inflating
     // `committedProcessCount` for every later spawn.
     try {
-      // Observation only: the policy is asked what it *would* decide so the
-      // refusal count is real, but nothing here acts on the answer — no
-      // derived ceiling reaches the child and no spawn is refused.
-      options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
+      const decision = options.childHeapPolicy?.decide(
+        processRegistry.committedProcessCount,
+      );
+      if (decision?.refuse) {
+        const policy = options.childHeapPolicy!.snapshot();
+        if (policy.mode === 'admit') {
+          throw new AcpChildCapacityExceededError(
+            policy.maxConcurrentChildren!,
+            processRegistry.committedProcessCount - 1,
+          );
+        }
+      }
       const memoryArgs = getAcpMemoryArgs();
       child = spawn(
         process.execPath,

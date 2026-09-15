@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../../config/config.js';
+import { TurnBudget } from '../../core/turn-budget.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
@@ -1959,5 +1960,39 @@ describe('WorkflowRunner', () => {
         fs.readdir(path.join(root, 'generated', 'inline')),
       ).resolves.toEqual([`${first.runId}.js`]);
     });
+  });
+  // A `+250k` turn target belongs to the turn, not to this run: the run's
+  // budget measures the turn, while the registry — what `/workflows` and the
+  // snapshot show — keeps this run's own figures and records no cap for it.
+  it('builds a directive budget from the turn and registers no per-run cap', async () => {
+    const { config, registry } = configWithRegistry();
+    const turns = new TurnBudget();
+    turns.beginTurn({
+      promptId: 'turn',
+      sessionId: 'runner-turn',
+      budget: 250_000,
+      directiveText: '+250k',
+      outputTokensAtTurnStart: 0,
+    });
+    Object.assign(config, {
+      getSessionId: () => 'runner-turn',
+      getTurnBudget: () => turns,
+    });
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return budget.total',
+      args: undefined,
+      dispatch: async () => 'unused',
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: 250_000 },
+    });
+    expect(handle.budget.source).toBe('directive');
+    expect(handle.budget.total).toBe(250_000);
+    expect(registry.get(handle.runId)?.tokenBudgetTotal).toBeNull();
   });
 });
