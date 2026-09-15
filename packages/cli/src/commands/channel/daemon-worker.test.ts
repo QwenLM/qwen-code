@@ -720,13 +720,18 @@ describe('createDaemonChannelBridgeFacade', () => {
     ]);
   });
 
-  it('preserves session-scoped available commands when present', () => {
+  it('preserves session-scoped available commands and model metadata when present', () => {
     const getAvailableCommands = vi.fn(() => [
       { name: 'status', description: 'Show status' },
     ]);
+    const getSessionModelInfo = vi.fn(() => ({
+      model: 'model-a',
+      reasoningEffort: 'high',
+    }));
     const bridge = {
       availableCommands: [],
       getAvailableCommands,
+      getSessionModelInfo,
       on: mockBridgeOn,
       off: mockBridgeOff,
       newSession: mockBridgeNewSession,
@@ -744,6 +749,11 @@ describe('createDaemonChannelBridgeFacade', () => {
       { name: 'status', description: 'Show status' },
     ]);
     expect(getAvailableCommands).toHaveBeenCalledWith('session-1');
+    expect(facade.getSessionModelInfo?.('session-1')).toEqual({
+      model: 'model-a',
+      reasoningEffort: 'high',
+    });
+    expect(getSessionModelInfo).toHaveBeenCalledWith('session-1');
   });
 
   it('forwards listSessions when present on bridge', () => {
