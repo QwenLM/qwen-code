@@ -155,6 +155,45 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 | `externalToolGuard`                                                                                                                                | Optional daemon-side handler for the private child-to-parent prepare RPC. The bridge validates channel ownership and the active Prompt before and after it calls the handler. |
 | `channelIdleTimeoutMs`                                                                                                                             | ACP child auto-reap delay after runtime work drains. Plain preheat is preserved for first use; active keepalive windows may extend the delay.                                 |
 
+## Web Shell workspace creation deadlines
+
+In the common case, workspace creation makes a capability preflight on a cold or
+expired cache, followed by session creation. Each request has its own default
+30-second timeout, including response-body consumption. Web Shell allows 75
+seconds for the combined creation action, covering these two request budgets
+plus 15 seconds of headroom. A 20-second preflight followed by a 15-second create
+therefore succeeds without configuration changes. A concurrent capability refresh
+can supersede the preflight and extend the chain; the action may then time out
+before creation settles even when each request stays within its own deadline.
+
+The 75-second limit also bounds transports that do not settle after SDK
+cancellation. It limits the action's wait rather than guaranteeing transport
+cancellation; successful results arriving after that limit are detached. Both
+initial workspace creation and creation with an existing session use this limit.
+SDK standalone creation, other actions, and post-creation callbacks retain their
+existing deadlines.
+
+Increasing `--initialize-timeout-ms` does not raise the SDK request timeout for
+the capability preflight or the create request. Load/resume follows the separate
+[restore timeout contract](../../design/2026-08-07-safe-session-restore-timeout.md#timeout-contract):
+automatic SDK derivation requires a cached server restore budget; without one it
+falls back to 70 seconds. Explicit request or client timeouts override that
+derivation and can shorten the budget. See the
+[serve protocol reference](../qwen-serve-protocol.md#capabilities) for the SDK and
+Web Shell restore headroom.
+
+Direct SDK consumers can configure
+[`fetchTimeoutMs`](./13-sdk-daemon-client.md#configuration); Web Shell providers
+do not expose this option. See the
+[Web Shell timeout reference](../../../packages/web-shell/README.md#workspace-会话创建超时)
+for creation and callback limits.
+
+The following controlled HTTP test shows the previous 30-second action deadline
+and the 75-second deadline with identical response delays. It exercises the
+actual SDK and workspace actions, not a rendered Web Shell or real daemon.
+
+![Controlled HTTP workspace creation before and after the deadline change](./assets/workspace-create-timeout.png)
+
 ## Important defaults
 
 | Constant                          | File                    | Value             | Meaning                                                                              |

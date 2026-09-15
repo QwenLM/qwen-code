@@ -154,6 +154,11 @@ class AttachmentUploadError extends Error {
 const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
 const RESTORE_REQUEST_HEADROOM_MS = 10_000;
 const RESTORE_WATCHDOG_HEADROOM_MS = 15_000;
+// Covers one default capability preflight + create (2 x 30s), plus 15s headroom.
+// Concurrent capability refreshes can extend the chain beyond this action limit.
+// Keep in sync with DEFAULT_FETCH_TIMEOUT_MS in sdk-typescript's DaemonClient.ts;
+// actions.test.ts pins both the SDK request deadline and this watchdog boundary.
+const CREATE_WATCHDOG_TIMEOUT_MS = 75_000;
 const ATTACH_WATCHDOG_TIMEOUT_MS = 30_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -2184,6 +2189,7 @@ export function createDaemonSessionActions({
                 ),
             ),
             'Create session timed out',
+            CREATE_WATCHDOG_TIMEOUT_MS,
           );
           persistStableClientId(nextSession.clientId, nextSession.sessionId);
           return nextSession;
@@ -2214,6 +2220,7 @@ export function createDaemonSessionActions({
             : await withActionTimeout(
                 trackedCreate,
                 'Create session timed out',
+                CREATE_WATCHDOG_TIMEOUT_MS,
               );
         if (manualSessionClearRef.current) {
           try {
