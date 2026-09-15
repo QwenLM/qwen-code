@@ -1160,6 +1160,12 @@ function upsertToolBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1377,6 +1383,12 @@ function appendShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1423,6 +1435,12 @@ function appendUserShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1470,6 +1488,12 @@ function upsertPermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1526,6 +1550,12 @@ function resolvePermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1594,6 +1624,12 @@ function appendUnrecognizedDiagnostic(
       ? { originatorClientId: event.originatorClientId }
       : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1621,6 +1657,12 @@ function appendStatusBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event?.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1703,6 +1745,12 @@ function appendPromptCancelledBlock(
       : {}),
     ...(event.reason ? { reason: event.reason } : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),

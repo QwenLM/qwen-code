@@ -274,11 +274,12 @@ and nests one level only — a workflow reached through `workflow()` cannot call
 It takes one of two forms. `workflow('<name>')` resolves a name against
 `<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
 slash commands) and `~/.qwen/workflows` (user scope, lower precedence when both
-define the same name). `workflow({ scriptPath: '<absolute path>' })` loads a
-script file directly from either of those directories or from the
-generated-scripts root (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the
-per-project runtime dir, not the project tree); a path outside those roots is
-refused. A bare string is always a name: a path passed as a string is rejected
+define the same name); an active extension's workflow is always named
+`'<extension>:<name>'`. `workflow({ scriptPath: '<absolute path>' })` loads a
+script file directly from either of those directories, an active extension's
+workflow file, or the generated-scripts root
+(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project runtime dir,
+not the project tree); any other path is refused. A bare string is always a name: a path passed as a string is rejected
 as an invalid workflow name. At the top level that rejection ends the run;
 inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
 other thunk rejection — with no agent dispatched and nothing in the failures
