@@ -152,10 +152,10 @@ differs only by the change under test; the verdict is the pair of counts.
   never rely on it), then rebuild **only the
   affected workspace or file** — e.g. `npm run build -w packages/<ws>` inside
   the base tree wired to the already-installed root `node_modules`, or
-  recompile the single changed module. A full base `npm ci` rarely fits the
+  recompile the single changed module. A full base `pnpm install` rarely fits the
   budget; say so in the report if you had to spend it.
 - ⚠️ Reusing the root `node_modules` for the base side is only a clean
-  control when the PR leaves `package.json`/`package-lock.json` untouched.
+  control when the PR leaves `package.json`/`pnpm-lock.yaml` untouched.
   If the PR changes the dependency tree, the tree itself is part of the
   change: either make the A/B dependency-aware (install the base lockfile in
   the base worktree for the affected package) or name the confound

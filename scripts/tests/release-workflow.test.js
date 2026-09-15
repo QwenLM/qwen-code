@@ -55,7 +55,6 @@ const cuaReleaseWorkflow = readFileSync(
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
-const rootPackageLock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
@@ -101,16 +100,13 @@ describe('CUA release workflow', () => {
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
     );
-    expect(rootPackageLock.packages['packages/node-repl'].version).toBe(
-      nodeReplPackage.version,
-    );
     expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
     expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
   });
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
     expect(cuaReleaseWorkflow).toMatch(
-      /verify-node-repl-package:[\s\S]*?npm ci --ignore-scripts[\s\S]*?npm run typecheck[\s\S]*?npm test[\s\S]*?npm run smoke:mcp[\s\S]*?npm run smoke:lifecycle[\s\S]*?node packages\/node-repl\/scripts\/verify-package\.mjs[\s\S]*?node-repl-mcp-npm-\$\{\{[\s\S]*?node_repl_version/,
+      /verify-node-repl-package:[\s\S]*?pnpm install --frozen-lockfile --ignore-scripts[\s\S]*?npm run typecheck[\s\S]*?npm test[\s\S]*?npm run smoke:mcp[\s\S]*?npm run smoke:lifecycle[\s\S]*?node packages\/node-repl\/scripts\/verify-package\.mjs[\s\S]*?node-repl-mcp-npm-\$\{\{[\s\S]*?node_repl_version/,
     );
   });
 
@@ -2177,7 +2173,9 @@ describe('release workflow', () => {
       expect(setupNode?.if, id).toBe(
         "${{ runner.environment != 'self-hosted' }}",
       );
-      expect(setupNode?.with.cache, id).toBe('npm');
+      // Dependencies install with pnpm, so an npm download cache would be
+      // restored and never read.
+      expect(setupNode?.with.cache, id).toBeUndefined();
       expect(setupNode?.with['package-manager-cache'], id).toBe(false);
       const machineNode = steps.find((step) =>
         String(step.uses ?? '').includes('.github/actions/self-hosted-node'),
@@ -2190,15 +2188,13 @@ describe('release workflow', () => {
     const publishSetupNode = releaseYaml.jobs.publish.steps.find((step) =>
       String(step.uses ?? '').includes('actions/setup-node'),
     );
-    expect(publishSetupNode?.with.cache).toBe(
-      "${{ runner.environment != 'self-hosted' && 'npm' || '' }}",
-    );
+    expect(publishSetupNode?.with.cache).toBeUndefined();
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
   });
 
   it('stages every integration package manifest after versioning', () => {
     expect(releaseStepScript).toContain(
-      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
+      'git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
     );
   });
 

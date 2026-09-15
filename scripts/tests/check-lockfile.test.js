@@ -27,13 +27,12 @@ const script = join(root, 'scripts', 'check-lockfile.js');
 // is gitignored, so a crashed run cannot leave tracked residue, and Node
 // resolves the script's `yaml` import by walking up into the real
 // node_modules. Copying the real manifests and lockfiles in — rather than
-// writing minimal ones — keeps the script's two integrity sections green, so
-// the parity section is the only thing under test.
+// writing minimal ones — keeps the script's integrity section green, so the
+// parity section is the only thing under test.
 let fixtureRoot;
 
 const FILES = [
   'package.json',
-  'package-lock.json',
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
   'packages/web-shell/package.json',
@@ -56,8 +55,8 @@ function runCheck() {
   return { status: result.status, out: result.stdout + result.stderr };
 }
 
-// The parity banner is what separates this section's verdict from the two
-// integrity sections', so every arm asserts on it rather than on the exit code
+// The parity banner is what separates this section's verdict from the
+// integrity section's, so every arm asserts on it rather than on the exit code
 // alone.
 function parityLines(out) {
   return out.slice(out.indexOf('Checking Playwright parity...'));
@@ -84,12 +83,14 @@ function replaced(text, from, to) {
   return patched;
 }
 
-function perturbNpmLockfile(mutate) {
-  const lockfile = JSON.parse(
-    readFileSync(join(fixtureRoot, 'package-lock.json'), 'utf8'),
-  );
-  mutate(lockfile.packages);
-  writeFixture('package-lock.json', JSON.stringify(lockfile, null, 2));
+// A package's own dependencies are recorded only in the snapshots section, so
+// these blocks are unique in the file; `replaced` proves each edit landed.
+const TEST_SNAPSHOT = `  '@playwright/test@${PINNED}':\n    dependencies:\n      playwright: ${PINNED}\n`;
+const PLAYWRIGHT_SNAPSHOT = `  playwright@${PINNED}:\n    dependencies:\n      playwright-core: ${PINNED}\n`;
+
+function perturbPnpmSnapshot(from, to) {
+  const text = readFileSync(join(fixtureRoot, 'pnpm-lock.yaml'), 'utf8');
+  writeFixture('pnpm-lock.yaml', replaced(text, from, to));
 }
 
 // Scoped to the web-shell importer block: the same specifier string appears
@@ -184,73 +185,35 @@ describe('check-lockfile Playwright parity', () => {
     }
   });
 
-  it('rejects a lockfile that resolves the hoisted package off the pin', () => {
-    try {
-      perturbNpmLockfile((packages) => {
-        packages['node_modules/playwright'].version = '1.58.2';
-      });
-
-      const { status, out } = runCheck();
-
-      expect(parityLines(out)).toContain(
-        `resolves node_modules/playwright to 1.58.2 instead of ${PINNED}`,
-      );
-      expect(status).toBe(1);
-    } finally {
-      restore();
-    }
-  });
-
-  it('rejects a lockfile that lost the hoisted package entirely', () => {
-    try {
-      perturbNpmLockfile((packages) => {
-        delete packages['node_modules/@playwright/test'];
-      });
-
-      const { status, out } = runCheck();
-
-      expect(parityLines(out)).toContain(
-        'has no node_modules/@playwright/test entry',
-      );
-      expect(status).toBe(1);
-    } finally {
-      restore();
-    }
-  });
-
   it('rejects a nested copy at a different revision', () => {
     try {
-      perturbNpmLockfile((packages) => {
-        packages['node_modules/@playwright/test/node_modules/playwright'] = {
-          version: '1.62.0',
-          dev: true,
-          resolved:
-            'https://registry.npmjs.org/playwright/-/playwright-1.62.0.tgz',
-          integrity: 'sha512-fixture=',
-        };
-      });
+      perturbPnpmSnapshot(
+        TEST_SNAPSHOT,
+        TEST_SNAPSHOT.replace(`playwright: ${PINNED}`, 'playwright: 1.62.0'),
+      );
 
       const { status, out } = runCheck();
 
-      expect(parityLines(out)).toContain('splitting the chromium revision');
+      expect(parityLines(out)).toContain(
+        `resolves playwright under @playwright/test@${PINNED} to 1.62.0, splitting the chromium revision`,
+      );
       expect(status).toBe(1);
     } finally {
       restore();
     }
   });
 
-  it('tolerates a nested copy at the pinned revision', () => {
+  it('tolerates a peer suffix on the pinned revision', () => {
     try {
-      // A same-version duplicate is a redundant install, not a split revision,
-      // so it must not be reported as one.
-      perturbNpmLockfile((packages) => {
-        packages['node_modules/@playwright/test/node_modules/playwright'] = {
-          version: PINNED,
-          dev: true,
-          resolved: `https://registry.npmjs.org/playwright/-/playwright-${PINNED}.tgz`,
-          integrity: 'sha512-fixture=',
-        };
-      });
+      // pnpm appends the peers it resolved to a version; the revision is the
+      // part before them, so a suffix alone is not a split.
+      perturbPnpmSnapshot(
+        TEST_SNAPSHOT,
+        TEST_SNAPSHOT.replace(
+          `playwright: ${PINNED}`,
+          `playwright: ${PINNED}(fsevents@2.3.2)`,
+        ),
+      );
 
       const { status, out } = runCheck();
 
@@ -400,22 +363,20 @@ describe('check-lockfile Playwright parity', () => {
   it('rejects a nested copy in the other direction too', () => {
     try {
       // The nested candidates are derived from the manifest list, so the pair
-      // is checked both ways: an @playwright/test nested under the hoisted
-      // playwright splits the chromium revision exactly as the reverse does.
-      perturbNpmLockfile((packages) => {
-        packages['node_modules/playwright/node_modules/@playwright/test'] = {
-          version: '1.62.0',
-          dev: true,
-          resolved:
-            'https://registry.npmjs.org/@playwright/test/-/test-1.62.0.tgz',
-          integrity: 'sha512-fixture=',
-        };
-      });
+      // is checked both ways: a playwright that depends on another
+      // @playwright/test splits the chromium revision exactly as the reverse does.
+      perturbPnpmSnapshot(
+        PLAYWRIGHT_SNAPSHOT,
+        PLAYWRIGHT_SNAPSHOT.replace(
+          'dependencies:\n',
+          "dependencies:\n      '@playwright/test': 1.62.0\n",
+        ),
+      );
 
       const { status, out } = runCheck();
 
       expect(parityLines(out)).toContain(
-        'nests node_modules/playwright/node_modules/@playwright/test at 1.62.0',
+        `resolves @playwright/test under playwright@${PINNED} to 1.62.0`,
       );
       expect(status).toBe(1);
     } finally {

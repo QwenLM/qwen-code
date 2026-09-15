@@ -35,7 +35,7 @@ import {
 // renaming the layout there fails the build here instead of silently
 // no-op-ing the sweeps on the shared runners — a suffix rename already
 // broke a sweeper once (see paths.ts).
-// npm-cache.yml and qwen-triage.yml also run on the shared pool but are
+// pnpm-store.yml and qwen-triage.yml also run on the shared pool but are
 // deliberately not covered here; extending the sweep to them is follow-up
 // work.
 const probePr = 12345;

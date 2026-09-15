@@ -123,7 +123,7 @@ case "${step}" in
 
   push-release-branch)
     release_branch_name="${BRANCH_NAME:?}"
-    git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
+    git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
     if git diff --staged --quiet; then
       echo "No version changes to commit"
     else
