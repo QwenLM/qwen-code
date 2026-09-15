@@ -312,7 +312,12 @@ export const TranscriptViewport = forwardRef<
   );
 
   const restoreOverFrames = useCallback(
-    (step: (onSettled: () => void) => boolean | 'pending') => {
+    (
+      step: (
+        onSettled: () => void,
+        retryAfterSettled: () => void,
+      ) => boolean | 'pending',
+    ) => {
       const owner = Symbol();
       restoreOwner.current = owner;
       restoring.current = true;
@@ -325,12 +330,17 @@ export const TranscriptViewport = forwardRef<
         restoring.current = false;
         if (updateFollow) updateFollowRef.current();
       };
+      const retry = () => {
+        if (restoreOwner.current !== owner) return;
+        if (--remaining > 0) frame = requestAnimationFrame(restore);
+        else finish();
+      };
       const restore = () => {
         if (restoreOwner.current !== owner || intent !== scrollIntent.current) {
           finish();
           return;
         }
-        const result = step(finish);
+        const result = step(finish, retry);
         if (restoreOwner.current !== owner || intent !== scrollIntent.current) {
           finish();
           return;
@@ -340,8 +350,7 @@ export const TranscriptViewport = forwardRef<
           finish();
           return;
         }
-        if (--remaining > 0) frame = requestAnimationFrame(restore);
-        else finish();
+        retry();
       };
       restore();
       return () => {
@@ -365,7 +374,7 @@ export const TranscriptViewport = forwardRef<
     if (!changedView && !changedMessages && !targetBlockId) return;
     if (changedView) anchor.current = undefined;
     if (!historical && !targetBlockId) return;
-    return restoreOverFrames((onSettled) => {
+    return restoreOverFrames((onSettled, retryAfterSettled) => {
       const scroll = scroller();
       if (!scroll) return false;
       const saved = anchor.current;
@@ -379,7 +388,7 @@ export const TranscriptViewport = forwardRef<
         if (list.current?.scrollToMessage(target.id, undefined, onSettled))
           return 'pending';
       } else if (saved) {
-        return restoreReadingAnchor(saved, onSettled);
+        return restoreReadingAnchor(saved, retryAfterSettled);
       } else if (changedView) {
         scroll.scrollTop =
           entryDirection.current === 'newer' ? 0 : scroll.scrollHeight;
@@ -413,10 +422,10 @@ export const TranscriptViewport = forwardRef<
         const saved = anchor.current;
         if (!saved || restoring.current || intent !== scrollIntent.current)
           return;
-        cancelRestore = restoreOverFrames((onSettled) => {
+        cancelRestore = restoreOverFrames((_onSettled, retryAfterSettled) => {
           const current = anchor.current;
           if (!current || intent !== scrollIntent.current) return false;
-          const result = restoreReadingAnchor(current, onSettled);
+          const result = restoreReadingAnchor(current, retryAfterSettled);
           capture();
           return result;
         });

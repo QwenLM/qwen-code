@@ -689,6 +689,49 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
     expect(getTranscriptPage).toHaveBeenCalledTimes(2);
   });
 
+  it('retries anchor restoration after a deferred virtual scroll is reset', async () => {
+    const {
+      click,
+      list,
+      row,
+      getTranscriptPage,
+      settleFrames,
+      advanceFrame,
+      triggerResize,
+      render,
+    } = await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 0;
+    const targetKey = `msg:${observed.props!.messages[0]!.id}`;
+    const before = row(targetKey).getBoundingClientRect().top;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2'], true));
+    await click('history.loadEarlier');
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+
+    list().scrollTop = 200;
+    observed.hideRows = true;
+    render();
+    let finishDeferredScroll!: () => void;
+    observed.scrollToMessage = vi.fn((_messageId, _callId, onSettled) => {
+      finishDeferredScroll = () => {
+        list().scrollTop = 0;
+        onSettled?.();
+      };
+      return true;
+    });
+    triggerResize();
+    advanceFrame();
+
+    act(() => finishDeferredScroll());
+    observed.hideRows = false;
+    render();
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+  });
+
   it('keeps the reader position after a dispatched scroll supersedes the saved anchor', async () => {
     const { click, list, row, getTranscriptPage, settleFrames, triggerResize } =
       await setup();
