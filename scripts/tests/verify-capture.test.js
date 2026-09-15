@@ -244,19 +244,58 @@ describe('verify-capture helper', () => {
     ).toBe(false);
   });
 
+  // The stroke must follow the glyph's OWN fill: the other bold arms feed
+  // \x1b[1m (default grey), where a stroke drifted to a constant grey is
+  // invisible because fill and stroke coincide. ANSI[1] is #cd3131, so a
+  // same-colour stroke caps green/blue at 0x31 at any blend with the
+  // #1e1e1e canvas, while a constant #d4d4d4 stroke paints an uncovered ring
+  // whose green/blue reaches ~0x8a (measured with and without host fonts).
+  // A channel ceiling, not a red-pixel count: a count passes with the stroke
+  // deleted entirely.
+  it('strokes a bold coloured glyph in its own fill, not a constant', async () => {
+    let png;
+    withDir((dir) => {
+      const out = path.join(dir, 'bold-colour.png');
+      const res = run(['--out', out, '--cols', '30'], {
+        input: `${ESC}[1;31mFAIL PASS${ESC}[0m\n`,
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      png = readFileSync(out);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const { data, info } = await sharp(png)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    let maxGB = 0;
+    for (let i = 0; i + 2 < data.length; i += info.channels) {
+      maxGB = Math.max(maxGB, data[i + 1], data[i + 2]);
+    }
+    expect(
+      maxGB,
+      'a grey halo was painted around a bold red glyph',
+    ).toBeLessThanOrEqual(0x40);
+  });
+
   // The title and a bold body cell are the renderer's two bold emitters; when
   // each carried its own attribute string the title kept a bare
   // font-weight="bold" — a no-op where no bold face resolves — while the body
   // cells gained the stroke, so the caption rendered LIGHTER than the cells
   // it heads in the A/B evidence images this helper exists to publish. Pin
-  // the shared recipe: a source assertion reds on every host, with or without
+  // the shared recipe: source assertions red on every host, with or without
   // fonts. The definition `const boldAttrs = (colour) =>` does not match this
   // pattern; the two call sites — boldAttrs('#9cdcfe') for the title and
   // boldAttrs(colour) for a bold cell — do, so a site rewritten to a
-  // hand-rolled attribute string drops the count.
+  // hand-rolled attribute string drops the count. That floor cannot see a NEW
+  // label that hand-rolls font-weight="bold" (a footer, a legend — the title's
+  // own shape before this fix), so also count the attribute in code, comments
+  // stripped because the prose above boldAttrs carries the literal: exactly
+  // one definition site.
   it('emits the title and bold body cells through one bold helper', () => {
     const src = readFileSync(HELPER, 'utf8');
     expect(src.match(/boldAttrs\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    const code = src.replace(/^\s*\/\/.*$/gm, '');
+    expect(code.match(/font-weight="bold"/g)?.length ?? 0).toBe(1);
   });
 
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
