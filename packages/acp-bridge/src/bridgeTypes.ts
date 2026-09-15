@@ -117,6 +117,8 @@ export type BridgePromptContentBlock =
 
 export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
   prompt: BridgePromptContentBlock[];
+  /** Per-prompt projection before ring retention and fan-out; defaults to full. */
+  eventDetailMode?: LiveReplayMode;
 };
 
 export interface RewindRequest {
@@ -305,6 +307,8 @@ export interface BridgeRestoreSessionRequest {
   historyPageSize?: number;
   /** Load-only live-turn replay projection; defaults to the complete journal. */
   liveReplayMode?: LiveReplayMode;
+  /** Load response projection for durable replay; defaults to full. */
+  compactedReplayMode?: LiveReplayMode;
   /** Keep inherited fork records as model context without replaying them. */
   hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
@@ -940,7 +944,7 @@ export interface BridgeSessionGoal {
     /** Canonical Goal turns completed so far. */
     iterations: number;
     setAt: number;
-    /** The judge's verdict on the most recent turn, when it has run. */
+    /** Why the Goal last stopped, or the verifier's most recent reason. */
     lastReason?: string;
   } | null;
 }
@@ -1230,6 +1234,7 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
 
 /** One daemon-owned, session-global queued mid-turn message. */
 export interface MidTurnQueueEntry {
+  eventDetailMode?: LiveReplayMode;
   messageId: string;
   text: string;
   /**
@@ -1262,6 +1267,7 @@ export interface BridgeMidTurnMessagesSnapshot {
  * `removePendingPrompt` can cancel a queued-but-not-yet-started prompt.
  */
 export interface PendingPromptEntry {
+  eventDetailMode?: LiveReplayMode;
   promptId: string;
   queuedAt: number;
   startedAt?: number;
@@ -2382,6 +2388,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
+      /** Applied only if the message is promoted into a new prompt. */
+      eventDetailMode?: LiveReplayMode;
       content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
