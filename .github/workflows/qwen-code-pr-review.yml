@@ -3169,7 +3169,7 @@ jobs:
             never_started="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:?}/jobs?per_page=100" \
               --jq '[.jobs[] | select(.name == "review-pr")] | if length == 0 then "unknown" elif all(.[]; (.runner_name // "") == "" and ((.steps // []) | length) == 0) then "true" else "false" end' 2>/dev/null)" || never_started="unknown"
             if [ "$never_started" = "true" ]; then
-              echo "review-pr in run ${GITHUB_RUN_ID} was never started by a runner (queue expired); posting the queue-expiry body." >> "$GITHUB_STEP_SUMMARY"
+              echo "review-pr in run ${GITHUB_RUN_ID} was never started by a runner; posting the never-started body." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           # A push landing mid-review leaves this comment pointing at a dead
@@ -3298,7 +3298,7 @@ jobs:
           # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
           # anchors on, and the retry instruction the timeout flavor needs.
           if [ "$never_started" = "true" ]; then
-            body="**Qwen Code review never started.** No runner picked up the review job before GitHub ended it, so no review ran for this head and nothing picks it up on its own. This step cannot see why: the \`ecs-review\` pool may be closed by schedule, empty or all-offline — \`qwen-review-runner-schedule.yml\` switches it, and its latest run tells those apart — or the run was cancelled while the job was still waiting. Re-request with \`@qwen-code /review\`; if it ends the same way, read that schedule run before requesting again. See [workflow logs](${RUN_URL})."
+            body="**Qwen Code review never started.** No runner picked up the review job before GitHub ended it, so no review ran for this head and nothing picks it up on its own. This step cannot determine the cause: the \`ecs-review\` pool may be closed by schedule, empty or all-offline — \`qwen-review-runner-schedule.yml\` switches it, and its latest run tells those apart — or the run was cancelled while the job was still waiting. Re-request with \`@qwen-code /review\`; if it ends the same way, read that schedule run before requesting again. See [workflow logs](${RUN_URL})."
           elif [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
             body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           else
