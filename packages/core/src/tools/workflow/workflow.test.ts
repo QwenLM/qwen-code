@@ -23,6 +23,10 @@ import {
 import { Storage } from '../../config/storage.js';
 import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
+import { TurnBudget } from '../../core/turn-budget.js';
+import { uiTelemetryService } from '../../telemetry/uiTelemetry.js';
+import { EVENT_API_RESPONSE } from '../../telemetry/constants.js';
+import { randomUUID } from 'node:crypto';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
@@ -718,7 +722,10 @@ await agent('scan package.json')
 
   // The inline fallback is large by construction — it carries the whole
   // reference — and grows whenever the reference does. It still needs a
-  // ceiling, or growth passes every other assertion about its size.
+  // ceiling, or growth passes every other assertion about its size. Raised
+  // from 24,000 when the reference gained the turn token budget: the
+  // fallback already stood at 23,973, so no description of the budget fits
+  // under the old figure, and the new one leaves a paragraph of headroom.
   it('keeps the inline fallback description within its budget', () => {
     const tool = new WorkflowTool({
       ...fakeConfig(),
@@ -729,7 +736,7 @@ await agent('scan package.json')
     } as unknown as Config);
 
     expect(tool.authoringSurface).toBe('inline');
-    expect(tool.description.length).toBeLessThanOrEqual(24_000);
+    expect(tool.description.length).toBeLessThanOrEqual(25_000);
   });
 
   it('rejects build() when script is missing', () => {
@@ -1811,6 +1818,36 @@ await agent('scan package.json')
     expect(registry.list()[1]!.status).toBe('completed');
   });
 
+  it('names the turn target, not a per-run cap, when the message set one', async () => {
+    const { config } = configWithRegistry();
+    const turns = new TurnBudget();
+    turns.beginTurn({
+      promptId: 'turn',
+      sessionId: 'banner-turn',
+      budget: 500_000,
+      directiveText: '+500k',
+      outputTokensAtTurnStart: 0,
+    });
+    Object.assign(config, {
+      getSessionId: () => 'banner-turn',
+      getTurnBudget: () => turns,
+    });
+
+    const result = await new WorkflowTool(config, {
+      dispatch: async () => 'ok',
+    })
+      .build({ script: 'return 1' })
+      .execute(new AbortController().signal);
+    const display = result.returnDisplay as string;
+
+    expect(display).toContain(
+      "This turn's output-token target is 500000 (set by `+500k` in your message)",
+    );
+    expect(display).not.toMatch(
+      /Workflows have no per-run token cap|Workflow token cap is/,
+    );
+  });
+
   it('P5 R1 #10: capped banner shape (`total !== null`) — was untested', async () => {
     const { config } = configWithRegistry();
     const originalEnv = process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'];
@@ -2341,6 +2378,72 @@ await agent('scan package.json')
       const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
 
       expect(trailer).toContain('tokens: 0 / 1000 spent');
+    });
+
+    // A `+500k` turn in a session already charged 400k before the turn began.
+    // The script reads the turn's figures rather than the run's; the trailer
+    // keeps this run's own spend apart from the turn's; the registry records
+    // no per-run cap; and once the turn has spent its target, the next
+    // agent() is refused without dispatching.
+    it('measures a +500k directive against the whole turn', async () => {
+      const { config } = storedConfig();
+      const sessionId = `turn-budget-${randomUUID()}`;
+      const turns = new TurnBudget();
+      Object.assign(config, {
+        getSessionId: () => sessionId,
+        getTurnBudget: () => turns,
+      });
+      const charge = (outputTokens: number) =>
+        uiTelemetryService.addEvent(
+          {
+            'event.name': EVENT_API_RESPONSE,
+            model: 'qwen-main',
+            prompt_id: 'main',
+            duration_ms: 1,
+            input_token_count: 1,
+            output_token_count: outputTokens,
+            total_token_count: outputTokens + 1,
+            cached_content_token_count: 0,
+            thoughts_token_count: 0,
+          } as unknown as Parameters<typeof uiTelemetryService.addEvent>[0],
+          sessionId,
+        );
+      charge(400_000);
+      turns.beginTurn({
+        promptId: 'main',
+        sessionId,
+        budget: 500_000,
+        directiveText: '+500k',
+        outputTokensAtTurnStart:
+          uiTelemetryService.getTotalOutputTokens(sessionId),
+      });
+      charge(150_000);
+
+      const dispatch = vi.fn(async () => 'unused');
+      const measured = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return [budget.total, budget.spent(), budget.remaining()];',
+        })
+        .execute(new AbortController().signal);
+      const parts = measured.llmContent as Array<{ text: string }>;
+
+      expect(JSON.parse(parts[0].text)).toEqual([500_000, 150_000, 350_000]);
+      expect(parts[1].text).toContain(
+        'tokens: 0 spent by this run · 150000 / 500000 this turn (+500k directive)',
+      );
+      expect(
+        config.getWorkflowRunRegistry().list()[0]!.tokenBudgetTotal,
+      ).toBeNull();
+
+      charge(350_000);
+      const refused = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'await agent("one"); return "done";' })
+        .execute(new AbortController().signal);
+
+      expect((refused.llmContent as Array<{ text: string }>)[0].text).toContain(
+        'token budget exceeded (500000 / 500000 output tokens)',
+      );
+      expect(dispatch).not.toHaveBeenCalled();
     });
 
     it('names the script and journal on a background launch', async () => {

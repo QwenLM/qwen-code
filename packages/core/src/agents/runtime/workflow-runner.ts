@@ -172,7 +172,7 @@ export class WorkflowRunner {
   ): Promise<WorkflowRunHandle> {
     const config = options.config;
     const runInBackground = options.runInBackground === true;
-    const budget = WorkflowBudgetImpl.fromEnv();
+    const budget = WorkflowBudgetImpl.fromConfig(config);
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const registry = config.getWorkflowRunRegistry?.();
@@ -308,7 +308,9 @@ export class WorkflowRunner {
           startTime: Date.now(),
           outputFile: '',
           abortController: controller,
-          tokenBudgetTotal: budget.total,
+          // The registry and `/workflows` show one run: a turn target is not
+          // this run's cap, and its spend is not this run's alone.
+          tokenBudgetTotal: budget.runCap(),
           script,
           scriptPath,
           ...(journalPath ? { journalPath } : {}),

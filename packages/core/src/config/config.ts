@@ -142,6 +142,7 @@ import { isImageGenerationCapable } from '../models/image-generation-capability.
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
+import { TurnBudget } from '../core/turn-budget.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -820,8 +821,13 @@ export {
 } from './mcp-server-config.js';
 
 export interface SandboxConfig {
-  command: 'docker' | 'podman' | 'sandbox-exec';
-  image: string;
+  command: 'docker' | 'podman' | 'sandbox-exec' | 'bwrap';
+  /**
+   * Container image, required by `docker` and `podman`. The in-place backends
+   * (`sandbox-exec`, `bwrap`) confine the current process instead of starting a
+   * container, so `loadSandboxConfig` leaves this unset for them.
+   */
+  image?: string;
 }
 
 /**
@@ -2533,6 +2539,9 @@ export class Config {
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   private readonly workflowRunRegistry = new WorkflowRunRegistry();
+  // Derived Configs reach this one through the prototype, on purpose: a
+  // workflow started inside a subagent measures against its session's turn.
+  private readonly turnBudget = new TurnBudget();
   // Derived Configs do not run field initializers. getFileReadCache()
   // lazily installs an own cache to keep child state isolated.
   private fileReadCache: FileReadCache = new FileReadCache();
@@ -10065,6 +10074,14 @@ export class Config {
 
   getWorkflowRunRegistry(): WorkflowRunRegistry {
     return this.workflowRunRegistry;
+  }
+
+  /**
+   * The current turn's output-token target and starting point, written when
+   * an interaction starts and read by a workflow at launch.
+   */
+  getTurnBudget(): TurnBudget {
+    return this.turnBudget;
   }
 
   /**
