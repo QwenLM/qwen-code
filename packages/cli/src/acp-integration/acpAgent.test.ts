@@ -315,6 +315,18 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   SessionIdCaseConflictError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionIdCaseConflictError,
+  // The real cursor codec: parseAcpSessionListCursor narrows on
+  // InvalidSessionListCursorError with instanceof and round-trips composite
+  // cursors through decode, so stand-ins would break both paths.
+  decodeSessionListCursor: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).decodeSessionListCursor,
+  encodeSessionListCursor: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).encodeSessionListCursor,
+  InvalidSessionListCursorError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).InvalidSessionListCursorError,
   // The real helpers: `history-replay-page` is not mocked and calls them to
   // compute the restore skip set when a replay is not suppress-driven.
   lastHistoryContentFromRecords: (
@@ -25412,7 +25424,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         await expect(
           agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
         ).rejects.toThrow(
-          `Invalid cursor: "${cursor}" is not a valid numeric cursor`,
+          `Invalid cursor: "${cursor}" is not a valid session-list cursor`,
         );
       }
       expect(SessionService).not.toHaveBeenCalled();
@@ -25586,6 +25598,43 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       expect(listSessions).toHaveBeenCalledWith({
         cursor: 1_797_860_000_000.5,
         size: 2,
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('round-trips a composite (mtime, sessionId) cursor', async () => {
+    const composite = {
+      mtime: 1_797_860_000_000.5,
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+    };
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: composite,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await expect(
+        agent.unstable_listSessions({
+          cwd: '/tmp/project',
+          cursor: '1797860000000.5:550e8400-e29b-41d4-a716-446655440000',
+        }),
+      ).resolves.toEqual({
+        sessions: [],
+        nextCursor: '1797860000000.5:550e8400-e29b-41d4-a716-446655440000',
+      });
+      expect(listSessions).toHaveBeenCalledWith({
+        cursor: composite,
+        size: undefined,
       });
     } finally {
       mockConnectionState.resolve();

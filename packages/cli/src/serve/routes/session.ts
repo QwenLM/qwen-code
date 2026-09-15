@@ -46,6 +46,7 @@ import {
   type WorktreeSession,
   parseGoalControlRequest,
   readArtifactSnapshot,
+  decodeSessionListCursor,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
@@ -1478,15 +1479,15 @@ export function registerSessionRoutes(
     }
   };
 
-  const isNumericSessionCursor = (cursor: string): boolean => {
-    const trimmed = cursor.trim();
-    if (trimmed === '') return false;
-    const parsed = Number(trimmed);
-    return (
-      Number.isFinite(parsed) &&
-      parsed >= 0 &&
-      parsed <= Number.MAX_SAFE_INTEGER
-    );
+  // Persisted-list cursors are either legacy bare-mtime numerics or the
+  // composite "<mtimeMs>:<sessionId>" form; anything else (base64url JSON)
+  // belongs to the live/organized cursor families.
+  const isPersistedSessionListCursor = (cursor: string): boolean => {
+    try {
+      return decodeSessionListCursor(cursor) !== undefined;
+    } catch {
+      return false;
+    }
   };
 
   const requireTrustedRuntimeForWorkspaceRoute = (
@@ -8374,7 +8375,7 @@ export function registerSessionRoutes(
             parentSessionId !== undefined ||
             parsedSource.sourceType !== undefined ||
             (cursor !== undefined && cursor !== ''
-              ? isNumericSessionCursor(cursor)
+              ? isPersistedSessionListCursor(cursor)
               : await hasActivePersistedSessions(runtime, controller.signal));
           // The live path only reads cursor/size; persisted-only options
           // (organized view or archived state) would be silently dropped there.

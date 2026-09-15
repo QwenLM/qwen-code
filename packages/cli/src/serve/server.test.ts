@@ -19899,6 +19899,55 @@ describe('createServeApp', () => {
       expect(res.body.sessions[0].sessionId).toBe(id);
     });
 
+    it('paginates losslessly across an mtime tie group via composite cursor', async () => {
+      const sharedMtime = new Date('2026-05-17T12:00:00.000Z');
+      const ids = [
+        '550e8400-e29b-41d4-a716-446655440001',
+        '550e8400-e29b-41d4-a716-446655440002',
+        '550e8400-e29b-41d4-a716-446655440003',
+      ];
+      for (const [i, sessionId] of ids.entries()) {
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp: sharedMtime.toISOString(),
+          prompt: `tie-group prompt ${i}`,
+          mtime: sharedMtime,
+        });
+      }
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const page1 = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=2`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page1.status).toBe(200);
+      expect(page1.body.sessions).toHaveLength(2);
+      // Composite "<mtimeMs>:<sessionId>" wire format, not a bare number.
+      expect(page1.body.nextCursor).toMatch(
+        /^\d+(\.\d+)?:[0-9a-fA-F-]{32,36}$/,
+      );
+
+      const page2 = await request(app)
+        .get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?size=2&cursor=${encodeURIComponent(page1.body.nextCursor)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page2.status).toBe(200);
+      expect(page2.body.sessions).toHaveLength(1);
+      expect(page2.body.nextCursor).toBeUndefined();
+
+      const seen = [...page1.body.sessions, ...page2.body.sessions].map(
+        (session) => session.sessionId,
+      );
+      expect(new Set(seen).size).toBe(3);
+      expect([...seen].sort()).toEqual([...ids].sort());
+    });
+
     it('merges sidecar pr history with the live entry bindings on list', async () => {
       // The live entry only knows bindings from this daemon lifetime; the
       // sidecar holds the full history. Binding A pre-restart, restarting

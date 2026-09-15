@@ -10,6 +10,8 @@ import { join } from 'node:path';
 import {
   escapeXml,
   SessionService,
+  encodeSessionListCursor,
+  type SessionListCursor,
   stripTerminalControlSequences,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -44,6 +46,7 @@ import {
   LIVE_SESSION_SOURCE_PREFIX,
 } from '../../runtime/live-session-source.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
 export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
@@ -54,6 +57,17 @@ const COORDINATOR_TURN_TIMEOUT_MS = 10 * 60_000;
 const BACKEND_CONTEXT_FLUSH_MS = 200;
 const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 30_000;
 const SESSION_SCAN_SIZE = 100;
+// Page cap for the resume-time compatibility scan. With the composite
+// session-list cursor, an mtime tie group no longer self-terminates the walk
+// after two pages, so an unbounded loop would re-scan and re-stat the whole
+// chats directory once per page before Live Voice connects. The page count
+// matches the file budget one listSessions pass guarantees
+// (MAX_FILES_TO_PROCESS 10000 / SESSION_SCAN_SIZE 100) ? but each page costs
+// a full directory re-scan (listSessions carries nothing across pages), so
+// the true worst case is ~100x that budget; the cap exists so a candidate
+// buried past the 10,000 most recent sessions does not stall a voice call
+// indefinitely, not because the walk is cheap.
+const MAX_SESSION_SCAN_PAGES = 100;
 const MAX_LIVE_CAPTION_CHARS = 8_192;
 
 function writeLiveDiagnostic(
@@ -559,7 +573,10 @@ export class LiveSessionCoordinator {
         ? (await this.options.listRecentSessions(runtime)).find(
             isCompatibleLiveSession,
           )
-        : await this.findRecentCompatibleSession(runtime);
+        : await this.findRecentCompatibleSession(
+            runtime,
+            context.callAbort.signal,
+          );
     }
     if (!this.isActive(context)) {
       throw new DOMException('Live call ended.', 'AbortError');
@@ -610,23 +627,56 @@ export class LiveSessionCoordinator {
 
   private async findRecentCompatibleSession(
     runtime: WorkspaceRuntime,
+    signal?: AbortSignal,
   ): Promise<SessionListItem | undefined> {
     const service = new SessionService(runtime.workspaceCwd);
-    let cursor: number | undefined;
-    const seenCursors = new Set<number>();
-    while (true) {
+    let cursor: SessionListCursor | undefined;
+    const seenCursors = new Set<string>();
+    for (let pageNo = 0; pageNo < MAX_SESSION_SCAN_PAGES; pageNo++) {
+      signal?.throwIfAborted();
       const page = await service.listSessions({
         size: SESSION_SCAN_SIZE,
         archiveState: 'active',
         ...(cursor !== undefined ? { cursor } : {}),
+        ...(signal !== undefined ? { signal } : {}),
       });
       const match = page.items.find(isCompatibleLiveSession);
       if (match) return match;
       if (!page.hasMore || page.nextCursor === undefined) return undefined;
-      if (seenCursors.has(page.nextCursor)) return undefined;
-      seenCursors.add(page.nextCursor);
+      // Cursors are structured objects now; the loop guard must compare the
+      // encoded wire form, not object identity.
+      const cursorKey = encodeSessionListCursor(page.nextCursor);
+      if (seenCursors.has(cursorKey)) {
+        // The daemon handed back a cursor it already issued: the walk cannot
+        // advance, so "stopped here" is "cursor producer is stuck", not
+        // "no compatible session exists". Log it on both channels like the
+        // cap exit below does.
+        writeLiveDiagnostic('resume_scan_repeat_cursor', {
+          page: pageNo,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+        writeStderrLineSafe(
+          `qwen serve: live resume scan stopped on a repeated cursor at page ${pageNo + 1} for ${runtime.workspaceCwd}`,
+        );
+        return undefined;
+      }
+      seenCursors.add(cursorKey);
       cursor = page.nextCursor;
     }
+    // Fell out of the page cap with a live cursor: the scan is incomplete,
+    // so the "no compatible session" outcome below is really "gave up".
+    writeLiveDiagnostic('resume_scan_truncated', {
+      pages: MAX_SESSION_SCAN_PAGES,
+      workspaceCwd: runtime.workspaceCwd,
+    });
+    // Unlike the JSON diagnostic above (QWEN_LIVE_DIAGNOSTICS-gated), this
+    // line is unconditional and names the workspace, so an oncall grepping
+    // the daemon log can tell "gave up" from "does not exist", and two
+    // workspaces hitting the cap in one run stay distinguishable.
+    writeStderrLineSafe(
+      `qwen serve: live resume scan truncated at ${MAX_SESSION_SCAN_PAGES} pages for ${runtime.workspaceCwd}`,
+    );
+    return undefined;
   }
 
   private callbacksFor(

@@ -264,15 +264,103 @@ export class SessionIdCaseConflictError extends Error {
 }
 
 /**
+ * Composite pagination cursor for session listings: the mtime of the last
+ * processed session file plus its session id as a tie-breaker. mtimeMs alone
+ * is not unique: bulk copies, backup restores, and coarse-granularity
+ * filesystems (FAT32/exFAT, some SMB/NFS mounts) can give many session files
+ * the same mtime, so paginating on mtime alone silently skips every file
+ * sharing the boundary value. The session id makes the ordering total and
+ * pagination lossless.
+ */
+export interface SessionListCursor {
+  /** `mtimeMs` of the last processed session file. */
+  mtime: number;
+  /** Session id (file basename without `.jsonl`) of the last processed file. */
+  sessionId: string;
+}
+
+/**
+ * Wire format for a session-list cursor: `"<mtimeMs>:<sessionId>"`. A bare
+ * number string stays a valid legacy cursor (strictly-earlier mtime), so
+ * clients mid-pagination across an upgrade keep working.
+ */
+export function encodeSessionListCursor(
+  cursor: number | SessionListCursor,
+): string {
+  return typeof cursor === 'number'
+    ? String(cursor)
+    : `${cursor.mtime}:${cursor.sessionId}`;
+}
+
+/** Thrown when a session-list cursor string cannot be decoded. */
+export class InvalidSessionListCursorError extends Error {
+  constructor(raw: string) {
+    super(`Invalid session list cursor: ${JSON.stringify(raw)}`);
+    this.name = 'InvalidSessionListCursorError';
+  }
+}
+
+/**
+ * Decodes a wire-format session-list cursor. Returns `undefined` only for
+ * the literal empty string (first page); a blank-but-nonempty string is
+ * malformed like any other invalid input. Returns a number for a legacy
+ * numeric cursor and a {@link SessionListCursor} for the composite form.
+ * Throws {@link InvalidSessionListCursorError} on malformed input.
+ */
+export function decodeSessionListCursor(
+  raw: string,
+): number | SessionListCursor | undefined {
+  // Only the literal empty string means "no cursor"; a blank-but-nonempty
+  // string is malformed (matches the previous numeric-parser behavior).
+  if (raw === '') return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    throw new InvalidSessionListCursorError(raw);
+  }
+  const sep = trimmed.indexOf(':');
+  if (sep < 0) {
+    const parsed = Number(trimmed);
+    if (
+      !Number.isFinite(parsed) ||
+      parsed < 0 ||
+      parsed > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new InvalidSessionListCursorError(raw);
+    }
+    return parsed;
+  }
+  const mtimeText = trimmed.slice(0, sep);
+  const sessionId = trimmed.slice(sep + 1);
+  const mtime = Number(mtimeText);
+  if (
+    mtimeText === '' ||
+    !Number.isFinite(mtime) ||
+    // The composite branch must accept everything the encoder can emit;
+    // pre-epoch mtimes are real on bulk-copied/restored files (cp -p,
+    // rsync -a), and rejecting one here would make the daemon refuse a
+    // cursor it minted itself. The sign check stays on the legacy numeric
+    // branch only. Guard by magnitude, never truthiness: mtime 0 is valid.
+    Math.abs(mtime) > Number.MAX_SAFE_INTEGER ||
+    !SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)
+  ) {
+    throw new InvalidSessionListCursorError(raw);
+  }
+  return { mtime, sessionId };
+}
+
+/**
  * Pagination options for listing sessions.
  */
 export interface ListSessionsOptions {
   /**
-   * Cursor for pagination (mtime of the last item from previous page).
-   * Items with mtime < cursor will be returned.
-   * If undefined, starts from the most recent.
+   * Cursor for pagination. Pass the {@link ListSessionsResult.nextCursor}
+   * composite cursor from the previous page; entries strictly after it in
+   * (mtime desc, name asc) order are returned. A bare number is still
+   * accepted as a legacy cursor with its historical semantics (items with
+   * mtime strictly less than the value), so in-flight clients holding a
+   * numeric cursor keep working. If undefined, starts from the most recent.
    */
-  cursor?: number;
+  cursor?: number | SessionListCursor;
   /**
    * Maximum number of items to return.
    * @default 20
@@ -294,10 +382,10 @@ export interface ListSessionsResult {
   /** Session items for this page */
   items: SessionListItem[];
   /**
-   * Cursor for next page (mtime of last item).
-   * Undefined if no more items.
+   * Cursor for the next page; opaque; serialize with
+   * {@link encodeSessionListCursor} for transport. Undefined if no more items.
    */
-  nextCursor?: number;
+  nextCursor?: SessionListCursor;
   /** Whether there are more items after this page */
   hasMore: boolean;
 }
@@ -428,6 +516,17 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
  * (32-36 hex characters, optionally with hyphens).
  */
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
+
+/**
+ * Code-unit (byte) order for session file names. The paginated list's cursor
+ * is a keyset evaluated on every page turn, so the tie-break must be
+ * locale-independent: localeCompare's result for mixed-case hex names depends
+ * on the process's ambient ICU locale and can flip between two page fetches.
+ * Plain relational comparison is identical in every JS process.
+ */
+function compareSessionFileNames(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
@@ -2519,8 +2618,14 @@ export class SessionService {
   /**
    * Lists sessions for the current project with pagination.
    *
-   * Sessions are ordered by file modification time (most recent first).
-   * Uses cursor-based pagination with mtime as the cursor.
+   * Sessions are ordered by file modification time (most recent first),
+   * tie-broken by file name in code-unit order. Pagination uses a composite
+   * {@link SessionListCursor} so pages never skip or repeat entries while
+   * the chats directory is static between page turns, even when many files
+   * share one mtimeMs. The cursor is a keyset over live values: a file whose
+   * mtime moves between two page turns, or one created mid-scan, can still
+   * shift the boundary, so callers accumulating pages should key by
+   * sessionId.
    *
    * Only reads the first line of each JSONL file for efficiency.
    * Files are filtered by UUID pattern first, then by project hash.
@@ -2566,13 +2671,31 @@ export class SessionService {
     }
     signal?.throwIfAborted();
 
-    // Sort by mtime descending (most recent first)
-    files.sort((a, b) => b.mtime - a.mtime);
+    // Sort by mtime descending (most recent first), tie-broken by file name
+    // ascending so the order is total: mtimeMs alone is not unique (bulk
+    // copies, backup restores, coarse-granularity filesystems), and the
+    // composite cursor filter below relies on this exact ordering.
+    files.sort(
+      (a, b) => b.mtime - a.mtime || compareSessionFileNames(a.name, b.name),
+    );
     signal?.throwIfAborted();
 
-    // Apply cursor filter (items with mtime < cursor)
+    // Apply cursor filter. A bare number is a legacy cursor and keeps its
+    // strict-mtime semantics; a composite cursor keeps everything that sorts
+    // strictly after its (mtime, name) position, so files sharing the
+    // boundary mtime are no longer skipped as a group.
     if (cursor !== undefined) {
-      files = files.filter((f) => f.mtime < cursor);
+      if (typeof cursor === 'number') {
+        files = files.filter((f) => f.mtime < cursor);
+      } else {
+        const cursorFileName = `${cursor.sessionId}.jsonl`;
+        files = files.filter(
+          (f) =>
+            f.mtime < cursor.mtime ||
+            (f.mtime === cursor.mtime &&
+              compareSessionFileNames(f.name, cursorFileName) > 0),
+        );
+      }
     }
 
     // Iterate through files until we have enough matching ones.
@@ -2581,6 +2704,7 @@ export class SessionService {
     const items: SessionListItem[] = [];
     let filesProcessed = 0;
     let lastProcessedMtime: number | undefined;
+    let lastProcessedName: string | undefined;
     let hasMoreFiles = false;
 
     // Pre-allocate the tail-read buffer once and pass it to every
@@ -2606,6 +2730,7 @@ export class SessionService {
 
       filesProcessed++;
       lastProcessedMtime = file.mtime;
+      lastProcessedName = file.name;
 
       const filePath = path.join(chatsDir, file.name);
       const readResult = signal
@@ -2676,11 +2801,19 @@ export class SessionService {
     }
     signal?.throwIfAborted();
 
-    // Determine next cursor (mtime of last processed file)
-    // Only set if there are more files to process
+    // Determine next cursor from the last processed file. Only set if
+    // there are more files to process. The session id half keeps pagination
+    // lossless when the page boundary lands inside a group of files sharing
+    // one mtimeMs; both halves advance for every processed file, including
+    // ones skipped for content/project mismatch, so no file is re-read.
     const nextCursor =
-      hasMoreFiles && lastProcessedMtime !== undefined
-        ? lastProcessedMtime
+      hasMoreFiles &&
+      lastProcessedMtime !== undefined &&
+      lastProcessedName !== undefined
+        ? {
+            mtime: lastProcessedMtime,
+            sessionId: lastProcessedName.replace(/\.jsonl$/, ''),
+          }
         : undefined;
 
     return {
@@ -2830,11 +2963,12 @@ export class SessionService {
   /**
    * Enumerates every persisted session id of this project for one archive
    * state by reading the chats dir directly, in deterministic filename
-   * order. Unlike {@link listSessions} there is no mtime cursor and no
-   * page size: an exhaustive sweep paged by the strict `mtime < cursor`
-   * filter would silently skip sessions that share an mtime with a page's
-   * last entry, on every run. Membership is checked the same way as
-   * {@link listSessions}.
+   * order. Unlike {@link listSessions} there is no cursor and no page size:
+   * an exhaustive sweep is one pass, with no pagination state to carry.
+   * (listSessions paginates losslessly across mtime ties since the
+   * composite-cursor fix; this direct scan predates it and stays because a
+   * sweep is still cheaper than paging here.) Membership is checked the same
+   * way as {@link listSessions}.
    */
   async listAllProjectSessionIds(
     archiveState: SessionArchiveState,
@@ -4311,9 +4445,12 @@ export class SessionService {
     const chatsDir = this.getChatsDir();
 
     // Scan all session files directly rather than paging through
-    // listSessions(): the mtime-only cursor there uses a strict `<` boundary,
-    // so sessions that share an mtime with the page's last entry are skipped,
-    // which would silently drop valid title matches.
+    // listSessions(): title search needs a full sweep anyway, and the
+    // paginated path offers no filter hook. Note the sweep is itself bounded
+    // by MAX_FILES_TO_PROCESS, so sessions past that cap are not
+    // title-searchable either. (listSessions has paginated losslessly across
+    // mtime ties since the composite-cursor fix; whether to route this back
+    // through it is separate cleanup.)
     let fileNames: string[];
     try {
       fileNames = fs.readdirSync(chatsDir);
@@ -4338,7 +4475,9 @@ export class SessionService {
 
     // Sort most-recent first, with filename as a stable tie-breaker so runs
     // are deterministic even when multiple files share an mtime.
-    files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
+    files.sort(
+      (a, b) => b.mtime - a.mtime || compareSessionFileNames(a.name, b.name),
+    );
 
     // Pool the tail-read buffer across files; the title scan in the loop
     // body is otherwise the dominant alloc cost when many candidates exist.

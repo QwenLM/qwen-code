@@ -32,14 +32,28 @@ const buildRealtimeStartupContext = vi.hoisted(() =>
   vi.fn(async () => '<startup_context>test context</startup_context>'),
 );
 
+// Default: one empty page. Tests targeting findRecentCompatibleSession
+// override this stub with a multi-page program.
+const listSessionsStub = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _options?: unknown,
+    ): Promise<{
+      items: SessionListItem[];
+      hasMore: boolean;
+      nextCursor?: { mtime: number; sessionId: string };
+    }> => ({ items: [], hasMore: false }),
+  ),
+);
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
     SessionService: class {
-      async listSessions() {
-        return { items: [], hasMore: false };
+      async listSessions(options?: unknown) {
+        return listSessionsStub(options);
       }
 
       async removeSession() {
@@ -87,6 +101,7 @@ function waitFor(assertion: () => void): Promise<void> {
 function makeHarness(
   options: {
     recent?: SessionListItem[];
+    useCoordinatorScan?: boolean;
     enqueueAccepted?: boolean;
     providerError?: QwenRealtimeError;
     transcriptTail?: RealtimeTranscriptEntry[];
@@ -283,7 +298,11 @@ function makeHarness(
       async (sessionId: string) => '/conversations/conversation-' + sessionId,
     ),
     discardEmptyConversationDirectory: vi.fn(async () => true),
-    listRecentSessions: vi.fn(async () => options.recent ?? []),
+    // Production leaves listRecentSessions unset; only then does resume mode
+    // reach findRecentCompatibleSession (the paginated SessionService scan).
+    ...(options.useCoordinatorScan
+      ? {}
+      : { listRecentSessions: vi.fn(async () => options.recent ?? []) }),
     gracefulStopDrainMs: options.gracefulStopDrainMs,
   });
 
@@ -374,6 +393,11 @@ function makeHarness(
 afterEach(() => {
   vi.useRealTimers();
   readPersistedParentSessionId.mockReset();
+  listSessionsStub.mockReset();
+  listSessionsStub.mockImplementation(async () => ({
+    items: [],
+    hasMore: false,
+  }));
 });
 
 describe('LiveSessionCoordinator', () => {
@@ -1085,6 +1109,246 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.bridge.resumeSession).not.toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: persistedSessionId }),
     );
+  });
+
+  it('resume scan follows composite cursors past page one to find a compatible candidate', async () => {
+    const incompatible = (n: number) =>
+      ({
+        sessionId: `550e8400-e29b-41d4-a716-4466554410${String(n).padStart(2, '0')}`,
+        cwd: '/conversations',
+        startTime: '2026-09-01T00:00:00.000Z',
+        mtime: 1_000 - n,
+        prompt: 'delegated sub-session',
+        parentSessionId: 'parent-x',
+      }) as SessionListItem;
+    const compatibleSourceId = LIVE_SESSION_SOURCE_PREFIX + 'scan-hit';
+    const compatible = {
+      sessionId: '550e8400-e29b-41d4-a716-4466554400aa',
+      cwd: '/conversations',
+      startTime: '2026-09-01T00:03:00.000Z',
+      mtime: 997,
+      prompt: 'top-level live session',
+      sourceType: 'default',
+      sourceId: compatibleSourceId,
+    } as SessionListItem;
+    listSessionsStub
+      .mockResolvedValueOnce({
+        items: [incompatible(1)],
+        hasMore: true,
+        nextCursor: { mtime: 999, sessionId: incompatible(1).sessionId },
+      })
+      .mockResolvedValueOnce({
+        items: [incompatible(2)],
+        hasMore: true,
+        nextCursor: { mtime: 998, sessionId: incompatible(2).sessionId },
+      })
+      .mockResolvedValueOnce({ items: [compatible], hasMore: false });
+
+    const harness = makeHarness({ useCoordinatorScan: true });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'resume',
+    });
+
+    // The match sits on page 3: reachable only when the page-2 cursor does
+    // not collapse to '[object Object]' and trip the repeat guard.
+    await waitFor(() =>
+      expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+        sessionId: compatible.sessionId,
+        workspaceCwd: '/conversations',
+        sourceType: 'default',
+        sourceId: compatibleSourceId,
+      }),
+    );
+    expect(listSessionsStub).toHaveBeenCalledTimes(3);
+    expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
+    // The forwarded page cursor must stay the composite object: narrowing it
+    // to cursor.mtime would silently restore the tie-group loss on the resume
+    // path. And the scan must carry the call's abort signal so a stopped call
+    // cancels mid-scan.
+    expect(listSessionsStub).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        size: 100,
+        archiveState: 'active',
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(listSessionsStub).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        cursor: { mtime: 999, sessionId: incompatible(1).sessionId },
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(listSessionsStub).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        cursor: { mtime: 998, sessionId: incompatible(2).sessionId },
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it('bounds the resume scan when every page reports a fresh cursor', async () => {
+    // Fresh cursor per page, but only up to CAP_PROBE_PAGES: if the cap is
+    // removed the scan ends by exhaustion and the call-count assertion below
+    // fails as an assertion instead of dying on heap exhaustion.
+    const CAP_PROBE_PAGES = 150; // past MAX_SESSION_SCAN_PAGES (100)
+    let pageNo = 0;
+    listSessionsStub.mockImplementation(async () => {
+      pageNo += 1;
+      if (pageNo > CAP_PROBE_PAGES) {
+        return { items: [], hasMore: false };
+      }
+      return {
+        items: [
+          {
+            sessionId: `550e8400-e29b-41d4-a716-4466554411${String(pageNo % 100).padStart(2, '0')}`,
+            cwd: '/conversations',
+            startTime: '2026-09-01T00:00:00.000Z',
+            mtime: 1_000,
+            prompt: 'delegated sub-session',
+            parentSessionId: 'parent-x',
+          } as SessionListItem,
+        ],
+        hasMore: true,
+        nextCursor: {
+          mtime: 1_000,
+          sessionId: `550e8400-e29b-41d4-a716-4466554402${String(pageNo).padStart(2, '0')}`,
+        },
+      };
+    });
+
+    // Install the sinks before start(): the truncation diagnostic fires
+    // inside the scan, which completes before start() resolves.
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const harness = makeHarness({ useCoordinatorScan: true });
+    try {
+      await harness.coordinator.start({
+        epoch: 1,
+        callId: 'call-1',
+        mode: 'resume',
+      });
+      await waitFor(() =>
+        expect(harness.bridge.spawnOrAttach).toHaveBeenCalled(),
+      );
+      expect(listSessionsStub).toHaveBeenCalledTimes(100);
+      expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+      // Cap exhaustion is diagnosable without QWEN_LIVE_DIAGNOSTICS: exactly
+      // one unconditional truncation line naming the budget and the
+      // workspace, so "gave up" never reads as "no compatible session
+      // exists", and two workspaces hitting the cap in one daemon log stay
+      // distinguishable.
+      const truncationLines = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('live resume scan truncated'),
+      );
+      expect(truncationLines).toHaveLength(1);
+      // Both halves of the diagnostic: which workspace, and at what budget
+      // the scan gave up (the half that distinguishes "gave up at 100").
+      expect(String(truncationLines[0]?.[0])).toContain('/conversations');
+      expect(String(truncationLines[0]?.[0])).toContain('100 pages');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('stops the resume scan when the daemon repeats a cursor', async () => {
+    // A daemon that answers page N+1 with page N's cursor would otherwise
+    // spin the scan to the page cap making no progress: the repeat guard
+    // must trip on the second sighting and end the scan. This is not a cap
+    // exit, so no truncation line is logged for it.
+    // A fresh object identity per page with the same content: production
+    // never reuses the reference (listSessions builds a new literal per
+    // call), so an identity-based Set guard would never trip here ? only the
+    // encoded-key comparison can stop the scan.
+    // Bounded even with the guard deleted: the page cap still stops the
+    // loop at 100, so a regression fails as an assertion, not heap
+    // exhaustion.
+    listSessionsStub.mockImplementation(async () => ({
+      items: [],
+      hasMore: true,
+      nextCursor: {
+        mtime: 1_000,
+        sessionId: '550e8400-e29b-41d4-a716-446655440099',
+      },
+    }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const harness = makeHarness({ useCoordinatorScan: true });
+    try {
+      await harness.coordinator.start({
+        epoch: 1,
+        callId: 'call-1',
+        mode: 'resume',
+      });
+      await waitFor(() =>
+        expect(harness.bridge.spawnOrAttach).toHaveBeenCalled(),
+      );
+      expect(listSessionsStub).toHaveBeenCalledTimes(2);
+      expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+      const truncationLines = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('live resume scan truncated'),
+      );
+      expect(truncationLines).toHaveLength(0);
+      // The repeat exit is not silent either: exactly one line naming the
+      // repeated cursor, so a stuck cursor producer is distinguishable from
+      // an empty workspace.
+      const repeatLines = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('stopped on a repeated cursor'),
+      );
+      expect(repeatLines).toHaveLength(1);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('aborts an in-flight resume scan when the call stops mid-scan', async () => {
+    let resolvePage:
+      | ((page: {
+          items: SessionListItem[];
+          hasMore: boolean;
+          nextCursor?: { mtime: number; sessionId: string };
+        }) => void)
+      | undefined;
+    listSessionsStub.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    const harness = makeHarness({
+      useCoordinatorScan: true,
+      gracefulStopDrainMs: 0,
+    });
+    const startPromise = harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'resume',
+    });
+
+    // The scan is parked inside page 1; stop the call, then release the page.
+    // The loop must observe callAbort before requesting page 2, and the abort
+    // is swallowed by start()s inactive-context guard rather than reported.
+    await waitFor(() => expect(listSessionsStub).toHaveBeenCalledTimes(1));
+    await harness.coordinator.stop({ epoch: 1, callId: 'call-1' });
+    resolvePage?.({
+      items: [],
+      hasMore: true,
+      nextCursor: {
+        mtime: 999,
+        sessionId: '550e8400-e29b-41d4-a716-446655440001',
+      },
+    });
+    await startPromise;
+
+    expect(listSessionsStub).toHaveBeenCalledTimes(1);
+    expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+    expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
   it('tracks a task session only from a completed built-in create_sub_session result', async () => {

@@ -11,6 +11,7 @@ import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { SessionPicker } from './SessionPicker.js';
+import { SESSION_PAGE_SIZE } from '../utils/sessionPickerUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type {
   Config,
@@ -82,7 +83,9 @@ function createMockSessionService(
     listSessions: vi.fn().mockResolvedValue({
       items: sessions,
       hasMore,
-      nextCursor: hasMore ? Date.now() : undefined,
+      nextCursor: hasMore
+        ? { mtime: Date.now(), sessionId: 'test-session-id' }
+        : undefined,
     } as ListSessionsResult),
     loadSession: vi.fn(),
     loadLastSession: vi
@@ -711,7 +714,10 @@ describe('SessionPicker', () => {
           .mockResolvedValueOnce({
             items: firstPage,
             hasMore: true,
-            nextCursor: Date.now() - 5000,
+            nextCursor: {
+              mtime: 1_755_000_000_000,
+              sessionId: 'session-4',
+            },
           })
           .mockResolvedValueOnce({
             items: secondPage,
@@ -739,6 +745,17 @@ describe('SessionPicker', () => {
 
       // First page should be loaded
       expect(mockService.listSessions).toHaveBeenCalled();
+
+      // Scrolling/auto-load must forward the composite page-1 cursor
+      // verbatim ? narrowing it to nextCursor.mtime would silently restore
+      // the mtime-tie loss this type exists to fix.
+      expect(mockService.listSessions).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          size: SESSION_PAGE_SIZE,
+          cursor: { mtime: 1_755_000_000_000, sessionId: 'session-4' },
+        }),
+      );
 
       unmount();
     });
