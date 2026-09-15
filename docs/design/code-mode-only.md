@@ -22,7 +22,7 @@ unchanged.
 
 ## Non-goals
 
-- Hybrid direct/code exposure.
+- Defining hybrid direct/code exposure; see [Code Mode](code-mode.md).
 - Persistent cells, globals, or values between `exec` calls.
 - Background jobs, `wait`, `yield`, `store`, or `load`.
 - Raw/freeform provider calls.
@@ -49,12 +49,12 @@ and registry listings.
 The registry remains the source of truth. Exposure is a view over registered
 tools, never a second registry.
 
-| Category                                   | Model top level   | `tools.*` inside `exec` |
-| ------------------------------------------ | ----------------- | ----------------------- |
-| `exec`                                     | CodeModeOnly only | No                      |
-| Direct control                             | Yes               | No                      |
-| Ordinary registered tool                   | No                | Yes                     |
-| Hidden bridge (`tool_search`, `tool_call`) | No                | No                      |
+| Category                                   | Model top level                       | `tools.*` inside `exec` |
+| ------------------------------------------ | ------------------------------------- | ----------------------- |
+| `exec`                                     | CodeMode and CodeModeOnly             | No                      |
+| Direct control                             | Yes                                   | No                      |
+| Ordinary registered tool                   | CodeMode only                         | Yes                     |
+| Hidden bridge (`tool_search`, `tool_call`) | Existing behavior outside strict mode | No                      |
 
 The direct-control allowlist is centralized and deliberately small. It covers
 user interaction (`ask_user_question`), delegation (`agent`), terminal output
@@ -157,14 +157,13 @@ OpenAI-compatible, and Anthropic adapters all receive the structured `exec`
 declaration without provider-specific prompting.
 
 Filtered subagent declarations apply the same policy. For a read-only teammate
-or a fork with an execution allowlist, `exec` is the audited gateway while the
-exact allowed nested names are carried in its invocation context. The same set
-generates the description and is checked again before Core dispatch, so an
-explicit allowlist can narrow code-mode-callable nested tools without becoming
-prompt-only policy, exposing a hidden bridge, or making `exec` recursive.
-For cache-compatible forks, an inherited `exec` declaration represents its
-ordinary bindings: an omitted `fork_tools` inherits them, while an explicit
-list replaces them with the requested subset.
+or a fork with an execution allowlist, `exec` is the audited gateway and the
+nested names carried in its invocation context are checked again before Core
+dispatch. Explicit ordinary-tool entries narrow that nested set. An inherited
+or explicitly allowed `exec` instead represents all surviving ordinary
+code-mode-callable bindings, while the agent's own `tools` list still narrows
+its direct surface. Hidden bridges remain unavailable and `exec` cannot call
+itself.
 
 ## Failure and rollback
 

@@ -57,8 +57,10 @@ their normal top-level declaration is revealed. In `code_mode_only`, the
 existing behavior remains: all nested declarations live in the `exec`
 description because no later top-level reveal is possible.
 
-Filtered subagent declarations preserve the same mode and narrow both direct
-and nested calls to the subagent's allowed tool set.
+Filtered subagent declarations preserve the same mode. The agent's `tools`
+list narrows its direct surface. Explicit ordinary-tool execution entries
+narrow the nested set, while an inherited or explicitly allowed `exec` carries
+all surviving code-mode-callable bindings.
 
 ## Constraints and risks
 

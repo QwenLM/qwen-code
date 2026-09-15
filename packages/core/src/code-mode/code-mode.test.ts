@@ -156,11 +156,19 @@ describe('code mode exposure', () => {
       undefined,
       { skipDiscovery: true },
     );
+    const invalid = makeFakeConfig();
+    vi.spyOn(invalid, 'getToolMode').mockReturnValue(
+      'code-mode' as ReturnType<typeof invalid.getToolMode>,
+    );
+    const invalidRegistry = await invalid.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
 
     expect(directRegistry.getAllToolNames()).not.toContain('exec');
     expect(codeModeRegistry.getAllToolNames()).toContain('exec');
     expect(codeModeRegistry.getAllToolNames()).toContain('tool_search');
     expect(codeModeOnlyRegistry.getAllToolNames()).toContain('exec');
+    expect(invalidRegistry.getAllToolNames()).not.toContain('exec');
   });
 
   it('keeps Direct declarations unchanged', () => {
@@ -181,9 +189,19 @@ describe('code mode exposure', () => {
     const registry = new ToolRegistry(
       makeFakeConfig({ toolMode: ToolMode.CodeMode }),
     );
-    for (const name of ['read_file', 'tool_search', 'agent', 'exec']) {
+    registry.registerTool(
+      new MockTool({
+        name: 'read_file',
+        description: 'Reads a file from the filesystem.',
+        params: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+        },
+      }),
+    );
+    for (const name of ['tool_search', 'agent', 'exec'])
       registry.registerTool(new MockTool({ name }));
-    }
 
     const declarations = registry.getFunctionDeclarations();
     expect(declarations.map((item) => item.name)).toEqual([
@@ -192,9 +210,13 @@ describe('code mode exposure', () => {
       'read_file',
       'tool_search',
     ]);
-    expect(
-      declarations.find((item) => item.name === 'read_file')?.description,
-    ).toContain('declare const tools: { read_file(args:');
+    const readFileDescription = declarations.find(
+      (item) => item.name === 'read_file',
+    )?.description;
+    expect(readFileDescription).toContain('Reads a file from the filesystem.');
+    expect(readFileDescription).toContain(
+      'read_file(args: { "path": string })',
+    );
     expect(
       declarations.find((item) => item.name === 'agent')?.description,
     ).not.toContain('declare const tools:');
@@ -204,7 +226,7 @@ describe('code mode exposure', () => {
     expect(execDescription).not.toContain('tools.read_file(args:');
     expect(execDescription).toContain('"name":"read_file"');
     expect(execDescription).toContain(
-      'Deferred tools remain listed in ALL_TOOLS',
+      'Deferred tools with a reveal path receive a declaration',
     );
   });
 
@@ -267,6 +289,63 @@ describe('code mode exposure', () => {
     expect(
       revealed.find((item) => item.name === 'deferred_tool')?.description,
     ).toContain('declare const tools: { deferred_tool(args:');
+  });
+
+  it('includes nested schemas when CodeMode has no reveal path', () => {
+    const registry = new ToolRegistry(
+      makeFakeConfig({ toolMode: ToolMode.CodeMode }),
+    );
+    registry.registerTool(new MockTool({ name: 'exec' }));
+    registry.registerTool(
+      new MockTool({
+        name: 'deferred_tool',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+        },
+      }),
+    );
+
+    const description = registry.getFunctionDeclarations()[0]?.description;
+    expect(description).toContain(
+      'tools.deferred_tool(args: { "path": string })',
+    );
+  });
+
+  it('describes an empty filtered CodeMode surface accurately', () => {
+    const registry = new ToolRegistry(
+      makeFakeConfig({ toolMode: ToolMode.CodeMode }),
+    );
+    registry.registerTool(new MockTool({ name: 'exec' }));
+    registry.registerTool(new MockTool({ name: 'ask_user_question' }));
+
+    const description = registry
+      .getFunctionDeclarationsFiltered(['exec', 'ask_user_question'], new Set())
+      .find((declaration) => declaration.name === 'exec')?.description;
+    expect(description).toContain(
+      '// No ordinary tools are available in this context.',
+    );
+    expect(description).not.toContain(
+      'Nested tool declarations for directly exposed tools',
+    );
+  });
+
+  it('keeps filtered and unfiltered CodeMode declaration order aligned', () => {
+    const registry = new ToolRegistry(
+      makeFakeConfig({ toolMode: ToolMode.CodeMode }),
+    );
+    for (const name of ['read_file', 'readFile', 'exec'])
+      registry.registerTool(new MockTool({ name }));
+
+    const unfiltered = registry
+      .getFunctionDeclarations()
+      .map((declaration) => declaration.name);
+    const filtered = registry
+      .getFunctionDeclarationsFiltered(['read_file', 'readFile', 'exec'])
+      .map((declaration) => declaration.name);
+    expect(filtered).toEqual(unfiltered);
   });
 
   it('exposes exec and direct controls while retaining ordinary and hidden tools', () => {

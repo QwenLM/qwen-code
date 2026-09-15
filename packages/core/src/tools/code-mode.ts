@@ -26,7 +26,11 @@ export const ToolMode = {
 
 export type ToolMode = (typeof ToolMode)[keyof typeof ToolMode];
 
-export function isCodeModeEnabled(mode: ToolMode | undefined): boolean {
+export function isToolMode(mode: unknown): mode is ToolMode {
+  return Object.values(ToolMode).some((candidate) => candidate === mode);
+}
+
+export function isCodeModeEnabled(mode: unknown): boolean {
   return mode === ToolMode.CodeMode || mode === ToolMode.CodeModeOnly;
 }
 
@@ -197,27 +201,29 @@ function schemaToType(schema: unknown): string {
   return 'unknown';
 }
 
+function bindingSignature(binding: CodeModeToolBinding): string {
+  return `${binding.jsName}(args: ${schemaToType(binding.parametersJsonSchema)}): Promise<CodeModeToolResult>`;
+}
+
 function describeBinding(binding: CodeModeToolBinding): string {
   // A deferred tool keeps its registry semantics, but CodeModeOnly hides
   // tool_search and never surfaces nested calls as history functionCalls, so
   // nothing can reveal it later: this description is its only chance to carry
   // a schema.
-  const params = schemaToType(binding.parametersJsonSchema);
-  return `tools.${binding.jsName}(args: ${params}): Promise<CodeModeToolResult>;`;
+  return `tools.${bindingSignature(binding)};`;
 }
 
 export function augmentDeclarationForCodeMode(
   declaration: FunctionDeclaration,
   binding: CodeModeToolBinding,
 ): FunctionDeclaration {
-  const params = schemaToType(binding.parametersJsonSchema);
   return {
     ...declaration,
     description: `${declaration.description ?? ''}
 
 exec tool declaration:
 \`\`\`ts
-declare const tools: { ${binding.jsName}(args: ${params}): Promise<CodeModeToolResult>; };
+declare const tools: { ${bindingSignature(binding)}; };
 \`\`\``,
   };
 }
@@ -225,6 +231,8 @@ declare const tools: { ${binding.jsName}(args: ${params}): Promise<CodeModeToolR
 export function buildExecDescription(
   plan: CodeModeBindingPlan,
   codeModeOnly = true,
+  topLevelBindingNames: ReadonlySet<string> = new Set(),
+  canRevealDeferred = false,
 ): string {
   const allTools = plan.bindings.map(
     ({ name, jsName, description, deferred }) => ({
@@ -240,16 +248,29 @@ export function buildExecDescription(
         `- ${omitted} is omitted because it collides with ${kept} as tools.${jsName}.`,
     )
     .join('\n');
-  const declarations = codeModeOnly
-    ? plan.bindings.map(describeBinding).join('\n')
-    : 'Nested tool declarations are included in their top-level tool descriptions. Deferred tools remain listed in ALL_TOOLS and receive a declaration when their top-level declaration is revealed.';
+  const uncoveredBindings = plan.bindings.filter(
+    (binding) =>
+      !topLevelBindingNames.has(binding.name) &&
+      (!binding.deferred || !canRevealDeferred),
+  );
+  const declarations =
+    plan.bindings.length === 0
+      ? ''
+      : codeModeOnly
+        ? plan.bindings.map(describeBinding).join('\n')
+        : [
+            'Nested tool declarations for directly exposed tools are included in their top-level tool descriptions. Deferred tools with a reveal path receive a declaration when their top-level declaration is revealed.',
+            uncoveredBindings.map(describeBinding).join('\n'),
+          ]
+            .filter(Boolean)
+            .join('\n');
   const toolsDescription = codeModeOnly
     ? 'the code-mode-callable tool functions declared below.'
-    : 'the code-mode-callable tool functions declared in their top-level tool descriptions.';
+    : 'the code-mode-callable tool functions declared in their top-level tool descriptions or below.';
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
-Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Tool calls can be composed with Promise.all. Await every tool promise; unawaited calls are cancelled when the script finishes. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Prefer batching independent calls with Promise.all. Await every tool promise; unawaited calls are cancelled when the script finishes. Pass values you need to inspect or return to text(); assigning a result does not include it in the exec output. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
 
 Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls.
 
@@ -280,9 +301,16 @@ export function buildExecDeclaration(
   execTool: AnyDeclarativeTool,
   plan: CodeModeBindingPlan,
   codeModeOnly = true,
+  topLevelBindingNames?: ReadonlySet<string>,
+  canRevealDeferred?: boolean,
 ): FunctionDeclaration {
   return {
     ...execTool.schema,
-    description: buildExecDescription(plan, codeModeOnly),
+    description: buildExecDescription(
+      plan,
+      codeModeOnly,
+      topLevelBindingNames,
+      canRevealDeferred,
+    ),
   };
 }

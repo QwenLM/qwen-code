@@ -35247,6 +35247,25 @@ describe('Session', () => {
       expect(direct.parts[0].functionResponse?.response?.['error']).toContain(
         'unavailable on this CodeModeOnly call surface',
       );
+
+      vi.mocked(mockConfig.getToolMode).mockReturnValue(core.ToolMode.CodeMode);
+      const hybridDirect = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-hybrid-code-mode-direct',
+        [
+          {
+            id: 'read-acp-hybrid-direct',
+            name: 'read_file',
+            args: { path: '/tmp/example.txt' },
+          },
+        ],
+      );
+      expect(nestedExecute).toHaveBeenCalledTimes(2);
+      expect(hybridDirect.parts[0].functionResponse?.response?.['output']).toBe(
+        'nested ACP output',
+      );
     });
 
     function emitNestedAskUserQuestion(

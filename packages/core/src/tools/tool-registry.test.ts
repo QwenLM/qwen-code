@@ -788,6 +788,42 @@ describe('ToolRegistry', () => {
         expect(toolRegistry.isDeferredToolRevealed(toolB.name)).toBe(false);
       });
 
+      it('counts CodeMode declaration decoration toward the budget', () => {
+        const directTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const codeModeTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const directRegistry = new ToolRegistry(new Config(baseConfigParams));
+        const codeModeRegistry = new ToolRegistry(
+          new Config({ ...baseConfigParams, toolMode: 'code_mode' }),
+        );
+        directRegistry.registerTool(directTool);
+        codeModeRegistry.registerTool(new MockTool({ name: 'exec' }));
+        codeModeRegistry.registerTool(codeModeTool);
+        const rawBudget = tokensFor(directTool);
+
+        expect(directRegistry.preloadDeferredToolsWithinBudget(rawBudget)).toBe(
+          1,
+        );
+        expect(
+          codeModeRegistry.preloadDeferredToolsWithinBudget(rawBudget),
+        ).toBe(0);
+      });
+
       it('excludes visible deferred tools from the preload budget', () => {
         const visibleTool = new MockTool({
           name: 'visible',

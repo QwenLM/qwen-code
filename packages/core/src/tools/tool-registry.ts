@@ -883,9 +883,24 @@ export class ToolRegistry {
     const bindings = new Map(
       plan.bindings.map((binding) => [binding.name, binding]),
     );
+    const topLevelBindingNames = new Set(
+      tools
+        .filter((tool) => tool.name !== ToolNames.EXEC)
+        .filter((tool) => bindings.has(tool.name))
+        .map((tool) => tool.name),
+    );
+    const canRevealDeferred = tools.some(
+      (tool) => tool.name === ToolNames.TOOL_SEARCH,
+    );
     return tools.map((tool) => {
       if (tool.name === ToolNames.EXEC) {
-        return buildExecDeclaration(tool, plan, false);
+        return buildExecDeclaration(
+          tool,
+          plan,
+          false,
+          topLevelBindingNames,
+          canRevealDeferred,
+        );
       }
       const binding = bindings.get(tool.name);
       return binding
@@ -1076,6 +1091,19 @@ export class ToolRegistry {
   preloadDeferredToolsWithinBudget(budgetTokens: number): number {
     const candidates: string[] = [];
     let totalChars = 0;
+    const execTool = this.tools.get(ToolNames.EXEC);
+    const codeModeBindings =
+      this.config.getToolMode?.() === ToolMode.CodeMode &&
+      execTool !== undefined &&
+      this.isToolAvailable(execTool.name) &&
+      this.isToolDeclared(execTool.name)
+        ? new Map(
+            this.getCodeModeBindingPlan().bindings.map((binding) => [
+              binding.name,
+              binding,
+            ]),
+          )
+        : undefined;
     for (const tool of this.tools.values()) {
       if (!this.isToolAvailable(tool.name)) continue;
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
@@ -1088,7 +1116,12 @@ export class ToolRegistry {
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);
-      totalChars += JSON.stringify(tool.schema).length;
+      const binding = codeModeBindings?.get(tool.name);
+      totalChars += JSON.stringify(
+        binding
+          ? augmentDeclarationForCodeMode(tool.schema, binding)
+          : tool.schema,
+      ).length;
     }
     const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
     if (candidates.length === 0) {
@@ -1155,7 +1188,7 @@ export class ToolRegistry {
             this.isToolAvailable(tool.name) &&
             this.isToolDeclared(tool.name),
         )
-        .sort(ToolRegistry.compareCodeModeTools);
+        .sort(ToolRegistry.compareToolsByDeclarationName);
       return this.decorateCodeModeDeclarations(
         tools,
         codeModeAllowedNames ?? allowedNames,

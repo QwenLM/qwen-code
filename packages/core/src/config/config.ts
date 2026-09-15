@@ -96,6 +96,8 @@ import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  isCodeModeEnabled,
+  isToolMode,
   ToolMode,
   type ToolMode as ToolModeValue,
 } from '../tools/code-mode.js';
@@ -3197,7 +3199,9 @@ export class Config {
     this.toolMode =
       this.bareMode || this.safeMode
         ? ToolMode.Direct
-        : (params.toolMode ?? ToolMode.Direct);
+        : isToolMode(params.toolMode)
+          ? params.toolMode
+          : ToolMode.Direct;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -10396,7 +10400,7 @@ export class Config {
     };
 
     const registerExecIfEnabled = async (): Promise<void> => {
-      if (this.getToolMode() === ToolMode.Direct) return;
+      if (!isCodeModeEnabled(this.getToolMode())) return;
       await registerLazy(ToolNames.EXEC, async () => {
         const { ExecTool } = await import('../tools/exec.js');
         return new ExecTool(this);

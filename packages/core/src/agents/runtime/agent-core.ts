@@ -757,7 +757,7 @@ export class AgentCore {
             !isExcluded(name) &&
             !isHiddenByEagerAllowList(name) &&
             !isDisallowed(name) &&
-            this.isToolExecutionAllowed(name),
+            this.isToolExecutionAllowed(name, true),
         );
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
@@ -765,10 +765,13 @@ export class AgentCore {
         ),
       );
       const declarationNames =
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeMode &&
-        configuredNames
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeMode
           ? allowedNames.filter(
-              (name) => name === ToolNames.EXEC || configuredNames.has(name),
+              (name) =>
+                (!configuredNames ||
+                  name === ToolNames.EXEC ||
+                  configuredNames.has(name)) &&
+                this.isToolExecutionAllowed(name),
             )
           : allowedNames;
       const declarations = toolRegistry.getFunctionDeclarationsFiltered(
@@ -1704,11 +1707,14 @@ export class AgentCore {
           declaredToolNames.has(ToolNames.EXEC) &&
           !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
           this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true)) &&
-      this.isToolExecutionAllowed(ToolNames.SKILL)
+      this.isToolExecutionAllowed(ToolNames.SKILL, true)
     );
   }
 
-  private isToolExecutionAllowed(toolName: string): boolean {
+  private isToolExecutionAllowed(
+    toolName: string,
+    forNestedBinding = false,
+  ): boolean {
     if (this.executionAllowedTools === undefined) {
       return true;
     }
@@ -1719,6 +1725,7 @@ export class AgentCore {
       return true;
     }
     if (
+      forNestedBinding &&
       isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
       this.executionAllowedExactTools?.has(ToolNames.EXEC) &&
       getToolExposure(toolName) === 'code-mode-callable'

@@ -19,7 +19,7 @@ provider 请求和执行均保持不变。
 
 ## 非目标
 
-- 混合暴露直接调用和代码调用。
+- 定义混合的直接调用和代码调用；详见 [Code Mode](code-mode.zh-CN.md)。
 - 在多次 `exec` 调用间持久化 cell、全局变量或值。
 - 后台任务、`wait`、`yield`、`store` 或 `load`。
 - 原始/freeform provider 调用。
@@ -44,12 +44,12 @@ provider 请求和执行均保持不变。
 
 registry 仍是事实来源。暴露只是注册工具之上的视图，而不是第二套 registry。
 
-| 类别                                      | 模型顶层调用    | `exec` 内的 `tools.*` |
-| ----------------------------------------- | --------------- | --------------------- |
-| `exec`                                    | 仅 CodeModeOnly | 否                    |
-| 直接控制工具                              | 是              | 否                    |
-| 已注册的普通工具                          | 否              | 是                    |
-| 隐藏 bridge（`tool_search`、`tool_call`） | 否              | 否                    |
+| 类别                                      | 模型顶层调用             | `exec` 内的 `tools.*` |
+| ----------------------------------------- | ------------------------ | --------------------- |
+| `exec`                                    | CodeMode 和 CodeModeOnly | 否                    |
+| 直接控制工具                              | 是                       | 否                    |
+| 已注册的普通工具                          | 仅 CodeMode              | 是                    |
+| 隐藏 bridge（`tool_search`、`tool_call`） | 严格模式之外沿用既有行为 | 否                    |
 
 直接控制 allowlist 集中维护且刻意保持精简。它覆盖用户交互
 （`ask_user_question`）、委派（`agent`）、终止输出约定、
@@ -135,12 +135,10 @@ ACP 会串行执行普通嵌套调用，与现有直接工具顺序一致；Core
 `exec` declaration，不需要 provider 专用 prompt。
 
 经过过滤的子智能体 declaration 使用相同策略。对于只读 teammate 或带执行
-allowlist 的 fork，`exec` 是经过审计的 gateway，而允许的确切嵌套名称会随 invocation
-context 传递。同一集合既用于生成描述，也会在 Core 分派前再次校验，因此显式
-allowlist 可以收窄 code-mode-callable 嵌套工具，而不会变成仅 prompt 策略、暴露
-隐藏 bridge 或使 `exec` 能够递归。对于 cache-compatible fork，继承的 `exec`
-declaration 代表其普通 binding：省略 `fork_tools` 时继承这些 binding，显式列表则
-用请求的子集替换它们。
+allowlist 的 fork，`exec` 是经过审计的 gateway，其 invocation context 中携带的嵌套
+名称会在 Core 分派前再次校验。显式列出的普通工具会收窄该嵌套集合；继承或显式允许
+的 `exec` 则代表所有仍可用的普通 code-mode-callable binding，而智能体自身的
+`tools` 列表仍会收窄直接调用面。隐藏 bridge 始终不可用，`exec` 也不能调用自身。
 
 ## 失败与回滚
 

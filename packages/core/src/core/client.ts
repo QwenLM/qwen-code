@@ -1841,8 +1841,9 @@ export class LlmClient {
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
    * advertise tools the model has no way to load on demand. Tools held back
-   * by `tools.eager` in that state are unreachable for the session, which is
-   * warned about once per session.
+   * by `tools.eager` in that state are unavailable directly. Hybrid CodeMode
+   * can still call them through `exec`; Direct mode cannot reach them. The
+   * active behavior is warned about once per session.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1867,11 +1868,15 @@ export class LlmClient {
         }
         if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
           this.warnedAboutUnreachableEagerTools = true;
+          const hybridCodeMode =
+            this.config.getToolMode?.() === ToolMode.CodeMode;
           // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
           console.warn(
             `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
-              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
-              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+              (hybridCodeMode
+                ? `so their top-level declarations cannot be loaded until restart, but they remain callable through exec: ${withheld.join(', ')}. `
+                : `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. `) +
+              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to make them directly loadable, ` +
               `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
           );
         }

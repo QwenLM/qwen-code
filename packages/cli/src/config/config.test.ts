@@ -3594,6 +3594,38 @@ describe('mergeExcludeTools', () => {
     expect(codeModeOnly.getToolMode()).toBe('code_mode_only');
   });
 
+  it('should fail closed for an invalid tool mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { mode: 'code-mode' } } as unknown as Settings,
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getToolMode()).toBe(ToolMode.Direct);
+    expect(config.getWarnings()).toContain(
+      'Unrecognized tools.mode "code-mode"; falling back to direct.',
+    );
+  });
+
+  it('should honor the legacy tools.codeModeOnly setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { codeModeOnly: true } } as unknown as Settings,
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getToolMode()).toBe(ToolMode.CodeModeOnly);
+    expect(config.getWarnings()).toContain(
+      'tools.codeModeOnly is deprecated; use tools.mode = "code_mode_only".',
+    );
+  });
+
   it.each([
     ['--safe-mode', ToolMode.CodeMode],
     ['--safe-mode', ToolMode.CodeModeOnly],

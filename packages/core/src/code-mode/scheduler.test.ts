@@ -828,6 +828,47 @@ describe('CodeModeOnly scheduler dispatch', () => {
     );
   });
 
+  it('allows an ordinary direct call on the hybrid CodeMode surface', async () => {
+    const config = makeFakeConfig({
+      toolMode: 'code_mode',
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'read ok',
+      returnDisplay: 'read ok',
+    });
+    registry.registerTool(
+      new MockTool({ name: 'read_probe', kind: Kind.Read, execute }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'hybrid-direct-read',
+        name: 'read_probe',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-hybrid-direct-read',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(completed.mock.calls[0]?.[0][0].status).toBe('success');
+  });
+
   it('enforces a restricted agent allowlist inside exec', async () => {
     const config = makeFakeConfig({
       toolMode: 'code_mode_only',
