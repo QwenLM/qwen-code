@@ -26,8 +26,7 @@ export async function executeDomCuaOperation(
   args: Args,
   tab: TabState,
 ): Promise<DispatchResult> {
-  if (method === 'dom_cua.get_visible_dom')
-    return await snapshotTab(tab, { interactiveOnly: true });
+  if (method === 'dom_cua.get_visible_dom') return await snapshotTab(tab);
   switch (method) {
     case 'dom_cua.click': {
       const locator = await domCuaLocator(tab, args);

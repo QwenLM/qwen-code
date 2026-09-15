@@ -134,10 +134,13 @@ the requested navigation state with its own deadline. Successful input does
 not imply that the destination has loaded. A short, bounded renderer drain
 allows queued input handlers to run without waiting for a new page context.
 
-`tab.playwright.domSnapshot()` returns Playwright's general AI accessibility
-snapshot. `tab.dom_cua.get_visible_dom()` filters that snapshot to interactive
-elements while preserving its `aria-ref` values as `node_id`. DOM CUA actions
-resolve those ids through Playwright's `aria-ref` locator. The adapter and its
+`tab.playwright.domSnapshot()` and `tab.dom_cua.get_visible_dom()` return the
+same Playwright AI accessibility snapshot, subject to the existing 20,000-character
+budget. Neither filters by role or cursor style: those hints cannot reliably
+distinguish clickable elements from static content. The snapshot therefore
+includes static text and containers alongside controls. A ref identifies a
+node, not a guarantee that clicking it performs an action. DOM CUA actions
+resolve these ids through Playwright's `aria-ref` locator. The adapter and its
 tests are pinned to the same Playwright version because the snapshot text
 format is version-sensitive.
 

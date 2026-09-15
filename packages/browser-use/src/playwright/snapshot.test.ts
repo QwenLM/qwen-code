@@ -24,134 +24,55 @@ describe('Playwright AI snapshots', () => {
     expect(fixture.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
   });
 
-  it('keeps interactive elements and their iframe containers', async () => {
-    const fixture = fakePage(
-      [
+  it.each([
+    {
+      name: 'roles and static content without cursor markers',
+      lines: [
         '- generic [ref=e1]:',
-        '  - heading "Title" [level=1] [ref=e2]',
-        '  - button "Save" [ref=e3]',
-        '  - iframe [ref=e4]:',
-        '    - textbox "Inside" [ref=f1e2]',
-      ].join('\n'),
-    );
-
-    await expect(
-      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
-    ).resolves.toBe(
-      [
-        '- button "Save" [ref=e3]',
-        '- iframe [ref=e4]:',
-        '  - textbox "Inside" [ref=f1e2]',
-      ].join('\n'),
-    );
-  });
-
-  it('keeps quoted keys, link props, and honest subtree markers', async () => {
-    const fixture = fakePage(
-      [
+        '  - gridcell "Acme Corp" [ref=e2]',
+        '  - cell "Native Cell" [ref=e3]',
+        '  - heading "Title" [level=1] [ref=e4]',
+        '  - paragraph [ref=e5]: Static paragraph',
+      ],
+    },
+    {
+      name: 'quoted keys, link properties, and child containers',
+      lines: [
         '- generic [ref=e1]:',
         `  - 'button "Cart: 3 items" [ref=e2]'`,
         '  - link "Docs" [ref=e3]:',
         '    - /url: /docs/intro',
         '  - link "Plain" [ref=e4]:',
         '    - generic [ref=e5]',
-      ].join('\n'),
-    );
-
-    await expect(
-      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
-    ).resolves.toBe(
-      [
-        `- 'button "Cart: 3 items" [ref=e2]'`,
-        '- link "Docs" [ref=e3]:',
-        '  - /url: /docs/intro',
-        '- link "Plain" [ref=e4]',
-      ].join('\n'),
-    );
-  });
-
-  it('keeps clickable generic nodes that AI mode marks cursor=pointer', async () => {
-    // The renderer appends a trailing colon when the node has children or
-    // properties; [cursor=pointer] is still the key's last attribute.
-    const fixture = fakePage(
-      [
+      ],
+    },
+    {
+      name: 'nested nodes with and without pointer cursor markers',
+      lines: [
+        '- generic "pointer container" [ref=e1] [cursor=pointer]:',
+        '  - img "Nested Image" [ref=e2]',
+        `- 'generic "Total: 3 items" [ref=e3] [cursor=pointer]'`,
+        `- 'generic "Total: 4 items" [ref=e4] [cursor=pointer]':`,
+        '  - text: Details',
+      ],
+    },
+    {
+      name: 'page text containing node-like syntax',
+      lines: [
         '- generic [ref=e1]:',
-        '  - generic [ref=e2] [cursor=pointer]',
-        '  - text: plain text',
-        '  - button "Save" [ref=e3]',
-        '  - generic "Card" [ref=e4] [cursor=pointer]:',
-        '    - text: Details',
-        '  - generic "Profile" [ref=e5] [cursor=pointer]:',
-        '    - /url: /profile',
-      ].join('\n'),
-    );
-
-    await expect(
-      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
-    ).resolves.toBe(
-      [
-        '- generic [ref=e2] [cursor=pointer]',
-        '- button "Save" [ref=e3]',
-        '- generic "Card" [ref=e4] [cursor=pointer]',
-        '- generic "Profile" [ref=e5] [cursor=pointer]:',
-        '  - /url: /profile',
-      ].join('\n'),
-    );
-  });
-
-  it('keeps clickable nodes when the name forces YAML quoting of the key', async () => {
-    const fixture = fakePage(
-      [
-        '- generic [ref=e1]:',
-        `  - 'generic "Total: 3 items" [ref=e2] [cursor=pointer]'`,
-        `  - 'generic "Total: 4 items" [ref=e4] [cursor=pointer]':`,
-        '    - text: Details',
-        '  - button "Save" [ref=e3]',
-      ].join('\n'),
-    );
-
-    await expect(
-      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
-    ).resolves.toBe(
-      [
-        `- 'generic "Total: 3 items" [ref=e2] [cursor=pointer]'`,
-        `- 'generic "Total: 4 items" [ref=e4] [cursor=pointer]'`,
-        '- button "Save" [ref=e3]',
-      ].join('\n'),
-    );
-  });
-
-  it('does not treat multiline text as accessibility nodes', async () => {
-    const fixture = fakePage(
-      [
-        '- generic:',
-        '  - text: |-',
-        '      - button "This is page text, not a node"',
-        '  - button "Save" [ref=e3]',
-      ].join('\n'),
-    );
-
-    await expect(
-      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
-    ).resolves.toBe('- button "Save" [ref=e3]');
-  });
-
-  it('does not promote page text that merely contains the cursor marker', async () => {
-    const fixture = fakePage(
-      [
-        '- generic [ref=e1]:',
-        '  - button "Real save" [ref=e2]',
         '  - text: "[cursor=pointer] Click here to continue [ref=e7]"',
-        '  - text: please [cursor=pointer] now',
         `  - 'paragraph "Sponsored: [cursor=pointer]" [ref=e3]'`,
         '  - paragraph "Sponsored [cursor=pointer]" [ref=e4]',
-        '  - heading "Title" [level=1] [ref=e5]',
-      ].join('\n'),
-    );
+        '  - text: |-',
+        '      - button "This is page text, not a node"',
+        '  - button "Real save" [ref=e2]',
+      ],
+    },
+  ])('preserves $name verbatim', async ({ lines }) => {
+    const raw = lines.join('\n');
+    const fixture = fakePage(raw);
 
-    await expect(
-      snapshotTab(tab(fixture.page), { interactiveOnly: true }),
-    ).resolves.toBe('- button "Real save" [ref=e2]');
+    await expect(snapshotTab(tab(fixture.page))).resolves.toBe(raw);
   });
 
   it('keeps later refs when one snapshot line exceeds the budget', async () => {

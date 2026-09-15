@@ -80,7 +80,7 @@ Locator plan 的每个数组最多包含 32 步，最多嵌套 32 层，顶层�
 
 输入操作与导航等待使用独立超时。Locator 点击、按键和 DOM CUA 点击关闭 Playwright 隐式的操作后导航等待。操作超时覆盖输入执行；`expectNavigation()` 在操作前注册监听器，并使用自己的超时等待请求的导航状态。输入成功不代表目标页面已加载。短暂且有上限的 renderer drain 允许排队的输入处理器运行，而不等待新的页面上下文。
 
-`tab.playwright.domSnapshot()` 返回 Playwright 通用 AI 无障碍快照。`tab.dom_cua.get_visible_dom()` 将快照过滤为可交互元素，并把 `aria-ref` 值保留为 `node_id`。DOM CUA 操作通过 Playwright 的 `aria-ref` locator 解析这些 id。由于快照文本格式与版本有关，适配器及其测试固定使用同一 Playwright 版本。
+`tab.playwright.domSnapshot()` 和 `tab.dom_cua.get_visible_dom()` 返回相同的 Playwright AI 无障碍快照，仍受现有 20,000 字符预算约束。两者都不按角色或光标样式过滤，因为这些提示无法可靠地区分可点击元素与静态内容。因此快照除控件外也包含静态文本和容器。ref 用于标识节点，并不保证点击该节点会产生动作。DOM CUA 操作通过 Playwright 的 `aria-ref` locator 解析这些 id。由于快照文本格式与版本有关，适配器及其测试固定使用同一 Playwright 版本。
 
 Playwright 公共 CDP session API 提供坐标 CUA 的按钮 4（后退）和 5（前进）；较高层的 Playwright mouse API 不暴露它们。快照截断、截图编码和预算、会话失效检测及 JSON 传输封装属于运行时实现细节，不作为面向模型的选项。
 
