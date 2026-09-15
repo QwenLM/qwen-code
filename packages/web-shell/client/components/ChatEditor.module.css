@@ -1728,6 +1728,9 @@
 }
 
 .contextTooltip {
+  --muted-foreground: var(--chat-editor-text-secondary);
+  --destructive: var(--error-color);
+
   display: flex;
   flex-direction: column;
   align-items: stretch;
