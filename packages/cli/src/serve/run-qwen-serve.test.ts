@@ -5789,6 +5789,7 @@ describe('runQwenServe memory budget', () => {
             enforced: boolean;
             childHeap: {
               mode: string;
+              admissionEnforced: boolean;
               maxConcurrentChildren: number;
               perChildCeilingMb: number | null;
               refusals: number;
@@ -5855,12 +5856,14 @@ describe('runQwenServe memory budget', () => {
       // all — so a matcher asserting `any(Number)` would fail on exactly the
       // host where the code is doing the right thing.
       expect(Object.keys(memory?.childHeap ?? {}).sort()).toEqual([
+        'admissionEnforced',
         'maxConcurrentChildren',
         'mode',
         'perChildCeilingMb',
         'refusals',
       ]);
       expect(memory?.childHeap?.mode).toBe('observe');
+      expect(memory?.childHeap?.admissionEnforced).toBe(false);
       expect(memory?.childHeap?.refusals).toBe(0);
       // Whichever branch this host took, the two figures agree with each
       // other. The arithmetic itself is pinned exhaustively in
