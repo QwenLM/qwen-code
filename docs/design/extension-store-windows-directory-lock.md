@@ -106,8 +106,8 @@ In scope:
   one of the holders.
 - When the swap is still impossible, say so in terms the user can act on, and
   leave the previous version installed.
-- Keep the journal recovery story explicit for the new swap strategy, and leave
-  POSIX behaviour unchanged.
+- Keep the journal recovery story explicit. The copy fallback is Windows-only; the
+  rollback-keeps-its-journal rule applies on every platform.
 
 Out of scope:
 
@@ -183,10 +183,9 @@ consumed it. Restoring over the live tree is what keeps a manifest-less husk out
 of reach when an entry cannot be deleted: the swap fails, but the tree it failed
 over is the installed one. Recovery needs no new concept -
 `recoverTransactionsUnlocked()` keeps its existing phase comparison and simply
-calls the strategy-aware rollback. A rollback that cannot complete keeps its
-journal instead of failing the operation that triggered recovery, so a holder that
-refuses the restoring copy costs one operation rather than every extension read and
-mutation until it releases.
+calls the strategy-aware rollback. A rollback a lock error defeated is marked and
+kept, so the operation proceeds and a later recovery retries it; any other failure
+still stops the caller.
 
 **B - actionable failure text.** Alongside the existing store errors:
 
@@ -206,9 +205,9 @@ goes through the existing `AggregateError` path. Lock classification lives here
 rather than in `renameWithRetry`, and covers
 `EPERM` and `EBUSY` - the latter because a child process whose working directory
 is the directory being renamed reports that code rather than `EPERM`, and neither
-error is otherwise retried or explained. `EACCES` is deliberately excluded: a
-permission denial is not a held handle, and treating it as one would divert a
-permission problem into a copy that fails later with a different error.
+error is otherwise retried or explained. On Windows a permission denial arrives as
+`EPERM` too (libuv maps `ERROR_ACCESS_DENIED` and `ERROR_PRIVILEGE_NOT_HELD` to it),
+so only a `symlink` failure is separable - and it is not a lock.
 
 ## Decisions and Rejected Alternatives
 
@@ -295,8 +294,11 @@ step surfacing the locked-directory error with the tree restored and the rollbac
 area empty; the rollback restoring over the live tree rather than emptying it; a
 destination that resolves outside the extensions root, and a linked root inside it,
 each being refused with the relocated tree left intact; a relative symlink target
-surviving a copy swap; a rollback that cannot complete leaving the store usable;
-an entry whose type changes
+surviving a copy swap; a lock-defeated rollback keeping its journal and its backup
+once the generation moves; a destination's stacked transactions replayed newest
+first; a second transaction for one destination refused; a copy-mode uninstall
+restoring the installed tree when its wipe is blocked; a non-lock rollback failure
+still reaching the caller; an entry whose type changes
 between versions being reconciled so the copy runs; an interrupted backup's `.partial` tree being removed by
 recovery; quarantining a journal whose strategy is unrecognised; and the pre-existing
 journals without the field keeping their current behaviour. The one branch that is
@@ -320,7 +322,7 @@ Acceptance:
   directory, and the previous version is still installed and loadable.
 - `npm run build && npm run typecheck` and the `packages/core` unit tests for the
   touched files pass, on both Windows and the Linux lane.
-- POSIX code paths are unchanged in the diff.
+- POSIX code paths are unchanged except that a lock-defeated rollback is kept.
 
 ## Open Questions
 

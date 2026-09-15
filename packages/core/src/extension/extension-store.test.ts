@@ -3234,8 +3234,181 @@ describe('ExtensionStore', () => {
       expect(failure).toBeInstanceOf(AggregateError);
       // The journal survives, so a later operation retries it instead of every
       // operation failing until the holder releases.
-      expect(await leftoverJournals()).toHaveLength(1);
+      const [journalName] = await leftoverJournals();
+      expect(journalName).toBeDefined();
+      // A mutation that touches no artifact is not blocked by the holder, so it
+      // advances the generation; the marked journal must still be rolled back
+      // rather than cleaned up as a commit.
+      await store.setWorkspaceActivations([identity], root, 'disabled');
       await expect(store.readSnapshot()).resolves.toBeDefined();
+      expect(
+        fs.existsSync(
+          path.join(storeDir, 'rollback', journalName.replace(/\.json$/, '')),
+        ),
+      ).toBe(true);
+      expect(await leftoverJournals()).toHaveLength(1);
+    });
+
+    it('surfaces a rollback failure that is not a lock', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'f9'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      const staging = await stageUpdate(store);
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+      const internals = store as unknown as {
+        copyTree: (source: string, target: string) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string) => {
+          if (source === destination) return await copyTree(source, target);
+          throw Object.assign(new Error('EIO: i/o error, copyfile'), {
+            code: 'EIO',
+          });
+        },
+      );
+
+      const failure: unknown = await store
+        .commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: staging,
+          destinationDirectory: destination,
+        })
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      // Only a lock is absorbed; anything else still stops the caller.
+      await expect(store.readSnapshot()).rejects.toMatchObject({ code: 'EIO' });
+    });
+
+    it('refuses a second transaction while one is still unresolved', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'f7'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+      const internals = store as unknown as {
+        copyTree: (source: string, target: string) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string) => {
+          if (source === destination) return await copyTree(source, target);
+          throw lockError(source);
+        },
+      );
+      await store
+        .commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: await stageUpdate(store),
+          destinationDirectory: destination,
+        })
+        .catch(() => undefined);
+      expect(await leftoverJournals()).toHaveLength(1);
+
+      await expect(
+        store.commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: await stageUpdate(store),
+          destinationDirectory: destination,
+        }),
+      ).rejects.toThrow(/still unresolved/);
+      expect(await leftoverJournals()).toHaveLength(1);
+    });
+
+    it('restores the installed tree when a copy-mode uninstall cannot empty it', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'f8'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+      const internals = store as unknown as {
+        emptyDirectory: (directory: string) => Promise<void>;
+      };
+      vi.spyOn(internals, 'emptyDirectory').mockRejectedValueOnce(
+        lockError(destination),
+      );
+
+      const failure: unknown = await store
+        .commitArtifact({
+          operation: 'uninstall',
+          identity,
+          destinationDirectory: destination,
+        })
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(ExtensionDirectoryLockedError);
+      // The husk must not survive: the rollback restores the installed tree.
+      expect(
+        await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).toBe('one');
+      expect(
+        await fsp.readFile(path.join(destination, 'stale.md'), 'utf8'),
+      ).toBe('one');
+    });
+
+    it('replays a destination pending transactions newest first', async () => {
+      const store = makeStore();
+      const identity = { id: 'f6'.repeat(32), name: 'demo' };
+      const initial = await store.ensureInitialized([identity]);
+      const targetSnapshot = structuredClone(initial);
+      targetSnapshot.generation = 1;
+      const destination = path.join(extensionsDir, 'demo');
+      const transactionsDir = path.join(storeDir, 'transactions');
+      const rollbackDir = path.join(storeDir, 'rollback');
+      await fsp.mkdir(path.join(destination, 'skills'), { recursive: true });
+      await fsp.writeFile(path.join(destination, 'version'), 'torn');
+      const plant = async (
+        transactionId: string,
+        backupVersion: string,
+        mtimeSeconds: number,
+      ) => {
+        const backup = path.join(rollbackDir, transactionId);
+        await fsp.mkdir(path.join(backup, 'skills'), { recursive: true });
+        await fsp.writeFile(path.join(backup, 'version'), backupVersion);
+        const journalPath = path.join(transactionsDir, `${transactionId}.json`);
+        await fsp.writeFile(
+          journalPath,
+          JSON.stringify({
+            version: 1,
+            transactionId,
+            operation: 'update',
+            phase: 'prepared',
+            destinationDirectory: destination,
+            stagingDirectory: path.join(storeDir, 'staging', transactionId),
+            backupDirectory: backup,
+            swapStrategy: 'copy',
+            previousGeneration: 0,
+            targetGeneration: 1,
+            targetSnapshot,
+          }),
+        );
+        await fsp.utimes(journalPath, mtimeSeconds, mtimeSeconds);
+      };
+      // Directory order lists the intact one first; mtime order lists it last.
+      await plant('aa-intact-old', 'one', 1_000);
+      await plant('zz-torn-new', 'torn', 2_000);
+
+      await store.ensureInitialized([identity]);
+
+      expect(
+        await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).toBe('one');
+      expect(await fsp.readdir(rollbackDir)).toEqual([]);
+      expect(await leftoverJournals()).toEqual([]);
     });
 
     it('updates by copy when an entry changes kind', async () => {
@@ -3287,9 +3460,11 @@ describe('ExtensionStore', () => {
       const partialBackup = `${backup}.partial`;
       await fsp.mkdir(path.join(destination, 'skills'), { recursive: true });
       await fsp.writeFile(path.join(destination, 'version'), 'old');
-      // The copy died before the backup was published; only `.partial` exists.
+      // The copy died before the backup was published; only `.partial` exists,
+      // and its content differs from the intact destination so restoring it
+      // over the destination cannot pass for leaving it alone.
       await fsp.mkdir(path.join(partialBackup, 'skills'), { recursive: true });
-      await fsp.writeFile(path.join(partialBackup, 'version'), 'old');
+      await fsp.writeFile(path.join(partialBackup, 'version'), 'half');
       await fsp.writeFile(
         path.join(storeDir, 'transactions', `${transactionId}.json`),
         JSON.stringify({

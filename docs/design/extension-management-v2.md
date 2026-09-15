@@ -60,9 +60,9 @@ it, in a copy swap), moves staging into place - copied over the installed tree
 there - and atomically writes `state.json`. That state rename is the
 commit point. Before it, recovery rolls back; after it, recovery only completes
 projection and cleanup. A committed policy is never rolled back because one
-runtime refresh failed. If both a pre-commit operation and its rollback fail,
-the caller receives both errors and the journal remains for fail-closed recovery;
-the store does not continue writing through an ambiguous artifact state.
+runtime refresh failed. If both a pre-commit operation and its rollback fail, the
+caller receives both errors and the journal remains; a lock-defeated rollback is
+retried on a later operation instead of stopping every one.
 
 Store files use owner-only permissions and atomic no-follow writes. Extension
 ids, direct-child artifact paths, transaction paths, and names are validated.
