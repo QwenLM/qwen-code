@@ -15,6 +15,10 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
 const MANAGED_LABELS = ['ecs-review', 'ecs-qwen'];
+// One literal for both the switch filter and the fleet guard below: the
+// guard's whole job is to prove the filter will match something, so two
+// copies that can drift would reintroduce the silent no-op it prevents.
+const FLEET_NAME = /^ecs-qwen-hk[12]-\d+$/;
 
 export function planLabels(runners, mode) {
   if (!['review', 'ci'].includes(mode)) {
@@ -22,9 +26,7 @@ export function planLabels(runners, mode) {
   }
   const target = mode === 'review' ? 'ecs-review' : 'ecs-qwen';
   return runners
-    .filter(
-      (r) => r.status === 'online' && /^ecs-qwen-hk[12]-\d+$/.test(r.name),
-    )
+    .filter((r) => r.status === 'online' && FLEET_NAME.test(r.name))
     .flatMap((r) => {
       const labels = r.labels.map((l) => l.name);
       const remove = labels.filter(
@@ -52,8 +54,7 @@ async function main() {
       'usage: review-runner-schedule.mjs <owner/repo> <review|ci>',
     );
   }
-  // Validate the mode before spending an authenticated call on it; the real
-  // plan happens below. Reads as a no-op, so it needs the note.
+  // Validate the mode before spending an authenticated call on it.
   planLabels([], mode);
   if (!process.env.RUNNER_ADMIN_TOKEN) {
     throw new Error(
@@ -69,7 +70,7 @@ async function main() {
     ]),
   );
   const runners = pages.flatMap((page) => page.runners);
-  if (!runners.some((r) => /^ecs-qwen-hk[12]-\d+$/.test(r.name))) {
+  if (!runners.some((r) => FLEET_NAME.test(r.name))) {
     throw new Error('no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found');
   }
   const actions = planLabels(runners, mode);

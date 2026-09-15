@@ -108,8 +108,11 @@ describe('review runner schedule', () => {
     assert.ok(schedule.includes('secrets.RUNNER_ADMIN_PAT'));
     // The in-repo half of the fence on the admin PAT. Losing it is silent:
     // a dispatch from any other branch still runs, now executing that
-    // branch's copy of the planner with the token in its environment.
-    assert.ok(schedule.includes("github.ref == 'refs/heads/main'"));
+    // branch's copy of the planner with the token in its environment. The
+    // 4-space anchor binds the clause to a JOB-level `if:` — the same
+    // substring on a step, or quoted in the header prose, would leave the
+    // checkout and the job running on a non-main dispatch.
+    assert.match(schedule, /^ {4}if: .*github\.ref == 'refs\/heads\/main'/m);
   });
 });
 

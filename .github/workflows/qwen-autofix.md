@@ -4277,11 +4277,12 @@ with no check-run yet. That fallback is this probe's alone — the scan's
 dispatch gate dropped it when the `ecs-review` pool let a queued review
 sit out a whole closed window, so the scan now holds only on
 IN_PROGRESS; holding here is cheaper, because it defers one stale-base
-merge that the next round retries rather than a whole round. The probe sees
-LIFECYCLE runs only: a command-triggered run executes against the base
-branch, so its review-pr check attaches to main's commit and never
-shows under the PR's rollup (the review ack comment says the same), and
-the runs fallback is event-scoped to pull_request_target. An in-flight command review therefore does
+merge that the next round retries rather than a whole round.
+The probe sees LIFECYCLE runs only: a command-triggered run executes
+against the base branch, so its review-pr check attaches to main's
+commit and never shows under the PR's rollup (the review ack comment
+says the same), and the runs fallback is event-scoped to
+pull_request_target. An in-flight command review therefore does
 NOT hold the refresh, and the merge push can still invalidate its
 posting — the second hazard named above, still open. Giving command
 runs a PR-head-visible signal (a pending check posted at the ack step,
