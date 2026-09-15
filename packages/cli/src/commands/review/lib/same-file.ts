@@ -7,6 +7,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import type { BigIntStats } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { hasVerifiableInode } from '@qwen-code/qwen-code-core/utils/file-identity.js';
 
 // Stats are read with `{ bigint: true }` so the 64-bit NTFS file index
 // arrives EXACTLY. A number-backed `Stats` rounds it at the JS boundary, and
@@ -14,12 +15,13 @@ import { basename, dirname, join } from 'node:path';
 // (`Number.isSafeInteger(ino) && ino > 0`) then withholds verifiability from
 // every id above 2^53 — degrading this comparator to canonical spellings on
 // exactly the volumes where hard links must be seen through (#11848). With
-// exact bigints the only unverifiable case left is `ino === 0n` (FAT/exFAT
-// and some SMB mounts), which keeps the canonical-spelling fallback below.
-// Both shared predicates are deliberately left alone: core's canonical one
-// (core/src/utils/file-identity.ts, `Number(ino) !== 0`) stays looser, and
-// the CLI's strict number one keeps its `(ino: number)` signature for its
-// remaining number-backed consumers — this comparator's gate is local.
+// exact bigints the only unverifiable case left is a zero ino (FAT/exFAT and
+// some SMB mounts), which keeps the canonical-spelling fallback below. The
+// gate is core's canonical `hasVerifiableInode`, already typed
+// `(ino: number | bigint)` — the strict CLI predicate keeps its
+// `(ino: number)` signature for its number-backed consumers and is not
+// widened for this comparator (#11848's "conversions stay local"
+// constraint).
 
 function tryStat(path: string): BigIntStats | undefined {
   try {
@@ -71,7 +73,7 @@ export function isSameFile(left: string, right: string): boolean {
   const leftStat = tryStat(left);
   const rightStat = tryStat(right);
   if (leftStat !== undefined && rightStat !== undefined) {
-    if (leftStat.ino !== 0n && rightStat.ino !== 0n) {
+    if (hasVerifiableInode(leftStat.ino) && hasVerifiableInode(rightStat.ino)) {
       return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
     }
     // realpathSync.native canonicalises case the way the volume does

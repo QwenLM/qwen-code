@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { constants as fsConstants, type BigIntStats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { hasVerifiableInode } from '@qwen-code/qwen-code-core/utils/file-identity.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import {
   getConversationDirectoryName,
@@ -88,10 +89,11 @@ export class StandaloneDeletionJournalError extends Error {
 // exact as a bigint, while a number-backed Stats rounds it at the JS
 // boundary — which is what let a complete private replacement of the
 // journal tree compare equal on volumes whose ids exceed 2^53 (#11848).
-// The strict number predicate in conversation-directory-identity.ts keeps
-// its `(ino: number)` signature for its number-backed consumers; the gate
-// here is the exact-id shape, where zero is the only unverifiable inode
-// (FAT/exFAT/SMB).
+// The gate is core's canonical `hasVerifiableInode`, already typed
+// `(ino: number | bigint)`: zero is the only unverifiable inode
+// (FAT/exFAT/SMB). The strict number predicate in
+// conversation-directory-identity.ts keeps its `(ino: number)` signature
+// for its number-backed consumers and is not widened for this comparator.
 interface DirectoryIdentity {
   device: bigint;
   inode: bigint;
@@ -99,7 +101,7 @@ interface DirectoryIdentity {
 }
 
 function directoryIdentityOf(stat: BigIntStats): DirectoryIdentity {
-  const inodeVerifiable = stat.ino !== 0n;
+  const inodeVerifiable = hasVerifiableInode(stat.ino);
   return {
     device: stat.dev,
     inode: inodeVerifiable ? stat.ino : 0n,

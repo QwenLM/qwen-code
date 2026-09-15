@@ -34,7 +34,11 @@ import {
   runRepoContext,
 } from './repo-context.js';
 import { stringifyPlanReport } from './lib/report.js';
-import { isolateHostGitConfig, plantAdminEntry } from './lib/test-utils.js';
+import {
+  inodesVerifiable,
+  isolateHostGitConfig,
+  plantAdminEntry,
+} from './lib/test-utils.js';
 import {
   appendRunSession,
   priorSessionIds,
@@ -1016,9 +1020,9 @@ describe('repo-context providers and trust boundary', () => {
     linkSync(planPath, alias);
     // `isSameFile` stats with `{ bigint: true }`, so a 64-bit NTFS id is
     // exact and the alias guard is live on volumes whose ids exceed 2^53
-    // (#11848). The only unverifiable case left is a volume reporting no
-    // inode numbers at all (FAT/exFAT/SMB).
-    if (statSync(planPath, { bigint: true }).ino === 0n) {
+    // (#11848); the only skip case left is a volume reporting no inode
+    // numbers at all (FAT/exFAT/SMB).
+    if (!inodesVerifiable(statSync, planPath)) {
       ctx.skip();
       return;
     }

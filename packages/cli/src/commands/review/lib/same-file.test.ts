@@ -18,6 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isSameFile } from './same-file.js';
+import { inodesVerifiable } from './test-utils.js';
 
 // Lets a test pose as a volume that exposes no inode numbers: statSync
 // reports ino 0 while enabled, everything else delegates to the real thing.
@@ -101,15 +102,13 @@ describe('isSameFile', () => {
     writeFileSync(original, '{}');
     const linked = join(dir, 'linked.json');
     linkSync(original, linked);
-    // Hard-link identity rides dev/ino, so the gate below covers the one
-    // case that must not be read as identity:
-    //   ino === 0 (FAT/exFAT/SMB) — degrading to canonical spellings is BY
-    //     DESIGN, and 'decides by canonical spelling when inodes are
-    //     unverifiable' below is the test that pins it.
-    // A 64-bit NTFS file index above 2^53 is NOT a skip case: bigint stats
-    // carry it exactly (#11848), and 'equates hard-linked names through an
-    // exact inode above the safe-integer range' below pins that.
-    if (statSync(original, { bigint: true }).ino === 0n) {
+    // Hard-link identity rides dev/ino, so this test is meaningful only
+    // where the volume exposes inode numbers at all; the ino-0 fallback is
+    // pinned by 'decides by canonical spelling when inodes are
+    // unverifiable' below. A 64-bit NTFS file index above 2^53 is NOT a skip
+    // case: bigint stats carry it exactly (#11848), and 'equates hard-linked
+    // names through an exact inode above the safe-integer range' pins that.
+    if (!inodesVerifiable(statSync, original)) {
       ctx.skip();
       return;
     }

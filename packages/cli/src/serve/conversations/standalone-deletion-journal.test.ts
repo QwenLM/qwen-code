@@ -17,11 +17,37 @@ import {
   type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
 
-const { openMock } = vi.hoisted(() => ({ openMock: vi.fn() }));
+// Lets a test pose as a volume whose 64-bit file ids exceed 2^53: a
+// registered path's lstat reports the posed EXACT id under
+// `{ bigint: true }` and its rounded double under a number stat — the two
+// shapes one volume shows a bigint caller and a number caller. The durable
+// handle channel (handle.stat) is posed per test through openMock below.
+const { openMock, journalInodePose } = vi.hoisted(() => ({
+  openMock: vi.fn(),
+  journalInodePose: new Map<string, bigint>(),
+}));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   openMock.mockImplementation(actual.open);
-  return { ...actual, open: openMock };
+  const wantsBigint = (opts: unknown): boolean =>
+    typeof opts === 'object' &&
+    opts !== null &&
+    (opts as { bigint?: boolean }).bigint === true;
+  const lstat = (async (
+    filePath: Parameters<typeof actual.lstat>[0],
+    options?: unknown,
+  ) => {
+    const posed = journalInodePose.get(String(filePath));
+    if (wantsBigint(options)) {
+      const stats = await actual.lstat(filePath, { bigint: true });
+      if (posed !== undefined) stats.ino = posed;
+      return stats;
+    }
+    const stats = await actual.lstat(filePath);
+    if (posed !== undefined) stats.ino = Number(posed);
+    return stats;
+  }) as typeof actual.lstat;
+  return { ...actual, open: openMock, lstat };
 });
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -205,6 +231,82 @@ describe('StandaloneDeletionJournal', () => {
       ).resolves.toEqual([]);
     },
   );
+
+  it('rejects a journal directory replacement whose ids share one rounding bucket', async () => {
+    // The #11848 journal half, pinned platform-independently: pose a volume
+    // whose 64-bit file ids exceed 2^53 on BOTH stat channels the journal
+    // reads (fs.lstat and the durable handle's stat). The replacement's id
+    // differs from the recorded one but rounds to the same double, so a
+    // number-backed comparator cannot see the swap and the fail-open this
+    // test goes red against is exactly the pre-fix behaviour: both sides
+    // "unverifiable", device-only equality, and hasRecord answering false
+    // over the attacker's empty tree instead of rejecting 'compromised'.
+    const journalDirectory = path.dirname(journalPath('prepared'));
+    const beforeIno = 2n ** 60n + 1n;
+    const afterIno = 2n ** 60n + 2n;
+    // Fixture guard: the case rests on the two ids sharing one double while
+    // staying distinct as bigints.
+    expect(Number(beforeIno)).toBe(Number(afterIno));
+    expect(beforeIno).not.toBe(afterIno);
+    const originalOpen = openMock.getMockImplementation();
+    if (!originalOpen) throw new Error('expected fs.open implementation');
+    openMock.mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (String(args[0]) === journalDirectory) {
+        const stat = handle.stat.bind(handle);
+        handle.stat = (async (options?: { bigint?: boolean }) => {
+          const stats = await stat(options as never);
+          const posed = journalInodePose.get(journalDirectory);
+          if (posed !== undefined) {
+            (stats as { ino: number | bigint }).ino =
+              options?.bigint === true ? posed : Number(posed);
+          }
+          return stats;
+        }) as typeof handle.stat;
+      }
+      return handle;
+    });
+    // Only the journal directory is replaced: the parents keep their real
+    // (unchanged) identities, so detection can flow ONLY through the posed
+    // channel — on a safe-inode Linux host the parents would otherwise
+    // detect the swap themselves and keep the mutants green.
+    const saved = `${journalDirectory}.saved`;
+    try {
+      journalInodePose.set(journalDirectory, beforeIno);
+      const root = await workspace.getRoot();
+      const record = await makeRecord('prepared');
+      await journal.writePrepared(record, root);
+      // Rename-and-recreate: the journal tree is privately replaced; the
+      // replacement reports a fresh id one double-rounding bucket over.
+      await fs.rename(journalDirectory, saved);
+      await fs.mkdir(journalDirectory, { mode: 0o700 });
+      journalInodePose.set(journalDirectory, afterIno);
+      for (const operation of [
+        () => journal.hasRecord(SESSION_ID),
+        () => journal.listSessionIds(),
+        () => journal.read(SESSION_ID, root),
+        () => journal.clear(SESSION_ID, root),
+        () => journal.writePrepared(record, root),
+      ]) {
+        await expect(operation()).rejects.toMatchObject({
+          reason: 'compromised',
+        });
+      }
+      // The attacker's tree holds no record; the original is intact.
+      await expect(fs.readdir(journalDirectory)).resolves.toEqual([]);
+      await expect(
+        fs.readFile(
+          path.join(saved, path.basename(journalPath('prepared'))),
+          'utf8',
+        ),
+      ).resolves.toContain(SESSION_ID);
+    } finally {
+      journalInodePose.clear();
+      openMock.mockImplementation(originalOpen);
+      await fs.rm(journalDirectory, { recursive: true, force: true });
+      await fs.rename(saved, journalDirectory);
+    }
+  });
 
   it.each(['base', 'state'] as const)(
     'rejects a replaced %s parent on every operation',
