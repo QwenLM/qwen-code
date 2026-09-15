@@ -4154,33 +4154,36 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(failed.posted).toContain('did not complete successfully');
   });
 
-  it('skips the fallback comment when no runner ever started review-pr', () => {
-    // The review pool is closed for 12 of every 24 hours, so a review-pr job
-    // queued into the dark window can expire without a runner ever picking it
-    // up: no runner_name and no steps. Nothing ran, so the failure body's
-    // "did not complete successfully / retried automatically" claims would
-    // both be false — the step records the skip and posts nothing.
-    const r = runFallbackStep('never_started', {
-      reviewPrResult: 'failure',
-      jobs: JSON.stringify({
-        total_count: 2,
-        jobs: [
-          {
-            name: 'precheck-pr',
-            runner_name: 'ubuntu-latest',
-            steps: [{ name: 'Checkout' }],
-          },
-          { name: 'review-pr', runner_name: '', status: 'queued', steps: [] },
-        ],
-      }),
-    });
-    expect(r.status).toBe(0);
-    expect(r.posted).toBe('');
-    expect(r.calls).not.toContain('pr comment');
-    expect(r.summary).toContain('never started by a runner');
-  });
+  it.skipIf(!hasJq)(
+    'skips the fallback comment when no runner ever started review-pr',
+    () => {
+      // The review pool is closed for 12 of every 24 hours, so a review-pr job
+      // queued into the dark window can expire without a runner ever picking it
+      // up: no runner_name and no steps. Nothing ran, so the failure body's
+      // "did not complete successfully / retried automatically" claims would
+      // both be false — the step records the skip and posts nothing.
+      const r = runFallbackStep('never_started', {
+        reviewPrResult: 'failure',
+        jobs: JSON.stringify({
+          total_count: 2,
+          jobs: [
+            {
+              name: 'precheck-pr',
+              runner_name: 'ubuntu-latest',
+              steps: [{ name: 'Checkout' }],
+            },
+            { name: 'review-pr', runner_name: '', status: 'queued', steps: [] },
+          ],
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted).toBe('');
+      expect(r.calls).not.toContain('pr comment');
+      expect(r.summary).toContain('never started by a runner');
+    },
+  );
 
-  it('still posts when review-pr did run on a runner', () => {
+  it.skipIf(!hasJq)('still posts when review-pr did run on a runner', () => {
     // The control for the skip above: the same job list with a runner
     // recorded must keep the failure comment, or the "never started" branch
     // would swallow every genuine failure too.
@@ -4201,6 +4204,55 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
     expect(r.posted).toContain('did not complete successfully');
   });
+
+  it.skipIf(!hasJq)(
+    'still posts when a runner was assigned before any step was recorded',
+    () => {
+      // The guard's two clauses only disagree on this mixed state: a runner
+      // accepted review-pr and the job was lost before it recorded a step
+      // (worker killed, host deregistered mid-assignment). Both clauses must
+      // hold for "nothing ran" — widening the `and` to an `or`, or dropping
+      // the runner_name clause, reads this row as never-started and silently
+      // swallows a genuine failure, the outcome the control above forbids.
+      const r = runFallbackStep('ran_no_steps', {
+        reviewPrResult: 'failure',
+        jobs: JSON.stringify({
+          total_count: 1,
+          jobs: [
+            { name: 'review-pr', runner_name: 'ecs-qwen-hk1-3', steps: [] },
+          ],
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    },
+  );
+
+  it.skipIf(!hasJq)(
+    'still posts when the listing carries no review-pr job',
+    () => {
+      // The listing is read with `?per_page=100` and no pagination, so a
+      // listing that drops review-pr (or a run large enough to push it off the
+      // first page) leaves the filter with an empty list. An empty list is
+      // "unknown", not "nothing ran": the step cannot prove the job never
+      // started, and the comment has to post.
+      const r = runFallbackStep('no_review_pr_job', {
+        reviewPrResult: 'failure',
+        jobs: JSON.stringify({
+          total_count: 1,
+          jobs: [
+            {
+              name: 'precheck-pr',
+              runner_name: 'ubuntu-latest',
+              steps: [{ name: 'Checkout' }],
+            },
+          ],
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    },
+  );
 
   it('posts when the job list cannot be read', () => {
     // No fixture, so the listing fails and the step cannot prove the job

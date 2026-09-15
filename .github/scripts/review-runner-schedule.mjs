@@ -74,10 +74,11 @@ async function main() {
   const results = await Promise.all(
     actions.map(async ({ id, name, add, remove }) => {
       try {
-        // Add before removing, so a failure can only leave the host in both
-        // pools. The reverse order lets a failed POST strand the host with
-        // no pool label at all — no job in either pool can match it until
-        // the next successful switch, which can be 12 hours away.
+        // Add before removing. A failed POST leaves the host in its previous
+        // pool only; a failed DELETE leaves it in both. Neither leaves it with
+        // no pool label at all — the reverse order does, and the host then
+        // matches no runs-on until the next successful switch (up to 12 hours)
+        // or a manual dispatch. There is no periodic reconciliation.
         if (add.length) {
           await gh([
             'api',
