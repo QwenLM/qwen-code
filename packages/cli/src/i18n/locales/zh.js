@@ -2258,8 +2258,6 @@ export default {
     '选择用于塑造回答表达方式的输出风格（{{styles}}，或自定义风格名称）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已保存，但此工作区不受信任时不会生效。',
-  'Set a goal — keep working until the condition is met':
-    '设定目标 — 持续工作直到条件满足',
   'Set or control a session goal': '设定或控制会话目标',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',

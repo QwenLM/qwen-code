@@ -2526,8 +2526,6 @@ export default {
     'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
   'It is saved but does not apply while this workspace is untrusted.':
     'It is saved but does not apply while this workspace is untrusted.',
-  'Set a goal — keep working until the condition is met':
-    'Set a goal — keep working until the condition is met',
   'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
