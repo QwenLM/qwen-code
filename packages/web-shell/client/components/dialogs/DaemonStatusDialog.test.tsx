@@ -333,6 +333,30 @@ describe('DaemonStatusDialog', () => {
     expect(container!.querySelector('#daemon-connection-address')).toBeNull();
   });
 
+  // An expired token or a stopped target leaves no report to render, and that
+  // is exactly when the operator needs the form to re-enter a token.
+  it('keeps the connection form when the status report fails to load', () => {
+    summaryState = {
+      report: undefined,
+      loading: false,
+      error: new Error('Unauthorized'),
+    };
+    fullState = {
+      report: undefined,
+      loading: false,
+      error: new Error('Unauthorized'),
+    };
+    mount('en', vi.fn());
+    expect(container!.textContent).toContain('Unauthorized');
+    expect(
+      container!.querySelector('#daemon-connection-address'),
+    ).not.toBeNull();
+    const stateLabel = Array.from(container!.querySelectorAll('span')).find(
+      (span) => span.textContent === 'Connection state',
+    );
+    expect(stateLabel?.nextElementSibling?.textContent).toBe('Error');
+  });
+
   it('keeps an invalid daemon address on the form', () => {
     const onChangeTarget = vi.fn();
     mount('en', onChangeTarget);

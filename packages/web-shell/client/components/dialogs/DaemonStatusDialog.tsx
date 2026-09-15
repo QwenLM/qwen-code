@@ -722,6 +722,159 @@ function DaemonStatusDialogInner({
   const loading = summary.loading || full.loading;
   const error = summary.error ?? full.error;
 
+  // Rendered on the dashboard and on the load-failure screen alike: an
+  // unreachable daemon, a rejected token or a still-booting runtime is exactly
+  // when the operator needs to re-enter a token or pick another target. With a
+  // report on screen only a failing (now stale) summary marks the link as
+  // errored, matching the toolbar banner; with none, any load error does.
+  const connectionFailed = report
+    ? Boolean(summary.error && summary.report)
+    : Boolean(error);
+  const connectionCard = (
+    <Card title={t('daemon.connection.title')}>
+      <Row label={t('daemon.connection.target')} value={workspace.baseUrl} />
+      <Row
+        label={t('daemon.connection.state')}
+        value={
+          connectionFailed
+            ? t('daemon.connection.status.error')
+            : t(CONNECTION_STATUS_KEYS[workspace.status])
+        }
+      />
+      {standalone && (
+        <form
+          className="mt-3 flex flex-col gap-2"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            const daemonOrigin = getAllowedDaemonOrigin(
+              connectionAddress.trim(),
+            );
+            if (!daemonOrigin) {
+              setConnectionError(t('daemon.connection.invalid'));
+              return;
+            }
+            const token =
+              connectionToken.trim() || getDaemonToken(daemonOrigin);
+            // A changed target keeps the write-then-navigate switch
+            // (the boot gate probes there; a not-yet-allowed origin
+            // would be CSP-blocked from here anyway). On the current
+            // target the typed token would overwrite the stored
+            // credential before the page reloads, so probe it first —
+            // a non-success response must not destroy the working token.
+            if (daemonOrigin !== workspace.baseUrl) {
+              setConnectionError('');
+              onChangeTarget(daemonOrigin, token);
+              return;
+            }
+            setConnectBusy(true);
+            const controller = new AbortController();
+            probeControllerRef.current = controller;
+            const timeout = window.setTimeout(() => controller.abort(), 10_000);
+            probeTimerRef.current = timeout;
+            // Retiring nulls the ref synchronously, so this check runs
+            // before the microtask callbacks below can act on a submit
+            // the operator has already abandoned. The 10s self-abort
+            // leaves the ref pointing at this controller, so it still
+            // reports "the daemon did not answer".
+            const owned = (): boolean =>
+              probeControllerRef.current === controller;
+            void fetch(`${daemonOrigin}/capabilities`, {
+              headers: token ? { Authorization: `Bearer ${token}` } : {},
+              signal: controller.signal,
+            })
+              .then((response) => {
+                if (!owned()) return;
+                if (!response.ok) {
+                  setConnectionError(
+                    response.status === 401
+                      ? t('daemon.connection.authFailed')
+                      : t('daemon.connection.notReady'),
+                  );
+                  return;
+                }
+                setConnectionError('');
+                onChangeTarget(daemonOrigin, token);
+              })
+              .catch(() => {
+                if (!owned()) return;
+                // A rejection means no answer arrived — including this
+                // handler's own 10 s abort, so "the daemon did not
+                // answer" is conclusive rather than inconclusive. Report
+                // it and leave the stored credential alone: navigating
+                // here would overwrite a working token with one nothing
+                // accepted and read as a successful switch.
+                setConnectionError(t('daemon.connection.notReady'));
+              })
+              .finally(() => {
+                window.clearTimeout(timeout);
+                // Only release the ref if it still names this attempt: a
+                // newer probe may already own it.
+                if (probeTimerRef.current === timeout) {
+                  probeTimerRef.current = null;
+                }
+                if (!owned()) return;
+                probeControllerRef.current = null;
+                setConnectBusy(false);
+              });
+          }}
+        >
+          <Label htmlFor="daemon-connection-address">
+            {t('daemon.connection.address')}
+          </Label>
+          <Input
+            id="daemon-connection-address"
+            type="url"
+            inputMode="url"
+            autoComplete="url"
+            aria-invalid={connectionError ? true : undefined}
+            aria-describedby={
+              connectionError ? 'daemon-connection-address-error' : undefined
+            }
+            value={connectionAddress}
+            onChange={(event) => {
+              // Editing the address abandons the submit that armed the
+              // probe: a late response must not switch to (and reload
+              // onto) a target the operator has already typed over.
+              retireConnectionProbe();
+              setConnectionAddress(event.target.value);
+              setConnectionToken('');
+            }}
+          />
+          {connectionError && (
+            <p
+              id="daemon-connection-address-error"
+              role="alert"
+              className="text-xs text-destructive"
+            >
+              {connectionError}
+            </p>
+          )}
+          <Label htmlFor="daemon-connection-token">
+            {t('daemon.connection.token')}
+          </Label>
+          <Input
+            id="daemon-connection-token"
+            type="password"
+            autoComplete="off"
+            value={connectionToken}
+            onChange={(event) => setConnectionToken(event.target.value)}
+          />
+          <Button
+            type="submit"
+            size="sm"
+            className="mt-1 w-full"
+            disabled={connectBusy}
+          >
+            {connectBusy
+              ? t('daemon.connection.status.connecting')
+              : t('daemon.connection.connect')}
+          </Button>
+        </form>
+      )}
+    </Card>
+  );
+
   if (!report) {
     return (
       <div className={styles.dialog}>
@@ -730,6 +883,7 @@ function DaemonStatusDialogInner({
             ? `${t('daemon.loadFailed')}: ${error.message}`
             : t('daemon.loading')}
         </div>
+        {error && <div className={styles.grid}>{connectionCard}</div>}
       </div>
     );
   }
@@ -845,156 +999,7 @@ function DaemonStatusDialogInner({
           tabIndex={0}
           className={styles.grid}
         >
-          <Card title={t('daemon.connection.title')}>
-            <Row
-              label={t('daemon.connection.target')}
-              value={workspace.baseUrl}
-            />
-            <Row
-              label={t('daemon.connection.state')}
-              value={
-                summary.error && summary.report
-                  ? t('daemon.connection.status.error')
-                  : t(CONNECTION_STATUS_KEYS[workspace.status])
-              }
-            />
-            {standalone && (
-              <form
-                className="mt-3 flex flex-col gap-2"
-                noValidate
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const daemonOrigin = getAllowedDaemonOrigin(
-                    connectionAddress.trim(),
-                  );
-                  if (!daemonOrigin) {
-                    setConnectionError(t('daemon.connection.invalid'));
-                    return;
-                  }
-                  const token =
-                    connectionToken.trim() || getDaemonToken(daemonOrigin);
-                  // A changed target keeps the write-then-navigate switch
-                  // (the boot gate probes there; a not-yet-allowed origin
-                  // would be CSP-blocked from here anyway). On the current
-                  // target the typed token would overwrite the stored
-                  // credential before the page reloads, so probe it first —
-                  // a non-success response must not destroy the working token.
-                  if (daemonOrigin !== workspace.baseUrl) {
-                    setConnectionError('');
-                    onChangeTarget(daemonOrigin, token);
-                    return;
-                  }
-                  setConnectBusy(true);
-                  const controller = new AbortController();
-                  probeControllerRef.current = controller;
-                  const timeout = window.setTimeout(
-                    () => controller.abort(),
-                    10_000,
-                  );
-                  probeTimerRef.current = timeout;
-                  // Retiring nulls the ref synchronously, so this check runs
-                  // before the microtask callbacks below can act on a submit
-                  // the operator has already abandoned. The 10s self-abort
-                  // leaves the ref pointing at this controller, so it still
-                  // reports "the daemon did not answer".
-                  const owned = (): boolean =>
-                    probeControllerRef.current === controller;
-                  void fetch(`${daemonOrigin}/capabilities`, {
-                    headers: token ? { Authorization: `Bearer ${token}` } : {},
-                    signal: controller.signal,
-                  })
-                    .then((response) => {
-                      if (!owned()) return;
-                      if (!response.ok) {
-                        setConnectionError(
-                          response.status === 401
-                            ? t('daemon.connection.authFailed')
-                            : t('daemon.connection.notReady'),
-                        );
-                        return;
-                      }
-                      setConnectionError('');
-                      onChangeTarget(daemonOrigin, token);
-                    })
-                    .catch(() => {
-                      if (!owned()) return;
-                      // A rejection means no answer arrived — including this
-                      // handler's own 10 s abort, so "the daemon did not
-                      // answer" is conclusive rather than inconclusive. Report
-                      // it and leave the stored credential alone: navigating
-                      // here would overwrite a working token with one nothing
-                      // accepted and read as a successful switch.
-                      setConnectionError(t('daemon.connection.notReady'));
-                    })
-                    .finally(() => {
-                      window.clearTimeout(timeout);
-                      // Only release the ref if it still names this attempt: a
-                      // newer probe may already own it.
-                      if (probeTimerRef.current === timeout) {
-                        probeTimerRef.current = null;
-                      }
-                      if (!owned()) return;
-                      probeControllerRef.current = null;
-                      setConnectBusy(false);
-                    });
-                }}
-              >
-                <Label htmlFor="daemon-connection-address">
-                  {t('daemon.connection.address')}
-                </Label>
-                <Input
-                  id="daemon-connection-address"
-                  type="url"
-                  inputMode="url"
-                  autoComplete="url"
-                  aria-invalid={connectionError ? true : undefined}
-                  aria-describedby={
-                    connectionError
-                      ? 'daemon-connection-address-error'
-                      : undefined
-                  }
-                  value={connectionAddress}
-                  onChange={(event) => {
-                    // Editing the address abandons the submit that armed the
-                    // probe: a late response must not switch to (and reload
-                    // onto) a target the operator has already typed over.
-                    retireConnectionProbe();
-                    setConnectionAddress(event.target.value);
-                    setConnectionToken('');
-                  }}
-                />
-                {connectionError && (
-                  <p
-                    id="daemon-connection-address-error"
-                    role="alert"
-                    className="text-xs text-destructive"
-                  >
-                    {connectionError}
-                  </p>
-                )}
-                <Label htmlFor="daemon-connection-token">
-                  {t('daemon.connection.token')}
-                </Label>
-                <Input
-                  id="daemon-connection-token"
-                  type="password"
-                  autoComplete="off"
-                  value={connectionToken}
-                  onChange={(event) => setConnectionToken(event.target.value)}
-                />
-                <Button
-                  type="submit"
-                  size="sm"
-                  className="mt-1 w-full"
-                  disabled={connectBusy}
-                >
-                  {connectBusy
-                    ? t('daemon.connection.status.connecting')
-                    : t('daemon.connection.connect')}
-                </Button>
-              </form>
-            )}
-          </Card>
+          {connectionCard}
           <Card title={t('daemon.overview.title')}>
             {daemon.qwenCodeVersion && (
               <Row
