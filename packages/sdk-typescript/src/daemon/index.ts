@@ -615,6 +615,7 @@ export type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowApprovalStatusEntry,
+  DaemonWorkflowSizeWarning,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,
   DaemonWorkflowCallTrace,

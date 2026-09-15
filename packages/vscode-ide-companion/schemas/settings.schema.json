@@ -1480,6 +1480,16 @@
           "type": "boolean",
           "default": false
         },
+        "workflowSizeGuideline": {
+          "description": "Advisory size guideline for the dynamic workflows the model writes: \"small\" aims for fewer than 5 agents, \"medium\" (the default) fewer than 15, \"large\" fewer than 50, and \"unrestricted\" sends no guideline. It is a guideline, not an enforced limit. It also sets the agent count at which a running workflow is flagged as large (QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS overrides that threshold). A change takes effect from your next message. Options: small, medium, large, unrestricted",
+          "enum": [
+            "small",
+            "medium",
+            "large",
+            "unrestricted"
+          ],
+          "default": "medium"
+        },
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
           "type": "number",

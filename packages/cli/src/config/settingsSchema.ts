@@ -3113,6 +3113,24 @@ const SETTINGS_SCHEMA = {
           'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
         showInDialog: true,
       },
+      workflowSizeGuideline: {
+        type: 'enum',
+        label: 'Dynamic Workflow Size',
+        category: 'Tools',
+        // Read on the next prompt: the change is announced to the model then,
+        // and runs started afterwards use the new agent threshold.
+        requiresRestart: false,
+        default: 'medium',
+        description:
+          'Advisory size guideline for the dynamic workflows the model writes: "small" aims for fewer than 5 agents, "medium" (the default) fewer than 15, "large" fewer than 50, and "unrestricted" sends no guideline. It is a guideline, not an enforced limit. It also sets the agent count at which a running workflow is flagged as large (QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS overrides that threshold). A change takes effect from your next message.',
+        showInDialog: true,
+        options: [
+          { value: 'small', label: 'Small (under 5 agents)' },
+          { value: 'medium', label: 'Medium (under 15 agents)' },
+          { value: 'large', label: 'Large (under 50 agents)' },
+          { value: 'unrestricted', label: 'Unrestricted (no guideline)' },
+        ],
+      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',
