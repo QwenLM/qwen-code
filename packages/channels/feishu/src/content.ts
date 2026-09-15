@@ -84,6 +84,12 @@ function scanFenceLines(
   const listStack: number[] = [];
   let listIndent = 0;
   let listBq = '';
+  // Whether the previous line holds an open paragraph: CommonMark forbids an
+  // indented code block from interrupting one, so a 4-column line directly
+  // after a paragraph line is a lazy continuation whose images are real —
+  // even across container prefixes (lazy continuations carry no markers).
+  // Blank lines and fences end paragraphs.
+  let paragraphOpen = false;
   // Line endings are normalized first: CommonMark admits CR and CRLF, and a
   // fence line terminated by `\r` must still read as a fence line.
   for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
@@ -96,6 +102,8 @@ function scanFenceLines(
     }
     const bqPrefix = prefix;
     if (/^[\t ]*$/.test(rest)) {
+      // Blank lines end paragraphs in every container.
+      paragraphOpen = false;
       if (bqPrefix === '') {
         // A bare blank line ends a blockquote container (CommonMark), and
         // with it a fence or list held inside one — resetting a LIST fence
@@ -134,6 +142,7 @@ function scanFenceLines(
       if (!lineContainer.startsWith(fenceContainer)) {
         // Container boundary: the fence auto-closes and this line is outside.
         fence = undefined;
+        paragraphOpen = false;
       } else {
         const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(rest);
         if (
@@ -143,6 +152,7 @@ function scanFenceLines(
           close[1]!.length >= fence.length
         ) {
           fence = undefined;
+          paragraphOpen = false;
         }
         continue;
       }
@@ -155,17 +165,18 @@ function scanFenceLines(
     const open = /^ {0,3}(`{3,}|~{3,})/.exec(rest);
     if (open && leadingColumns <= 3) {
       fence = { char: open[1]!.charAt(0), length: open[1]!.length, prefix };
+      paragraphOpen = false;
       continue;
     }
-    if (leadingColumns >= INDENTED_CODE_SPACES && bqPrefix === '') {
-      // An indented code block: code, so never harvested. The check keys on
-      // the blockquote prefix only — inside a list the content indent is
-      // already stripped, so 4 further columns are code there too, while a
-      // blockquoted over-indented line is a lazy paragraph continuation and
-      // its keys are real references.
+    if (leadingColumns >= INDENTED_CODE_SPACES && !paragraphOpen) {
+      // An indented code block: code, so never harvested. A paragraph left
+      // open by the previous line makes such a line a lazy continuation
+      // instead — CommonMark forbids indented code from interrupting a
+      // paragraph, in any container.
       continue;
     }
     onKeptLine?.(line);
+    paragraphOpen = true;
     // A list marker outside a fence opens a nested list whose content lines
     // carry the accumulated marker widths as extra indentation.
     const listMarker = /^ {0,3}(?:[-*+]|\d+[.)]) /.exec(rest);
@@ -211,8 +222,25 @@ export function closeOpenFence(text: string): string {
 const MD_IMAGE_SOURCE = String.raw`!\[[^\]\n]{0,200}\]\(\s*<?(img_[A-Za-z0-9_.:-]{1,200})>?(?:\s+(?:"[^"\n]{0,200}"|'[^'\n]{0,200}'))?\s*\)`;
 const mdImageRe = () => new RegExp(MD_IMAGE_SOURCE, 'g');
 
+/**
+ * Every image-shaped citation, loose form: `![alt](…)` or `![alt][ref]`,
+ * bounded so adversarial markup stays linear. Used only to assign citation
+ * ordinals — harvesting stays with the tight grammar above.
+ */
+const MD_IMAGE_CITATION_G_RE =
+  /!\[[^\]\n]{0,1000}\](?:\[([^\]\n]{1,200})\]|\(\s*<?([^)\n]{0,300})\))/g;
+/** Reference-style image definition: `[ref]: img_key`. */
+const MD_REFERENCE_DEFINITION_G_RE =
+  /^ {0,3}\[([^\]\n]{1,200})\]:[ \t]*(img_[A-Za-z0-9_.:-]{1,200})/gm;
+
 /** At-mention markup in `md` text; bounded so truncated markup cannot stall. */
 export const MD_AT_TAG_SOURCE = String.raw`<at\s+user_id=["'][^"']{1,200}["']\s*>[\s\S]{0,200}?</at>`;
+
+/**
+ * Sort base for legacy-only keys the rendered text never cites: past any
+ * possible citation ordinal (a message cannot carry a billion citations).
+ */
+const LEGACY_ONLY_POSITION_BASE = 1 << 30;
 
 export function parseFeishuContent(
   type: string,
@@ -318,18 +346,18 @@ function parsePostContent(
   // Whether any node contributed real (non-placeholder) content: title prose,
   // text/link/mention/code/markdown — anything but an img/media placeholder.
   let hasNonPlaceholderContent = false;
-  // Document position of every referenced key, harvested or legacy-rescued,
-  // in ONE space both sides compute the same way: node ordinal times a
-  // stride, plus the key's ordinal within its node. A message cannot carry
-  // anywhere near STRIDE key references in one node (each reference is a
-  // dozen-plus characters of platform-bounded text), so the spaces never
-  // overlap. The merge sorts on these so attachment order follows the order
-  // the rendered text cites each key.
-  const POSITION_STRIDE = 1 << 16;
+  // Document position of every referenced key as ONE citation ordinal
+  // stream: each native resource node and each image-shaped citation in md
+  // prose — whether or not the harvest grammar accepts its form — takes the
+  // next ordinal in document order. A key the tight grammar rejects
+  // (reference-style, over-bound alt, a title the simple form can't carry)
+  // still holds its text position here, so the legacy sweep places the
+  // rescued key where the text cites it; a key cited nowhere falls past the
+  // end of the stream in legacy node order. The merge sorts on these so
+  // attachment order follows the order the rendered text cites each key.
   const positions = new Map<string, number>();
   const resourceById = new Map<string, FeishuResource>();
-  let nodeIndex = -1;
-  let intraKey = 0;
+  let citationCounter = 0;
   const addAtPosition = (
     type: FeishuResource['type'],
     key: unknown,
@@ -337,9 +365,8 @@ function parsePostContent(
   ) => {
     if (typeof key === 'string' && key) {
       const id = `${type}:${key}`;
-      if (!positions.has(id)) {
-        positions.set(id, nodeIndex * POSITION_STRIDE + intraKey);
-        intraKey += 1;
+      if (!positions.has(id)) positions.set(id, citationCounter++);
+      if (!resourceById.has(id)) {
         resourceById.set(id, {
           type,
           key,
@@ -358,8 +385,6 @@ function parsePostContent(
     }
   }
   const render = (value: unknown): string => {
-    nodeIndex += 1;
-    intraKey = 0;
     const node = record(value);
     const text = string(node['text']);
     switch (node['tag']) {
@@ -411,6 +436,24 @@ function parsePostContent(
         // Code examples are not resource references, so keys are harvested
         // from fence-stripped prose. Remote URLs are never fetched.
         const prose = stripFencedCode(text);
+        // Reference-style definitions resolve `[ref]: img_key`; every
+        // image-shaped citation — harvested or not — consumes a citation
+        // ordinal so a grammar-rejected citation's key still holds its text
+        // position for the legacy merge below.
+        const definitions = new Map<string, string>();
+        for (const def of prose.matchAll(MD_REFERENCE_DEFINITION_G_RE)) {
+          definitions.set(def[1]!, def[2]!);
+        }
+        for (const citation of prose.matchAll(MD_IMAGE_CITATION_G_RE)) {
+          const ordinal = citationCounter++;
+          const key =
+            citation[1] !== undefined
+              ? definitions.get(citation[1])
+              : /^<?(img_[A-Za-z0-9_.:-]{1,200})/.exec(citation[2]!)?.[1];
+          if (key && !positions.has(`image:${key}`)) {
+            positions.set(`image:${key}`, ordinal);
+          }
+        }
         for (const match of prose.matchAll(mdImageRe())) {
           addAtPosition('image', match[1]);
         }
@@ -437,9 +480,11 @@ function parsePostContent(
   }
   // The legacy representation carries image nodes even when Markdown uses
   // syntax outside the simple inline image form above. It mirrors the same
-  // document, so rescued keys join the merge at the position the legacy
-  // sweep computes; keys both representations carry keep the v2 citation
-  // position, and the cap applies once over the position-sorted union.
+  // document, so a rescued key takes the ordinal of the citation that names
+  // it when the text cites it at all — including citations the harvest
+  // grammar rejects — and falls past the end of the citation stream in
+  // legacy node order otherwise. Keys both representations carry keep the
+  // v2 position, and the cap applies once over the position-sorted union.
   if (rows === v2 && Array.isArray(body['content'])) {
     let legacyNodeIndex = -1;
     for (const row of body['content']) {
@@ -457,10 +502,10 @@ function parsePostContent(
         const type: FeishuResource['type'] =
           node['tag'] === 'img' ? 'image' : 'video';
         const id = `${type}:${key}`;
-        if (positions.has(id)) continue;
-        // Same formula the v2 side uses: a legacy resource at node index j
-        // gets the position the v2 render would give a key at node j.
-        positions.set(id, legacyNodeIndex * POSITION_STRIDE);
+        if (resourceById.has(id)) continue;
+        if (!positions.has(id)) {
+          positions.set(id, LEGACY_ONLY_POSITION_BASE + legacyNodeIndex);
+        }
         resourceById.set(id, { type, key });
       }
     }

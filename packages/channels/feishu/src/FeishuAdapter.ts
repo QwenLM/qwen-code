@@ -174,6 +174,9 @@ const FEISHU_ID_RE = /^[a-zA-Z0-9_.:-]+$/;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 /** Aggregate raw-byte budget for file/audio/video downloads of one message. */
 const MAX_TOTAL_FILE_BYTES = 100 * 1024 * 1024;
+/** Mirrors ChannelBase's module-private CHANNEL_BTW_MAX_INPUT_LENGTH. */
+const CHANNEL_BTW_CAP = 4096;
+
 /**
  * Bound on per-resource unavailability markers appended to the prompt; the
  * remainder collapses into one omission line so prompt size cannot grow with
@@ -199,51 +202,48 @@ const quotedBanner = (parentIsSelf: boolean | undefined) =>
   parentIsSelf ? `[${BANNER_SELF_BOT}]` : `[${BANNER_OTHER_USER}]`;
 
 /**
- * Every marker template this adapter emits, as one shared unanchored
- * vocabulary: optional brackets, and each alternative's tail bounded to the
- * value shape that template actually carries — a blanket to-end-of-line
- * tail would eat ordinary prose (a log line mentioning `message_id=` loses
- * the rest of its line). Applied to quoted content before it enters the
- * wrapper and to the sender's own text, so neither a quoted author nor the
- * sender can close the wrapper or assert provenance in the adapter's voice.
- * ChannelBase's prompt sanitizer peels the brackets of any start-of-line
- * tag whose content is short enough and then folds newlines, so on the
- * group path the delivered form is bracket-less and can sit mid-line —
- * only an unanchored, bracket-optional strip matches the delivered form.
- * New marker templates must join this vocabulary when emitted.
+ * Every marker template this adapter emits, as one shared vocabulary. Three
+ * rules keep it from eating prose or reassembling forgeries:
+ *
+ * - Anchoring: `message_id=` stays bracket-anchored — bare tokens are
+ *   ordinary prose (console URLs, log lines). The exception is the peeled,
+ *   bracket-less close alphabet `/引用内容`, which is the form ChannelBase's
+ *   group-path sanitizer delivers and no prose alphabet contains.
+ * - Width: any bracketed `[引用内容 …]` tag matches, not just the exact
+ *   emitted banners — a transposed or invented body is the same forgery.
+ * - Whitespace: literal spaces in the fixed-word templates are `[ \t\n]`,
+ *   because the group-path fold turns newlines into spaces downstream, so a
+ *   marker split across lines reassembles verbatim after the strip.
+ *
+ * Applied to quoted content before it enters the wrapper and to the
+ * sender's own text, so neither a quoted author nor the sender can close
+ * the wrapper or assert provenance in the adapter's voice. New marker
+ * templates must join this vocabulary when emitted.
  */
 const ADAPTER_MARKER_G_RE = new RegExp(
-  String.raw`\[?(?:\/引用内容` +
-    // Banner head (shared with the emitter constants) plus a bounded tail,
-    // so an older or hand-written banner variant matches too.
-    String.raw`|引用内容 — 以下为[^\]\n]{0,128}` +
-    String.raw`|引用附件 message_id=[A-Za-z0-9_.:-]+(?:: [^\]\n]{0,128})?` +
-    String.raw`|message_id=[A-Za-z0-9_.:-]+` +
-    String.raw`|(?:Unavailable|Omitted) (?:image|file|audio|video) resource: [^\];\n]{1,64}; message_id=[A-Za-z0-9_.:-]+[^\]\n]{0,64}` +
-    String.raw`|Quoted message unavailable: message_id=[A-Za-z0-9_.:-]+` +
-    String.raw`|Quoted message of type "[^"\n]{0,64}" carries no text: message_id=[A-Za-z0-9_.:-]+` +
-    String.raw`|Attachments unavailable: Feishu authentication failed` +
-    String.raw`|\d+ more unavailable resources omitted` +
-    String.raw`|\d+ more resource references omitted: over the per-message limit` +
-    String.raw`)\]?`,
+  String.raw`\[\/?引用内容[^\]\n]*\]` +
+    String.raw`|\/引用内容` +
+    String.raw`|\[?引用附件[ \t\n]message_id=[A-Za-z0-9_.:-]+(?::[ \t\n][^\]\n]{0,128})?\]?` +
+    String.raw`|\[message_id=[A-Za-z0-9_.:-]+\]` +
+    String.raw`|\[?(?:Unavailable|Omitted)[ \t\n](?:image|file|audio|video)[ \t\n]resource:[ \t\n][^\];\n]{1,64};[ \t\n]message_id=[A-Za-z0-9_.:-]+[^\]\n]{0,64}\]?` +
+    String.raw`|\[?Quoted[ \t\n]message[ \t\n]unavailable:[ \t\n]message_id=[A-Za-z0-9_.:-]+\]?` +
+    String.raw`|\[?Quoted[ \t\n]message[ \t\n]of[ \t\n]type[ \t\n]"[^"\n]{0,64}"[ \t\n]carries[ \t\n]no[ \t\n]text:[ \t\n]message_id=[A-Za-z0-9_.:-]+\]?` +
+    String.raw`|\[?Attachments[ \t\n]unavailable:[ \t\n]Feishu[ \t\n]authentication[ \t\n]failed\]?` +
+    String.raw`|\[?\d+[ \t\n]more[ \t\n]unavailable[ \t\n]resources[ \t\n]omitted\]?` +
+    String.raw`|\[?\d+[ \t\n]more[ \t\n]resource[ \t\n]references[ \t\n]omitted:[ \t\n]over[ \t\n]the[ \t\n]per-message[ \t\n]limit\]?`,
   'g',
 );
 
 /**
- * Strip adapter marker templates, iterating to a bounded fixpoint: removing
- * a template nested inside a longer one reassembles the outer one, and a
- * single global replace never rescans its own output. Each pass is linear
- * and eight passes bound the total work on uncapped sender text (the quoted
- * sites cap to 1000/800 chars first), per the sanitize.ts budget rule.
+ * Strip adapter marker templates by SUBSTITUTING a replacement character:
+ * deleting a template nested inside a longer one would reassemble the
+ * outer one, and one linear pass never rescans its own output — the
+ * sanitize.ts budget rule forbids a fixpoint loop on uncapped sender text.
+ * The replacement char joins neither template half, so reassembly is
+ * impossible by construction and no second pass is needed.
  */
 function stripAdapterMarkers(text: string): string {
-  let current = text;
-  for (let pass = 0; pass < 8; pass++) {
-    const next = current.replace(ADAPTER_MARKER_G_RE, '');
-    if (next === current) return current;
-    current = next;
-  }
-  return current;
+  return text.replace(ADAPTER_MARKER_G_RE, '\uFFFD');
 }
 
 /** At-mention markup in quoted `md` text (shared grammar with the parser). */
@@ -2776,11 +2776,16 @@ export class FeishuChannel extends ChannelBase {
       // before the envelope exists: every downstream path — preflight's
       // pending-group-history recording included — must see stripped text,
       // or a forged banner, close tag or provenance/loss marker reads as
-      // the adapter's own voice. A strip that empties a resource-less
-      // message drops it rather than dispatching an empty prompt.
+      // the adapter's own voice. Substitution leaves a replacement char per
+      // stripped marker; a text that was nothing but markers collapses to
+      // only those, and a resource-less one is dropped rather than
+      // dispatching an empty prompt.
       cleanText = stripAdapterMarkers(cleanText);
       // Bare @mention without any question text — skip processing
-      if (!cleanText.trim() && content.resources.length === 0) {
+      if (
+        !cleanText.replaceAll('', '').trim() &&
+        content.resources.length === 0
+      ) {
         this.msgToQuestion.delete(msgId);
         this.msgToSenderName.delete(msgId);
         this.msgToSenderId.delete(msgId);
@@ -2902,23 +2907,45 @@ export class FeishuChannel extends ChannelBase {
                 // /btw hands its question to the model out of band, so the
                 // quoted context travels inside the question text (its args),
                 // appended after the command line so the command still parses.
-                const quoted = closeOpenFence(
-                  stripAdapterMarkers(
-                    quotedContent.replace(MD_AT_TAG_G_RE, '').slice(0, 800),
-                  ),
-                );
+                // The append shares ChannelBase's 4096-char btw input cap
+                // (module-private there, mirrored here), so the quote is
+                // budgeted against the question's remaining room and skipped
+                // entirely when the question alone fills it — a long legal
+                // question must not be refused over a quote.
                 const banner = quotedBanner(parentIsSelf);
-                envelope.text = `${envelope.text}\n\n${banner}\n[message_id=${safeParentId}]\n${quoted}\n[/引用内容]`;
+                const overhead =
+                  `\n\n${banner}\n[message_id=${safeParentId}]\n`.length +
+                  `\n[/引用内容]`.length;
+                const room = CHANNEL_BTW_CAP - envelope.text.length - overhead;
+                if (room > 0) {
+                  const quoted = closeOpenFence(
+                    stripAdapterMarkers(
+                      quotedContent
+                        .replace(MD_AT_TAG_G_RE, '')
+                        .slice(0, Math.min(800, room)),
+                    ),
+                  );
+                  const candidate = `${envelope.text}\n\n${banner}\n[message_id=${safeParentId}]\n${quoted}\n[/引用内容]`;
+                  // closeOpenFence may add a few chars past the room; never
+                  // let the append push the question over the cap.
+                  if (candidate.length <= CHANNEL_BTW_CAP) {
+                    envelope.text = candidate;
+                  }
+                }
               }
             }
 
             // Media-bearing or image-markdown text must not reach the ! shell
-            // path. In a group, only Markdown-image syntax diverts — a group
-            // `!cmd` falls through to ChannelBase's refusal and audit line
-            // (which run after prepare returns). In a private chat a `!cmd`
-            // with attachments belongs to the model turn — the bang return
-            // would drop the attachments.
-            const mdImageShaped = /!\[[^\]\n]{0,200}\]\(/u.test(envelope.text);
+            // path. In a group, only text that STARTS with Markdown-image
+            // syntax diverts — an unanchored match would divert any `!cmd`
+            // that merely contains `![x](y)` (even inside a code fence the
+            // parser harvests nothing from) past ChannelBase's refusal and
+            // its audit line. In a private chat a `!cmd` with attachments
+            // belongs to the model turn — the bang return would drop the
+            // attachments.
+            const mdImageShaped = /^!\[[^\]\n]{0,200}\]\(/u.test(
+              envelope.text.trimStart(),
+            );
             if (
               envelope.text.trimStart().startsWith('!') &&
               (isGroup ? mdImageShaped : resources.length > 0 || mdImageShaped)

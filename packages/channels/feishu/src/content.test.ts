@@ -109,9 +109,8 @@ describe('parseFeishuContent (#11554)', () => {
   });
 
   it('merges legacy-rescued resources in document order', () => {
-    // The titled form `![图1](img_AAA "标题")` is outside the harvest grammar,
-    // so only the legacy sweep recovers it — at its document position, not
-    // appended after the v2 hits.
+    // The harvest grammar carries the titled form, so both keys are
+    // harvested at their citation ordinals; the legacy sweep dedupes them.
     const result = parseFeishuContent(
       'post',
       JSON.stringify({
@@ -412,14 +411,49 @@ describe('parseFeishuContent (#11554)', () => {
         content_v2: [
           [
             {
+              // The blank line ends the paragraph, so the 4-column row is a
+              // real indented code block — without it the row would be a
+              // lazy paragraph continuation whose image is real.
               tag: 'md',
-              text: 'some text\n    ![sample](img_fake)\nsee ![real](img_real)',
+              text: 'some text\n\n    ![sample](img_fake)\nsee ![real](img_real)',
             },
           ],
         ],
       }),
     );
     expect(result.resources).toEqual([{ type: 'image', key: 'img_real' }]);
+  });
+
+  it('harvests an over-indented lazy paragraph continuation', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              // No blank line: indented code cannot interrupt a paragraph,
+              // so the 4-column row continues it and both images are real.
+              text: 'some text\n    ![sample](img_sample)\nsee ![real](img_real)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([
+      { type: 'image', key: 'img_sample' },
+      { type: 'image', key: 'img_real' },
+    ]);
+  });
+
+  it('harvests a tab-led lazy continuation of a list item paragraph', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [[{ tag: 'md', text: '- first\n\t![a](img_tab)' }]],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_tab' }]);
   });
 
   it('closeOpenFence closes a container-prefixed fence with its prefix', () => {
@@ -625,6 +659,60 @@ describe('parseFeishuContent (#11554)', () => {
       Array.from({ length: 8 }, (_, i) => `img_${i}`),
     );
     expect(result.droppedResourceCount).toBe(2);
+  });
+
+  it('places a reference-style cited key at its citation, not at the end', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'md', text: 'ignored legacy render' }],
+          [{ tag: 'img', image_key: 'img_A' }],
+        ],
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              // Reference-style images are documented out of the harvest
+              // grammar, but the citation still holds its text position.
+              text: 'first ![a][ref] then ![b](img_B)\n\n[ref]: img_A',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual(['img_A', 'img_B']);
+  });
+
+  it('keeps the first-cited key under the cap when the tail overflows', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_R' }],
+          ...Array.from({ length: 8 }, (_, i) => [
+            { tag: 'img', image_key: `img_H${i}` },
+          ]),
+        ],
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: `![r][r] ${Array.from(
+                { length: 8 },
+                (_, i) => `![h${i}](img_H${i})`,
+              ).join(' ')}\n\n[r]: img_R`,
+            },
+          ],
+        ],
+      }),
+    );
+    // img_R is cited first, so it survives; the tail (img_H7) drops.
+    expect(result.resources.map((r) => r.key)).toEqual([
+      'img_R',
+      ...Array.from({ length: 7 }, (_, i) => `img_H${i}`),
+    ]);
+    expect(result.droppedResourceCount).toBe(1);
   });
 
   it('keeps the text-cited key under the cap, not a legacy-only one', () => {
