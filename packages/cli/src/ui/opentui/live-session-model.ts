@@ -35,11 +35,12 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * only the type says whether that body can expand. */
   confirmType?: string;
   /** The dialog's body text for the plain-text-body confirmations
-   * (info's prompt, plan's plan, exec's command). */
+   * (info's prompt, plan's plan, exec's command) — and edit's raw diff,
+   * whose tail-windowed lines the card prices by painted height. */
   confirmBody?: string;
   /** Rows the dialog renders outside the body window (info's urls block,
    * exec's warnings, edit's fileName row and warnings, ask_user_question's
-   * question blocks) — charged in addition to the windowed body. */
+   * tallest question block) — charged in addition to the windowed body. */
   confirmExtra?: string;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */

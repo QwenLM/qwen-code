@@ -26,6 +26,7 @@ import {
   TodoRows,
   assistantMessageMeta,
   capToolCardDescription,
+  cardDescriptionColumns,
   hiddenLinesLabel,
   hiddenTailLinesLabel,
   maxHistoryItemRows,
@@ -137,14 +138,19 @@ function toolItemRows(
   );
   const nameCols = getCachedStringWidth(name) + 1;
   const suffix = toolCardSummarySuffix(item.done, item.summary);
+  // The header's flex row paints the status glyph and the name before the
+  // description wraps, so the description occupies the name-aware column
+  // share the budget itself converts with (messages.tsx's
+  // cardDescriptionColumns) — the raw-cols measure under-counts every
+  // capped card that share widens (R10-1).
+  const descCols = cardDescriptionColumns(cols, nameCols);
   let rows =
     Math.max(
       1,
       Math.ceil(
-        (nameCols +
-          (cap.description ? getCachedStringWidth(cap.description) : 0) +
+        ((cap.description ? getCachedStringWidth(cap.description) : 0) +
           getCachedStringWidth(suffix)) /
-          cols,
+          descCols,
       ),
     ) + (cap.hiddenRows > 0 ? 1 : 0);
   // ToolCardBody, indented by the same status column.
@@ -223,19 +229,64 @@ function goalItemRows(
   return rows;
 }
 
-/** ArenaSessionCard painted rows (ArenaSessionRow parity). */
+/**
+ * ArenaSessionCard painted rows (ArenaSessionRow parity): every line the
+ * card paints, composed the way the row composes it — the flat per-line
+ * charge dropped the approach lines' diff-stat suffix and never wrapped
+ * the status, file-group or token lines (R10-1).
+ */
 function arenaSessionRows(item: LiveArenaSessionItem, width: number): number {
-  const comparing =
-    item.sessionStatus === 'idle' || item.sessionStatus === 'completed';
-  if (!comparing) return 1;
-  const n = item.agents.length;
-  let rows = 6 + 2 * n + arenaFileGroups(item.agents).length;
-  for (const agent of item.agents) {
+  const { sessionStatus, agents } = item;
+  const comparing = sessionStatus === 'idle' || sessionStatus === 'completed';
+  const title = comparing
+    ? 'Arena Comparison Summary'
+    : sessionStatus === 'cancelled'
+      ? 'Arena Cancelled'
+      : 'Arena Failed';
+  if (!comparing) return paintedTextRows(title, width);
+  const branch = (index: number, total: number) =>
+    index === total - 1 ? '└─' : '├─';
+  const n = agents.length;
+  const groups = arenaFileGroups(agents);
+  let rows =
+    paintedTextRows(title, width) + paintedTextRows('Status Summary:', width);
+  agents.forEach((agent, index) => {
+    const { text } = getArenaStatusLabel(agent.status);
     rows += paintedTextRows(
-      `${agent.label}: ${agent.approachSummary ?? 'No approach summary available.'}`,
-      width - 5,
+      `  ${branch(index, n)} ${sanitizeTerminalText(agent.label)}: ${text}`,
+      width,
     );
-  }
+  });
+  rows += paintedTextRows('Files Modified:', width);
+  groups.forEach((group, index) => {
+    rows += paintedTextRows(
+      `  ${branch(index, groups.length)} ${sanitizeTerminalText(group.label)}: ${sanitizeTerminalText(arenaFileList(group.files))}`,
+      width,
+    );
+  });
+  rows += paintedTextRows('Approach Summary:', width);
+  agents.forEach((agent, index) => {
+    const stats = arenaDiffStats(agent);
+    const files = arenaAgentFiles(agent).length;
+    const summary = agent.approachSummary ?? 'No approach summary available.';
+    rows += paintedTextRows(
+      `  ${branch(index, n)} ${sanitizeTerminalText(agent.label)}: ${sanitizeTerminalText(summary)} ` +
+        `(${files} ${files === 1 ? 'file' : 'files'}, +${stats.additions} -${stats.deletions} lines, ` +
+        `${agent.toolCalls} ${agent.toolCalls === 1 ? 'tool call' : 'tool calls'})`,
+      width,
+    );
+  });
+  rows += paintedTextRows('Token Efficiency:', width);
+  agents.forEach((agent, index) => {
+    rows += paintedTextRows(
+      `  ${branch(index, n)} ${sanitizeTerminalText(agent.label)}: ${agent.outputTokens.toLocaleString()} tokens · runtime ${formatDuration(agent.durationMs)}`,
+      width,
+    );
+  });
+  rows += paintedTextRows(
+    `Run /arena select${sessionStatus === 'idle' ? ' to view detailed diff or pick a winner.' : ' to pick a winner.'}`,
+    width,
+  );
   return rows;
 }
 
@@ -247,10 +298,12 @@ function arenaSessionRows(item: LiveArenaSessionItem, width: number): number {
  * the render row by row, margins included, and biases toward over-counting
  * (an over-count only shrinks a card's description, while an under-count
  * keeps budget rows the viewport no longer has and pushes the mounted
- * dialog's outcome list off the alt screen). Known under-count gaps, each
- * bounded by one card's height: a thought opened by mouse click (the view
- * knows only the global ctrl+o toggle) and markdown block spacing the
- * source-line measure cannot see. Pending cards are excluded by the caller:
+ * dialog's outcome list off the alt screen). Known under-count gaps: a
+ * thought opened by mouse click (the view knows only the global ctrl+o
+ * toggle) paints its body uncounted, markdown block spacing the
+ * source-line measure cannot see, and the renderer's word wrap against
+ * this model's character wrap (an unbroken token past the wrap column
+ * lands differently). Pending cards are excluded by the caller:
  * their chrome rides the reserve / sibling charge and their descriptions
  * ARE the budget being priced.
  */
@@ -278,11 +331,18 @@ function transcriptItemRows(
       );
     case 'thinking': {
       // A live thought streams open; a committed one collapses to its
-      // header unless the global toggle is on.
+      // header unless the global toggle is on. The header is an unpadded
+      // wrapping text (a duration-labelled one is ~40 columns), so price
+      // the string ThinkingRow builds — a flat row under-counts it past
+      // the wrap column (R10-1).
       const open = thoughtsExpanded || !item.done;
+      const meta = thinkingMeta(item.done, open, false, item.durationMs);
       return (
         margin +
-        1 +
+        paintedTextRows(
+          `${meta.icon} ${meta.label}${meta.hint ? ` ${meta.hint}` : ''}`,
+          width,
+        ) +
         (open && item.text
           ? paintedTextRows(sanitizeTerminalText(item.text), width)
           : 0)
@@ -326,7 +386,11 @@ function transcriptItemRows(
           width - 2,
         )
       );
-    case 'retry':
+    case 'retry': {
+      // The countdown row is an unpadded wrapping text like the message
+      // row: price the string RetryRows builds at its mount-time (longest)
+      // value — the remaining seconds only tick down (R10-1).
+      const countdownSec = Math.max(0, Math.ceil(item.delayMs / 1000));
       return (
         margin +
         paintedTextRows(
@@ -336,8 +400,12 @@ function transcriptItemRows(
           ),
           width,
         ) +
-        1
+        paintedTextRows(
+          `↻ Retrying in ${countdownSec}s… (attempt ${item.attempt} of ${item.maxRetries})`,
+          width,
+        )
       );
+    }
     case 'stop-hook':
       return (
         margin +
@@ -359,16 +427,28 @@ function transcriptItemRows(
         margin + 1 + paintedTextRows(sanitizeTerminalText(item.text), width - 2)
       );
     case 'arena-agent': {
-      const { icon, text } = getArenaStatusLabel(item.agent.status);
+      // ArenaAgentRow paints THREE unconditional rows — status, Tokens,
+      // Tool Calls — plus the error row; one flat row for the Tokens /
+      // Tool Calls pair priced every card a row low (R10-1).
+      const { agent } = item;
+      const { icon, text } = getArenaStatusLabel(agent.status);
+      const failed = agent.failedToolCalls > 0;
       return (
         margin +
         paintedTextRows(
-          `${icon} ${sanitizeTerminalText(item.agent.label)} · ${text} · ${formatDuration(item.agent.durationMs)}`,
+          `${icon} ${sanitizeTerminalText(agent.label)} · ${text} · ${formatDuration(agent.durationMs)}`,
           width,
         ) +
-        1 +
-        (item.agent.error
-          ? paintedTextRows(sanitizeTerminalText(item.agent.error), width - 2)
+        paintedTextRows(
+          `  Tokens: ${agent.totalTokens.toLocaleString()} (in ${agent.inputTokens.toLocaleString()}, out ${agent.outputTokens.toLocaleString()})`,
+          width,
+        ) +
+        paintedTextRows(
+          `  Tool Calls: ${agent.toolCalls}${failed ? ` (✓ ${agent.successfulToolCalls} ✕ ${agent.failedToolCalls})` : ''}`,
+          width,
+        ) +
+        (agent.error
+          ? paintedTextRows(`  ${sanitizeTerminalText(agent.error)}`, width)
           : 0)
       );
     }

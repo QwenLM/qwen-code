@@ -928,4 +928,305 @@ describe('OpenTuiTranscriptView', () => {
       expect(rowsAbove).toBe(4);
     }
   });
+
+  it('charges the painted rows of a settled card’s capped description (R10-1)', () => {
+    // The card's flex row spends the 41-column mcp name before the
+    // description wraps, so the description paints in the name-aware share
+    // of the row — the budget's own wrap ratio — not the raw full-width
+    // basis: a 3000-column args JSON capped to 390 visible columns paints
+    // ceil(390 / 66) = 6 rows plus the hidden-tail label, not the 4+1 the
+    // raw-cols measure charged.
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            id: 's1',
+            tool: 'mcp__github_enterprise__create_repository',
+            description: 'x'.repeat(3000),
+            done: true,
+            success: true,
+            summary: 'ok',
+          }),
+          toolItem({
+            id: 't1',
+            description: 'y',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const rowsAboveArgs = mocks.pendingSpy.mock.calls
+      .slice(callsBefore)
+      .map((call) => call[6]);
+    expect(rowsAboveArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of rowsAboveArgs) {
+      expect(rowsAbove).toBe(7);
+    }
+
+    // The same conversion prices a description UNDER the cap: 300 columns
+    // fit the 5-row budget uncapped, but paint 4 rows in the name-aware
+    // share (ceil(300 / 75)), not the 3 the raw-cols measure charged.
+    const uncappedBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            id: 's2',
+            tool: 'read_file',
+            description: 'x'.repeat(300),
+            done: true,
+            success: true,
+            summary: 'ok',
+          }),
+          toolItem({
+            id: 't1',
+            description: 'y',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const uncappedArgs = mocks.pendingSpy.mock.calls
+      .slice(uncappedBefore)
+      .map((call) => call[6]);
+    expect(uncappedArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of uncappedArgs) {
+      expect(rowsAbove).toBe(4);
+    }
+  });
+
+  it('charges three painted rows per settled arena-agent card (R10-1)', () => {
+    // ArenaAgentRow paints three unconditional rows — status, Tokens, Tool
+    // Calls — plus the item margin; the row model charged one flat row for
+    // the Tokens/Tool Calls pair, pricing every card one row low.
+    const agent = (label: string) => ({
+      label,
+      status: AgentStatus.COMPLETED,
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    });
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          { kind: 'arena-agent', id: 'a1', agent: agent('A1') },
+          { kind: 'arena-agent', id: 'a2', agent: agent('A2') },
+          { kind: 'arena-agent', id: 'a3', agent: agent('A3') },
+          // The fourth card also paints the error row: 1 margin + 4 rows.
+          {
+            kind: 'arena-agent',
+            id: 'a4',
+            agent: { ...agent('A4'), error: 'boom' },
+          },
+          toolItem({
+            id: 't1',
+            description: 'y',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const rowsAboveArgs = mocks.pendingSpy.mock.calls
+      .slice(callsBefore)
+      .map((call) => call[6]);
+    expect(rowsAboveArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of rowsAboveArgs) {
+      // 3 cards x (1 margin + 3 painted rows) + 1 x (1 margin + 4 rows).
+      expect(rowsAbove).toBe(17);
+    }
+
+    // The failure suffix is part of the composed Tool Calls line: at a
+    // 20-column width '  Tool Calls: 3 (✓ 2 ✕ 1)' (25 columns) wraps to 2
+    // rows where the suffix-less 15 columns would not — and the 26-column
+    // Tokens line wraps too (status stays 1 row).
+    const failedBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={20}
+        availableTerminalHeight={80}
+        items={[
+          {
+            kind: 'arena-agent',
+            id: 'a5',
+            agent: {
+              ...agent('A5'),
+              toolCalls: 3,
+              successfulToolCalls: 2,
+              failedToolCalls: 1,
+            },
+          },
+          toolItem({
+            id: 't1',
+            description: 'y',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const failedArgs = mocks.pendingSpy.mock.calls
+      .slice(failedBefore)
+      .map((call) => call[6]);
+    expect(failedArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of failedArgs) {
+      // 1 margin + 1 status + 2 Tokens + 2 Tool Calls.
+      expect(rowsAbove).toBe(6);
+    }
+  });
+
+  it('composes every arena-session line the way the card paints it (R10-1)', () => {
+    // The flat per-line charge dropped the approach lines' diff-stat suffix
+    // (~33 columns) and never wrapped the status/file/token lines. Here
+    // each 69-column approach summary wraps to 2 painted rows at width 110
+    // once its suffix rides along — the model must follow.
+    const agent = (label: string) => ({
+      label,
+      status: AgentStatus.COMPLETED,
+      durationMs: 1000,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+      approachSummary: 'x'.repeat(69),
+    });
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={110}
+        availableTerminalHeight={80}
+        items={[
+          {
+            kind: 'arena-session',
+            id: 'as1',
+            sessionStatus: 'completed',
+            task: 'do it',
+            totalDurationMs: 2000,
+            agents: [agent('A'), agent('B')],
+          },
+          toolItem({
+            id: 't1',
+            description: 'y',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const rowsAboveArgs = mocks.pendingSpy.mock.calls
+      .slice(callsBefore)
+      .map((call) => call[6]);
+    expect(rowsAboveArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of rowsAboveArgs) {
+      // 1 margin + title, the Status/Files/Approach/Token headers (4), 2
+      // status lines, 1 (empty) common-files group, 2 approach lines at 2
+      // rows each, 2 token lines, and the Run hint.
+      expect(rowsAbove).toBe(16);
+    }
+  });
+
+  it('prices the thinking header and retry countdown as wrapping rows (R10-1)', () => {
+    // Both are unpadded wrapping texts the model charged a flat row for: at
+    // a 30-column width the duration-labelled thought header (36 columns)
+    // paints 2 rows and the two-digit retry countdown (35 columns) paints
+    // 2 — the flat charge reads 4 where the render paints 6.
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={30}
+        availableTerminalHeight={80}
+        items={[
+          {
+            kind: 'thinking',
+            id: 'th1',
+            text: 'body',
+            done: true,
+            durationMs: 12_000,
+          },
+          {
+            kind: 'retry',
+            id: 'r1',
+            attempt: 2,
+            maxRetries: 3,
+            delayMs: 15_000,
+            startedAt: Date.now(),
+          },
+          toolItem({
+            id: 't1',
+            description: 'y',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const rowsAboveArgs = mocks.pendingSpy.mock.calls
+      .slice(callsBefore)
+      .map((call) => call[6]);
+    expect(rowsAboveArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of rowsAboveArgs) {
+      // thinking: 1 margin + 2 header rows; retry: 1 message + 2 countdown.
+      expect(rowsAbove).toBe(6);
+    }
+  });
+
+  it('counts TAB at its painted two columns in the transcript row model (R11-2)', () => {
+    // A settled card's tool output keeps its TABs (sanitizeTerminalText
+    // preserves them deliberately) and the renderer advances each exactly 2
+    // columns: 10 lines of TAB + 105 columns paint 107 columns — 2 rows
+    // each at the card's 106-column basis — while the raw string width
+    // (TAB = 0 columns) measures 1.
+    const callsBefore = mocks.pendingSpy.mock.calls.length;
+    render(
+      <OpenTuiTranscriptView
+        availableWidth={108}
+        availableTerminalHeight={80}
+        items={[
+          toolItem({
+            id: 's1',
+            tool: 'read_file',
+            done: true,
+            success: true,
+            summary: 'ok',
+            output: Array.from(
+              { length: 10 },
+              () => '\t' + 'x'.repeat(105),
+            ).join('\n'),
+          }),
+          toolItem({
+            id: 't1',
+            description: 'y',
+            confirm: 'pending',
+            confirmType: 'mcp',
+          }),
+        ]}
+      />,
+    );
+    const rowsAboveArgs = mocks.pendingSpy.mock.calls
+      .slice(callsBefore)
+      .map((call) => call[6]);
+    expect(rowsAboveArgs.length).toBeGreaterThan(0);
+    for (const rowsAbove of rowsAboveArgs) {
+      // 1 header row + 10 tabbed output rows at 2 painted rows each.
+      expect(rowsAbove).toBe(21);
+    }
+  });
 });

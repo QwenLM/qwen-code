@@ -31,6 +31,7 @@ import {
   hiddenTailLinesLabel,
   maxHistoryItemRows,
   pendingCardMaxRows,
+  physicalRowsTotal,
   tailWindow,
   tailWindowPhysical,
   thinkingMeta,
@@ -44,7 +45,7 @@ import {
   userMessageMeta,
   STATUS_INDICATOR_WIDTH,
 } from './messages.js';
-import { toCodePoints } from '../utils/textUtils.js';
+import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
 import { TOOL_STATUS } from '../constants.js';
 import { C } from './theme.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
@@ -139,6 +140,13 @@ describe('toolCardText (card one-liner sanitize, R1-105)', () => {
       'run\\u001b[31m red\\u001b[0m',
     );
     expect(toolCardText('a\u0007b')).toBe('a\\u0007b');
+  });
+
+  it('detabs TAB to the two columns the renderer advances it (R11-2)', () => {
+    // The cap slices this same string by display width while the painted
+    // card row advances TAB 2 columns — the detab must live in the text
+    // itself or the slice and the painted row disagree.
+    expect(toolCardText('a\tb')).toBe('a  b');
   });
 });
 
@@ -379,20 +387,23 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
 
   it('charges the edit and ask_user_question rows painted outside the collapsed window (R7-1)', () => {
     // The edit dialog paints the fileName row and one row per warning ABOVE
-    // its tail-windowed diff, and the ask flow paints its question block
-    // with no window at all: both charge in addition to the collapsed body.
-    // A 3-row extra drops the shared fixed-body price from
-    // (80-26-20)*0.7 = 23 to (80-26-23)*0.7 = 21 — one site prices both
-    // types, so the charge must reach each (and the strict drop is the pin:
-    // today both calls return the identical number).
+    // its tail-windowed diff, so they charge in addition to the body. A
+    // 3-row extra drops the fixed-body price from (80-26-20)*0.7 = 23 to
+    // (80-26-23)*0.7 = 21 (the strict drop is the pin: both calls would
+    // otherwise return the identical number).
     const extra = '⚠ a\n⚠ b\n⚠ c';
     expect(pendingCardMaxRows(80, 2000, 108, { type: 'edit' }, 1)).toBe(23);
     expect(pendingCardMaxRows(80, 2000, 108, { type: 'edit', extra }, 1)).toBe(
       21,
     );
+    // The ask flow paints one question block at a time and ConfirmationBody
+    // renders NO windowed body for it, so the block alone is the price:
+    // (80-26-0)*0.7 = 37 without one, (80-26-3)*0.7 = 35 with a 3-row
+    // block — charging it the collapsed 20-row window would shrink the card
+    // by rows the dialog never paints (R10-1).
     expect(
       pendingCardMaxRows(80, 2000, 108, { type: 'ask_user_question' }, 1),
-    ).toBe(23);
+    ).toBe(37);
     expect(
       pendingCardMaxRows(
         80,
@@ -401,10 +412,38 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
         { type: 'ask_user_question', extra },
         1,
       ),
-    ).toBe(21);
+    ).toBe(35);
     // mcp renders no outside-window rows and its price must not move:
     // (80-26-5)*0.7 = 34 with or without the extra term wired.
     expect(pendingCardMaxRows(80, 2000, 108, { type: 'mcp' }, 1)).toBe(34);
+  });
+
+  it('prices an edit dialog body by the windowed diff’s painted rows (R10-1)', () => {
+    // DiffBody tail-windows the diff's LOGICAL lines and those lines wrap:
+    // 40 added 200-column lines keep 19 windowed lines that paint 38 rows
+    // at the dialog's 106 columns (plus the hidden-lines label), not the
+    // flat 20 the collapsed window charges sight-unseen — so the wrapping
+    // diff must leave the card a strictly smaller budget than one whose
+    // windowed lines each paint a single row.
+    const wrapping =
+      '@@ -0,0 +1,40 @@\n' +
+      Array.from({ length: 40 }, () => '+' + 'x'.repeat(199)).join('\n');
+    const fitting =
+      '@@ -0,0 +1,20 @@\n' +
+      Array.from({ length: 20 }, () => '+' + 'x'.repeat(60)).join('\n');
+    const budget = (body: string) =>
+      pendingCardMaxRows(80, 0, 106, { type: 'edit', body, extra: 'a.ts' }, 2);
+    expect(budget(wrapping)).toBeLessThan(budget(fitting));
+    // The exact pins: (80-26-40-2)*0.7/2 floors to 4 against
+    // (80-26-21-2)*0.7/2 = 10.
+    expect(budget(wrapping)).toBe(4);
+    expect(budget(fitting)).toBe(10);
+  });
+
+  it('counts TAB at the two columns the renderer advances it (R11-2)', () => {
+    // String widths count TAB as 0 columns, so a raw measure under-counts a
+    // tabbed line: 60 TABs + 60 columns paint 180 columns — 2 rows at 108.
+    expect(physicalRowsTotal(['\t'.repeat(60) + 'x'.repeat(60)], 108)).toBe(2);
   });
 
   it('keeps the sibling sum inside the shared region when the divided bound drops below the settled cap (R4-8, R4-1)', () => {
@@ -629,6 +668,19 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
     );
     expect(toCodePoints(cap.description)).toHaveLength(211);
     expect(cap.hiddenRows).toBe(15);
+  });
+
+  it('keeps a one-row budget to one painted row when the name fits (R11-1)', () => {
+    // The one-row floor exists for a name that alone exhausts the row
+    // (descRows * cols - nameCols <= 0); applied unconditionally it
+    // overrides a positive slice and the card paints name + a full-row
+    // description — 2 physical rows against a budget that certified 1. At
+    // descRows = 1 the unconditional floor fired for every name width.
+    const name = 'n'.repeat(40);
+    const cap = capToolCardDescription('d'.repeat(300), name, 110, 1);
+    expect(
+      getCachedStringWidth(cap.description) + getCachedStringWidth(name) + 1,
+    ).toBeLessThanOrEqual(110 - STATUS_INDICATOR_WIDTH);
   });
 });
 

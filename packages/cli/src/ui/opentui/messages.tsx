@@ -35,6 +35,7 @@ import {
   toCodePoints,
 } from '../utils/textUtils.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
+import { renderDiffBody } from './diff-render.js';
 import { formatDuration } from '../utils/displayUtils.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
@@ -106,18 +107,29 @@ export function hiddenLinesLabel(hiddenCount: number): string {
   return `... first ${hiddenCount} line${hiddenCount === 1 ? '' : 's'} hidden ...`;
 }
 
-/** Physical rows a logical row occupies when soft-wrapped to `cols` columns. */
+/**
+ * Physical rows a logical row occupies when soft-wrapped to `cols` columns.
+ * String widths count TAB as 0 columns while the renderer advances it
+ * exactly 2 (the detab convention dialogs-confirm's TextBody paints), so
+ * the row is measured detabbed — this is the single measuring site the
+ * window helpers, the dialog-body price and the transcript's painted-row
+ * model all share, and the convention cannot drift between them (R11-2).
+ */
 function physicalRowCount(row: string, cols: number): number {
-  return Math.max(1, Math.ceil(getCachedStringWidth(row) / cols));
+  return Math.max(
+    1,
+    Math.ceil(getCachedStringWidth(row.replace(/\t/g, '  ')) / cols),
+  );
 }
 
 /**
  * Total physical rows `rows` occupy when soft-wrapped to `cols` columns —
- * the shared total behind headWindowPhysical, tailWindowPhysical and
- * pendingCardMaxRows's dialog-body measure, so all three agree by
- * construction. `stopAfter` ends the scan early for callers whose consumers
- * all clamp past a threshold: every larger total produces the identical
- * clamped outcome.
+ * the shared total behind headWindowPhysical, tailWindowPhysical,
+ * pendingCardMaxRows's dialog-body measure and transcript-view's
+ * paintedTextRows, so all four agree by construction (the TAB detab lives
+ * in physicalRowCount; no caller can forget it). `stopAfter` ends the scan
+ * early for callers whose consumers all clamp past a threshold: every
+ * larger total produces the identical clamped outcome.
  */
 export function physicalRowsTotal(
   rows: readonly string[],
@@ -312,14 +324,36 @@ const MCP_CONFIRM_BODY_ROWS = 5;
 const CARD_DESC_WRAP_RATIO = 0.7;
 
 /**
+ * The card's flex row paints the status glyph and the tool name before the
+ * description, so the description wraps in the row's remaining columns —
+ * pendingCardMaxRows's name-aware wrap ratio expressed as a column count.
+ * transcript-view's settled-card row model prices the same header on this
+ * basis, so the budget and the row model stop disagreeing about one card
+ * (R10-1).
+ */
+export function cardDescriptionColumns(cols: number, nameCols: number): number {
+  return Math.max(
+    Math.floor(
+      cols *
+        Math.min(
+          CARD_DESC_WRAP_RATIO,
+          Math.max((cols - nameCols) / cols, 0.05),
+        ),
+    ),
+    1,
+  );
+}
+
+/**
  * What the transcript knows about the pending call's confirmation dialog.
  * `type` is confirmationDetails.type; `body` is the text the dialog renders
  * for the types whose body is a plain text block (info's prompt, plan's
  * plan, exec's command — see event-adapter's confirmationDialogBody, which
- * mirrors dialogs-confirm's ConfirmationBody switch); `extra` is the rows
- * the dialog renders OUTSIDE the body window (info's urls block, exec's
- * warnings, edit's fileName row and warnings, ask_user_question's question
- * blocks).
+ * mirrors dialogs-confirm's ConfirmationBody switch) — and edit's raw
+ * diff, whose tail-windowed lines wrap, so the card prices them by painted
+ * height; `extra` is the rows the dialog renders OUTSIDE the body window
+ * (info's urls block, exec's warnings, edit's fileName row and warnings,
+ * ask_user_question's tallest question block).
  */
 export interface PendingDialogBody {
   type?: string;
@@ -350,11 +384,14 @@ export interface PendingDialogBody {
  * windows only the prompt). The named fixed-body types return a null
  * expansion: mcp's dialog body is two fixed lines and the card is the only
  * surface carrying the call's arguments (R5-9); edit's dialog is a
- * tail-windowed diff — charged the collapsed window — painted BELOW the
- * fileName row and an unbounded warnings list, and ask_user_question's
- * flow paints one unwindowed question block per step. Both carry those
- * outside-the-window rows as `extra`, charged in addition to the collapsed
- * window: a PreToolUse 'ask' bounce can prepend hook-authored warnings of
+ * tail-windowed diff painted BELOW the fileName row and an unbounded
+ * warnings list — charged the windowed lines' PAINTED height when the
+ * diff arrives (the logical-line window wraps; R10-1), the flat collapsed
+ * window when it does not — and ask_user_question's flow paints one
+ * question block at a time, charged the tallest block with no collapsed
+ * window at all (ConfirmationBody renders no body for it). Both carry
+ * those outside-the-window rows as `extra`, charged in addition to the
+ * body: a PreToolUse 'ask' bounce can prepend hook-authored warnings of
  * arbitrary length to an edit confirmation, and unpriced those rows push
  * the mounted dialog's outcome list off the alt screen while the parked
  * cards keep their budget (R7-1). Everything else — a typed
@@ -372,33 +409,65 @@ function dialogBodyMeasure(
 ): { expanded: number | null; collapsed?: number } {
   const type = dialog?.type;
   const cols = Math.max(dialogWidth - 2, 10);
-  // String widths count TAB as 0 columns while the renderer advances it
-  // exactly 2 (customBanner's detab convention), so measure the detabbed
-  // text — the same detabbed rows TextBody windows in dialogs-confirm.
-  const detabbed = (text: string) =>
-    sanitizeTerminalText(text).replace(/\t/g, '  ');
+  // The painted rows these measures price are the sanitized text TextBody
+  // windows in dialogs-confirm; the TAB detab itself lives in
+  // physicalRowCount, the one measuring site every leg shares (R11-2).
   const extraRows = (extra: string | undefined): number =>
     extra === undefined
       ? 0
-      : physicalRowsTotal(detabbed(extra).split('\n'), cols, measureCap);
+      : physicalRowsTotal(
+          sanitizeTerminalText(extra).split('\n'),
+          cols,
+          measureCap,
+        );
   if (
     (type === 'info' || type === 'plan' || type === 'exec') &&
     dialog?.body !== undefined
   ) {
     const rows = physicalRowsTotal(
-      detabbed(dialog.body).split('\n'),
+      sanitizeTerminalText(dialog.body).split('\n'),
       cols,
       measureCap,
     );
     return { expanded: rows + extraRows(dialog.extra) };
   }
-  if (type === 'mcp' || type === 'edit' || type === 'ask_user_question') {
+  if (type === 'mcp') {
+    return {
+      expanded: null,
+      collapsed: MCP_CONFIRM_BODY_ROWS + extraRows(dialog?.extra),
+    };
+  }
+  if (type === 'edit') {
+    // DiffBody tail-windows the diff's LOGICAL lines and those lines wrap,
+    // so the flat collapsed window under-prices a wide diff: price the same
+    // windowed lines (and the window's hidden-lines label) physically
+    // (R10-1). A diff that never arrived — a version-skewed wire event —
+    // keeps the flat-window proxy.
+    if (dialog?.body === undefined) {
+      return {
+        expanded: null,
+        collapsed: CONFIRM_BODY_COLLAPSED_ROWS + extraRows(dialog?.extra),
+      };
+    }
+    const window = tailWindow(
+      renderDiffBody(dialog.body).map((line) =>
+        line.map((span) => span.text).join(''),
+      ),
+      CONFIRM_BODY_COLLAPSED_ROWS,
+    );
     return {
       expanded: null,
       collapsed:
-        (type === 'mcp' ? MCP_CONFIRM_BODY_ROWS : CONFIRM_BODY_COLLAPSED_ROWS) +
-        extraRows(dialog?.extra),
+        extraRows(dialog?.extra) +
+        physicalRowsTotal(window.visible, cols, measureCap) +
+        (window.hiddenCount > 0 ? 1 : 0),
     };
+  }
+  if (type === 'ask_user_question') {
+    // ConfirmationBody renders nothing for ask — the flow paints one
+    // question block at a time and the adapter's extra carries the tallest
+    // — so there is no collapsed body window to charge (R10-1).
+    return { expanded: null, collapsed: extraRows(dialog?.extra) };
   }
   return { expanded: payloadRows, collapsed: CONFIRM_BODY_COLLAPSED_ROWS };
 }
@@ -541,12 +610,16 @@ export function capToolCardDescription(
   const rows = Math.ceil((nameCols + getCachedStringWidth(description)) / cols);
   if (rows <= maxRows) return { description, hiddenRows: 0 };
   const descRows = Math.max(maxRows - 1, 1);
-  // Floor at one full row of columns: the sibling division can drop the
-  // budget to a single row, where a display name wider than the row would
-  // otherwise zero the slice and DELETE the description — the only surface
-  // carrying an mcp call's arguments (R7-2). The name then shares the row
-  // with whatever description fits instead of consuming it.
-  const visibleCols = Math.max(descRows * cols - nameCols, cols);
+  // Floor at one full row of columns only where the exact slice is empty:
+  // the sibling division can drop the budget to a single row, where a
+  // display name wider than the row would otherwise zero the slice and
+  // DELETE the description — the only surface carrying an mcp call's
+  // arguments (R7-2), so the name then shares the row with whatever
+  // description fits. Applied unconditionally the floor overrides a
+  // positive slice too, and the card paints name + a full-row description
+  // — 2 physical rows against a budget that certified 1 (R11-1).
+  const exactCols = descRows * cols - nameCols;
+  const visibleCols = exactCols > 0 ? exactCols : cols;
   return {
     description: sliceRowToWidth(description, visibleCols, 'head'),
     hiddenRows: Math.max(rows - descRows, 1),
@@ -597,7 +670,16 @@ export function toolCardSummarySuffix(
  * sequences and bare control bytes (model-controlled args must not reach
  * the terminal raw). */
 export function toolCardText(v: string): string {
-  return sanitizeMultilineForDisplay(v.replace(/\s*\n\s*/g, ' ').trim());
+  // Detab here, not in the cap: capToolCardDescription slices this same
+  // string, and the renderer advances TAB 2 columns while string widths
+  // count it as 0 — the slice and the painted card row must agree on one
+  // text (R11-2).
+  return sanitizeMultilineForDisplay(
+    v
+      .replace(/\s*\n\s*/g, ' ')
+      .replace(/\t/g, '  ')
+      .trim(),
+  );
 }
 
 export function toolCardDescription(rawName: string, args?: string): string {

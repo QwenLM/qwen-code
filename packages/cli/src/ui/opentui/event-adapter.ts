@@ -68,12 +68,16 @@ function isAskQuestion(value: unknown): value is AskQuestionLike {
  * that window — info's `URLs to fetch:` block (a margin row, a header row
  * and one row per URL, gated by the same displayUrls predicate) and exec's
  * one row per warning. mcp shows two fixed lines and carries nothing.
- * edit's windowed body is a tail-windowed diff, so it carries only the rows
- * painted ABOVE the diff window: the fileName row plus one ⚠ row per
- * warning (a PreToolUse 'ask' bounce can prepend hook-authored text of
- * arbitrary length there). ask_user_question has no window at all — the
- * flow paints one block per question (header, question text, option
- * labels) — so every question's block joins the extra. The two fields feed
+ * edit's windowed body is a tail-windowed diff: the diff travels as `body`
+ * so the card prices the windowed lines at their painted (wrapping) height
+ * (R10-1), and the rows painted ABOVE the diff window — the fileName row
+ * plus one ⚠ row per warning (a PreToolUse 'ask' bounce can prepend
+ * hook-authored text of arbitrary length there) — ride as the extra.
+ * ask_user_question has no window at all — the flow paints one block per
+ * question (header, question text, option labels) — so the TALLEST block
+ * is the extra: the card's static price must cover whichever step is
+ * showing, and summing every block would charge rows the dialog never
+ * paints together (R10-1). The two fields feed
  * the pending card's dialog-body measure (pendingCardMaxRows),
  * which charges extra IN ADDITION to the windowed body — the same split the
  * render makes, so a body filling the collapsed window can never swallow
@@ -88,6 +92,7 @@ export function confirmationDialogBody(details: {
   urls?: unknown;
   warnings?: unknown;
   fileName?: unknown;
+  fileDiff?: unknown;
   questions?: unknown;
 }): { body?: string; extra?: string } | undefined {
   // Version-skew guard: a field present in an unexpected shape fails the
@@ -136,10 +141,16 @@ export function confirmationDialogBody(details: {
     if (details.warnings !== undefined && !skewedStrings(details.warnings)) {
       return undefined;
     }
-    // The edit dialog paints the fileName row and one ⚠ row per warning
-    // ABOVE its tail-windowed diff — outside the collapsed body window the
-    // pending card prices — so they ride as the extra (R7-1).
+    const fileDiff = details.fileDiff;
+    if (fileDiff !== undefined && typeof fileDiff !== 'string') {
+      return undefined;
+    }
+    // The edit dialog tail-windows the diff BELOW the fileName row and one
+    // ⚠ row per warning: the diff travels as the body so the pending card
+    // prices the windowed lines at their painted (wrapping) height (R10-1),
+    // and the rows above the window ride as the extra (R7-1).
     return {
+      body: fileDiff,
       extra: [
         details.fileName,
         ...(details.warnings ?? []).map((warning) => `⚠ ${warning}`),
@@ -155,24 +166,25 @@ export function confirmationDialogBody(details: {
     ) {
       return undefined;
     }
-    // The flow paints one question block at a time — header, question text,
-    // option labels — and the card's static price must cover whichever step
-    // is showing, so every block joins the extra (the safe side is
-    // yielding). The footer and title stay in the chrome reserve.
-    const rows: string[] = [''];
+    // The flow paints one question block at a time — header, question
+    // text, option labels — and the card's static price must cover
+    // whichever step is showing, so the TALLEST block is the extra:
+    // summing every block would charge rows the dialog never paints
+    // together (R10-1). The footer and title stay in the chrome reserve.
+    let tallest: string[] = [];
     questions.forEach((question, index) => {
-      rows.push(
+      const block = [
+        '',
         `${question.header} (${index + 1}/${questions.length})`,
         question.question,
         '',
-      );
-      for (const option of question.options) {
-        rows.push(
+        ...question.options.map((option) =>
           question.multiSelect === true ? `[ ] ${option.label}` : option.label,
-        );
-      }
+        ),
+      ];
+      if (block.length > tallest.length) tallest = block;
     });
-    return { extra: rows.join('\n') };
+    return { extra: tallest.join('\n') };
   }
   return undefined;
 }
@@ -224,11 +236,13 @@ export type OpenTuiStreamEvent =
        * dialog's body (LiveToolItem.confirmType). */
       confirmType?: string;
       /** The dialog's body text (info's prompt, plan's plan, exec's
-       * command). */
+       * command — and edit's raw diff, priced by its windowed lines'
+       * painted height). */
       confirmBody?: string;
       /** Rows the dialog renders outside the body window: info's urls
        * block, exec's warnings, edit's fileName row and warnings,
-       * ask_user_question's question blocks (LiveToolItem.confirmExtra). */
+       * ask_user_question's tallest question block
+       * (LiveToolItem.confirmExtra). */
       confirmExtra?: string;
     }
   /** The call left awaiting_approval (approved, declined, or bounced):

@@ -252,9 +252,10 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       },
     ]);
     // An edit dialog paints the fileName row and one ⚠ row per warning
-    // ABOVE its tail-windowed diff — outside the collapsed body window the
-    // pending card prices — so they travel as the extra (R7-1). The diff is
-    // no windowed text body, so confirmBody stays absent.
+    // ABOVE its tail-windowed diff, so those rows travel as the extra
+    // (R7-1) — and the diff itself travels as the body so the pending card
+    // prices the windowed lines at their painted (wrapping) height instead
+    // of a flat window charge (R10-1).
     expect(
       map({
         type: 'tool_call_confirmation',
@@ -276,6 +277,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         tool: 'edit',
         title: 'Apply this change?',
         confirmType: 'edit',
+        confirmBody: '@@ -1,1 +1,1 @@',
         confirmExtra: 'a.txt\n⚠ Exact shell command: `ls`',
       },
     ]);
@@ -312,6 +314,48 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
     ]);
   });
 
+  it('prices the tallest ask_user_question block, not the sum (R10-1)', () => {
+    // AskUserQuestionFlow paints ONE question block at a time, so the
+    // card's static price covers whichever step is showing — the tallest
+    // block. Summing every block charged rows the dialog never paints
+    // together and shrank the card's budget for nothing.
+    const map = createEventMapper();
+    expect(
+      map({
+        type: 'tool_call_confirmation',
+        value: {
+          request: { callId: 'c10', name: 'ask_user_question' },
+          details: {
+            title: 'Answer?',
+            type: 'ask_user_question',
+            questions: [
+              {
+                header: 'Pick',
+                question: 'Which one?',
+                options: [{ label: 'a' }, { label: 'b' }, { label: 'c' }],
+                multiSelect: true,
+              },
+              {
+                header: 'Confirm',
+                question: 'Sure?',
+                options: [{ label: 'yes' }],
+              },
+            ],
+          },
+        },
+      } as unknown as AnyEv),
+    ).toEqual([
+      {
+        type: 'confirm',
+        id: 'c10',
+        tool: 'ask_user_question',
+        title: 'Answer?',
+        confirmType: 'ask_user_question',
+        confirmExtra: '\nPick (1/2)\nWhich one?\n\n[ ] a\n[ ] b\n[ ] c',
+      },
+    ]);
+  });
+
   it('fails the dialog body back to the payload proxy on version-skewed details (R5-2)', () => {
     // A field present in an unexpected shape means the rest of the dialog
     // may differ too (a skewed 'exec' could window its command): the
@@ -341,6 +385,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       [{ type: 'exec', command: 42 }, 'exec'],
       [{ type: 'edit', fileName: 42 }, 'edit'],
       [{ type: 'edit', fileName: 'a.txt', warnings: 'nope' }, 'edit'],
+      [{ type: 'edit', fileName: 'a.txt', fileDiff: 42 }, 'edit'],
       [{ type: 'ask_user_question', questions: 'nope' }, 'ask_user_question'],
       [
         {
