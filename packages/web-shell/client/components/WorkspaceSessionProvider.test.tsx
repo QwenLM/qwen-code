@@ -228,6 +228,43 @@ describe('WorkspaceSessionProvider targets', () => {
     },
   );
 
+  it('keeps the dark palette and browser locale on error surfaces when the host passes no opinion (#11955)', async () => {
+    // The standalone entry passes theme/language as undefined when the user
+    // never chose one. These surfaces render before App's settings
+    // resolution reaches them, so they must fall back to the pre-paint dark
+    // default and the browser locale — not light tokens on the dark
+    // pre-paint page and unconditional English.
+    const originalLanguage = navigator.language;
+    Object.defineProperty(navigator, 'language', {
+      value: 'zh-CN',
+      configurable: true,
+    });
+    try {
+      mocks.workspace = {
+        ...mocks.workspace,
+        status: 'error',
+        capabilities: undefined,
+        error: new Error('502 Daemon restarting'),
+      };
+      await act(async () => {
+        root.render(
+          <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
+        );
+      });
+
+      const surface = container.querySelector('[data-web-shell-root]');
+      expect(surface?.className).toContain('dark');
+      expect(container.textContent).toContain(
+        '无法连接工作区服务，请检查守护进程后重试。',
+      );
+    } finally {
+      Object.defineProperty(navigator, 'language', {
+        value: originalLanguage,
+        configurable: true,
+      });
+    }
+  });
+
   it('keeps the app mounted when opening a standalone session from a workspace', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     const app = container.querySelector('output');
