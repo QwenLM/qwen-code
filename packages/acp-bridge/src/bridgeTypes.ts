@@ -940,7 +940,7 @@ export interface BridgeSessionGoal {
     /** Canonical Goal turns completed so far. */
     iterations: number;
     setAt: number;
-    /** The judge's verdict on the most recent turn, when it has run. */
+    /** Why the Goal last stopped, or the verifier's most recent reason. */
     lastReason?: string;
   } | null;
 }
