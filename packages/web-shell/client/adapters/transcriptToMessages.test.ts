@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import {
+  createDaemonTranscriptState,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
@@ -30,6 +35,47 @@ function textBlock(
     ...overrides,
   };
 }
+
+it.each([true, false])(
+  'retains queue overflow summaries with background provenance: %s',
+  (withBackground) => {
+    const text =
+      'Dropped 1 background notification (queue full): 1 shell result (shell-0).';
+    const backgroundTurn = {
+      turnId: 'automatic-1',
+      taskId: 'shell-1',
+      kind: 'shell',
+      startedAt: 100,
+    };
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            _meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: { kind: 'queue', status: 'dropped' },
+              ...(withBackground ? { backgroundTurn } : {}),
+            },
+          },
+        },
+      }),
+    );
+    expect(transcriptBlocksToDaemonMessages(state.blocks)).toContainEqual(
+      expect.objectContaining({
+        role: 'system',
+        source: 'background_notification',
+        content: text,
+        data: { kind: 'queue', status: 'dropped' },
+      }),
+    );
+  },
+);
 
 describe('Assistant branch anchors', () => {
   it('preserves the checkpoint on the rendered Assistant message', () => {
@@ -5082,3 +5128,393 @@ it.each([true, false])(
     }
   },
 );
+
+describe('background execution identity', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    toolUseId: 'tool-1',
+    sourceTurnId: 'user-1',
+    label: 'Explore',
+    startedAt: 10,
+  };
+  it.each([true, false])(
+    'retains a result marker and main replies (explicit start: %s)',
+    (withStart) => {
+      const meta = {
+        backgroundTurn,
+        source: 'background_notification_response',
+      };
+      const messages = transcriptBlocksToDaemonMessages([
+        textBlock('user', 'user', 'Another question', 1, false, {
+          promptId: 'user-2',
+        }),
+        textBlock('answer', 'assistant', 'User answer', 2, false, {
+          promptId: 'user-2',
+        }),
+        ...(withStart
+          ? [
+              textBlock('start', 'assistant', 'Continue', 10, false, {
+                meta: {
+                  ...meta,
+                  source: 'background_notification_turn_started',
+                  qwenDiscreteMessage: true,
+                },
+              }),
+            ]
+          : []),
+        textBlock('auto-answer', 'assistant', 'Background answer', 11, false, {
+          meta,
+        }),
+        textBlock('steering', 'user', 'Please verify', 12, false, {
+          meta: { ...meta, source: 'mid_turn_message_injected' },
+        }),
+        textBlock('auto-followup', 'assistant', 'Verified', 13, false, {
+          meta,
+        }),
+      ]);
+      expect(messages.map((message) => message.role)).toEqual([
+        'user',
+        'assistant',
+        'system',
+        'assistant',
+        'system',
+        'assistant',
+      ]);
+      expect(messages[2]).toMatchObject({
+        id: 'background-turn:auto-1',
+        source: 'background_notification_turn_started',
+        backgroundTurn,
+        timestamp: 10,
+      });
+      expect(messages[3]).toMatchObject({
+        content: 'Background answer',
+      });
+      expect(messages[4]).toMatchObject({
+        source: 'mid_turn_message_injected',
+      });
+      expect(messages[5]).toMatchObject({
+        content: 'Verified',
+      });
+    },
+  );
+  it.each(['completed', 'failed', 'cancelled'])(
+    'shows one result marker with %s status and preserves the main reply',
+    (status) => {
+      const task = {
+        taskId: 'task-1',
+        toolUseId: 'tool-1',
+        kind: 'agent',
+        status,
+      };
+      const source = toolBlock('source', 'tool-1', 'completed', 1, {
+        toolName: 'agent',
+        background: true,
+        preview: {
+          kind: 'subagent_delegation',
+          agentName: 'Explore',
+          task: 'Search',
+        },
+      });
+      const completed = textBlock(
+        'completed',
+        'assistant',
+        'Task done',
+        5,
+        false,
+        {
+          meta: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            backgroundTask: task,
+          },
+        },
+      );
+      const pending = transcriptBlocksToDaemonMessages([source, completed]);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ endTime: 5 }],
+      });
+      expect(
+        pending[0].role === 'tool_group' &&
+          pending[0].tools[0].backgroundResultPending,
+      ).toBe(true);
+      const messages = transcriptBlocksToDaemonMessages([
+        source,
+        completed,
+        textBlock('start', 'assistant', 'Continue', 10, false, {
+          meta: {
+            source: 'background_notification_turn_started',
+            backgroundTurn,
+          },
+        }),
+        textBlock('consumed', 'assistant', 'Raw notification', 11, false, {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTurn,
+            backgroundTask: task,
+          },
+        }),
+        textBlock('answer', 'assistant', 'Main agent summary', 12, false, {
+          backgroundTurn,
+        }),
+      ]);
+      expect(messages.map((message) => message.role)).toEqual([
+        'tool_group',
+        'system',
+        'assistant',
+      ]);
+      expect(
+        messages[0].role === 'tool_group' &&
+          messages[0].tools[0].backgroundResultPending,
+      ).toBe(false);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ endTime: 5 }],
+      });
+      expect(messages[1]).toMatchObject({
+        source: 'background_notification_turn_started',
+        data: { backgroundTask: { status } },
+      });
+      expect(messages[2]).toMatchObject({
+        content: 'Main agent summary',
+      });
+    },
+  );
+  it.each([false, true])(
+    'reconciles a persisted daemon notification before completion and automatic reply (tool first: %s)',
+    (toolFirst) => {
+      const task = {
+        taskId: 'task-1',
+        toolUseId: 'tool-1',
+        kind: 'agent',
+        status: 'completed',
+      };
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('source', 'tool-1', 'completed', 1, {
+          toolName: 'agent',
+          background: true,
+        }),
+        textBlock('persisted-notification', 'user', 'Task done', 4, false, {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: task,
+          },
+        }),
+        statusBlock('completed', 'Task done', 5, {
+          source: 'background_task_completed',
+          data: task,
+        }),
+        ...(toolFirst
+          ? [
+              {
+                ...toolBlock('automatic-tool', 'read-1', 'completed', 11, {
+                  toolName: 'read_file',
+                }),
+                backgroundTurn,
+              },
+            ]
+          : []),
+        textBlock('answer', 'assistant', 'Main agent summary', 12, false, {
+          backgroundTurn,
+        }),
+      ]);
+      expect
+        .soft(messages.map((message) => message.role))
+        .toEqual([
+          'tool_group',
+          'system',
+          ...(toolFirst ? ['tool_group'] : []),
+          'assistant',
+        ]);
+      expect.soft(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ backgroundResultPending: false }],
+      });
+      const marker = messages.find(
+        (message) =>
+          message.role === 'system' &&
+          message.source === 'background_notification_turn_started',
+      );
+      expect.soft(marker).toMatchObject({
+        data: { backgroundTask: { status: 'completed' } },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        role: 'assistant',
+        content: 'Main agent summary',
+      });
+    },
+  );
+  it('does not merge neighboring replies from different executions', () => {
+    expect(
+      transcriptBlocksToDaemonMessages([
+        textBlock('first', 'assistant', 'First', 1, false, { promptId: 'one' }),
+        textBlock('second', 'assistant', 'Second', 2, false, {
+          promptId: 'two',
+        }),
+      ]).map((message) => ('content' in message ? message.content : '')),
+    ).toEqual(['First', 'Second']);
+  });
+  it('shows completion before consumption without starting an automatic group', () => {
+    const completed = textBlock(
+      'completed',
+      'assistant',
+      'Explore done',
+      5,
+      false,
+      {
+        meta: {
+          source: 'background_task_completed',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'task-1',
+            kind: 'agent',
+            status: 'completed',
+            toolUseId: 'tool-1',
+          },
+        },
+      },
+    );
+    expect(transcriptBlocksToDaemonMessages([completed])).toMatchObject([
+      {
+        role: 'system',
+        source: 'background_task_completed',
+        data: { awaitingProcessing: true },
+      },
+    ]);
+    const consumed = textBlock(
+      'consumed',
+      'assistant',
+      'Result received',
+      8,
+      false,
+      {
+        meta: {
+          source: 'background_notification',
+          backgroundTask: { taskId: 'task-1' },
+        },
+      },
+    );
+    expect(transcriptBlocksToDaemonMessages([completed, consumed])).toEqual([]);
+  });
+});
+
+it('restores a background result marker before its first tool', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const messages = transcriptBlocksToDaemonMessages([
+    textBlock('user', 'user', 'New question', 1),
+    { ...toolBlock('tool', 'read-1', 'completed', 101), backgroundTurn },
+  ]);
+  expect(messages.map((message) => message.role)).toEqual([
+    'user',
+    'system',
+    'tool_group',
+  ]);
+  expect(messages[1]).toMatchObject({
+    source: 'background_notification_turn_started',
+    backgroundTurn,
+  });
+  expect(messages[2]).toMatchObject({ role: 'tool_group' });
+});
+
+it('does not mark a restarted task completion consumed by its previous run', () => {
+  const backgroundTask = {
+    taskId: 'reused-task',
+    kind: 'agent',
+    status: 'completed',
+  };
+  const completed = textBlock(
+    'completed',
+    'assistant',
+    'Finished again',
+    3,
+    false,
+    { meta: { source: 'background_task_completed', backgroundTask } },
+  );
+  const consumed = textBlock(
+    'consumed',
+    'assistant',
+    'Previous result received',
+    2,
+    false,
+    { meta: { source: 'background_notification', backgroundTask } },
+  );
+  expect(
+    transcriptBlocksToDaemonMessages([consumed, completed])[1],
+  ).toMatchObject({ data: { awaitingProcessing: true } });
+  expect(transcriptBlocksToDaemonMessages([completed, consumed])).toEqual([]);
+});
+
+it('does not let old execution output consume or relabel a newer result for the same task', () => {
+  const backgroundTurn = {
+    turnId: 'old-execution',
+    taskId: 'same-task',
+    kind: 'agent' as const,
+    startedAt: 2,
+  };
+  const firstTask = { taskId: 'same-task', kind: 'agent', status: 'completed' };
+  const secondTask = { ...firstTask, status: 'failed' };
+  const first = textBlock('first', 'assistant', 'First done', 1, false, {
+    meta: { source: 'background_task_completed', backgroundTask: firstTask },
+  });
+  const start = textBlock('start', 'assistant', 'Start', 2, false, {
+    backgroundTurn,
+    meta: { source: 'background_notification_turn_started', backgroundTurn },
+  });
+  const second = textBlock('second', 'assistant', 'Second done', 3, false, {
+    meta: { source: 'background_task_completed', backgroundTask: secondTask },
+  });
+  const oldOutput = textBlock(
+    'old-output',
+    'assistant',
+    'Still processing first',
+    4,
+    true,
+    { backgroundTurn },
+  );
+  const messages = transcriptBlocksToDaemonMessages([
+    first,
+    start,
+    second,
+    oldOutput,
+  ]);
+  expect(messages[0]).toMatchObject({ data: { backgroundTask: firstTask } });
+  expect(messages[1]).toMatchObject({
+    source: 'background_task_completed',
+    data: { ...secondTask, awaitingProcessing: true },
+  });
+  const consumed = textBlock(
+    'consumed-second',
+    'assistant',
+    'Received second',
+    5,
+    false,
+    {
+      meta: { source: 'background_notification', backgroundTask: secondTask },
+    },
+  );
+  const after = transcriptBlocksToDaemonMessages([
+    first,
+    start,
+    second,
+    oldOutput,
+    consumed,
+  ]);
+  expect(
+    after.some(
+      (message) =>
+        message.role === 'system' &&
+        message.source === 'background_task_completed',
+    ),
+  ).toBe(false);
+  expect(after[0]).toMatchObject({ data: { backgroundTask: firstTask } });
+});

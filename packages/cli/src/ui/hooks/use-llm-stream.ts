@@ -3290,6 +3290,8 @@ export const useLlmStream = (
         const message = messages[index];
         if (GOAL_COMMAND_RE.test(message)) {
           await handleSlashCommand(message);
+          // The command has already taken effect; restoring it after cancelled
+          // steering preparation would execute that side effect again.
           continue;
         }
 

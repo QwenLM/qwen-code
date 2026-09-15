@@ -60,6 +60,7 @@ import {
   extractErrorCode,
   extractErrorMessage,
   parseSessionSource,
+  summarizeReplay,
 } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
@@ -660,16 +661,22 @@ function parseHistoryPageSize(
   return value as number;
 }
 
-function parseLiveReplayMode(
+function parseReplayMode(
   body: Record<string, unknown>,
   res: Response,
+  key: 'liveReplayMode' | 'compactedReplayMode' | 'eventDetailMode',
 ): 'full' | 'summary' | undefined | null {
-  const value = body['liveReplayMode'];
+  const value = body[key];
   if (value === undefined) return undefined;
   if (value !== 'full' && value !== 'summary') {
     res.status(400).json({
-      error: '`liveReplayMode` must be `full` or `summary`',
-      code: 'invalid_live_replay_mode',
+      error: `\`${key}\` must be \`full\` or \`summary\``,
+      code:
+        key === 'liveReplayMode'
+          ? 'invalid_live_replay_mode'
+          : key === 'compactedReplayMode'
+            ? 'invalid_compacted_replay_mode'
+            : 'invalid_event_detail_mode',
     });
     return null;
   }
@@ -3679,8 +3686,14 @@ export function registerSessionRoutes(
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
       if (historyPageSize === null) return;
-      const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
+      const liveReplayMode = parseReplayMode(body ?? {}, res, 'liveReplayMode');
       if (liveReplayMode === null) return;
+      const compactedReplayMode = parseReplayMode(
+        body ?? {},
+        res,
+        'compactedReplayMode',
+      );
+      if (compactedReplayMode === null) return;
       const restoreSource = parseRequestedSessionSource(body, res);
       if (restoreSource === null) return;
       const clientId = parseClientIdHeader(req, res);
@@ -3727,6 +3740,9 @@ export function registerSessionRoutes(
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(historyPageSize !== undefined ? { historyPageSize } : {}),
                   ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+                  ...(compactedReplayMode !== undefined
+                    ? { compactedReplayMode }
+                    : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
                 },
               );
@@ -3998,6 +4014,9 @@ export function registerSessionRoutes(
                       ? { historyPageSize }
                       : {}),
                     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+                    ...(compactedReplayMode !== undefined
+                      ? { compactedReplayMode }
+                      : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...restoreRequestMetadata,
@@ -5555,6 +5574,12 @@ export function registerSessionRoutes(
     const route = 'GET /session/:id/transcript';
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
+    const compactedReplayMode = parseReplayMode(
+      req.query,
+      res,
+      'compactedReplayMode',
+    );
+    if (compactedReplayMode === null) return;
     const limit = parseTranscriptLimitQuery(req.query['limit'], res);
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
@@ -5643,9 +5668,10 @@ export function registerSessionRoutes(
       const serialized = serializeWorkspaceTranscriptResponse(
         {
           ...result,
-          events: (result.events ?? []).map((event) =>
-            redactSdkSurfaceEvent(event, workspaceTrusted),
-          ),
+          events: (compactedReplayMode === 'summary'
+            ? summarizeReplay(result.events ?? [])
+            : (result.events ?? [])
+          ).map((event) => redactSdkSurfaceEvent(event, workspaceTrusted)),
         },
         sessionId,
       );
@@ -5672,6 +5698,12 @@ export function registerSessionRoutes(
     if (!qualifiedTarget) return;
     const preResolvedRuntime =
       qualifiedTarget.kind === 'ordinary' ? qualifiedTarget.runtime : undefined;
+    const compactedReplayMode = parseReplayMode(
+      req.query,
+      res,
+      'compactedReplayMode',
+    );
+    if (compactedReplayMode === null) return;
     const limit = parseTranscriptLimitQuery(req.query['limit'], res);
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
@@ -5877,7 +5909,9 @@ export function registerSessionRoutes(
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
-        result,
+        compactedReplayMode === 'summary'
+          ? { ...result, events: summarizeReplay(result.events) }
+          : result,
         sessionId,
       );
       res
@@ -6851,6 +6885,8 @@ export function registerSessionRoutes(
       async (req, res, sessionId, runtime, onPromptAdmitted) => {
         const ownerBridge = runtime.bridge;
         const body = safeBody(req);
+        const eventDetailMode = parseReplayMode(body, res, 'eventDetailMode');
+        if (eventDetailMode === null) return;
         const prompt = body['prompt'];
         if (!Array.isArray(prompt) || prompt.length === 0) {
           res.status(400).json({
@@ -8617,6 +8653,10 @@ export function registerSessionRoutes(
           ...(session.activeWorkState !== undefined
             ? { activeWorkState: session.activeWorkState }
             : {}),
+          hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
+          ...(session.backgroundTurn
+            ? { backgroundTurn: session.backgroundTurn }
+            : {}),
           isWaitingForPermission: session.isWaitingForPermission ?? false,
           isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
           // Bridge-local activity watermark, absent until a running prompt in
@@ -8875,6 +8915,8 @@ export function registerSessionRoutes(
       'POST /session/:id/mid-turn-message',
       (req, res, sessionId, runtime) => {
         const body = safeBody(req);
+        const eventDetailMode = parseReplayMode(body, res, 'eventDetailMode');
+        if (eventDetailMode === null) return;
         const message = body['message'];
         const messageId = body['messageId'];
         // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
@@ -8951,6 +8993,7 @@ export function registerSessionRoutes(
           typeof messageId === 'string' ? messageId : undefined,
           {
             rejectIfIdle: true,
+            ...(eventDetailMode !== undefined ? { eventDetailMode } : {}),
             ...(mediaBlocks ? { content: mediaBlocks } : {}),
           },
         );
