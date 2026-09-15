@@ -15,6 +15,7 @@ import { cpLen } from '../utils/textUtils.js';
 import {
   applyLineKey,
   backspaceAtCaret,
+  caretForAcceptedValue,
   caretSpans,
   clampCaret,
   deleteAtCaret,
@@ -265,6 +266,29 @@ describe('line-edit', () => {
     });
     const alreadyInside: LineState = { text: 'ab', cursor: 1 };
     expect(clampCaret(alreadyInside)).toBe(alreadyInside);
+  });
+
+  it('lets a value the owner refused leave no trace of its own', () => {
+    // The owner's text is what the caret indexes, so a character the field's
+    // setter strips back the caret to the last offset that text agrees with.
+    expect(
+      caretForAcceptedValue({ text: '129x34', cursor: 4 }, '12934'),
+    ).toEqual({ text: '12934', cursor: 3 });
+    // Repeated refusals cannot walk the caret right: each starts from a state
+    // the accepted value already owns.
+    expect(
+      caretForAcceptedValue({ text: '12934', cursor: 3 }, '12934'),
+    ).toEqual({ text: '12934', cursor: 3 });
+    // An unrelated value replaces the text, so the caret restarts at its front.
+    expect(caretForAcceptedValue({ text: 'abcdef', cursor: 6 }, 'xy')).toEqual({
+      text: 'xy',
+      cursor: 0,
+    });
+    // Same text: the plain clamp of an externally shortened value applies.
+    expect(caretForAcceptedValue({ text: 'ab', cursor: 9 }, 'ab')).toEqual({
+      text: 'ab',
+      cursor: 2,
+    });
   });
 
   it('splits the value at the caret for cursor rendering', () => {

@@ -646,17 +646,33 @@ function AskUserQuestionFlow(props: {
   // keystroke. The mirror is written synchronously so each event appends to
   // what the previous one produced.
   const typedRef = useRef<Record<number, string>>({});
+  const tabRef = useRef(0);
+  const selectedRef = useRef(0);
+  const checkedRef = useRef<Record<number, string[]>>({});
   const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { width } = useTerminalDimensions();
 
-  const isSubmitTab = hasMultipleQuestions && tab === totalTabs - 1;
-  const question = isSubmitTab ? undefined : questions[tab];
-  const isMultiSelect = question?.multiSelect === true;
-  // The free-text row sits after the predefined options.
-  const totalOptions = question ? question.options.length + 1 : 2;
-  const isCustomRow =
-    question !== undefined && selected === question.options.length;
+  // Derived from the two indices alone so the keyboard handler can read them
+  // for the batch's live position rather than for the one this render saw.
+  const viewOf = (tabIdx: number, selIdx: number) => {
+    const onSubmit = hasMultipleQuestions && tabIdx === totalTabs - 1;
+    const q = onSubmit ? undefined : questions[tabIdx];
+    return {
+      isSubmitTab: onSubmit,
+      question: q,
+      isMultiSelect: q?.multiSelect === true,
+      // The free-text row sits after the predefined options.
+      totalOptions: q ? q.options.length + 1 : 2,
+      isCustomRow: q !== undefined && selIdx === q.options.length,
+    };
+  };
+  const { isSubmitTab, question, isMultiSelect, isCustomRow } = viewOf(
+    tab,
+    selected,
+  );
   const typedValue = (idx: number) => typedRef.current[idx] ?? typed[idx] ?? '';
+  const checkedLabels = (idx: number) =>
+    checkedRef.current[idx] ?? checked[idx] ?? [];
   const customValue = typedValue(tab);
   const isCustomAnswer =
     question !== undefined &&
@@ -667,28 +683,52 @@ function AskUserQuestionFlow(props: {
   const answerFor = (idx: number): string | undefined => {
     const current = questions[idx];
     if (!current?.multiSelect) return picked[idx];
-    const labels = [...(checked[idx] ?? [])];
+    const labels = [...checkedLabels(idx)];
     const own = typedValue(idx).trim();
     if (typedChecked[idx] && own) labels.push(own);
     return labels.length > 0 ? labels.join(', ') : undefined;
   };
 
+  const moveToTab = (next: number) => {
+    tabRef.current = next;
+    setTab(next);
+  };
+
+  const moveToOption = (next: number) => {
+    selectedRef.current = next;
+    setSelected(next);
+  };
+
+  const toggleChecked = (idx: number, label: string) => {
+    const current = checkedLabels(idx);
+    const next = current.includes(label)
+      ? current.filter((value) => value !== label)
+      : [...current, label];
+    checkedRef.current = { ...checkedRef.current, [idx]: next };
+    setChecked((prev) => ({ ...prev, [idx]: next }));
+  };
+
+  const cancelPendingAdvance = () => {
+    if (advanceTimer.current) clearTimeout(advanceTimer.current);
+  };
+
   const selectAndAdvance = (value: string) => {
-    setPicked((prev) => ({ ...prev, [tab]: value }));
+    const idx = tabRef.current;
+    setPicked((prev) => ({ ...prev, [idx]: value }));
     if (!hasMultipleQuestions) {
-      onAnswered({ [tab]: value });
+      onAnswered({ [idx]: value });
       return;
     }
-    if (tab >= totalTabs - 1) return;
+    if (idx >= totalTabs - 1) return;
     // ink's pause, so the ✓ on the row just answered is visible before the tab
     // swap carries it up into the chip row. An answer landing inside that pause
     // supersedes the swap scheduled by the previous keystroke: left running,
     // both timers fire and the question between them is skipped without ever
     // being drawn.
-    if (advanceTimer.current) clearTimeout(advanceTimer.current);
+    cancelPendingAdvance();
     advanceTimer.current = setTimeout(() => {
-      setTab((prev) => Math.min(prev + 1, totalTabs - 1));
-      setSelected(0);
+      moveToTab(Math.min(tabRef.current + 1, totalTabs - 1));
+      moveToOption(0);
     }, 150);
   };
 
@@ -702,19 +742,20 @@ function AskUserQuestionFlow(props: {
   };
 
   const multiAnswer = (includeTyped: boolean, value: string) => {
-    const labels = [...(checked[tab] ?? [])];
+    const labels = [...checkedLabels(tabRef.current)];
     const own = value.trim();
     if (includeTyped && own) labels.push(own);
     return labels.length > 0 ? labels.join(', ') : undefined;
   };
 
   const writeCustomValue = (next: string) => {
-    typedRef.current = { ...typedRef.current, [tab]: next };
-    setTyped((prev) => ({ ...prev, [tab]: next }));
+    const idx = tabRef.current;
+    typedRef.current = { ...typedRef.current, [idx]: next };
+    setTyped((prev) => ({ ...prev, [idx]: next }));
     // A multi-select box tracks whether its free-text entry counts, so typing
     // into it checks the box and emptying it unchecks it again.
-    if (isMultiSelect) {
-      setTypedChecked((prev) => ({ ...prev, [tab]: next.trim().length > 0 }));
+    if (questions[idx]?.multiSelect === true) {
+      setTypedChecked((prev) => ({ ...prev, [idx]: next.trim().length > 0 }));
     }
   };
 
@@ -730,14 +771,18 @@ function AskUserQuestionFlow(props: {
   const submitCustomRow = () => {
     // Re-read rather than use the rendered value: the keystroke that fills the
     // row and this Enter can share one batch.
-    const current = typedValue(tab);
+    const idx = tabRef.current;
+    const current = typedValue(idx);
     const value = current.trim();
-    if (isMultiSelect) {
-      setTypedChecked((prev) => ({ ...prev, [tab]: value.length > 0 }));
+    const isMulti = questions[idx]?.multiSelect === true;
+    if (isMulti) {
+      setTypedChecked((prev) => ({ ...prev, [idx]: value.length > 0 }));
     }
     if (!value) return;
-    const answer = isMultiSelect ? multiAnswer(true, current) : value;
-    if (answer !== undefined) selectAndAdvance(answer);
+    const answer = isMulti ? multiAnswer(true, current) : value;
+    if (answer === undefined) return;
+    custom.settle();
+    selectAndAdvance(answer);
   };
 
   useEffect(
@@ -768,87 +813,107 @@ function AskUserQuestionFlow(props: {
 
   useKeyboard((key) => {
     const original = toOriginalKey(key);
+    // One stdin burst runs every key it carries against this one closure, so
+    // the position each branch acts on comes from the mirrors rather than from
+    // what this render drew.
+    const {
+      isSubmitTab: onReview,
+      question: asked,
+      isMultiSelect: multi,
+      totalOptions: optionCount,
+      isCustomRow: onCustomRow,
+    } = viewOf(tabRef.current, selectedRef.current);
 
-    if (isCustomRow) {
+    // The field re-seeds its buffer during render, so a tab move inside this
+    // burst leaves it holding the question that render drew. A keystroke handled
+    // now would append to that text and store it under the new tab, so the row
+    // keeps its keys only while the burst still stands on the tab it drew — and
+    // none at all once its answer has been given.
+    const fieldIsMine = tabRef.current === tab && !custom.settled;
+
+    if (onCustomRow) {
       // Bare letters belong to the input and ←/→ must not switch tabs while it
       // owns the cursor, so only unambiguous shortcuts are honoured here.
       if (original.name === 'up' || (original.ctrl && original.name === 'p')) {
-        setSelected(Math.max(0, selected - 1));
+        moveToOption(Math.max(0, selectedRef.current - 1));
       } else if (
         original.name === 'down' ||
         (original.ctrl && original.name === 'n')
       ) {
-        setSelected(Math.min(totalOptions - 1, selected + 1));
+        moveToOption(Math.min(optionCount - 1, selectedRef.current + 1));
       } else if (original.name === 'return') {
         submitCustomRow();
-      } else if (!custom.handleKey(original) && isPrintableKeyInput(key)) {
+      } else if (
+        fieldIsMine &&
+        !custom.handleKey(original) &&
+        isPrintableKeyInput(key)
+      ) {
         custom.insert(key.sequence);
       }
       return;
     }
 
-    if (hasMultipleQuestions && original.name === 'left' && tab > 0) {
-      setTab(tab - 1);
-      setSelected(0);
+    if (
+      hasMultipleQuestions &&
+      original.name === 'left' &&
+      tabRef.current > 0
+    ) {
+      cancelPendingAdvance();
+      moveToTab(tabRef.current - 1);
+      moveToOption(0);
       return;
     }
     if (
       hasMultipleQuestions &&
       original.name === 'right' &&
-      tab < totalTabs - 1
+      tabRef.current < totalTabs - 1
     ) {
-      setTab(tab + 1);
-      setSelected(0);
+      cancelPendingAdvance();
+      moveToTab(tabRef.current + 1);
+      moveToOption(0);
       return;
     }
     if (matchesCommand(Command.SELECTION_UP, key)) {
-      setSelected(Math.max(0, selected - 1));
+      moveToOption(Math.max(0, selectedRef.current - 1));
       return;
     }
     if (matchesCommand(Command.SELECTION_DOWN, key)) {
-      setSelected(Math.min(totalOptions - 1, selected + 1));
+      moveToOption(Math.min(optionCount - 1, selectedRef.current + 1));
       return;
     }
 
     const numKey = /^[1-9]\d*$/.test(original.sequence)
       ? Number(original.sequence)
       : NaN;
-    if (Number.isSafeInteger(numKey) && numKey <= totalOptions) {
+    if (Number.isSafeInteger(numKey) && numKey <= optionCount) {
       const target = numKey - 1;
-      setSelected(target);
+      moveToOption(target);
       // Single-select commits a predefined option straight from its digit; the
       // free-text row's digit only moves the cursor onto it.
-      const option = !isMultiSelect ? question?.options[target] : undefined;
+      const option = !multi ? asked?.options[target] : undefined;
       if (option) selectAndAdvance(option.label);
       return;
     }
 
-    if (original.name === 'space' && isMultiSelect && question) {
-      const option = question.options[selected];
-      if (option) {
-        const current = checked[tab] ?? [];
-        setChecked((prev) => ({
-          ...prev,
-          [tab]: current.includes(option.label)
-            ? current.filter((label) => label !== option.label)
-            : [...current, option.label],
-        }));
-      }
+    if (original.name === 'space' && multi && asked) {
+      const option = asked.options[selectedRef.current];
+      if (option) toggleChecked(tabRef.current, option.label);
       return;
     }
 
     if (original.name === 'return') {
-      if (isSubmitTab) {
-        if (selected === 0) submitAll();
+      if (onReview) {
+        if (selectedRef.current === 0) submitAll();
         else onAnswered(null);
         return;
       }
-      if (isMultiSelect) {
-        const answer = multiAnswer(typedChecked[tab] === true, customValue);
+      if (multi) {
+        const idx = tabRef.current;
+        const answer = multiAnswer(typedChecked[idx] === true, typedValue(idx));
         if (answer !== undefined) selectAndAdvance(answer);
         return;
       }
-      const option = question?.options[selected];
+      const option = asked?.options[selectedRef.current];
       if (option) selectAndAdvance(option.label);
     }
     // Escape is owned by OpenTuiToolConfirmation (it settles the whole call).

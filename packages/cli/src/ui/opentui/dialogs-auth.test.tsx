@@ -112,6 +112,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 import { AuthType } from '@qwen-code/qwen-code-core';
 import * as coreRuntime from '@qwen-code/qwen-code-core';
+import { ICON } from '../constants.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
@@ -474,6 +475,39 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await press('return'); // baseUrl → apiKey
   }
 
+  /** Walk the wizard up to the base-URL input step. */
+  async function runToBaseUrlInput(): Promise<void> {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+  }
+
+  /** The step titles the wizard walks through from the API key to the review. */
+  async function runToReviewStep(): Promise<void> {
+    await typeText('sk-test');
+    await press('return'); // apiKey → models
+    await typeText('test-model');
+    await press('return'); // models → advancedConfig
+    await press('return'); // advancedConfig → review
+  }
+
+  /**
+   * A held key repeats out of one stdin read, and so does a bracketed paste's
+   * trailing Enter: every keystroke and the Enter that commits them are handled
+   * against the render that registered the handler.
+   */
+  async function typeBatchedThenEnter(text: string): Promise<void> {
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      for (const char of text) {
+        handler(baseKeyEvent({ name: char, sequence: char }));
+      }
+      handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+  }
+
   it('keeps every character of a burst that shares one batch', async () => {
     await runToApiKeyStep();
     await typeBatched('sk-burst-key');
@@ -483,6 +517,133 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     // the burst is what the wizard carries forward, not its last character
     await press('return'); // apiKey → models
     expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+  });
+
+  it('submits the burst that shares one batch with its Enter', async () => {
+    await runToApiKeyStep();
+    await typeBatchedThenEnter('sk-burst-key');
+    // The Enter read the flow's state, which no render had refreshed yet, so the
+    // step refused the key it was showing and stayed put.
+    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+  });
+
+  it('carries the URL typed in the same batch as its Enter to the review', async () => {
+    await runToBaseUrlInput();
+    await typeBatchedThenEnter('https://x.test');
+    // A stale empty URL fell back to the protocol default without an error, so
+    // the wizard advanced and saved the endpoint nobody typed.
+    expect(screen.getByText(/Step 3\/6 · API Key/)).toBeTruthy();
+    await runToReviewStep();
+    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(document.body.textContent).toContain('"baseUrl": "https://x.test"');
+    expect(document.body.textContent).not.toContain('api.openai.com');
+  });
+
+  it('ignores the keystrokes that trail the Enter of the same read', async () => {
+    await runToApiKeyStep();
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    try {
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        for (const char of 'sk-test') {
+          handler(baseKeyEvent({ name: char, sequence: char }));
+        }
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+        // The read is not over: the Enter moved the wizard on, and this key is
+        // still dispatched to the step that was on screen when it started.
+        handler(baseKeyEvent({ name: 'Z', sequence: 'Z' }));
+      });
+      await typeText('test-model');
+      await press('return'); // models → advancedConfig
+      await press('return'); // advancedConfig → review
+      await press('return'); // review → save
+      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
+      expect(build.mock.calls[0]?.[1]?.apiKey).toBe('sk-test');
+    } finally {
+      build.mockRestore();
+    }
+  });
+
+  it('ignores the keystroke that trails the models step Enter', async () => {
+    await runToApiKeyStep();
+    await typeText('sk-test');
+    await press('return'); // apiKey → models (custom input focused)
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    try {
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        for (const char of 'mod') {
+          handler(baseKeyEvent({ name: char, sequence: char }));
+        }
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+        handler(baseKeyEvent({ name: 'Z', sequence: 'Z' }));
+      });
+      await press('return'); // advancedConfig → review
+      await press('return'); // review → save
+      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['mod']);
+    } finally {
+      build.mockRestore();
+    }
+  });
+
+  it('ignores the digit that trails the advanced-config step Enter', async () => {
+    await runToApiKeyStep();
+    await typeText('sk-test');
+    await press('return'); // apiKey → models
+    await typeText('test-model');
+    await press('return'); // models → advancedConfig
+    await press('down'); // thinking → modality
+    await press('down'); // modality → context window
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      for (const char of '12') {
+        handler(baseKeyEvent({ name: char, sequence: char }));
+      }
+      handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      handler(baseKeyEvent({ name: '3', sequence: '3' }));
+    });
+    // The review step prints what will be saved, and the Enter that left the
+    // advanced-config step carried 12. The trailing digit belongs to no step.
+    expect(document.body.textContent).toContain('"contextWindowSize": 12');
+    expect(document.body.textContent).not.toContain('"contextWindowSize": 123');
+  });
+
+  it('keeps taking the read after an Enter the step refused', async () => {
+    await runToBaseUrlInput();
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      for (const char of 'abc') {
+        handler(baseKeyEvent({ name: char, sequence: char }));
+      }
+      handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      // A refused Enter keeps the step mounted, so the read is still this
+      // field's: only an Enter that moved the wizard ends it.
+      for (const char of 'def') {
+        handler(baseKeyEvent({ name: char, sequence: char }));
+      }
+    });
+    expect(
+      screen.getByText((_, element) => element?.textContent === 'abcdef'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Enter the API endpoint for this protocol/),
+    ).toBeTruthy();
+  });
+
+  it('submits a paste that shares its read with the Enter', async () => {
+    await runToApiKeyStep();
+    await typeText('sk-test');
+    await press('return'); // apiKey → models
+    const pasteHandler = mocks.state.pasteHandlers.at(-1);
+    if (!pasteHandler) throw new Error('no paste handler registered');
+    const keyHandler = lastKeyboardHandler();
+    await act(async () => {
+      pasteHandler(makePasteEvent('pasted-model'));
+      keyHandler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    await press('return'); // advancedConfig: skip → review
+    expect(document.body.textContent).toContain('"id": "pasted-model"');
   });
 
   it('inserts a paste into the API-key input and prevents default', async () => {
@@ -653,13 +814,109 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('left');
     await typeText('9');
     expect(focusedField()).toEqual({ text: '12934', cell: '3' });
-    // The step's setter keeps digits only, so a letter never reaches the value.
-    // The caret still advances one cell, as ink's does; ink also keeps the letter
-    // on screen, because its field renders its own buffer rather than the value.
+    // The step's setter keeps digits only, so a letter never reaches the value —
+    // and never moves the caret either, so the next digit lands where this one
+    // was parked. ink stores the rejected letter in its own buffer instead,
+    // which is recorded as a divergence rather than ported.
     await typeText('x');
-    expect(focusedField()).toEqual({ text: '12934', cell: '4' });
+    expect(focusedField()).toEqual({ text: '12934', cell: '3' });
+    await typeText('7');
+    expect(focusedField()).toEqual({ text: '129734', cell: '3' });
     await press('return');
     expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
-    expect(document.body.textContent).toContain('"contextWindowSize": 12934');
+    expect(document.body.textContent).toContain('"contextWindowSize": 129734');
+  });
+
+  /** The text the row owning the context-window field renders. */
+  function contextRow(): string {
+    const rows = [...document.querySelectorAll('div')].filter((el) =>
+      (el.textContent ?? '').includes('Context window'),
+    );
+    const last = rows[rows.length - 1];
+    if (!last) throw new Error('no context-window row rendered');
+    return last.textContent ?? '';
+  }
+
+  it('prints the whole value of a field that lost the cursor', async () => {
+    await runToContextWindowRow();
+    await typeText('1234');
+    await press('left');
+    expect(focusedField()).toEqual({ text: '1234', cell: '4' });
+    // ↑ hands the cursor to the toggle row above, as ink's does, and the field
+    // keeps printing every character: the highlight marks which row the caret is
+    // in, it is not part of the value.
+    await press('up');
+    expect(contextRow()).toMatch(/Context window: 1234$/);
+    await press('down');
+    expect(focusedField()).toEqual({ text: '1234', cell: '4' });
+  });
+});
+
+describe('recommended-model checkboxes out of one read (#113)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
+    core.logAuth.mockReset();
+  });
+
+  const SPACE = { name: 'space', sequence: ' ' };
+  const ENTER = { name: 'return', sequence: '\r' };
+
+  /** Every key of one stdin read, dispatched without a render in between. */
+  async function pressBatched(
+    keys: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      for (const key of keys) handler(baseKeyEvent(key));
+    });
+  }
+
+  /**
+   * Walk the DeepSeek wizard to the model-IDs step with the recommended list
+   * holding focus. A custom provider ships no recommended list, so a preset is
+   * the only route to the checkboxes.
+   */
+  async function runToRecommendedList(): Promise<void> {
+    renderDialog();
+    await press('down'); // main: THIRD_PARTY_PROVIDERS
+    await press('return'); // → thirdparty-select, DeepSeek on top
+    await press('return'); // DeepSeek → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models (custom-ID input focused)
+    await press('tab'); // → recommended list, first row
+  }
+
+  function recommendedRow(id: string): string {
+    const row = screen.getByText(id).parentElement;
+    if (!row) throw new Error(`the ${id} row is not mounted`);
+    return row.textContent ?? '';
+  }
+
+  it('applies every tick of a held Space to the same checkbox', async () => {
+    await runToRecommendedList();
+    // DeepSeek pre-checks both of its models, so the step opens filled.
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
+    await pressBatched([SPACE, SPACE]);
+    // Two ticks out of one read cancel each other. Held from the render that
+    // armed the handler, the second one re-toggles what the first one changed.
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
+    await pressBatched([SPACE]);
+    // ...and one tick still clears the row, so the batch above is not a no-op.
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.CIRCLE_EMPTY);
+  });
+
+  it('submits the tick made in the same read as Enter', async () => {
+    await runToRecommendedList();
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    try {
+      await pressBatched([SPACE, ENTER]);
+      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+    } finally {
+      build.mockRestore();
+    }
   });
 });

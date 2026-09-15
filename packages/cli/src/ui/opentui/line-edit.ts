@@ -67,6 +67,35 @@ export function clampCaret(state: LineState): LineState {
   return cursor === state.cursor ? state : { text: state.text, cursor };
 }
 
+/**
+ * Caret for a value the field's owner may have rewritten.
+ *
+ * The caret indexes the value the owner acknowledged, not the text this module
+ * last proposed: an owner that refuses a character would otherwise leave the
+ * caret one cell right of where the user put it, and the next Backspace would
+ * delete a character the user never inserted. Capping the caret at the code
+ * points the two texts agree on makes a refused keystroke leave no trace at all,
+ * and is just the clamp when they are equal.
+ */
+export function caretForAcceptedValue(
+  state: LineState,
+  accepted: string,
+): LineState {
+  if (accepted === state.text) return clampCaret(state);
+  const proposed = toCodePoints(state.text);
+  const current = toCodePoints(accepted);
+  let shared = 0;
+  while (
+    shared < proposed.length &&
+    shared < current.length &&
+    proposed[shared] === current[shared]
+  ) {
+    shared++;
+  }
+  const cursor = Math.min(state.cursor, shared);
+  return { text: accepted, cursor };
+}
+
 /** The three pieces a caret splits the value into, for cursor rendering. */
 export function caretSpans(state: LineState): {
   before: string;
@@ -213,7 +242,8 @@ export function applyLineKey(
  * sees the render that registered the handler, whose `value` prop is already
  * stale by the second keystroke. Writing it synchronously lets each event edit
  * what the previous one produced, and re-syncing it during render keeps a value
- * replaced from elsewhere (a preset, a go-back) from stranding the caret.
+ * replaced from elsewhere (a preset, a go-back) from stranding the caret, or one
+ * the owner refused a character of, from leaving that character's trace behind.
  */
 export function useLineEdit(
   value: string,
@@ -224,8 +254,13 @@ export function useLineEdit(
    */
   mountKey?: unknown,
 ): {
-  /** Caret offset to render. */
-  caret: number;
+  /**
+   * The field's value as the keystroke being handled sees it. Read per access,
+   * because the handler a burst runs in belongs to a render that predates it.
+   */
+  readonly text: string;
+  /** Caret offset to render. Read per access, as {@link text} is. */
+  readonly caret: number;
   /**
    * ink's TextInput key handling. `false` means the field leaves the key to the
    * dialog — Enter, list navigation, and every combo this port doesn't bind.
@@ -233,18 +268,27 @@ export function useLineEdit(
   handleKey: (key: Pick<Key, 'name' | 'ctrl' | 'meta' | 'sequence'>) => boolean;
   /** Inserts at the caret: a paste, or a printable key. */
   insert: (text: string) => void;
+  /**
+   * The field submitted and the wizard moved on. A keystroke handled now would
+   * land in the step this read already left, because the read keeps dispatching
+   * to the handler of the render that armed it.
+   */
+  settle: () => void;
+  /** Whether {@link settle} was called on this field. */
+  readonly settled: boolean;
 } {
   const [, repaint] = useState(0);
+  // Per render, not per mount: a fresh handler closes over a fresh copy of this,
+  // so the flag spans exactly one stdin read while the render that follows the
+  // submit clears it. A field whose submit was rejected stays editable.
+  let settled = false;
   const mirror = useRef<LineState>(endOfLine(value));
   const mounted = useRef<unknown>(mountKey);
   if (mounted.current !== mountKey) {
     mounted.current = mountKey;
     mirror.current = endOfLine(value);
   } else {
-    mirror.current = clampCaret({
-      text: value,
-      cursor: mirror.current.cursor,
-    });
+    mirror.current = caretForAcceptedValue(mirror.current, value);
   }
   const commit = (next: LineState) => {
     const changed = next.text !== mirror.current.text;
@@ -254,7 +298,12 @@ export function useLineEdit(
     if (changed) onChange(next.text);
   };
   return {
-    caret: mirror.current.cursor,
+    get text() {
+      return mirror.current.text;
+    },
+    get caret() {
+      return mirror.current.cursor;
+    },
     handleKey: (key) => {
       const edited = applyLineKey(mirror.current, key);
       if (!edited) return false;
@@ -264,6 +313,12 @@ export function useLineEdit(
     insert: (text) => {
       const edited = insertAtCaret(mirror.current, text);
       if (edited !== mirror.current) commit(edited);
+    },
+    settle: () => {
+      settled = true;
+    },
+    get settled() {
+      return settled;
     },
   };
 }

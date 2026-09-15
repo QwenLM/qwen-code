@@ -20,7 +20,7 @@
  *  - documentation/TOS links render as plain text (no OSC 8 in dialogs).
  */
 
-import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useKeyboard, usePaste, useRenderer } from '@opentui/react';
 import type { PasteEvent } from '@opentui/core';
 import { decodePasteBytes } from '@opentui/core';
@@ -243,7 +243,14 @@ function FieldText({
   return (
     <>
       <text fg={C.text}>{spans.before}</text>
-      {active && <text bg={C.accent}>{spans.at || ' '}</text>}
+      {/* The character belongs to the value whatever owns the focus; only the
+          highlight says which field the caret is in. Dropping it while inactive
+          would print a value one character shorter than the one held. */}
+      {active ? (
+        <text bg={C.accent}>{spans.at || ' '}</text>
+      ) : (
+        <text fg={C.text}>{spans.at}</text>
+      )}
       <text fg={C.text}>{spans.after}</text>
     </>
   );
@@ -274,18 +281,21 @@ function InputLine({
 
 /**
  * Shared single-line text-input key handling (backend ask-user parity). Returns
- * the caret offset so the row can put its cursor cell where ink's would be.
+ * the caret offset so the row can put its cursor cell where ink's would be. The
+ * submit's own verdict is what settles the field, so a step that reports nothing
+ * cannot leave the latch unarmed.
  */
 function useLineInputKeys(
   value: string,
   onChange: (next: string) => void,
-  onSubmit: () => void,
+  onSubmit: (text: string) => boolean,
 ): number {
   const line = useLineEdit(value, onChange);
   useKeyboard((key) => {
+    if (line.settled) return;
     const o = toOriginalKey(key);
     if (o.name === 'return' || o.name === 'enter') {
-      onSubmit();
+      if (onSubmit(line.text)) line.settle();
       return;
     }
     if (!line.handleKey(o) && isPrintableKeyInput(key)) {
@@ -389,8 +399,10 @@ function BaseUrlInputStep({
   flow: ProviderSetupFlow;
   documentationUrl?: string;
 }) {
-  const caret = useLineInputKeys(flow.state.baseUrl, flow.changeBaseUrl, () =>
-    flow.submitBaseUrl(),
+  const caret = useLineInputKeys(
+    flow.state.baseUrl,
+    flow.changeBaseUrl,
+    (text) => flow.submitBaseUrl(text),
   );
   return (
     <box flexDirection="column" marginTop={1}>
@@ -430,8 +442,8 @@ function ApiKeyStep({
   flow: ProviderSetupFlow;
 }) {
   const docUrl = resolveDocumentationUrl(provider, flow.state.baseUrl);
-  const caret = useLineInputKeys(flow.state.apiKey, flow.changeApiKey, () =>
-    flow.submitApiKey(flow.state.apiKey),
+  const caret = useLineInputKeys(flow.state.apiKey, flow.changeApiKey, (text) =>
+    flow.submitApiKey(text),
   );
   return (
     <box flexDirection="column" marginTop={1}>
@@ -494,6 +506,11 @@ function ModelsStep({
     () => new Set(selectedModelIds.filter((id) => recommendedIds.has(id))),
   );
 
+  // Keystrokes of one burst are handled against the render that registered the
+  // handler, whose `checked` set is already stale by the second Space. The
+  // mirror is written synchronously so each tick sees the previous one.
+  const checkedRef = useRef<ReadonlySet<string>>(checked);
+
   const syncModelIds = useCallback(
     (custom: string, keys: ReadonlySet<string>) => {
       flow.changeModelIds(
@@ -506,9 +523,9 @@ function ModelsStep({
   const updateCustom = useCallback(
     (next: string) => {
       setCustomText(next);
-      syncModelIds(next, checked);
+      syncModelIds(next, checkedRef.current);
     },
-    [checked, syncModelIds],
+    [syncModelIds],
   );
 
   // ink keeps this field in a TextInput whose buffer survives the list taking
@@ -517,22 +534,31 @@ function ModelsStep({
 
   const toggleRecommended = useCallback(
     (id: string) => {
-      const next = new Set(checked);
+      const next = new Set(checkedRef.current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      checkedRef.current = next;
       setChecked(next);
-      syncModelIds(customText, next);
+      syncModelIds(custom.text, next);
     },
-    [checked, customText, syncModelIds],
+    [custom, syncModelIds],
   );
 
   const submit = useCallback(() => {
-    flow.submitModelIds({
-      modelIds: uniqueIds([...normalizeModelIds(customText), ...checked]),
-    });
-  }, [customText, checked, flow]);
+    if (
+      flow.submitModelIds({
+        modelIds: uniqueIds([
+          ...normalizeModelIds(custom.text),
+          ...checkedRef.current,
+        ]),
+      })
+    ) {
+      custom.settle();
+    }
+  }, [custom, flow]);
 
   useKeyboard((key) => {
+    if (custom.settled) return;
     const o = toOriginalKey(key);
     if (focus >= 0) {
       if (o.name === 'tab') {
@@ -646,6 +672,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
   const onCtxRow = focusedConfigIndex === ctxIdx;
   const ctxField = useLineEdit(contextWindowSize, flow.changeContextWindowSize);
   useKeyboard((key) => {
+    if (ctxField.settled) return;
     const o = toOriginalKey(key);
     // Focus-row navigation restricted to unambiguous shortcuts (ink parity:
     // a letter typed into the context-window field must not move the row).
@@ -666,6 +693,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     }
     if (o.name === 'return') {
       flow.submitAdvancedConfig();
+      ctxField.settle();
       return;
     }
     if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {
