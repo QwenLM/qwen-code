@@ -1188,7 +1188,7 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('No active sessions');
   });
 
-  it('shows the toolbar failure banner when a poll fails but data is present', () => {
+  it('shows the connection error when a poll fails but data is present', () => {
     // Distinct from the no-data early return: the summary has stale data plus
     // an error, so the cards render and the toolbar banner appears.
     summaryState = {
@@ -1200,6 +1200,7 @@ describe('DaemonStatusDialog', () => {
     const text = container!.textContent ?? '';
     expect(text).toContain('4242'); // stale cards still render
     expect(text).toContain('Failed to load daemon status'); // toolbar banner
+    expect(text).toContain('Connection stateError');
   });
 
   it('shows the pure loading state before any report arrives', () => {

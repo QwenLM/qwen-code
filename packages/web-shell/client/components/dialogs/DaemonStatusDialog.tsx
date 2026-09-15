@@ -852,7 +852,11 @@ function DaemonStatusDialogInner({
             />
             <Row
               label={t('daemon.connection.state')}
-              value={t(CONNECTION_STATUS_KEYS[workspace.status])}
+              value={
+                summary.error && summary.report
+                  ? t('daemon.connection.status.error')
+                  : t(CONNECTION_STATUS_KEYS[workspace.status])
+              }
             />
             {standalone && (
               <form
