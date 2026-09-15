@@ -30,6 +30,10 @@ import {
   type WorkflowTask,
   type WorkflowTerminalStatus,
 } from './workflow-run-registry.js';
+import {
+  isWorkflowSizeWarning,
+  type WorkflowSizeWarning,
+} from './runtime/workflow-size.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
@@ -62,6 +66,8 @@ export interface WorkflowSnapshot {
   agentsCompleted: number;
   /** Absent on snapshots written before resume respawns were counted. */
   agentsRespawned?: number;
+  /** Absent when the run never crossed a size threshold, and on older snapshots. */
+  sizeWarning?: WorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   /** `perPhaseTokens` flattened to `[phaseOrNull, tokens]` pairs. */
@@ -100,6 +106,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     agentsDispatched: task.agentsDispatched,
     agentsCompleted: task.agentsCompleted,
     agentsRespawned: task.agentsRespawned ?? 0,
+    ...(task.sizeWarning ? { sizeWarning: { ...task.sizeWarning } } : {}),
     tokensSpent: task.tokensSpent,
     tokenBudgetTotal: task.tokenBudgetTotal,
     perPhaseTokens: Array.from(task.perPhaseTokens.entries()),
@@ -404,6 +411,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     isFiniteNumber(value['agentsCompleted']) &&
     (value['agentsRespawned'] === undefined ||
       isFiniteNumber(value['agentsRespawned'])) &&
+    (value['sizeWarning'] === undefined ||
+      isWorkflowSizeWarning(value['sizeWarning'])) &&
     isFiniteNumber(value['tokensSpent']) &&
     (value['tokenBudgetTotal'] === null ||
       isFiniteNumber(value['tokenBudgetTotal'])) &&

@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { WorkflowTool } from './workflow.js';
+import { buildWorkflowToolDescription, WorkflowTool } from './workflow.js';
+import {
+  buildWorkflowSizeGuidelineParagraph,
+  resolveWorkflowSizeGuidelineSetting,
+} from '../../agents/runtime/workflow-size.js';
 import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
@@ -287,6 +291,52 @@ await agent('scan package.json')
         new AbortController().signal,
       );
     }
+
+    // Declared phases say what the author meant; the structure says where the
+    // agents actually are. A reader approving a fan-out needs both.
+    it('shows where the agents are, read from the script', async () => {
+      const details = await detailsFor({
+        script: [
+          "const plan = await agent('plan the audit')",
+          'const found = await parallel([',
+          "  () => agent('scan src/core'),",
+          "  () => agent('scan src/cli'),",
+          '])',
+          'while (budget.remaining() > 50_000) {',
+          "  await agent('look again')",
+          '}',
+          'return found',
+        ].join('\n'),
+      });
+      const prompt = (details as { prompt: string }).prompt;
+      expect(prompt).toContain(
+        [
+          'Structure:',
+          '  step — "plan the audit"',
+          '  parallel × 2 — "scan src/core", "scan src/cli"',
+          '  loop while (budget.remaining() > 50_000) — "look again"',
+        ].join('\n'),
+      );
+    });
+
+    it('caps the structure rows and names the rest', async () => {
+      const script = Array.from(
+        { length: 14 },
+        (_, i) => `await parallel([() => agent('batch ${i}')])`,
+      ).join('\n');
+      const prompt = ((await detailsFor({ script })) as { prompt: string })
+        .prompt;
+      expect(prompt).toContain('  parallel × 1 — "batch 11"');
+      expect(prompt).not.toContain('"batch 12"');
+      expect(prompt).toContain('  … and 2 more');
+    });
+
+    it('leaves the structure out when the script dispatches no agent', async () => {
+      const prompt = (
+        (await detailsFor({ script: 'return 1' })) as { prompt: string }
+      ).prompt;
+      expect(prompt).not.toContain('Structure:');
+    });
 
     it('names the workflow, its purpose and its phases', async () => {
       const details = await detailsFor({ script: SCRIPT_WITH_META });
@@ -695,8 +745,10 @@ await agent('scan package.json')
   // Every model-visible string in the tool surface is paid for on every turn,
   // so each has a budget. The headroom is a paragraph, not a sentence: one
   // legitimate clause fits, a block of option prose pasted back does not.
+  // The description's budget was raised from 4,500 when it gained the workflow
+  // size guideline paragraph (about 290 characters), which put it at 4,502.
   it.each([
-    ['the description', (tool: WorkflowTool) => tool.description, 4_500],
+    ['the description', (tool: WorkflowTool) => tool.description, 4_800],
     ['script', (tool: WorkflowTool) => paramDescription(tool, 'script'), 900],
     [
       'scriptPath',
@@ -736,7 +788,10 @@ await agent('scan package.json')
     } as unknown as Config);
 
     expect(tool.authoringSurface).toBe('inline');
-    expect(tool.description.length).toBeLessThanOrEqual(25_000);
+    // Raised again from 25,000 when the reference gained the workflow size
+    // limits and the description the size guideline paragraph, which put the
+    // fallback at 25,759.
+    expect(tool.description.length).toBeLessThanOrEqual(26_500);
   });
 
   it('rejects build() when script is missing', () => {
@@ -2742,5 +2797,57 @@ describe('WorkflowTool — extension workflow labels', () => {
       new AbortController().signal,
     )) as { prompt: string };
     expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+  });
+});
+
+// The size guideline is part of what the model plans a run around, so every
+// description shape carries it — and none does when the user removed it.
+describe('WorkflowTool size guideline', () => {
+  it('states the default guideline after the runtime facts', () => {
+    const { description } = new WorkflowTool(fakeConfig());
+    const paragraph = buildWorkflowSizeGuidelineParagraph(
+      resolveWorkflowSizeGuidelineSetting(undefined),
+    );
+    expect(paragraph).not.toBeNull();
+    const at = description.indexOf(paragraph!);
+    expect(at).toBeGreaterThan(description.indexOf('**Runtime**'));
+    expect(at).toBeLessThan(description.indexOf('**Writing the script**'));
+  });
+
+  it('states a configured guideline, and none when unrestricted', () => {
+    const small = new WorkflowTool({
+      ...fakeConfig(),
+      getWorkflowSizeGuideline: () => ({ size: 'small', isDefault: false }),
+    } as unknown as Config);
+    expect(small.description).toContain(
+      'A workflow size guideline is configured for this session: small',
+    );
+
+    const unrestricted = new WorkflowTool({
+      ...fakeConfig(),
+      getWorkflowSizeGuideline: () => ({
+        size: 'unrestricted',
+        isDefault: false,
+      }),
+    } as unknown as Config);
+    expect(unrestricted.description).not.toContain('size guideline');
+  });
+
+  it('carries the guideline in every description shape', () => {
+    const setting = resolveWorkflowSizeGuidelineSetting('large');
+    const paragraph = buildWorkflowSizeGuidelineParagraph(setting)!;
+    for (const surface of [
+      'pointer',
+      'pointer-via-tool-search',
+      'withheld',
+      'inline',
+    ] as const) {
+      expect(
+        buildWorkflowToolDescription(surface, undefined, setting),
+      ).toContain(paragraph);
+    }
+    expect(buildWorkflowToolDescription('pointer')).not.toContain(
+      'size guideline',
+    );
   });
 });

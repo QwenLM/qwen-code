@@ -76,7 +76,8 @@ result discarded.
 A script must be deterministic so a resume replays the same call sequence.
 `Math.random()` throws, and so does all of `Date` — `new Date()`,
 `Date.now()`, `Date.parse()` and `Date.UTC()` alike. Pass timestamps in via
-`args`, or stamp the result after the workflow returns.
+`args`, or stamp the result after the workflow returns. A script that calls any
+of them is refused before it starts, so none of its agents runs first.
 
 Scripts run in a `node:vm` sandbox with no filesystem, shell, network, or
 environment access. All I/O happens through the prompts you give the agents, so
@@ -221,6 +222,15 @@ at its index.
 - Tokens: a token target or cap may be in effect — read `budget.total`
   (`null` = uncapped) before committing to a large fan-out, because once it is
   reached every further `agent()` call is refused.
+- Size guideline: the tool description states the session's guideline — small
+  (5 agents), medium (15, the default) or large (50) — or none when the user
+  set it to unrestricted. It is advisory: follow it unless the user's prompt
+  calls for a different scale. A running workflow that schedules more agents
+  than the guideline (25 when unrestricted) or projects past ~1.5M output
+  tokens is flagged to the user as a large workflow; it is not stopped.
+- The user can steer size from the prompt ("use a small workflow, 5 agents
+  max") or with the Dynamic Workflow Size setting. A change made mid-session
+  arrives as a reminder that replaces the guideline in the description.
 
 ## Default to `pipeline()`
 

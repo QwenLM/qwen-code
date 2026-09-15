@@ -41,6 +41,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { buildFailureLines } from './workflow-failure-lines.js';
+import {
+  formatWorkflowSizeWarningLog,
+  type WorkflowSizeWarning,
+} from './runtime/workflow-size.js';
 import { parseExtensionWorkflowName } from './runtime/workflow-saved.js';
 import {
   buildResumeCall,
@@ -337,6 +341,12 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * shape. Treat `undefined` as `0`.
    */
   agentsRespawned?: number;
+  /**
+   * The large-run flag, recorded the first time this run scheduled more agents
+   * or projected more output tokens than its thresholds. At most one per run;
+   * absent while the run stays within bounds.
+   */
+  sizeWarning?: WorkflowSizeWarning;
   /** Most recent log lines from the sandbox's `getLogs()`. Capped at 100 for the UI. */
   recentLogs: string[];
   /** Ordered runtime facts used to replay this run after it settles. */
@@ -422,6 +432,7 @@ export type WorkflowTaskRegistration = Omit<
   | 'agentsDispatched'
   | 'agentsCompleted'
   | 'agentsRespawned'
+  | 'sizeWarning'
   | 'recentLogs'
   | 'events'
   | 'tokensSpent'
@@ -780,6 +791,7 @@ export class WorkflowRunRegistry {
     entry.agentsDispatched = 0;
     entry.agentsCompleted = 0;
     entry.agentsRespawned = 0;
+    delete entry.sizeWarning;
     entry.recentLogs = [];
     entry.events = [];
     entry.tokensSpent = 0;
@@ -1293,6 +1305,30 @@ export class WorkflowRunRegistry {
       return;
     entry.agentsRespawned = (entry.agentsRespawned ?? 0) + 1;
     this.onLogAppended(runId, line);
+  }
+
+  /**
+   * Record the large-run flag. Returns whether it was recorded: a run is
+   * flagged at most once, and only while it is still active — a warning for a
+   * run that already settled would ask the user to stop something stopped.
+   */
+  onSizeWarning(runId: string, warning: WorkflowSizeWarning): boolean {
+    const entry = this.entries.get(runId);
+    if (
+      !entry ||
+      entry.sizeWarning !== undefined ||
+      !isActiveWorkflowStatus(entry.status)
+    ) {
+      return false;
+    }
+    entry.sizeWarning = warning;
+    this.onLogAppended(
+      runId,
+      formatWorkflowSizeWarningLog(warning),
+      warning.at,
+    );
+    this.emitStatusChange(entry);
+    return true;
   }
 
   /**

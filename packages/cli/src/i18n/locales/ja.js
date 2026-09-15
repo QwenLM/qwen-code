@@ -974,6 +974,11 @@ export default {
   'No tasks currently running': '現在実行中のタスクはありません',
   'No entry to show.': '表示するエントリはありません。',
   'needs approval': '承認待ち',
+  'Large workflow': '大規模なワークフロー',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大規模なワークフロー：{{agents}} 個のエージェントを予定（警告しきい値 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大規模なワークフロー：出力トークン ~{{tokens}} の見込み（警告しきい値 {{cap}}）。',
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',

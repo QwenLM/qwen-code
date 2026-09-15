@@ -2159,6 +2159,11 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'Large workflow': '大型工作流程',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流程：已排定 {{agents}} 個 agent（警示門檻 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流程：預計輸出 ~{{tokens}} 個 token（警示門檻 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',

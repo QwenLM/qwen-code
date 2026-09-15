@@ -143,6 +143,12 @@ import { BackgroundAgentResumeService } from '../agents/background-agent-resume.
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { TurnBudget } from '../core/turn-budget.js';
+import {
+  isWorkflowSizeGuideline,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuideline,
+  type WorkflowSizeGuidelineSetting,
+} from '../agents/runtime/workflow-size.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -1186,6 +1192,11 @@ export interface ConfigParameters {
    * even when unset it fires at most once per process.
    */
   skipWorkflowUsageWarning?: boolean;
+  /**
+   * Advisory size guideline for dynamic workflows
+   * (`tools.workflowSizeGuideline`). Unset or unrecognised means the default.
+   */
+  workflowSizeGuideline?: string;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -2816,6 +2827,7 @@ export class Config {
   private goalProposalHostSupported = false;
   private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
+  private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -3175,6 +3187,11 @@ export class Config {
     this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
+    this.workflowSizeGuideline = isWorkflowSizeGuideline(
+      params.workflowSizeGuideline,
+    )
+      ? params.workflowSizeGuideline
+      : undefined;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -8860,6 +8877,25 @@ export class Config {
    */
   getSkipWorkflowUsageWarning(): boolean {
     return this.skipWorkflowUsageWarning;
+  }
+
+  /**
+   * The dynamic-workflow size guideline in effect: stated in the Workflow tool
+   * description, and the agent threshold of the large-run warning.
+   */
+  getWorkflowSizeGuideline(): WorkflowSizeGuidelineSetting {
+    return resolveWorkflowSizeGuidelineSetting(this.workflowSizeGuideline);
+  }
+
+  /**
+   * Apply a guideline the user changed mid-session. Runs started afterwards use
+   * it; the tool description keeps its startup value, so the caller also tells
+   * the model.
+   */
+  setWorkflowSizeGuideline(size: WorkflowSizeGuideline | undefined): void {
+    this.workflowSizeGuideline = isWorkflowSizeGuideline(size)
+      ? size
+      : undefined;
   }
 
   /**
