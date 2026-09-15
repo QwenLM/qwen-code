@@ -247,10 +247,11 @@ function OpenTuiEntryApp({
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
           showToolCallArgs={settings.merged.ui?.showToolCallArgs === true}
+          awaitingCallId={live.waitingCalls[0]?.callId}
         />
       </box>
     ),
-    [live.items, width, height, thoughtsExpanded, settings],
+    [live.items, live.waitingCalls, width, height, thoughtsExpanded, settings],
   );
 
   const handleRenderError = useCallback(

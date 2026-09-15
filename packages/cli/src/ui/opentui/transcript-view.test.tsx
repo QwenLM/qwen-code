@@ -77,6 +77,7 @@ describe('OpenTuiTranscriptView', () => {
     // args — so the card is the only surface that carries the arguments.
     const { container } = render(
       <OpenTuiTranscriptView
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -103,6 +104,7 @@ describe('OpenTuiTranscriptView', () => {
     const pending = render(
       <OpenTuiTranscriptView
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -119,6 +121,7 @@ describe('OpenTuiTranscriptView', () => {
     const settled = render(
       <OpenTuiTranscriptView
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -144,6 +147,7 @@ describe('OpenTuiTranscriptView', () => {
     const { container } = render(
       <OpenTuiTranscriptView
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -176,6 +180,7 @@ describe('OpenTuiTranscriptView', () => {
       <OpenTuiTranscriptView
         availableWidth={110}
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -336,6 +341,7 @@ describe('OpenTuiTranscriptView', () => {
     // every pending row would point at calls with nothing on screen to answer.
     const { container } = render(
       <OpenTuiTranscriptView
+        awaitingCallId="t1"
         items={[
           toolItem({ description: 'echo one', confirm: 'pending' }),
           toolItem({
@@ -349,6 +355,29 @@ describe('OpenTuiTranscriptView', () => {
     const text = container.textContent ?? '';
     expect(text.split('←')).toHaveLength(2);
     expect(text.indexOf('←')).toBeLessThan(text.indexOf('echo two'));
+  });
+
+  it('marks the awaiting call the queue names, not the first pending row', () => {
+    // A PreToolUse `ask` hook re-arms a call that already left the queue: it is
+    // appended behind the call still waiting, while its own card goes back to
+    // pending where it sits in the transcript. The dialog on screen is the
+    // queue's head, so that is the card carrying the arrow.
+    const { container } = render(
+      <OpenTuiTranscriptView
+        awaitingCallId="t2"
+        items={[
+          toolItem({ description: 'echo one', confirm: 'pending' }),
+          toolItem({
+            id: 't2',
+            description: 'echo two',
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text.split('←')).toHaveLength(2);
+    expect(text.indexOf('←')).toBeGreaterThan(text.indexOf('echo two'));
   });
 
   it('renders the ! shell row with the ink $ prefix', () => {

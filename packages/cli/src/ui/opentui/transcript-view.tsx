@@ -83,6 +83,12 @@ export interface TranscriptViewProps {
   /** `ui.showToolCallArgs`: ink draws each call's raw arguments on their own
    * line under the card header. */
   showToolCallArgs?: boolean;
+  /** The call whose confirmation is on screen. ink's trailing marker points at
+   * the call the user can answer, and only the waiting queue knows which that
+   * is: a PreToolUse `ask` hook re-arms an already approved call by appending it
+   * *behind* another waiting call, while its card goes back to pending in place,
+   * so transcript order and queue order disagree. */
+  awaitingCallId?: string;
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -110,10 +116,15 @@ export function OpenTuiTranscriptView({
   availableTerminalHeight = 24,
   thoughtsExpanded = false,
   showToolCallArgs = false,
+  awaitingCallId,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   const awaitingId = items.find(
-    (item) => item.kind === 'tool' && item.confirm === 'pending' && !item.done,
+    (item) =>
+      item.kind === 'tool' &&
+      item.confirm === 'pending' &&
+      !item.done &&
+      item.id === awaitingCallId,
   )?.id;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
