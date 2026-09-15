@@ -103,8 +103,8 @@ describe('controllers add', () => {
     addPeerController.mockResolvedValue({ record: record(), token: TOKEN });
     await handleAdd({ label: 'voice bridge' });
     const out = stdout.join('\n');
-    expect(out).toContain('agents.crossSessionMessaging enabled');
-    expect(out).toContain('restarted after enabling it');
+    expect(out).toContain('agents.crossSessionMessaging turned off');
+    expect(out).toContain('restarted after changing that setting');
     expect(out).toContain('without per-message review');
     expect(out).toContain('agents.crossSessionInbound');
   });
