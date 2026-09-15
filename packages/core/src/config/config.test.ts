@@ -4019,6 +4019,18 @@ describe('Server Config (config.ts)', () => {
         config,
         expect.objectContaining({ cause: 'resume', goal_id: 'g-resumed' }),
       );
+
+      expect(runtime.getRecoveryCause()).toBe('pause');
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: 'g-resumed',
+        expectedRevision: runtime.getSnapshot().goal!.revision,
+      });
+      expect(logGoalState).toHaveBeenCalledTimes(2);
+      expect(logGoalState).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({ cause: 'pause', goal_id: 'g-resumed' }),
+      );
     });
 
     it('holds selective Goal readiness and autonomous work until finalization', async () => {

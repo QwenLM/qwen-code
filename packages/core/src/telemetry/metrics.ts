@@ -278,6 +278,12 @@ const HISTOGRAM_DEFINITIONS = {
       'Tokens a Goal had spent when it completed, was blocked, or reached a usage limit.',
     unit: '{token}',
     valueType: ValueType.INT,
+    advice: {
+      explicitBucketBoundaries: [
+        1_000, 10_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
+        30_000_000,
+      ] as number[],
+    },
     assign: (h: Histogram) => (goalTokensUsedHistogram = h),
     attributes: {} as {
       cause: GoalOutcomeCause;
@@ -579,11 +585,17 @@ export function initializeMetrics(config: TelemetryRuntimeConfig): void {
     valueType: ValueType.INT,
   });
 
-  Object.entries(HISTOGRAM_DEFINITIONS).forEach(
-    ([name, { description, unit, valueType, assign }]) => {
-      assign(meter.createHistogram(name, { description, unit, valueType }));
-    },
-  );
+  Object.entries(HISTOGRAM_DEFINITIONS).forEach(([name, definition]) => {
+    const { description, unit, valueType, assign } = definition;
+    assign(
+      meter.createHistogram(name, {
+        description,
+        unit,
+        valueType,
+        ...('advice' in definition ? { advice: definition.advice } : {}),
+      }),
+    );
+  });
 
   // Increment session counter after all metrics are initialized
   sessionCounter?.add(1, baseMetricDefinition.getCommonAttributes(config));

@@ -239,7 +239,15 @@ describe('Telemetry Metrics', () => {
       );
       expect(mockCreateHistogramFn).toHaveBeenCalledWith(
         'qwen-code.goal.tokens_used',
-        expect.objectContaining({ unit: '{token}' }),
+        expect.objectContaining({
+          unit: '{token}',
+          advice: {
+            explicitBucketBoundaries: [
+              1_000, 10_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
+              30_000_000,
+            ],
+          },
+        }),
       );
       expect(mockCreateHistogramFn).toHaveBeenCalledWith(
         'qwen-code.goal.turn_count',
@@ -272,34 +280,64 @@ describe('Telemetry Metrics', () => {
       expect(mockHistogramRecordFn).not.toHaveBeenCalled();
     });
 
-    it('records spend and turns on an outcome', () => {
-      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+    it.each(['complete', 'blocked', 'usage_limited'] as const)(
+      'records spend and turns on %s',
+      (cause) => {
+        const config = makeFakeConfig({ sessionId: 'test-session-id' });
+        initializeMetricsModule(config);
+        mockCounterAddFn.mockClear();
+        const limitAttributes =
+          cause === 'usage_limited'
+            ? { limit_kind: 'time_budget' as const }
+            : {};
+
+        recordGoalStateMetricsModule(
+          config,
+          goalEvent({
+            cause,
+            status: cause,
+            ...limitAttributes,
+            turn_count: 12,
+            tokens_used: 45_000,
+          }),
+        );
+
+        expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+          cause,
+          status: cause,
+          ...limitAttributes,
+        });
+        expect(mockHistogramRecordFn).toHaveBeenCalledWith(45_000, {
+          cause,
+          ...limitAttributes,
+        });
+        expect(mockHistogramRecordFn).toHaveBeenCalledWith(12, {
+          cause,
+          ...limitAttributes,
+        });
+      },
+    );
+
+    it('records zero spend and turns on an outcome', () => {
+      const config = makeFakeConfig({});
       initializeMetricsModule(config);
-      mockCounterAddFn.mockClear();
 
       recordGoalStateMetricsModule(
         config,
         goalEvent({
-          cause: 'usage_limited',
-          status: 'usage_limited',
-          limit_kind: 'time_budget',
-          turn_count: 12,
-          tokens_used: 45_000,
+          cause: 'complete',
+          status: 'complete',
+          tokens_used: 0,
+          turn_count: 0,
         }),
       );
 
-      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-        cause: 'usage_limited',
-        status: 'usage_limited',
-        limit_kind: 'time_budget',
+      expect(mockHistogramRecordFn).toHaveBeenCalledTimes(2);
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(1, 0, {
+        cause: 'complete',
       });
-      expect(mockHistogramRecordFn).toHaveBeenCalledWith(45_000, {
-        cause: 'usage_limited',
-        limit_kind: 'time_budget',
-      });
-      expect(mockHistogramRecordFn).toHaveBeenCalledWith(12, {
-        cause: 'usage_limited',
-        limit_kind: 'time_budget',
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 0, {
+        cause: 'complete',
       });
     });
   });

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import type {
   GoalRecord,
   GoalSnapshotV2,
@@ -17,6 +17,23 @@ import {
 import { GOAL_STATE_EVENT_CAUSES } from './types.js';
 
 const NOW = 1_000_000;
+const REPORTED_CAUSES = [
+  'create',
+  'replace',
+  'edit',
+  'pause',
+  'resume',
+  'complete',
+  'blocked',
+  'usage_limited',
+  'verifier_reject',
+] as const;
+const UNREPORTED_CAUSES = [
+  'turn_finished',
+  'checkpoint',
+  'migrated',
+  'verifier_accept',
+] as const;
 
 function goal(overrides: Partial<GoalRecord> = {}): GoalRecord {
   return {
@@ -42,27 +59,29 @@ function snapshot(
 }
 
 describe('goalStateEventFromSnapshot', () => {
-  it.each(GOAL_STATE_EVENT_CAUSES.filter((cause) => cause !== 'clear'))(
-    'reports %s',
-    (cause) => {
-      expect(
-        goalStateEventFromSnapshot(snapshot(goal()), cause, NOW),
-      ).toMatchObject({
-        'event.name': 'goal_state',
-        cause,
-        goal_id: 'g-1',
-        revision: 3,
-      });
-    },
-  );
+  it('classifies every runtime cause and pins the reported set', () => {
+    expectTypeOf<GoalStateCause>().toEqualTypeOf<
+      | (typeof REPORTED_CAUSES)[number]
+      | (typeof UNREPORTED_CAUSES)[number]
+      | 'clear'
+    >();
+    expect([...GOAL_STATE_EVENT_CAUSES].sort()).toEqual(
+      [...REPORTED_CAUSES, 'clear'].sort(),
+    );
+  });
 
-  it.each<GoalStateCause | undefined>([
-    'turn_finished',
-    'checkpoint',
-    'migrated',
-    'verifier_accept',
-    undefined,
-  ])('does not report %s', (cause) => {
+  it.each(REPORTED_CAUSES)('reports %s', (cause) => {
+    expect(
+      goalStateEventFromSnapshot(snapshot(goal()), cause, NOW),
+    ).toMatchObject({
+      'event.name': 'goal_state',
+      cause,
+      goal_id: 'g-1',
+      revision: 3,
+    });
+  });
+
+  it.each([...UNREPORTED_CAUSES, undefined])('does not report %s', (cause) => {
     // Per-turn causes would multiply the volume; an accept is always followed
     // by the stop it accepted; a missing cause is an activity change.
     expect(isGoalStateEventCause(cause)).toBe(false);
@@ -117,6 +136,32 @@ describe('goalStateEventFromSnapshot', () => {
     ]) {
       expect(Object.keys(event)).not.toContain(key);
     }
+  });
+
+  it('preserves zero figures on a newly created Goal', () => {
+    const event = goalStateEventFromSnapshot(
+      snapshot(
+        goal({
+          status: 'active',
+          turnCount: 0,
+          tokensUsed: 0,
+          activeTimeMs: 0,
+          createdAt: NOW,
+          updatedAt: NOW,
+        }),
+      ),
+      'create',
+      NOW,
+    );
+
+    expect(event).toMatchObject({
+      turn_count: 0,
+      tokens_used: 0,
+      active_time_ms: 0,
+    });
+    expect(Object.keys(event!)).toEqual(
+      expect.arrayContaining(['turn_count', 'tokens_used', 'active_time_ms']),
+    );
   });
 
   it("reads an active Goal's running clock as of the broadcast", () => {

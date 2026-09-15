@@ -491,6 +491,70 @@ describe('QwenLogger', () => {
       expect(keys).not.toContain('token_budget');
     });
 
+    it('journals every allowed Goal property without the Goal id', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'usage_limited',
+          goal_id: 'g-1',
+          revision: 4,
+          status: 'usage_limited',
+          limit_kind: 'time_budget',
+          turn_count: 7,
+          tokens_used: 9_000,
+          token_budget: 80_000,
+          turn_budget: 50,
+          active_time_ms: 60_000,
+          active_time_budget_ms: 60_000,
+          objective_length: 22,
+        }),
+      );
+
+      const rumEvent = enqueueSpy.mock.calls[0]![0];
+      expect(rumEvent.properties).toEqual({
+        cause: 'usage_limited',
+        revision: 4,
+        status: 'usage_limited',
+        limit_kind: 'time_budget',
+        turn_count: 7,
+        tokens_used: 9_000,
+        token_budget: 80_000,
+        turn_budget: 50,
+        active_time_ms: 60_000,
+        active_time_budget_ms: 60_000,
+        objective_length: 22,
+      });
+      expect(Object.keys(rumEvent.properties ?? {})).not.toContain('goal_id');
+    });
+
+    it('preserves zero Goal figures in analytics', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'create',
+          goal_id: 'g-1',
+          revision: 1,
+          status: 'active',
+          turn_count: 0,
+          tokens_used: 0,
+          active_time_ms: 0,
+        }),
+      );
+
+      expect(enqueueSpy.mock.calls[0]![0].properties).toEqual({
+        cause: 'create',
+        revision: 1,
+        status: 'active',
+        turn_count: 0,
+        tokens_used: 0,
+        active_time_ms: 0,
+      });
+    });
+
     it('logs protocol tag sanitization without model content', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
