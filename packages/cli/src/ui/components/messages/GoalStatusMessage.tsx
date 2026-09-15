@@ -6,10 +6,16 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
+import {
+  goalCheckpointHealthLine,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+} from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { ICON } from '../../constants.js';
 import { formatDuration } from '../../utils/formatters.js';
+import { formatTokenCount } from '../../statusLinePresets.js';
 import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
 interface LegacyGoalStatusMessageProps {
@@ -113,11 +119,29 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
   if (goal.activeTimeMs > 0) {
     stats.push(formatDuration(goal.activeTimeMs, { hideTrailingZeros: true }));
   }
+  if (goal.tokensUsed > 0) {
+    const used = formatTokenCount(goal.tokensUsed);
+    stats.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
+    );
+  }
   const subtitle = stats.length > 0 ? stats.join(' · ') : null;
+  // This renderer writes straight to the terminal, so both lines below are
+  // sanitized here: a pause reason can embed a raw provider error, and the
+  // checkpoint diagnostic, though cleaned where it is written, can come back
+  // from a journal record verbatim.
   const reason =
     goal.status !== 'active' || snapshot.activity === 'verifying'
-      ? goal.lastReason?.trim()
+      ? sanitizeTerminalText(goal.lastReason ?? '').trim()
       : undefined;
+  // Checkpoint health, shown before the stall breaker has to stop the Goal:
+  // a Goal paying a failed checkpoint every turn otherwise looks like one
+  // that is working. A Goal the breaker stopped keeps the line, since its stop
+  // reason names the kind of failure but not the failure itself; which
+  // records show it, and in what words, is decided once in core.
+  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
 
   return (
     <Box flexDirection="row">
@@ -142,6 +166,11 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
         {reason ? (
           <Text color={theme.text.secondary} wrap="wrap">
             Reason: {reason}
+          </Text>
+        ) : null}
+        {checkpoint ? (
+          <Text color={theme.status.warning} wrap="wrap">
+            Checkpoint: {checkpoint}
           </Text>
         ) : null}
       </Box>

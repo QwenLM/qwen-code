@@ -84,6 +84,11 @@ describe('isSafeHref', () => {
     expect(isSafeHref('javascript:alert(1)')).toBe(false);
   });
 
+  it('blocks file: scheme', () => {
+    expect(isSafeHref('file://attacker.example/share/file.md')).toBe(false);
+    expect(isSafeHref('file:///etc/passwd')).toBe(false);
+  });
+
   it('blocks data: URIs', () => {
     expect(isSafeHref('data:text/html,<script>alert(1)</script>')).toBe(false);
   });
@@ -143,6 +148,11 @@ describe('isSafeImageSrc', () => {
 
   it('blocks javascript: scheme', () => {
     expect(isSafeImageSrc('javascript:alert(1)')).toBe(false);
+  });
+
+  it('blocks file: scheme', () => {
+    expect(isSafeImageSrc('file:///tmp/private.png')).toBe(false);
+    expect(isSafeImageSrc('file://attacker.example/share/img.png')).toBe(false);
   });
 
   it('allows relative paths', () => {

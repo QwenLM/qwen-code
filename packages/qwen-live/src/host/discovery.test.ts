@@ -68,6 +68,20 @@ describe('Live discovery file', () => {
     ).toEqual([]);
   });
 
+  it('preserves the optional standalone configuration path', async () => {
+    const runtime = await temporaryRuntime();
+    const expected = {
+      ...record('daemon_instance_nonce_config_01'),
+      configPath: path.join(runtime, 'custom data', 'config.json'),
+    };
+
+    const writtenPath = await writeLiveDiscoveryFile(runtime, expected);
+
+    expect(JSON.parse(await fs.readFile(writtenPath, 'utf8'))).toEqual(
+      expected,
+    );
+  });
+
   it('safely creates a missing nested runtime directory tree', async () => {
     const parent = await temporaryRuntime();
     const runtime = path.join(parent, 'nested', 'runtime', 'base');

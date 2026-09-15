@@ -148,6 +148,36 @@ describe('DiscoveredMCPTool', () => {
         })),
       }) satisfies McpDirectClient;
 
+    it.each(['summary', 'json', 'empty'] as const)(
+      'preserves CUA action handles with %s content',
+      async (kind) => {
+        const structuredContent = {
+          snapshot_id: 's00000001',
+          elements: [{ element_token: 's00000001:8', label: 'View' }],
+        };
+        const serialized = JSON.stringify(structuredContent);
+        const content =
+          kind === 'empty'
+            ? []
+            : [
+                {
+                  type: 'text' as const,
+                  text: kind === 'json' ? serialized : 'View menu',
+                },
+              ];
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({ content, structuredContent })),
+        };
+        const result = await createDirectTool(mcpClient, false)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expect(result.llmContent).toEqual([
+          { text: serialized },
+          ...(kind === 'summary' ? [{ text: 'View menu' }] : []),
+        ]);
+      },
+    );
+
     it('injects trusted request metadata for an allowed stdio tool', async () => {
       const mcpClient = successfulClient();
       const modelArguments = {
@@ -1175,7 +1205,7 @@ describe('DiscoveredMCPTool', () => {
         appResourceUi,
       );
 
-    it('loads an MCP App resource without changing model-visible content', async () => {
+    it('loads an MCP App resource while preserving structured tool output', async () => {
       const mcpClient: McpDirectClient = {
         callTool: vi.fn(async () => ({
           content: [{ type: 'text', text: 'Dashboard ready' }],
@@ -1202,13 +1232,16 @@ describe('DiscoveredMCPTool', () => {
         .build({ param: 'test' })
         .execute(new AbortController().signal);
 
-      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.llmContent).toEqual([
+        { text: '{"revenue":42}' },
+        { text: 'Dashboard ready' },
+      ]);
       expect(result.returnDisplay).toMatchObject({
         type: 'mcp_app',
         resourceUri: 'ui://demo/dashboard',
         html: '<main>Revenue</main>',
         toolArguments: { param: 'test' },
-        fallbackText: 'Dashboard ready',
+        fallbackText: '{"revenue":42}\nDashboard ready',
         csp: { connectDomains: ['https://api.example.com'] },
         permissions: { clipboardWrite: {} },
       });

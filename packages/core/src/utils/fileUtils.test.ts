@@ -1340,6 +1340,37 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: image.png');
     });
 
+    it('points the zoom hint at tools.zoom_image in CodeModeOnly', async () => {
+      await sharp({
+        create: {
+          width: 20,
+          height: 10,
+          channels: 3,
+          background: '#306090',
+        },
+      })
+        .png()
+        .toFile(testImageFilePath);
+      mockMimeGetType.mockReturnValue('image/png');
+      const codeModeConfig = {
+        ...mockConfig,
+        getCodeModeOnly: () => true,
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        codeModeConfig,
+      );
+
+      const parts = result.llmContent as Part[];
+      expect(parts[0]).toEqual({
+        text:
+          'Image overview: 20x10; oriented source: 20x10. ' +
+          'If details are too small, call tools.zoom_image with ' +
+          'coordinates normalized from 0 to 1000.',
+      });
+    });
+
     it('returns a bounded overview when a PNG exceeds the old data URI limit', async () => {
       const largeImagePath = path.join(tempRootDir, 'large.png');
       await sharp({

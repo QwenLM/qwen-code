@@ -54,8 +54,12 @@ import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { parseToolCallArguments } from '../tool-call-arguments.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { getErrorStatus } from '../../utils/errors.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
-import { isRetryableStreamTransportError } from '../stream-transport-retry.js';
+import {
+  isRetryableStatuslessUpstreamError,
+  isRetryableStreamTransportError,
+} from '../stream-transport-retry.js';
 import {
   reportAnthropicEvent,
   reportAnthropicFollowingRequest,
@@ -65,6 +69,34 @@ import {
 } from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
+
+function normalizeStreamError(error: unknown): unknown {
+  const redacted = redactProxyError(error);
+  if (!(redacted instanceof Error) || getErrorStatus(redacted) !== undefined) {
+    return redacted;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(redacted.message) as {
+      error?: { type?: unknown; message?: unknown };
+    } | null;
+  } catch {
+    return redacted;
+  }
+  if (
+    payload?.error?.type === 'api_error' &&
+    typeof payload.error.message === 'string' &&
+    /^Streaming error: 404: Rate limit exceeded on Anthropic API\.?$/i.test(
+      payload.error.message.trim(),
+    )
+  ) {
+    // The gateway's 404 is message text inside a successful SSE response.
+    return Object.assign(new Error(redacted.message, { cause: redacted }), {
+      status: 429,
+    });
+  }
+  return redacted;
+}
 
 /**
  * Hostname-only DeepSeek anthropic-compatible detector. Returns true ONLY
@@ -364,6 +396,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       fetch: buildSessionAwareFetch(
         runtimeOptions.fetch,
         this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
       ) as unknown as AnthropicFetch,
     });
 
@@ -807,6 +840,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
         dropUnsignedAssistantThinking,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
+        // Manual (non-adaptive) extended thinking requires an assistant
+        // turn to begin with a thinking block whenever a tool_use remains
+        // in it; adaptive thinking relaxes this. Applied to every such turn
+        // in history, not just the latest -- see
+        // ensureLeadingAssistantThinking's doc in the converter.
+        ensureLeadingAssistantThinking: thinking?.type === 'enabled',
         enableCacheControl,
         useGlobalCacheScope,
         cacheRetention,
@@ -1205,7 +1244,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         yield event;
       }
     } catch (error) {
-      throw redactProxyError(error);
+      throw normalizeStreamError(error);
     }
   }
 
@@ -1591,10 +1630,28 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (upstreamStreamFailed) {
       const upstreamErrorClassification =
         classifyRetryError(upstreamStreamError);
-      // Match LlmChat's replay boundary: only known mid-SSE socket cuts
-      // may release an already closed batch before the error is propagated.
+      // Match LlmChat's replay boundary: known mid-SSE socket cuts and
+      // status-less upstream failures the provider traced with a request id
+      // both release an already closed batch before the error propagates.
+      // The status-less arm reaches this provider only through an id inside
+      // the error body: the SDK builds a mid-stream failure as an
+      // `APIConnectionError` without headers, so the `request-id` response
+      // header never reaches `request_id` the way the OpenAI SDK stamps its
+      // `x-request-id`. Same policy as the OpenAI path, narrower set of
+      // producers — a gateway relaying its own id in the frame, rather than
+      // the SDK handing one over from the response.
+      // Releasing keeps the two providers' functionCall cuts on one footing —
+      // the delivered call flips LlmChat's delivered flags
+      // (`streamYieldedContentChunk`, `streamYieldedFunctionCall`), which
+      // shuts replay and continuation, and the error-path persistence plus
+      // the scheduler's repair flow take over. Withholding would instead
+      // leave a resume over prose as the only recovery once answer text has
+      // been delivered: a withheld batch never sets
+      // `streamYieldedFunctionCall`, so the model would be asked to continue
+      // an answer whose tool call it never saw.
       if (
-        isRetryableStreamTransportError(upstreamErrorClassification) &&
+        (isRetryableStreamTransportError(upstreamErrorClassification) ||
+          isRetryableStatuslessUpstreamError(upstreamErrorClassification)) &&
         deferredToolCalls.length > 0 &&
         !hasEmptyToolCall &&
         !hasMalformedToolCall &&

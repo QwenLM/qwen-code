@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonBackgroundTurn,
+  DaemonInputAnnotation,
+} from '@qwen-code/sdk/daemon';
 
 export interface AttachmentPreviewRequest {
   name: string;
@@ -52,6 +55,8 @@ export interface DaemonMessageToolCall {
   toolName: string;
   args?: Record<string, unknown>;
   executionMode?: 'foreground' | 'background';
+  subagentSessionReady?: boolean;
+  backgroundResultPending?: boolean;
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
   title?: string;
@@ -81,6 +86,7 @@ export interface DaemonMessageTodoItem {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  backgroundTurn?: DaemonBackgroundTurn;
   /**
    * Wall-clock epoch milliseconds when the backing transcript block was first
    * observed, populated from `serverTimestamp ?? clientReceivedAt`. Surfaced

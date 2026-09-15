@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonUiEvent } from '@qwen-code/sdk/daemon';
+import {
+  createDaemonTranscriptState,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
+  type DaemonUiEvent,
+} from '@qwen-code/sdk/daemon';
 import { projectMainTranscriptEventsForTesting } from './DaemonSessionProvider.js';
 
 describe('on-demand subagent transcript projection', () => {
@@ -214,3 +219,71 @@ describe('on-demand subagent transcript projection', () => {
     expect(result).not.toHaveProperty('rawOutput.executionMode');
   });
 });
+
+it.each([false, true])(
+  'retains subagent readiness=%s in compact live updates',
+  (subagentSessionReady) => {
+    const [event] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        subagentSessionReady,
+        rawOutput: { type: 'task_execution', subagentSessionReady },
+      },
+    ]);
+    expect(event).toMatchObject({
+      subagentSessionReady,
+      rawOutput: { subagentSessionReady },
+    });
+  },
+);
+
+it.each([false, true])(
+  'preserves meta-only readiness=%s without replacing existing output',
+  (subagentSessionReady) => {
+    const rawOutput = {
+      type: 'task_execution',
+      executionSummary: { totalToolCalls: 2 },
+    };
+    const initial = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-1',
+          toolName: 'agent',
+          status: 'in_progress',
+          rawOutput,
+        },
+      ],
+    );
+    const events = projectMainTranscriptEventsForTesting(
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'agent-1',
+            _meta: { toolName: 'agent', subagentSessionReady },
+          },
+        },
+      }),
+    );
+    expect(events).toMatchObject([{ subagentSessionReady }]);
+    expect(events[0]).not.toHaveProperty('rawOutput', expect.anything());
+    const state = reduceDaemonTranscriptEvents(initial, events);
+    expect(state.blocks).toMatchObject([
+      {
+        id: initial.blocks[0].id,
+        toolCallId: 'agent-1',
+        status: 'in_progress',
+        subagentSessionReady,
+        rawOutput,
+      },
+    ]);
+    expect(state.blocks).toHaveLength(1);
+  },
+);

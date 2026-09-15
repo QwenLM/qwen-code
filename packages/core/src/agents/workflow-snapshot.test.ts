@@ -218,6 +218,39 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(list[0].events).toBeUndefined();
   });
 
+  // Snapshots written before resume respawns were counted have no field for
+  // it. An old run's history is worth more than a uniform shape, so the
+  // validator accepts its absence rather than discarding the run.
+  it('loads a snapshot written before respawns were counted', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_prerespawn' }));
+    const snapshotPath =
+      config.storage.getWorkflowRunSnapshotPath('wf_prerespawn');
+    const parsed = JSON.parse(
+      await fs.readFile(snapshotPath, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(parsed['agentsRespawned']).toBe(0);
+    delete parsed['agentsRespawned'];
+    await fs.writeFile(snapshotPath, JSON.stringify(parsed), 'utf8');
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list).toHaveLength(1);
+    expect(list[0].agentsRespawned).toBeUndefined();
+  });
+
+  it('records the respawn count it was given', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_respawned', agentsRespawned: 2 }),
+    );
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list[0].agentsRespawned).toBe(2);
+  });
+
   it('freezes the snapshot projection before the first fs await', async () => {
     // R11-27: in-flight dispatches keep mutating the live entry across
     // the fs yields — a projection captured after the first await would

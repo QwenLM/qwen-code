@@ -26,13 +26,6 @@ export const plugin: ChannelPlugin = {
         envResolvable: true,
       },
       {
-        key: 'aggregateBackgroundAgentResponses',
-        label: 'Aggregate Background Agent Responses',
-        kind: 'boolean',
-        description:
-          'Buffer each background Agent turn and send one labeled result instead of labeled segments',
-      },
-      {
         key: 'interactiveCards',
         label: 'Interactive Cards',
         kind: 'object',
@@ -57,6 +50,25 @@ export const plugin: ChannelPlugin = {
           {
             key: 'questionCard',
             label: 'Question Card',
+            kind: 'object',
+            properties: [
+              {
+                key: 'enabled',
+                label: 'Enabled',
+                kind: 'boolean',
+              },
+              {
+                key: 'timeoutMs',
+                label: 'Timeout (ms)',
+                kind: 'number',
+                exclusiveMinimum:
+                  DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+              },
+            ],
+          },
+          {
+            key: 'permissionCard',
+            label: 'Permission Card',
             kind: 'object',
             properties: [
               {

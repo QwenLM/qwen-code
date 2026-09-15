@@ -17,6 +17,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -1213,6 +1214,34 @@ describe('ReadFileTool', () => {
         expect(String(result.llmContent).length).toBeLessThan(1000);
         expect(result.llmContent).toContain('has 31 pages');
         expect(result.llmContent).toContain("Use the 'pages' parameter");
+      });
+
+      it('keeps nested reads usable without claiming their bytes reached history', async () => {
+        const filePath = path.join(tempRootDir, 'program-input.txt');
+        await fsp.writeFile(filePath, 'program input', 'utf-8');
+        const source = {
+          kind: 'code_mode' as const,
+        };
+        await read({ file_path: filePath });
+        for (let i = 0; i < 2; i++) {
+          const result = await runWithToolCallSource(source, () =>
+            read({ file_path: filePath }),
+          );
+          expect(result.llmContent).toBe('program input');
+        }
+        const stats = await fsp.stat(filePath);
+        const cached = fileReadCache.check(stats);
+        expect(cached.state).toBe('fresh');
+        if (cached.state !== 'fresh') throw new Error('missing read record');
+        expect(cached.entry.lastReadWasFull).toBe(true);
+        expect(cached.entry.lastReadCacheable).toBe(true);
+        expect(cached.entry.readResidentInHistory).toBe(false);
+        expect((await read({ file_path: filePath })).llmContent).toBe(
+          'program input',
+        );
+        expect((await read({ file_path: filePath })).llmContent).toMatch(
+          /unchanged since/,
+        );
       });
 
       it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {
