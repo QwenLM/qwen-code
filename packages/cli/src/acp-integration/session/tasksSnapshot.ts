@@ -195,6 +195,12 @@ function serializeWorkflowTask(
     id: entry.runId,
     ...optionalField('toolUseId', entry.toolUseId),
     ...optionalField('workflowName', entry.workflowName),
+    ...optionalField('sourceRef', entry.sourceRef && { ...entry.sourceRef }),
+    ...optionalField(
+      'workflowCalls',
+      entry.workflowCalls?.map((call) => ({ ...call })),
+    ),
+    ...optionalField('workflowCallsTruncated', entry.workflowCallsTruncated),
     ...optionalField('sourceRunId', entry.sourceRunId),
     ...optionalField('startMode', entry.startMode),
     label:
@@ -243,6 +249,15 @@ function serializeWorkflowSnapshot(
     isHistorical: true,
     ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),
+    ...optionalField(
+      'sourceRef',
+      snapshot.sourceRef && { ...snapshot.sourceRef },
+    ),
+    ...optionalField(
+      'workflowCalls',
+      snapshot.workflowCalls?.map((call) => ({ ...call })),
+    ),
+    ...optionalField('workflowCallsTruncated', snapshot.workflowCallsTruncated),
     ...optionalField('sourceRunId', snapshot.sourceRunId),
     ...optionalField('startMode', snapshot.startMode),
     label:

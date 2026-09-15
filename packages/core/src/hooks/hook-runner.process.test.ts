@@ -162,6 +162,7 @@ describe.skipIf(process.platform === 'win32')(
 
         expect(result).toMatchObject({
           success: false,
+          outcome: 'timeout',
           error: { message: 'Hook timed out after 1s' },
         });
         // One second, not one millisecond and not a thousand seconds.
