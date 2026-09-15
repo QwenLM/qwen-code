@@ -155,6 +155,34 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 | `externalToolGuard`                                                                                                                                | Optional daemon-side handler for the private child-to-parent prepare RPC. The bridge validates channel ownership and the active Prompt before and after it calls the handler. |
 | `channelIdleTimeoutMs`                                                                                                                             | ACP child auto-reap delay after runtime work drains. Plain preheat is preserved for first use; active keepalive windows may extend the delay.                                 |
 
+## Web Shell workspace creation deadlines
+
+Workspace creation can make two sequential SDK requests: a capability preflight
+on a cold or expired cache, followed by session creation. Each request has its
+own default 30-second timeout, including response-body consumption. Web Shell
+allows 75 seconds for the combined creation action, covering both request budgets
+plus 15 seconds of headroom. A 20-second preflight followed by a 15-second create
+therefore succeeds without configuration changes.
+
+The 75-second limit also bounds transports that do not settle after SDK
+cancellation. It limits the action's wait rather than guaranteeing transport
+cancellation; successful results arriving after that limit are detached. Both
+initial workspace creation and creation with an existing session use this limit.
+SDK standalone creation, other actions, and post-creation callbacks retain their
+existing deadlines.
+
+Increasing `--initialize-timeout-ms` does not raise the SDK request timeout.
+Direct SDK consumers can configure `DaemonClientOptions.fetchTimeoutMs`, but the
+Web Shell providers do not expose that option and use the default request budget.
+See the [Web Shell timeout reference](../../../packages/web-shell/README.md#workspace-会话创建超时)
+for the related SDK, daemon, cache, and callback limits.
+
+The following controlled HTTP test shows the previous 30-second action deadline
+and the 75-second deadline with identical response delays. It exercises the
+actual SDK and workspace actions, not a rendered Web Shell or real daemon.
+
+![Controlled HTTP workspace creation before and after the deadline change](./assets/workspace-create-timeout.png)
+
 ## Important defaults
 
 | Constant                          | File                    | Value             | Meaning                                                                              |
