@@ -1853,6 +1853,22 @@ describe('Session', () => {
     });
   });
 
+  const makeWorkflowApproval = (approvalId: string): core.WorkflowApproval => ({
+    approvalId,
+    subagentId: `agent-${approvalId}`,
+    callId: `call-${approvalId}`,
+    name: 'run_shell_command',
+    description: 'Run command',
+    confirmationDetails: {
+      type: 'exec',
+      title: 'Run command',
+      command: 'echo safe',
+      rootCommand: 'echo',
+      hideAlwaysAllow: true,
+    },
+    at: 1,
+  });
+
   it('bridges workflow approvals through ACP permission requests', async () => {
     mockToolRegistry.getTool.mockReturnValue({
       displayName: 'Shell',
@@ -1951,31 +1967,15 @@ describe('Session', () => {
       );
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
       .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = callback(
       { runId: 'wf_concurrent' } as core.WorkflowTask,
-      makeApproval('wfap_first'),
+      makeWorkflowApproval('wfap_first'),
       { command: 'echo first' },
       new AbortController().signal,
     );
     const second = callback(
       { runId: 'wf_concurrent' } as core.WorkflowTask,
-      makeApproval('wfap_second'),
+      makeWorkflowApproval('wfap_second'),
       { command: 'echo second' },
       new AbortController().signal,
     );
@@ -2014,23 +2014,26 @@ describe('Session', () => {
     );
   });
 
-  it('serializes permissions across sessions sharing one ACP connection', async () => {
-    let resolveFirst:
+  it('does not serialize permissions across sessions sharing one ACP connection', async () => {
+    let settleFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    let settleSecond:
       | ((response: RequestPermissionResponse) => void)
       | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
           new Promise<RequestPermissionResponse>((resolve) => {
-            resolveFirst = resolve;
+            settleFirst = resolve;
           }),
       )
-      .mockResolvedValueOnce({
-        outcome: {
-          outcome: 'selected',
-          optionId: core.ToolConfirmationOutcome.ProceedOnce,
-        },
-      });
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            settleSecond = resolve;
+          }),
+      );
     const secondWorkflowRunRegistry = {
       ...mockWorkflowRunRegistry,
       setApprovalRequestCallback: vi.fn(),
@@ -2052,55 +2055,65 @@ describe('Session', () => {
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
     const secondCallback = secondWorkflowRunRegistry.setApprovalRequestCallback
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (): core.WorkflowApproval => ({
-      approvalId: 'wfap_1',
-      subagentId: 'agent-1',
-      callId: 'call-1',
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = firstCallback(
       { runId: 'wf_first' } as core.WorkflowTask,
-      makeApproval(),
+      makeWorkflowApproval('wfap_first'),
       { command: 'echo first' },
       new AbortController().signal,
     );
     const second = secondCallback(
       { runId: 'wf_second' } as core.WorkflowTask,
-      makeApproval(),
+      makeWorkflowApproval('wfap_second'),
       { command: 'echo second' },
       new AbortController().signal,
     );
 
+    // Neither request is answered and neither signal aborts, which is the
+    // shape of an idle session nobody is watching: a sibling session sharing
+    // the connection must still reach the client.
     await vi.waitFor(() => {
-      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
     });
-    resolveFirst?.({
-      outcome: {
-        outcome: 'selected',
-        optionId: core.ToolConfirmationOutcome.ProceedOnce,
-      },
-    });
-    await Promise.all([first, second]);
-
-    expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
     expect(
       vi
         .mocked(mockClient.requestPermission)
         .mock.calls.map(([request]) => request.toolCall.toolCallId),
     ).toEqual([
-      'workflow:test-session-id:wf_first:wfap_1',
-      'workflow:second-session-id:wf_second:wfap_1',
+      'workflow:test-session-id:wf_first:wfap_first',
+      'workflow:second-session-id:wf_second:wfap_second',
     ]);
+
+    settleFirst?.({ outcome: { outcome: 'cancelled' } });
+    settleSecond?.({ outcome: { outcome: 'cancelled' } });
+    await Promise.allSettled([first, second]);
+
+    // The send half above only shows where the request went. Each session must
+    // also settle its own approval against its own registry.
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_first',
+      'wfap_first',
+      core.ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+    expect(
+      secondWorkflowRunRegistry.resolvePendingApproval,
+    ).toHaveBeenCalledWith(
+      'wf_second',
+      'wfap_second',
+      core.ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+    expect(
+      mockWorkflowRunRegistry.resolvePendingApproval.mock.calls.map(
+        ([runId]) => runId,
+      ),
+    ).toEqual(['wf_first']);
+    expect(
+      secondWorkflowRunRegistry.resolvePendingApproval.mock.calls.map(
+        ([runId]) => runId,
+      ),
+    ).toEqual(['wf_second']);
+
     secondSession.dispose();
   });
 
@@ -2124,25 +2137,9 @@ describe('Session', () => {
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
       .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
     const firstAbort = new AbortController();
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = callback(
       { runId: 'wf_abort_queue' } as core.WorkflowTask,
-      makeApproval('wfap_aborted'),
+      makeWorkflowApproval('wfap_aborted'),
       { command: 'echo first' },
       firstAbort.signal,
     );
@@ -2151,7 +2148,7 @@ describe('Session', () => {
     });
     const second = callback(
       { runId: 'wf_abort_queue' } as core.WorkflowTask,
-      makeApproval('wfap_after_abort'),
+      makeWorkflowApproval('wfap_after_abort'),
       { command: 'echo second' },
       new AbortController().signal,
     );
@@ -2166,6 +2163,71 @@ describe('Session', () => {
     await second;
     // Settle the orphaned RPC so no dangling promises remain.
     settleFirstTransport?.({ outcome: { outcome: 'cancelled' } });
+  });
+
+  it('drops a queued permission request that was abandoned before the head settled', async () => {
+    let settleFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    vi.mocked(mockClient.requestPermission)
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            settleFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const first = callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_head'),
+      { command: 'echo first' },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+    const queuedAbort = new AbortController();
+    const queued = callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_queued'),
+      { command: 'echo second' },
+      queuedAbort.signal,
+    );
+    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+
+    queuedAbort.abort();
+    await queued;
+    settleFirst?.({ outcome: { outcome: 'cancelled' } });
+    await first;
+    // The head releasing must not resurrect the abandoned request. Published
+    // after its caller is gone, it would sit on the host as a prompt nobody
+    // can answer and no longer cancels.
+    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    expect(
+      vi
+        .mocked(mockWorkflowRunRegistry.resolvePendingApproval)
+        .mock.calls.map(([, approvalId]) => approvalId),
+    ).toEqual(['wfap_queued', 'wfap_head']);
+
+    // Dropping it must not wedge the session queue either.
+    await callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_after'),
+      { command: 'echo third' },
+      new AbortController().signal,
+    );
+    expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(mockClient.requestPermission).mock.calls[1]?.[0].toolCall
+        .toolCallId,
+    ).toBe('workflow:test-session-id:wf_queued_abort:wfap_after');
   });
 
   it('fails a workflow approval closed when the ACP request times out', async () => {

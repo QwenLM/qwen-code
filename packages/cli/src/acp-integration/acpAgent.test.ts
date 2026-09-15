@@ -268,6 +268,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isTurnResultRecordPayload: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isTurnResultRecordPayload,
+  // The real listing: the workspace hooks status is built from it.
+  buildHooksListing: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).buildHooksListing,
   RUNTIME_SNAPSHOT_PREFIX: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).RUNTIME_SNAPSHOT_PREFIX,
@@ -1182,6 +1186,7 @@ import {
   registerCreateSubSessionTool,
 } from './session/Session.js';
 import {
+  IDLE_HOOK_EVENTS,
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
@@ -9509,6 +9514,109 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('lists workspace hooks from the registry with their stored config and state', async () => {
+    const getAllSessionHooks = vi.fn().mockReturnValue([
+      {
+        hookId: 'session-hook-1',
+        eventName: 'Stop',
+        matcher: '',
+        config: { type: 'function', id: 'goal', errorMessage: 'x' },
+      },
+    ]);
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('workspace-session'),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue({
+        getAllHooks: () => [
+          {
+            eventName: 'PreToolUse',
+            source: 'user',
+            matcher: 'run_shell_command',
+            sequential: true,
+            enabled: false,
+            config: {
+              type: 'command',
+              command: './guard.sh',
+              timeout: 10,
+              env: { TOKEN: 'from-settings' },
+            },
+          },
+          {
+            eventName: 'Stop',
+            source: 'session',
+            agentScope: 'agent-1',
+            enabled: true,
+            config: {
+              type: 'http',
+              url: 'https://hooks.example.com/stop',
+              headers: { 'X-Team': 'core' },
+              once: true,
+            },
+          },
+        ],
+        getSessionHooksManager: () => ({ getAllSessionHooks }),
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceHooks, {}),
+    ).resolves.toEqual({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      disabled: false,
+      hooks: [
+        {
+          kind: 'hook',
+          eventName: 'PreToolUse',
+          config: {
+            type: 'command',
+            command: './guard.sh',
+            timeout: 10,
+            env: { TOKEN: 'from-settings' },
+          },
+          source: 'user',
+          matcher: 'run_shell_command',
+          sequential: true,
+          enabled: false,
+        },
+        {
+          kind: 'hook',
+          eventName: 'Stop',
+          config: {
+            type: 'http',
+            url: 'https://hooks.example.com/stop',
+            headers: { 'X-Team': 'core' },
+            once: true,
+          },
+          source: 'session',
+          enabled: true,
+        },
+      ],
+      events: IDLE_HOOK_EVENTS,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('returns an uninitialized skills snapshot without warming a cold cache', async () => {
     const extensionRefreshCache = vi.fn().mockResolvedValue(undefined);
     const skillRefreshCache = vi.fn().mockResolvedValue(undefined);
@@ -12753,6 +12861,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         source: 'user',
         scriptPath: '/home/test/.qwen/workflows/release-check.js',
       },
+      {
+        name: 'gcp:audit',
+        source: 'extension',
+        scriptPath: '/home/test/.qwen/extensions/gcp/workflows/audit.js',
+        extensionName: 'gcp',
+        description: 'Audits the project',
+      },
     ]);
 
     const agentPromise = runAcpAgent(
@@ -12827,6 +12942,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
         { name: 'release-check', source: 'user' },
+        { name: 'gcp:audit', source: 'extension' },
       ],
     });
     expect(tasks).toEqual({

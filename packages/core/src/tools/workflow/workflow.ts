@@ -59,7 +59,13 @@ import {
   WorkflowStartCancelledError,
   type WorkflowRunHandle,
 } from '../../agents/runtime/workflow-runner.js';
-import { isSymlinkedRoot } from '../../agents/runtime/workflow-saved.js';
+import {
+  findActiveExtensionWorkflowByPath,
+  findActiveExtensionWorkflowByPathCanonical,
+  isSymlinkedRoot,
+  parseExtensionWorkflowName,
+} from '../../agents/runtime/workflow-saved.js';
+import type { ExtensionWorkflowDefinition } from '../../agents/runtime/workflow-extension.js';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type {
@@ -158,7 +164,8 @@ const WORKFLOW_PARAM_SCHEMA = {
         'saved-workflow slash command; a tool that generated a script for ' +
         'this run hands you its path the same way. The file must resolve ' +
         'inside a saved-workflow directory (`.qwen/workflows`, ' +
-        '`~/.qwen/workflows`) or the generated-scripts root ' +
+        '`~/.qwen/workflows`), be a workflow file an active extension ' +
+        'ships, or sit under the generated-scripts root ' +
         '(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project ' +
         'runtime dir, not the project tree) — any other path is refused. ' +
         'Provide exactly ONE of `script` or `scriptPath`. The file is read ' +
@@ -261,13 +268,17 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       return `Run workflow: ${sanitizeLine(meta.name)}`;
     }
     if (this.params.scriptPath && this.params.script === undefined) {
-      const kind = isGeneratedWorkflowScriptPath(
+      if (isGeneratedWorkflowScriptPath(this.config, this.params.scriptPath)) {
+        return `Run generated workflow script (${path.basename(this.params.scriptPath)})`;
+      }
+      const extensionWorkflow = findActiveExtensionWorkflowByPath(
         this.config,
         this.params.scriptPath,
-      )
-        ? 'generated workflow script'
-        : 'saved workflow';
-      return `Run ${kind} (${path.basename(this.params.scriptPath)})`;
+      );
+      if (extensionWorkflow) {
+        return `Run extension workflow (${sanitizeLine(extensionWorkflow.name)})`;
+      }
+      return `Run saved workflow (${path.basename(this.params.scriptPath)})`;
     }
     return `Run a workflow script (${this.params.script?.length ?? 0} chars)`;
   }
@@ -321,10 +332,23 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         this.params.scriptPath,
         path.dirname(this.config.storage.getInlineWorkflowScriptPath('wf_0')),
       ));
+    // An extension's file is third-party: name the extension workflow rather
+    // than presenting it as one the user saved.
+    const extensionWorkflow =
+      this.params.scriptPath !== undefined && !isGeneratedScriptPath
+        ? await findActiveExtensionWorkflowByPathCanonical(
+            this.config,
+            this.params.scriptPath,
+          )
+        : undefined;
     const body = buildConfirmationPrompt(
       this.params,
       meta,
-      isGeneratedScriptPath,
+      isGeneratedScriptPath
+        ? { kind: 'generated' }
+        : extensionWorkflow
+          ? { kind: 'extension', workflow: extensionWorkflow }
+          : { kind: 'saved' },
     );
 
     // The cost warning belongs before the spend, not after it. The registry
@@ -682,9 +706,19 @@ function buildRunTrailer(
     args,
   });
   if (resume && includeResume) {
-    const pathAdvice =
-      entry?.workflowName ||
-      !isGeneratedWorkflowScriptPath(config, handle.scriptPath!)
+    // An extension's file is third-party and an extension update replaces
+    // it, so the copy has to land somewhere the user owns.
+    // Same test as the registry's recovery advice: a qualified run name, or a
+    // path an active extension ships.
+    const isExtensionWorkflow =
+      (entry?.workflowName !== undefined &&
+        parseExtensionWorkflowName(entry.workflowName) !== null) ||
+      findActiveExtensionWorkflowByPath(config, handle.scriptPath!) !==
+        undefined;
+    const pathAdvice = isExtensionWorkflow
+      ? "this reads an extension's workflow file; copy it into .qwen/workflows before making a run-specific change"
+      : entry?.workflowName ||
+          !isGeneratedWorkflowScriptPath(config, handle.scriptPath!)
         ? 'this reads the saved workflow; copy it before making a run-specific change'
         : 'edit that generated copy first if the script needs to change';
     const journalAdvice = handle.journalPath
@@ -942,20 +976,31 @@ async function isWorkflowScriptPathWithinCanonicalRoot(
  * When `meta` is absent or unreadable the dialog still renders, just with
  * less to say.
  */
+/** Where a `scriptPath` call's file comes from, for the approval dialog. */
+type ScriptPathProvenance =
+  | { kind: 'generated' }
+  | { kind: 'saved' }
+  | { kind: 'extension'; workflow: ExtensionWorkflowDefinition };
+
 function buildConfirmationPrompt(
   params: WorkflowParams,
   meta: WorkflowMeta | null,
-  isGeneratedScriptPath: boolean,
+  provenance: ScriptPathProvenance,
 ): string {
   const lines: string[] = [];
 
   if (meta) {
     lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
     lines.push(sanitizeLine(meta.description));
+  } else if (params.scriptPath && provenance.kind === 'extension') {
+    lines.push(`Extension workflow: ${sanitizeLine(provenance.workflow.name)}`);
+    lines.push(sanitizeLine(provenance.workflow.description));
+    lines.push('', `Loaded from: ${sanitizeLine(params.scriptPath)}`);
   } else if (params.scriptPath) {
-    const label = isGeneratedScriptPath
-      ? 'Generated workflow script'
-      : 'Saved workflow';
+    const label =
+      provenance.kind === 'generated'
+        ? 'Generated workflow script'
+        : 'Saved workflow';
     lines.push(`${label}: ${sanitizeLine(params.scriptPath)}`);
   } else {
     lines.push('Workflow: (the script declares no meta block)');
@@ -1144,7 +1189,7 @@ Reach for one to be comprehensive (cover every part of the work in parallel), to
  */
 const WORKFLOW_TOOL_RUNTIME = `**Runtime**
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope); \`scriptPath\` additionally accepts a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree), and a path outside those roots is refused. Default \`max(2, min(16, availableParallelism()-2))\` agents in flight per run, which follows CPU affinity and container CPU limits (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope), plus active extensions' \`<extension>:<name>\`; \`scriptPath\` additionally accepts an active extension's workflow file or a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree); any other path is refused. Default \`max(2, min(16, availableParallelism()-2))\` agents in flight per run, which follows CPU affinity and container CPU limits (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
 
 /**
  * Replaces the authoring reference when the model can load it on its own.
