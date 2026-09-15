@@ -9,12 +9,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  getCustomModelCatalogCachePath,
   getModelCatalogCachePath,
   invalidateModelCatalog,
   lookupModelCatalog,
+  setCustomModelCatalogSource,
 } from './model-catalog.js';
 import {
   MODELS_DEV_URL,
+  projectCustomCatalog,
   refreshModelCatalog,
   trimModelsDevCatalog,
   type ModelsDevApi,
@@ -82,6 +85,21 @@ const api: ModelsDevApi = {
   },
 };
 
+const trimmed = {
+  'claude-x': {
+    context: 200000,
+    output: 64000,
+    modalities: { image: true, pdf: true },
+  },
+  foo: { context: 4000 },
+  'gpt-x': { context: 272000, output: 128000, modalities: { image: true } },
+  'qwen-x': {
+    context: 1000000,
+    output: 65536,
+    modalities: { image: true, video: true },
+  },
+};
+
 const ENV_NAMES = [
   'QWEN_HOME',
   'QWEN_CODE_MODELS_DEV',
@@ -94,24 +112,7 @@ describe('trimModelsDevCatalog', () => {
     expect(trimModelsDevCatalog(api, NOW)).toEqual({
       source: MODELS_DEV_URL,
       fetchedAt: NOW,
-      models: {
-        'claude-x': {
-          context: 200000,
-          output: 64000,
-          modalities: { image: true, pdf: true },
-        },
-        foo: { context: 4000 },
-        'gpt-x': {
-          context: 272000,
-          output: 128000,
-          modalities: { image: true },
-        },
-        'qwen-x': {
-          context: 1000000,
-          output: 65536,
-          modalities: { image: true, video: true },
-        },
-      },
+      models: trimmed,
     });
   });
 
@@ -121,6 +122,57 @@ describe('trimModelsDevCatalog', () => {
       fetchedAt: NOW,
       models: {},
     });
+  });
+});
+
+describe('projectCustomCatalog', () => {
+  it('normalizes the ids of a trimmed-shape document and drops bad entries', () => {
+    expect(
+      projectCustomCatalog(
+        {
+          models: {
+            'Qwen3.9-Max': { context: 42, modalities: { image: true } },
+            'openai/gpt-y:free': { output: 7 },
+            broken: { context: 'x' },
+          },
+        },
+        NOW,
+        '/etc/qwen/models.json',
+      ),
+    ).toEqual({
+      source: '/etc/qwen/models.json',
+      fetchedAt: NOW,
+      models: {
+        'gpt-y': { output: 7 },
+        'qwen3.9-max': { context: 42, modalities: { image: true } },
+      },
+    });
+  });
+
+  it('reads every provider of a models.dev-shape document', () => {
+    expect(
+      projectCustomCatalog(
+        {
+          ...api,
+          'my-gateway': {
+            models: {
+              'my-model': { id: 'my-model', limit: { context: 7, output: 8 } },
+            },
+          },
+        },
+        NOW,
+        'https://intranet/models.json',
+      ).models,
+    ).toEqual({
+      ...trimmed,
+      'my-model': { context: 7, output: 8 },
+      'router-only': { context: 9, output: 9 },
+    });
+  });
+
+  it('yields an empty catalog for a document of neither shape', () => {
+    expect(projectCustomCatalog(null, NOW, 'x').models).toEqual({});
+    expect(projectCustomCatalog('text', NOW, 'x').models).toEqual({});
   });
 });
 
@@ -136,14 +188,18 @@ describe('refreshModelCatalog', () => {
     return new Response(JSON.stringify(body), { status: 200, headers });
   }
 
-  function readCache(): { fetchedAt: string; etag?: string; models: unknown } {
-    return JSON.parse(fs.readFileSync(getModelCatalogCachePath(), 'utf8'));
+  function readJson(filePath: string): {
+    source: string;
+    fetchedAt: string;
+    etag?: string;
+    models: unknown;
+  } {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   }
 
-  function writeCache(catalog: unknown): void {
-    const cachePath = getModelCatalogCachePath();
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    fs.writeFileSync(cachePath, JSON.stringify(catalog));
+  function writeJson(filePath: string, content: unknown): void {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(content));
   }
 
   beforeEach(() => {
@@ -157,6 +213,7 @@ describe('refreshModelCatalog', () => {
     process.env['QWEN_HOME'] = path.join(tempDir, '.qwen');
     fetchMock.mockReset();
     vi.stubGlobal('fetch', fetchMock);
+    setCustomModelCatalogSource(undefined);
     invalidateModelCatalog();
   });
 
@@ -170,6 +227,7 @@ describe('refreshModelCatalog', () => {
         process.env[name] = value;
       }
     }
+    setCustomModelCatalogSource(undefined);
     invalidateModelCatalog();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -181,19 +239,16 @@ describe('refreshModelCatalog', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(MODELS_DEV_URL);
-    const cache = readCache();
+    const cache = readJson(getModelCatalogCachePath());
+    expect(cache.source).toBe(MODELS_DEV_URL);
     expect(cache.etag).toBe('"abc"');
-    expect(cache.models).toEqual(trimModelsDevCatalog(api, NOW).models);
-    expect(lookupModelCatalog('qwen-x')).toEqual({
-      context: 1000000,
-      output: 65536,
-      modalities: { image: true, video: true },
-    });
+    expect(cache.models).toEqual(trimmed);
+    expect(lookupModelCatalog('qwen-x')).toEqual(trimmed['qwen-x']);
   });
 
   it('skips the network while the cache is fresh', async () => {
-    writeCache({
-      source: 't',
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
       fetchedAt: new Date().toISOString(),
       models: {},
     });
@@ -203,9 +258,25 @@ describe('refreshModelCatalog', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('re-fetches a fresh cache that came from a different URL', async () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: 'https://old-mirror/api.json',
+      fetchedAt: new Date().toISOString(),
+      etag: '"old"',
+      models: {},
+    });
+    fetchMock.mockResolvedValue(jsonResponse(api));
+
+    await refreshModelCatalog();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({});
+    expect(readJson(getModelCatalogCachePath()).source).toBe(MODELS_DEV_URL);
+  });
+
   it('revalidates a stale cache with its ETag and keeps the models on 304', async () => {
-    writeCache({
-      source: 't',
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
       etag: '"abc"',
       models: { kept: { context: 7 } },
@@ -217,15 +288,15 @@ describe('refreshModelCatalog', () => {
     expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({
       'If-None-Match': '"abc"',
     });
-    const cache = readCache();
+    const cache = readJson(getModelCatalogCachePath());
     expect(cache.models).toEqual({ kept: { context: 7 } });
     expect(cache.etag).toBe('"abc"');
     expect(Date.parse(cache.fetchedAt)).toBeGreaterThan(Date.parse(LONG_AGO));
   });
 
   it('leaves the cache untouched when the fetch fails', async () => {
-    writeCache({
-      source: 't',
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
       models: { kept: { context: 7 } },
     });
@@ -233,16 +304,20 @@ describe('refreshModelCatalog', () => {
 
     await expect(refreshModelCatalog()).resolves.toBeUndefined();
 
-    expect(readCache().fetchedAt).toBe(LONG_AGO);
+    expect(readJson(getModelCatalogCachePath()).fetchedAt).toBe(LONG_AGO);
   });
 
   it('leaves the cache untouched on an HTTP error', async () => {
-    writeCache({ source: 't', fetchedAt: LONG_AGO, models: {} });
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: LONG_AGO,
+      models: {},
+    });
     fetchMock.mockResolvedValue(new Response('nope', { status: 500 }));
 
     await refreshModelCatalog();
 
-    expect(readCache().fetchedAt).toBe(LONG_AGO);
+    expect(readJson(getModelCatalogCachePath()).fetchedAt).toBe(LONG_AGO);
   });
 
   it('does nothing when the refresh or the whole catalog is switched off', async () => {
@@ -264,9 +339,9 @@ describe('refreshModelCatalog', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'https://mirror.example/api.json',
     );
-    expect(readCache()).toMatchObject({
-      source: 'https://mirror.example/api.json',
-    });
+    expect(readJson(getModelCatalogCachePath()).source).toBe(
+      'https://mirror.example/api.json',
+    );
   });
 
   it('shares one in-flight fetch between concurrent callers', async () => {
@@ -275,5 +350,71 @@ describe('refreshModelCatalog', () => {
     await Promise.all([refreshModelCatalog(), refreshModelCatalog()]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('materializes a local custom catalog before returning and merges it', async () => {
+    const file = path.join(tempDir, 'custom.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        models: { 'Qwen3.9-Max': { context: 42, modalities: { image: true } } },
+      }),
+    );
+    process.env['QWEN_CODE_MODELS_DEV_REFRESH'] = 'off';
+
+    const pending = refreshModelCatalog(file);
+    expect(lookupModelCatalog('qwen3.9-max')).toEqual({
+      context: 42,
+      modalities: { image: true },
+    });
+    await pending;
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(readJson(getCustomModelCatalogCachePath()).source).toBe(file);
+  });
+
+  it('keeps going when the local custom catalog is unreadable', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(api));
+
+    await refreshModelCatalog(path.join(tempDir, 'missing.json'));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(getCustomModelCatalogCachePath())).toBe(false);
+    expect(lookupModelCatalog('qwen-x')).toEqual(trimmed['qwen-x']);
+  });
+
+  it('downloads a custom catalog URL even when the models.dev refresh is off', async () => {
+    process.env['QWEN_CODE_MODELS_DEV_REFRESH'] = 'off';
+    fetchMock.mockResolvedValue(
+      jsonResponse({ models: { 'remote-model': { output: 9 } } }),
+    );
+
+    await refreshModelCatalog('https://intranet.example/models.json');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'https://intranet.example/models.json',
+    );
+    expect(lookupModelCatalog('remote-model')).toEqual({ output: 9 });
+    expect(fs.existsSync(getModelCatalogCachePath())).toBe(false);
+  });
+
+  it('refreshes models.dev and the custom URL in one pass', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(api))
+      .mockResolvedValueOnce(
+        jsonResponse({ models: { 'qwen-x': { output: 1 } } }),
+      );
+
+    await refreshModelCatalog('https://intranet.example/models.json');
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      MODELS_DEV_URL,
+      'https://intranet.example/models.json',
+    ]);
+    expect(lookupModelCatalog('qwen-x')).toEqual({
+      ...trimmed['qwen-x'],
+      output: 1,
+    });
   });
 });

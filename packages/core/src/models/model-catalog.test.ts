@@ -10,11 +10,13 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
+  getCustomModelCatalogCachePath,
   getModelCatalogCachePath,
   invalidateModelCatalog,
   loadModelCatalog,
   lookupModelCatalog,
   parseModelCatalog,
+  setCustomModelCatalogSource,
 } from './model-catalog.js';
 
 const FAR_FUTURE = '9999-01-01T00:00:00.000Z';
@@ -28,13 +30,21 @@ function restoreEnv(name: string, value: string | undefined): void {
   }
 }
 
+function writeJson(filePath: string, content: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(
+    filePath,
+    typeof content === 'string' ? content : JSON.stringify(content),
+  );
+}
+
 describe('model catalog', () => {
   let tempDir: string;
   let previousHome: string | undefined;
   let previousSwitch: string | undefined;
   const [bundledId, bundledEntry] = Object.entries(bundled.models)[0] as [
     string,
-    unknown,
+    Record<string, unknown>,
   ];
 
   beforeEach(() => {
@@ -43,24 +53,17 @@ describe('model catalog', () => {
     previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
     process.env['QWEN_HOME'] = path.join(tempDir, '.qwen');
     delete process.env['QWEN_CODE_MODELS_DEV'];
+    setCustomModelCatalogSource(undefined);
     invalidateModelCatalog();
   });
 
   afterEach(() => {
     restoreEnv('QWEN_HOME', previousHome);
     restoreEnv('QWEN_CODE_MODELS_DEV', previousSwitch);
+    setCustomModelCatalogSource(undefined);
     invalidateModelCatalog();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
-
-  function writeCache(catalog: unknown): void {
-    const cachePath = getModelCatalogCachePath();
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    fs.writeFileSync(
-      cachePath,
-      typeof catalog === 'string' ? catalog : JSON.stringify(catalog),
-    );
-  }
 
   it('serves the bundled snapshot when no cache exists', () => {
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
@@ -77,7 +80,7 @@ describe('model catalog', () => {
   });
 
   it('prefers a cache newer than the bundled snapshot', () => {
-    writeCache({
+    writeJson(getModelCatalogCachePath(), {
       source: 'test',
       fetchedAt: FAR_FUTURE,
       models: { 'cached-model': { context: 123, output: 45 } },
@@ -90,7 +93,7 @@ describe('model catalog', () => {
   });
 
   it('ignores a cache older than the bundled snapshot', () => {
-    writeCache({
+    writeJson(getModelCatalogCachePath(), {
       source: 'test',
       fetchedAt: LONG_AGO,
       models: { 'cached-model': { context: 123 } },
@@ -100,11 +103,47 @@ describe('model catalog', () => {
   });
 
   it('falls back to the bundled snapshot when the cache is malformed', () => {
-    writeCache('{not json');
+    writeJson(getModelCatalogCachePath(), '{not json');
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
-    writeCache({ fetchedAt: FAR_FUTURE });
+    writeJson(getModelCatalogCachePath(), { fetchedAt: FAR_FUTURE });
     invalidateModelCatalog();
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+  });
+
+  it('layers the custom catalog over the base per model and field', () => {
+    writeJson(getCustomModelCatalogCachePath(), {
+      source: '/etc/qwen/models.json',
+      fetchedAt: LONG_AGO,
+      models: {
+        [bundledId]: { context: 1 },
+        'custom-model': { output: 2 },
+      },
+    });
+    setCustomModelCatalogSource('/etc/qwen/models.json');
+
+    expect(lookupModelCatalog(bundledId)).toEqual({
+      ...bundledEntry,
+      context: 1,
+    });
+    expect(lookupModelCatalog('custom-model')).toEqual({ output: 2 });
+    expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+  });
+
+  it('ignores a custom cache whose source no longer matches the setting', () => {
+    writeJson(getCustomModelCatalogCachePath(), {
+      source: '/etc/qwen/old.json',
+      fetchedAt: LONG_AGO,
+      models: { 'custom-model': { output: 2 } },
+    });
+
+    setCustomModelCatalogSource('/etc/qwen/new.json');
+    expect(lookupModelCatalog('custom-model')).toBeUndefined();
+
+    setCustomModelCatalogSource(undefined);
+    expect(lookupModelCatalog('custom-model')).toBeUndefined();
+
+    setCustomModelCatalogSource('/etc/qwen/old.json');
+    expect(lookupModelCatalog('custom-model')).toEqual({ output: 2 });
   });
 
   it('drops malformed entries while parsing', () => {

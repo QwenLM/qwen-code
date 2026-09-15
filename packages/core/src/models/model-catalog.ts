@@ -37,6 +37,11 @@ export function getModelCatalogCachePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'model-registry.json');
 }
 
+/** Materialized copy of the `model.customCatalog` setting's URL or file. */
+export function getCustomModelCatalogCachePath(): string {
+  return path.join(Storage.getGlobalQwenDir(), 'model-registry.custom.json');
+}
+
 function isEntry(value: unknown): value is ModelCatalogEntry {
   if (!value || typeof value !== 'object') {
     return false;
@@ -73,26 +78,52 @@ export function parseModelCatalog(raw: unknown): ModelCatalog | undefined {
 }
 
 let loaded: ModelCatalog | undefined;
+let customSource: string | undefined;
 
-function readCache(): ModelCatalog | undefined {
+/**
+ * Records the `model.customCatalog` setting. The custom cache file is applied
+ * only while its `source` matches, so a changed or removed setting cannot
+ * leave a stale overlay behind.
+ */
+export function setCustomModelCatalogSource(source: string | undefined): void {
+  if (source !== customSource) {
+    customSource = source;
+    loaded = undefined;
+  }
+}
+
+function readCache(cachePath: string): ModelCatalog | undefined {
   try {
-    return parseModelCatalog(
-      JSON.parse(fs.readFileSync(getModelCatalogCachePath(), 'utf8')),
-    );
+    return parseModelCatalog(JSON.parse(fs.readFileSync(cachePath, 'utf8')));
   } catch {
     return undefined;
   }
 }
 
+function overlay(base: ModelCatalog, custom: ModelCatalog): ModelCatalog {
+  const models = { ...base.models };
+  for (const [id, entry] of Object.entries(custom.models)) {
+    models[id] = { ...models[id], ...entry };
+  }
+  return { ...base, models };
+}
+
 /**
  * The refreshed cache wins only when it is newer than the snapshot bundled
- * with this build, so upgrading the CLI never serves stale cached data.
+ * with this build, so upgrading the CLI never serves stale cached data. The
+ * custom catalog, when configured, is layered on top per model and field.
  */
 export function loadModelCatalog(): ModelCatalog {
   if (!loaded) {
     const bundled = bundledCatalog as ModelCatalog;
-    const cached = readCache();
-    loaded = cached && cached.fetchedAt > bundled.fetchedAt ? cached : bundled;
+    const cached = readCache(getModelCatalogCachePath());
+    const base =
+      cached && cached.fetchedAt > bundled.fetchedAt ? cached : bundled;
+    const custom = customSource
+      ? readCache(getCustomModelCatalogCachePath())
+      : undefined;
+    loaded =
+      custom && custom.source === customSource ? overlay(base, custom) : base;
   }
   return loaded;
 }

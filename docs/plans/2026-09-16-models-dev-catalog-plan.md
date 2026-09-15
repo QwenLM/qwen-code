@@ -110,6 +110,7 @@ alibaba-cn, alibaba, modelscope, volcengine
   - `QWEN_CODE_MODELS_DEV=off`：整个目录关闭，回到纯正则（也是单元测试 setup 的默认值，见 §5）。
   - `QWEN_CODE_MODELS_DEV_REFRESH=off`：不联网，只用内置快照（内网 / 代理受限；集成测试设置它保持 CI 无外网依赖）。
   - `QWEN_CODE_MODELS_DEV_URL`：镜像地址（国内访问 models.dev 可能不稳定，这一项比想象中重要）。
+- **用户自定义目录 `model.customCatalog`**（用户提出的离线场景）：URL 或本地文件路径，内容按模型逐字段叠加在 models.dev 目录之上（第 4.3 节的第 2/3 层之上、用户显式配置之下）。接受 models.dev `api.json` 格式（取文件里全部 provider）或精简格式 `{"models":{"<id>":{...}}}`（key 会归一化）。本地文件在每次启动时同步读取并物化到 `~/.qwen/model-registry.custom.json`，首个会话即生效；URL 与 models.dev 同节奏（24 h + ETag）下载到同一缓存，且**不受 `QWEN_CODE_MODELS_DEV_REFRESH=off` 影响**（内网用户正是关掉 models.dev、只拉内网地址）。缓存文件记录 `source`，设置改变或移除后旧缓存自动失效。
 - 刷新成功后的新数值在**下次模型解析**时生效（`contextWindowSize` 在 Config 初始化时解析），即下次启动或切换模型；不做 opencode 那种事件热重载。
 
 ### 4.5 构建期快照
@@ -156,7 +157,8 @@ alibaba-cn, alibaba, modelscope, volcengine
 8. **是否需要跨进程锁**（opencode 有）。`qwen serve` / agent team 会并发启动多个进程。
 9. **缓存位置** `~/.qwen/model-registry.json`（`Storage.getGlobalQwenDir()`，遵守 `QWEN_HOME`）vs `getRuntimeBaseDir()`（遵守 `QWEN_RUNTIME_DIR`）。
 10. 是否**顺手把 `reasoning_options` 存进快照**：models.dev 现在对 qwen3.8 系列有 effort 档位数据，设计文档写的"effort 档位必须 qwen-code 自维护"这条已经不成立。但接入 DashScope 的钳制属于 PR4，我这次没动。
-11. 设计文档 #9851 只有英文版，AGENTS.md 要求中英同步，这个 PR 是否要顺带补 zh-CN。
+11. **`model.customCatalog` 的合并语义**：目前是"逐模型、逐字段覆盖"，且自定义文件的 `modalities` 对象整体替换目录里的（用户可以用 `{}` 把目录多标的模态关掉，但关不掉正则表里的）。是否需要更细的字段级删除语义？另外自定义源目前只做用户级（`~/.qwen`），不做项目级。
+12. 设计文档 #9851 只有英文版，AGENTS.md 要求中英同步，这个 PR 是否要顺带补 zh-CN。
 
 ## 7. 当前状态与下一步
 
