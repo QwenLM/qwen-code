@@ -2205,6 +2205,13 @@ jobs:
           }
           cede_superseded() {
             echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
+            # review_completed is an output of THIS step — the step the
+            # reviewed agent runs in, whose inherited real $GITHUB_OUTPUT is
+            # within the agent's reach. A planted review_completed=true must
+            # not survive a cede into the record-reviewed gate: within one
+            # step the last write wins, and every reader compares against
+            # the string 'true', so a false write is inert on honest paths.
+            echo "review_completed=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
           # SUPERSEDE_FILE's premise against an unforgeable witness. The
@@ -2363,6 +2370,10 @@ jobs:
               # marker and no queued replacement to cede to, so there the
               # forgeable marker must fail loudly, not exit green.
               echo "Salvage-armed review attempt did not complete (${REASON:-unknown}); PR #${PR_NUMBER:-} head already moved — ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
+              # Same planted-output window as the shared supersede cede:
+              # overwrite a forged review_completed last, so this cede can
+              # suppress the stamp but never enable one.
+              echo "review_completed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             if [ "$OUTCOME" = "success" ]; then
@@ -3111,7 +3122,10 @@ jobs:
   # GITHUB_TOKEN where the reviewed agent can read it. The sha is the
   # EVENT's head, never a review-pr output, so a hijacked agent can at most
   # mark the head it was reviewing — no more than posting a clean review,
-  # which it can already do. The skip script trusts only statuses created by
+  # which it can already do. The gate's review_completed input IS an output
+  # of the agent's own step, though, so every post-agent cede there writes
+  # review_completed=false last: a planted value may suppress a stamp, never
+  # enable one. The skip script trusts only statuses created by
   # github-actions[bot], so one written with CI_BOT_PAT (also within the
   # agent's reach) never counts. Never fails the workflow.
   record-reviewed:

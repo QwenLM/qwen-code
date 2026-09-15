@@ -6999,6 +6999,9 @@ describe('review supersede salvage (#10110)', () => {
         cedeSupersededSource(),
         'PR_NUMBER=1; EXPECTED_HEAD_SHA=head-a',
         `SUPERSEDE_FILE="${supersedeFile}"`,
+        // The real step always has GITHUB_OUTPUT; the cede's planted-output
+        // overwrite (R2-2) writes it last.
+        `GITHUB_OUTPUT="${join(dir, 'gho')}"; : > "$GITHUB_OUTPUT"`,
         `GITHUB_STEP_SUMMARY="${summary}"; : > "$GITHUB_STEP_SUMMARY"`,
         'cede_superseded',
       ].join('\n');
@@ -7506,6 +7509,29 @@ describe('qwen pr review unchanged-diff anchor', () => {
     // never see — the skip would go dead without any test noticing.
     expect(creator).toBe('github-actions[bot]');
     expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
+  });
+
+  // R2-2. record-reviewed's evidence that a review happened is
+  // review_completed — an output of the very step the reviewed agent runs
+  // in, whose real $GITHUB_OUTPUT the agent can reach. Every post-agent
+  // cede must overwrite a planted value last: the false write can only
+  // suppress a stamp, never enable one.
+  it('overwrites a planted review_completed on every post-agent cede', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    const overwrite = 'echo "review_completed=false" >> "$GITHUB_OUTPUT"';
+    // The shared cede function: the write must land before the exit, so a
+    // planted value cannot survive it (last write wins within one step).
+    const cede = run.match(/cede_superseded\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(cede).not.toBe('');
+    expect(cede.indexOf(overwrite)).toBeGreaterThan(-1);
+    expect(cede.indexOf(overwrite)).toBeLessThan(cede.indexOf('exit 0'));
+    // The salvage-armed cede does not go through cede_superseded.
+    const salvageCede = run.match(
+      /Salvage-armed review attempt did not complete[\s\S]*?exit 0/,
+    )?.[0];
+    expect(salvageCede).toContain(overwrite);
   });
 
   // R1-3. The prose is what a reader has to go on, and both sites claimed
