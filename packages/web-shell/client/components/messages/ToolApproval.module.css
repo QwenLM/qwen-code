@@ -16,9 +16,11 @@
 }
 
 .floating {
+  display: flex;
+  flex-direction: column;
   max-height: min(360px, 55vh);
   margin: 0 auto;
-  overflow-y: auto;
+  overflow-y: hidden;
   padding: 16px;
   border-radius: 12px;
   background: var(--background);
@@ -26,6 +28,16 @@
     0 2px 4px -2px rgba(0, 0, 0, 0.1),
     0 4px 6px -1px rgba(0, 0, 0, 0.1);
   font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+/* Chrome holds its place and the command/content region absorbs the overflow,
+   so a long command scrolls inside the sheet instead of pushing the decision
+   buttons out of it. */
+.floating > .header,
+.floating > .desc,
+.floating > .explainRow,
+.floating > .options {
+  flex-shrink: 0;
 }
 
 .floatingWorkflow {
@@ -127,10 +139,6 @@
   -webkit-box-orient: vertical;
 }
 
-.desc:hover {
-  -webkit-line-clamp: unset;
-}
-
 .content {
   margin: 10px 0 0;
   margin-left: 24px;
@@ -141,27 +149,26 @@
   color: var(--foreground);
   white-space: pre-wrap;
   word-break: break-word;
+  min-height: 0;
   max-height: 300px;
   overflow-y: auto;
   line-height: 1.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
 }
 
 .planContent {
-  display: block;
   min-height: 0;
   max-height: min(240px, 25vh);
-  -webkit-line-clamp: unset;
 }
 
 .code {
+  display: flex;
+  flex-direction: column;
   margin: 10px 0 0;
   margin-left: 24px;
   padding: 8px 12px;
   background: var(--secondary);
   border-radius: 7px;
+  min-height: 0;
 }
 
 .codeBlock {
@@ -172,16 +179,9 @@
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.code:hover .codeBlock,
-.content:hover {
-  display: block;
-  -webkit-line-clamp: unset;
+  min-height: 0;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 /* Kept in the accessibility tree (used as the alertdialog's aria-describedby
