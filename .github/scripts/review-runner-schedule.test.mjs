@@ -24,7 +24,7 @@ const runner = (id, labels, extra = {}) => ({
 describe('review runner schedule', () => {
   it('switches online hk1 and hk2 runners, including busy runners', () => {
     const runners = Array.from({ length: 32 }, (_, i) =>
-      runner(i + 1, ['ecs-qwen', 'ecs-agent', 'diagnostic'], {
+      runner(i + 1, ['ecs-qwen', 'ecs-autofix', 'diagnostic'], {
         name: `ecs-qwen-hk${(i % 2) + 1}-${i + 1}`,
         busy: i % 2 === 0,
         status: i < 2 ? 'offline' : 'online',
@@ -52,7 +52,7 @@ describe('review runner schedule', () => {
       planLabels(
         [
           runner(1, ['ecs-review', 'diagnostic']),
-          runner(2, ['ecs-agent'], { name: 'ecs-qwen-hk1-2' }),
+          runner(2, ['ecs-autofix'], { name: 'ecs-qwen-hk1-2' }),
           runner(3, ['ecs-review'], { name: 'ecs-qwen-hk2-3-extra' }),
           runner(4, ['ecs-review'], { status: 'offline' }),
           runner(5, ['ecs-review'], { name: 'ecs-qwen-hk3-5' }),
@@ -166,9 +166,9 @@ it(
       const log = join(dir, 'calls');
       writeFakeGh(dir);
       for (const [labels, fail, expected] of [
-        [['ecs-qwen', 'ecs-agent'], false, ['POST', 'DELETE']],
-        [['ecs-qwen', 'ecs-agent'], true, ['POST']],
-        [['ecs-qwen', 'ecs-review', 'ecs-agent'], false, ['DELETE']],
+        [['ecs-qwen', 'ecs-autofix'], false, ['POST', 'DELETE']],
+        [['ecs-qwen', 'ecs-autofix'], true, ['POST']],
+        [['ecs-qwen', 'ecs-review', 'ecs-autofix'], false, ['DELETE']],
       ]) {
         writeFileSync(log, '');
         const result = spawnPlanner(dir, [runner(1, labels)], { fail });
