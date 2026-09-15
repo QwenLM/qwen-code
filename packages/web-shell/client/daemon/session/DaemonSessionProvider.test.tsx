@@ -13828,6 +13828,78 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
+  it.each([
+    { code: 'acp_child_capacity_exhausted' },
+    { data: { errorKind: 'acp_child_capacity_exhausted', httpStatus: 503 } },
+  ])('stops automatic load retries on capacity rejection %j', async (body) => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => flushPromises());
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValue(
+      new DaemonHttpError(503, body, 'capacity reached'),
+    );
+    vi.useFakeTimers();
+    try {
+      const switched = requireActions(actions)
+        .loadSession('session-b')
+        .catch(() => undefined);
+      await act(async () => {
+        await flushPromises();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await flushPromises();
+      });
+      await switched;
+      expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
+      expect(connection).toMatchObject({
+        status: 'error',
+        sessionId: 'session-b',
+        missingSession: false,
+        error: 'capacity reached',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows a readable capacity reason on automatic load without an i18n provider', async () => {
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      new DaemonHttpError(
+        503,
+        { code: 'acp_child_capacity_exhausted' },
+        'capacity reached',
+      ),
+    );
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'cold-session',
+    });
+    await act(async () => flushPromises());
+    expect(connection).toMatchObject({
+      status: 'error',
+      missingSession: false,
+      error:
+        'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
+    });
+  });
+
   it('retries restore_in_progress loads after the advertised delay', async () => {
     sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
     let actions: DaemonSessionActions | undefined;

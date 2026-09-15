@@ -357,7 +357,11 @@ import {
   resolveLiveProviderCredential,
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
-import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import type {
+  ChildHeapPolicy,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import type { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
 import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
@@ -592,6 +596,10 @@ export interface ServeAppDeps {
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  managedChildProcesses?: {
+    registry: ProcessRegistry;
+    policy: ChildHeapPolicy;
+  };
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -787,6 +795,12 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (
+    opts.childHeapMode === 'admit' &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== 'admit'
+  ) {
+    throw new TypeError('ACP admission requires managed child process wiring.');
+  }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
@@ -1197,9 +1211,11 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs
+      ...(acpChildArgs || deps.managedChildProcesses
         ? {
             channelFactory: createSpawnChannelFactory({
+              processRegistry: deps.managedChildProcesses?.registry,
+              childHeapPolicy: deps.managedChildProcesses?.policy,
               extraArgs: acpChildArgs,
             }),
           }
@@ -2279,7 +2295,14 @@ export function createServeApp(
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
-    getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+    getChildHeapPolicySnapshot: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.policy.snapshot()
+      : deps.getChildHeapPolicySnapshot,
+    getCommittedAcpChildCount: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.registry.committedProcessCount
+      : undefined,
+    childAdmissionEnforced:
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit',
   });
 
   if (conversationRuntimeManager) {

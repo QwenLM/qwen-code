@@ -887,19 +887,18 @@ export interface DaemonStatusReport {
     maxJournalEvents: number;
     maxJournalBytes: number;
     /**
-     * The daemon's resolved memory figures, observed and reported only.
+     * The daemon's resolved memory model and admission policy.
      * Additive — older daemons omit it, and it is `null` on paths that resolve
      * none.
      */
     memory?: {
       /**
-       * False, and required — scoped to the child-heap model: nothing in
-       * this section except `journalGrowth` is applied to a process.
+       * False, and required: modeled child heap ceilings are not applied.
+       * Count enforcement is reported separately by `childHeap.admissionEnforced`.
        */
       enforced: false;
       /**
-       * Adaptive live-journal growth derived from the budget — the one
-       * figure with runtime effect: session journal caps really do grow
+       * Adaptive live-journal growth derived from the budget: session journal caps really do grow
        * within this daemon-wide pool mid-turn. `null` when growth is
        * disabled; absent on daemons predating it.
        */
@@ -914,7 +913,8 @@ export interface DaemonStatusReport {
        * `null` when no policy was built; absent on daemons predating it.
        */
       childHeap?: {
-        mode: 'off' | 'observe';
+        mode: 'off' | 'observe' | 'admit';
+        admissionEnforced?: boolean;
         /**
          * `null` under `off`, which models nothing — distinct from `0`,
          * a computed answer meaning the pool hosts no child.
@@ -939,7 +939,7 @@ export interface DaemonStatusReport {
       availableMemoryMb: number;
       availableMemorySource: 'constrained' | 'host';
       insufficientMemory: boolean;
-      /** Derived figures for a capacity policy that has not shipped. */
+      /** Memory model used for child-count admission, not reserved memory. */
       modeled: {
         rootReserveMb: number;
         childPoolMb: number;
@@ -1014,6 +1014,7 @@ export interface DaemonStatusReport {
        * started even if the child has not exited. Not a process-tree count.
        */
       activeAcpChildren: number;
+      committedAcpChildren?: number | null;
       /**
        * Which children the daemon's RSS sampling covers, and only while an
        * SSE/WS watcher is active; with no client observing, nothing is
