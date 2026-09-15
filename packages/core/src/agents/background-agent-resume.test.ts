@@ -3286,8 +3286,8 @@ describe('BackgroundAgentResumeService', () => {
         }),
         JSON.stringify({
           uuid: 'nested-call',
-          timestamp: '2026-04-20T00:00:00.600Z',
-          parentUuid: 'u2',
+          timestamp: '2026-04-20T00:00:00.800Z',
+          parentUuid: 'u3',
           sessionId,
           type: 'assistant',
           message: {
@@ -3299,7 +3299,7 @@ describe('BackgroundAgentResumeService', () => {
         }),
         JSON.stringify({
           uuid: 'nested-state',
-          timestamp: '2026-04-20T00:00:00.700Z',
+          timestamp: '2026-04-20T00:00:00.900Z',
           parentUuid: 'nested-call',
           sessionId,
           type: 'system',

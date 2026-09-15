@@ -6159,9 +6159,9 @@ describe('AgentTool', () => {
           );
           const resident = mockRegistry.registerResidentAgent.mock
             .calls[0]?.[1] as {
-            continue: (message: string) => boolean;
+            continue: (input: string) => string;
           };
-          expect(resident.continue('Continue externally')).toBe(true);
+          expect(resident.continue('Continue externally')).toBe('continued');
           await vi.waitFor(() =>
             expect(mockAgent.execute).toHaveBeenCalledTimes(2),
           );
