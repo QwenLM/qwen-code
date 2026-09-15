@@ -371,7 +371,7 @@ export interface DaemonGoal {
   /** Judge turns completed; 0 before the first stop-hook evaluation. */
   iterations: number;
   setAt: number;
-  /** The judge's verdict on the most recent turn, when it has run. */
+  /** Why the Goal last stopped, or the verifier's most recent reason. */
   lastReason?: string;
   /**
    * The owning session is mid-turn. For a goal session that is almost always
