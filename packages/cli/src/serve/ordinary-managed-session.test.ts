@@ -20,19 +20,46 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import type { ChannelFactory } from '@qwen-code/acp-bridge';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  PRIVATE_MANAGED_TOOL_RUNTIME_ENV,
+  PRIVATE_MANAGED_TOOL_RUNTIME_VALUE,
+} from '@qwen-code/acp-bridge/status';
+import {
+  hashDaemonWorkspace,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import {
   resetEnvironmentTrackingForTesting,
   resetHomeEnvBootstrapForTesting,
 } from '../config/environment.js';
 import { resetTrustedFoldersForTesting } from '../config/trustedFolders.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
-import { canonicalizeWorkspace } from './acp-session-bridge.js';
+import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
+import {
+  canonicalizeWorkspace,
+  createAcpSessionBridge,
+  createSpawnChannelFactory,
+} from './acp-session-bridge.js';
+import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+import {
+  createDaemonExecutionEngines,
+  daemonManagedHostArgv,
+} from './daemon-execution-engines.js';
 import { createWorkspaceFileSystemFactory } from './fs/index.js';
+import { LocalManagedRuntimeProvider } from './managed-runtime-provider.js';
 import { resolveManagedRuntimeWorkerLauncher } from './managed-runtime-worker-launcher.js';
+import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import { getServeAppLifecycle } from './serve-app-lifecycle.js';
 import { createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
+import type { DaemonWorkspaceService } from './workspace-service/index.js';
+import {
+  createWorkspaceGenerationGuard,
+  createWorkspaceRegistry,
+  createWorkspaceSessionOwnerIndex,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
 
 const spawnHarness = vi.hoisted(() => ({ blockLegacySpawn: false }));
 
@@ -69,6 +96,7 @@ describe('ordinary REST session Managed owner', () => {
   let workspace: string;
   let home: string;
   let app: ReturnType<typeof createServeApp> | undefined;
+  let managedRuntimeProvider: LocalManagedRuntimeProvider | undefined;
   let modelServer: http.Server | undefined;
   let modelBaseUrl = 'http://127.0.0.1:9/v1';
   let modelHold: Promise<void> | undefined;
@@ -130,6 +158,8 @@ describe('ordinary REST session Managed owner', () => {
         .catch(() => undefined);
       app = undefined;
     }
+    await managedRuntimeProvider?.dispose();
+    managedRuntimeProvider = undefined;
     if (modelServer) {
       await new Promise<void>((resolve) => {
         modelServer?.close(() => resolve());
@@ -255,6 +285,100 @@ describe('ordinary REST session Managed owner', () => {
     });
   }
 
+  function makeManagedRuntime(input: {
+    cwd: string;
+    primary: boolean;
+    sessionOwnerIndex: ReturnType<typeof createWorkspaceSessionOwnerIndex>;
+    resolveToolRuntimeProvider: () => LocalManagedRuntimeProvider | undefined;
+  }): WorkspaceRuntime {
+    const generationGuard = createWorkspaceGenerationGuard();
+    const runtimeBaseDir = Storage.getRuntimeBaseDir();
+    const attachments = sessionAttachmentsRoots(input.cwd, runtimeBaseDir);
+    const fsFactory = createWorkspaceFileSystemFactory({
+      boundWorkspaces: [input.cwd],
+      trusted: true,
+      emit: () => {},
+    });
+    const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
+    const bridge = createAcpSessionBridge({
+      sessionAttachmentsRoot: attachments.root,
+      ...(attachments.fallback
+        ? { sessionAttachmentsFallbackRoot: attachments.fallback }
+        : {}),
+      maxSessions: 1,
+      initializeTimeoutMs: 90_000,
+      sessionLifecycle: input.sessionOwnerIndex.handleBridgeSessionLifecycle,
+      executionEngines: createDaemonExecutionEngines({
+        workspaceCwd: input.cwd,
+        sessionRuntimeBaseDir: runtimeBaseDir,
+        runtimeEnvironment: process.env,
+        workspaceTrusted: true,
+        generationGuard,
+        argv: daemonManagedHostArgv({}),
+        workspaceId: hashDaemonWorkspace(input.cwd),
+        legacyFactory: createSpawnChannelFactory(),
+        resolveToolRuntimeProvider: input.resolveToolRuntimeProvider,
+      }),
+      boundWorkspace: input.cwd,
+      fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      clientMcpSender: clientMcpSenderRegistry.lookup,
+      childEnvOverrides: {
+        [PRIVATE_MANAGED_TOOL_RUNTIME_ENV]: PRIVATE_MANAGED_TOOL_RUNTIME_VALUE,
+      },
+    });
+    return {
+      workspaceId: hashDaemonWorkspace(input.cwd),
+      workspaceCwd: input.cwd,
+      sessionRuntimeBaseDir: runtimeBaseDir,
+      primary: input.primary,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge,
+      workspaceService: {
+        getWorkspaceTrustStatus: async () => ({
+          v: 1,
+          workspaceCwd: input.cwd,
+          trusted: true,
+          folderTrustEnabled: true,
+        }),
+      } as unknown as DaemonWorkspaceService,
+      routeFileSystemFactory: fsFactory,
+      clientMcpSenderRegistry,
+      generationGuard,
+    };
+  }
+
+  function bootDualWorkspaceApp(secondary: string) {
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    const toolRuntimeProviderRef: {
+      current: LocalManagedRuntimeProvider | undefined;
+    } = { current: undefined };
+    const resolveToolRuntimeProvider = () => toolRuntimeProviderRef.current;
+    const primaryRuntime = makeManagedRuntime({
+      cwd: workspace,
+      primary: true,
+      sessionOwnerIndex,
+      resolveToolRuntimeProvider,
+    });
+    const secondaryRuntime = makeManagedRuntime({
+      cwd: secondary,
+      primary: false,
+      sessionOwnerIndex,
+      resolveToolRuntimeProvider,
+    });
+    const workspaceRegistry = createWorkspaceRegistry(
+      [primaryRuntime, secondaryRuntime],
+      { sessionOwnerIndex },
+    );
+    managedRuntimeProvider = new LocalManagedRuntimeProvider(workspaceRegistry);
+    toolRuntimeProviderRef.current = managedRuntimeProvider;
+    return createServeApp(serveOptions(), undefined, {
+      primaryWorkspaceTrusted: true,
+      workspaceRegistry,
+      fsFactory: primaryRuntime.routeFileSystemFactory,
+    });
+  }
+
   function host(): string {
     return `127.0.0.1:${PORT}`;
   }
@@ -265,16 +389,21 @@ describe('ordinary REST session Managed owner', () => {
     });
   }
 
-  async function createManagedSession(): Promise<string> {
+  async function createManagedSession(cwd?: string): Promise<string> {
     const res = await request(app!)
       .post('/session')
       .set('Host', host())
-      .send({});
+      .send(cwd ? { cwd } : {});
     expect(res.status).toBe(200);
     expect(res.body.sessionId).toEqual(expect.any(String));
     const sessionId = res.body.sessionId as string;
+    if (cwd !== undefined) {
+      expect(res.body.workspaceCwd).toBe(cwd);
+    }
     await expect(
-      sessionService().readExecutionEngine(sessionId),
+      new SessionService(cwd ?? workspace, {
+        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+      }).readExecutionEngine(sessionId),
     ).resolves.toMatchObject({
       status: 'verified',
       engine: 'managed',
@@ -499,6 +628,106 @@ describe('ordinary REST session Managed owner', () => {
       status: 'verified',
       engine: 'managed',
       sessionId,
+    });
+  });
+
+  it('keeps ordinary Managed sessions isolated across two daemon workspaces', async () => {
+    const secondaryDir = path.join(root, 'workspace-b');
+    await mkdir(secondaryDir);
+    const secondary = canonicalizeWorkspace(secondaryDir);
+    await writeFile(path.join(workspace, 'owner.txt'), 'primary');
+    await writeFile(path.join(secondary, 'owner.txt'), 'secondary');
+
+    await startModelServer();
+    await writeSettings();
+    spawnHarness.blockLegacySpawn = true;
+    app = bootDualWorkspaceApp(secondary);
+
+    const primaryId = await createManagedSession();
+    const secondaryId = await createManagedSession(secondary);
+    expect(primaryId).not.toBe(secondaryId);
+
+    const primaryService = new SessionService(workspace, {
+      runtimeBaseDir: Storage.getRuntimeBaseDir(),
+    });
+    const secondaryService = new SessionService(secondary, {
+      runtimeBaseDir: Storage.getRuntimeBaseDir(),
+    });
+    await expect(
+      primaryService.readExecutionEngine(secondaryId),
+    ).resolves.toBeUndefined();
+    await expect(
+      secondaryService.readExecutionEngine(primaryId),
+    ).resolves.toBeUndefined();
+
+    const primaryPrompt = await request(app)
+      .post(`/session/${primaryId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'say ping-primary' }] });
+    expect(primaryPrompt.status).toBe(202);
+    const secondaryPrompt = await request(app)
+      .post(`/session/${secondaryId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'say ping-secondary' }] });
+    expect(secondaryPrompt.status).toBe(202);
+
+    const primaryTurn = await waitForTurn(
+      primaryId,
+      primaryPrompt.body.promptId as string,
+    );
+    const secondaryTurn = await waitForTurn(
+      secondaryId,
+      secondaryPrompt.body.promptId as string,
+    );
+    expect(primaryTurn.state).toBe('completed');
+    expect(secondaryTurn.state).toBe('completed');
+    expect(primaryService.getSessionTranscriptPath(primaryId)).not.toBe(
+      secondaryService.getSessionTranscriptPath(secondaryId),
+    );
+
+    const primaryTranscript = await request(app)
+      .get(`/session/${primaryId}/transcript`)
+      .set('Host', host());
+    expect(primaryTranscript.status).toBe(200);
+    expect(JSON.stringify(primaryTranscript.body)).toContain(ASSISTANT_TEXT);
+    const secondaryTranscript = await request(app)
+      .get(`/session/${secondaryId}/transcript`)
+      .set('Host', host());
+    expect(secondaryTranscript.status).toBe(200);
+    expect(JSON.stringify(secondaryTranscript.body)).toContain(ASSISTANT_TEXT);
+    await expect(
+      readFile(path.join(workspace, 'owner.txt'), 'utf8'),
+    ).resolves.toBe('primary');
+    await expect(
+      readFile(path.join(secondary, 'owner.txt'), 'utf8'),
+    ).resolves.toBe('secondary');
+
+    const crossedPrimary = await request(app)
+      .get(
+        `/workspaces/${encodeURIComponent(secondary)}/session/${primaryId}/transcript`,
+      )
+      .set('Host', host());
+    expect(crossedPrimary.status).toBe(404);
+    const crossedSecondary = await request(app)
+      .get(
+        `/workspaces/${encodeURIComponent(workspace)}/session/${secondaryId}/transcript`,
+      )
+      .set('Host', host());
+    expect(crossedSecondary.status).toBe(404);
+
+    await expect(
+      primaryService.readExecutionEngine(primaryId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId: primaryId,
+    });
+    await expect(
+      secondaryService.readExecutionEngine(secondaryId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId: secondaryId,
     });
   });
 
