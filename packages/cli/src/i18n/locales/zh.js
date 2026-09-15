@@ -725,7 +725,10 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
-  'Code Mode Only (Experimental)': '仅代码模式（实验性）',
+  'Tool Mode (Experimental)': '工具模式（实验性）',
+  Default: '默认',
+  'Code Mode': '代码模式',
+  'Code Mode Only': '仅代码模式',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',

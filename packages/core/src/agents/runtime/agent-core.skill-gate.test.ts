@@ -12,6 +12,7 @@ import { makeFakeConfig } from '../../test-utils/config.js';
 import { ToolRegistry } from '../../tools/tool-registry.js';
 import { ExecTool } from '../../tools/exec.js';
 import { MockTool } from '../../test-utils/mock-tool.js';
+import { ToolMode } from '../../tools/code-mode.js';
 
 // The skill-announcement gate asks whether the model can INVOKE a skill, and
 // that is two conditions, not one.
@@ -191,7 +192,7 @@ describe('AgentCore skill-gate inputs', () => {
       toolConfig: ConstructorParameters<typeof AgentCore>[5],
       includeSkill = true,
     ) {
-      const config = makeFakeConfig({ codeModeOnly: true });
+      const config = makeFakeConfig({ toolMode: 'code_mode_only' });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
       registry.registerTool(new ExecTool(config));
@@ -295,7 +296,7 @@ describe('AgentCore skill-gate inputs', () => {
     });
 
     it('uses exec as a restricted gateway for a narrowed CodeModeOnly agent', async () => {
-      const config = makeFakeConfig({ codeModeOnly: true });
+      const config = makeFakeConfig({ toolMode: 'code_mode_only' });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
       registry.registerTool(new ExecTool(config));
@@ -331,8 +332,159 @@ describe('AgentCore skill-gate inputs', () => {
       ).toEqual([ToolNames.READ_FILE]);
     });
 
+    it('keeps direct and exec surfaces aligned for a narrowed CodeMode agent', async () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+      const core = new AgentCore(
+        'restricted-hybrid-code-mode',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        {
+          tools: [ToolNames.READ_FILE],
+          executionAllowedTools: [ToolNames.READ_FILE],
+        },
+      );
+
+      const declarations = await core.prepareTools();
+      const exec = declarations.find(
+        (declaration) => declaration.name === ToolNames.EXEC,
+      );
+      const readFile = declarations.find(
+        (declaration) => declaration.name === ToolNames.READ_FILE,
+      );
+
+      expect(declarations.map((declaration) => declaration.name)).toEqual([
+        ToolNames.EXEC,
+        ToolNames.READ_FILE,
+      ]);
+      expect(executable(core, ToolNames.EXEC)).toBe(true);
+      expect(exec?.description).toContain('"name":"read_file"');
+      expect(exec?.description).not.toContain('"name":"write_file"');
+      expect(readFile?.description).toContain(
+        'declare const tools: { read_file(args:',
+      );
+      expect(
+        (
+          core as unknown as {
+            codeModeAllowedToolNames?: readonly string[];
+          }
+        ).codeModeAllowedToolNames,
+      ).toEqual([ToolNames.READ_FILE]);
+    });
+
+    it('keeps inherited exec bindings off the direct CodeMode surface', async () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+      const core = new AgentCore(
+        'exec-only-hybrid-code-mode',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        {
+          tools: [ToolNames.EXEC],
+          executionAllowedTools: [ToolNames.EXEC],
+        },
+      );
+
+      const declarations = await core.prepareTools();
+
+      expect(declarations.map((declaration) => declaration.name)).toEqual([
+        ToolNames.EXEC,
+      ]);
+      expect(declarations[0]?.description).toContain('"name":"read_file"');
+      expect(declarations[0]?.description).toContain('"name":"write_file"');
+      expect(declarations[0]?.description).toContain('tools.read_file(args:');
+      expect(declarations[0]?.description).toContain('tools.write_file(args:');
+      expect(
+        (
+          core as unknown as {
+            codeModeAllowedToolNames?: readonly string[];
+          }
+        ).codeModeAllowedToolNames,
+      ).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
+    });
+
+    it('keeps inherited CodeMode declarations executable only when directly allowed', async () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+      const core = new AgentCore(
+        'allowlisted-hybrid-code-mode',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        {
+          tools: ['*'],
+          executionAllowedTools: [ToolNames.EXEC, ToolNames.READ_FILE],
+        },
+      );
+
+      const declarations = await core.prepareTools();
+
+      expect(declarations.map((declaration) => declaration.name)).toEqual([
+        ToolNames.EXEC,
+        ToolNames.READ_FILE,
+      ]);
+      expect(executable(core, ToolNames.READ_FILE)).toBe(true);
+      expect(executable(core, ToolNames.WRITE_FILE)).toBe(false);
+      expect(
+        (
+          core as unknown as {
+            codeModeAllowedToolNames?: readonly string[];
+          }
+        ).codeModeAllowedToolNames,
+      ).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
+    });
+
+    it('inherits the complete registry in CodeMode', async () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+      const core = new AgentCore(
+        'inherited-hybrid-code-mode',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        { tools: ['*'] },
+      );
+
+      const declarations = await core.prepareTools();
+
+      expect(declarations.map((declaration) => declaration.name)).toEqual([
+        ToolNames.EXEC,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+      ]);
+      expect(
+        (
+          core as unknown as {
+            codeModeAllowedToolNames?: readonly string[];
+          }
+        ).codeModeAllowedToolNames,
+      ).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
+    });
+
     it('narrows an inherited fork exec surface to its execution allowlist', async () => {
-      const config = makeFakeConfig({ codeModeOnly: true });
+      const config = makeFakeConfig({ toolMode: 'code_mode_only' });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
       registry.registerTool(new ExecTool(config));
@@ -361,7 +513,7 @@ describe('AgentCore skill-gate inputs', () => {
     });
 
     it('inherits the parent exec bindings for an unrestricted fork', async () => {
-      const config = makeFakeConfig({ codeModeOnly: true });
+      const config = makeFakeConfig({ toolMode: 'code_mode_only' });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
       registry.registerTool(new ExecTool(config));
@@ -389,7 +541,7 @@ describe('AgentCore skill-gate inputs', () => {
     });
 
     it('keeps disallowed tools out of a restricted CodeModeOnly gateway', async () => {
-      const config = makeFakeConfig({ codeModeOnly: true });
+      const config = makeFakeConfig({ toolMode: 'code_mode_only' });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
       registry.registerTool(new ExecTool(config));

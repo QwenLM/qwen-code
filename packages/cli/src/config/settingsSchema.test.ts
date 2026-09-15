@@ -233,6 +233,23 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should expose the tool mode enum', () => {
+      expect(getSettingsSchema().tools.properties.mode).toMatchObject({
+        type: 'enum',
+        default: 'direct',
+        requiresRestart: true,
+        showInDialog: true,
+        options: [
+          { value: 'direct', label: 'Default' },
+          { value: 'code_mode', label: 'Code Mode' },
+          { value: 'code_mode_only', label: 'Code Mode Only' },
+        ],
+      });
+      expect(getSettingsSchema().tools.properties).not.toHaveProperty(
+        'codeModeOnly',
+      );
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties

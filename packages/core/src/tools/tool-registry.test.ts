@@ -189,7 +189,7 @@ describe('ToolRegistry', () => {
       const baseUrl = 'https://images.example/v1';
       const config = new Config({
         ...baseConfigParams,
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
         experimentalZedIntegration: true,
         modelProvidersConfig: {
           openai: [
@@ -788,6 +788,42 @@ describe('ToolRegistry', () => {
         expect(toolRegistry.isDeferredToolRevealed(toolB.name)).toBe(false);
       });
 
+      it('counts CodeMode declaration decoration toward the budget', () => {
+        const directTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const codeModeTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const directRegistry = new ToolRegistry(new Config(baseConfigParams));
+        const codeModeRegistry = new ToolRegistry(
+          new Config({ ...baseConfigParams, toolMode: 'code_mode' }),
+        );
+        directRegistry.registerTool(directTool);
+        codeModeRegistry.registerTool(new MockTool({ name: 'exec' }));
+        codeModeRegistry.registerTool(codeModeTool);
+        const rawBudget = tokensFor(directTool);
+
+        expect(directRegistry.preloadDeferredToolsWithinBudget(rawBudget)).toBe(
+          1,
+        );
+        expect(
+          codeModeRegistry.preloadDeferredToolsWithinBudget(rawBudget),
+        ).toBe(0);
+      });
+
       it('excludes visible deferred tools from the preload budget', () => {
         const visibleTool = new MockTool({
           name: 'visible',
@@ -875,7 +911,7 @@ describe('ToolRegistry', () => {
       // is the one the previous test proves IS reported in Direct mode.
       const codeModeConfig = new Config({
         ...baseConfigParams,
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
       });
       const registry = new ToolRegistry(codeModeConfig);
       registry.registerTool(

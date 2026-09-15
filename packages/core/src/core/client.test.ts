@@ -102,6 +102,7 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -3062,6 +3063,28 @@ describe('Gemini Client (client.ts)', () => {
       // Names the tool, so the report is actionable without a debug session.
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('write_file'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('reports that withheld tools remain callable through exec in CodeMode', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null);
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('they remain callable through exec'),
+      );
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('they are unreachable until restart'),
       );
       warnSpy.mockRestore();
     });

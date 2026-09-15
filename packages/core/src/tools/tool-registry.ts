@@ -31,6 +31,7 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
+  augmentDeclarationForCodeMode,
   buildExecDeclaration,
   getToolExposure,
   planCodeModeBindings,
@@ -849,11 +850,12 @@ export class ToolRegistry {
   getFunctionDeclarations(options?: {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
-    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+    const toolMode = this.config.getToolMode?.();
+    if (toolMode === ToolMode.CodeModeOnly) {
       return this.getCodeModeFunctionDeclarations();
     }
     const includeDeferred = options?.includeDeferred === true;
-    return Array.from(this.tools.values())
+    const declarations = Array.from(this.tools.values())
       .filter((tool) => this.isToolAvailable(tool.name))
       .filter((tool) => this.isToolDeclared(tool.name))
       .filter(
@@ -863,8 +865,48 @@ export class ToolRegistry {
           tool.alwaysLoad ||
           !this.isDeferredAndHidden(tool.name),
       )
-      .sort(ToolRegistry.compareToolsByDeclarationName)
-      .map((tool) => tool.schema);
+      .sort(ToolRegistry.compareToolsByDeclarationName);
+    if (toolMode !== ToolMode.CodeMode) {
+      return declarations.map((tool) => tool.schema);
+    }
+    return this.decorateCodeModeDeclarations(declarations);
+  }
+
+  private decorateCodeModeDeclarations(
+    tools: AnyDeclarativeTool[],
+    allowedNames?: ReadonlySet<string>,
+  ): FunctionDeclaration[] {
+    if (!tools.some((tool) => tool.name === ToolNames.EXEC)) {
+      return tools.map((tool) => tool.schema);
+    }
+    const plan = this.getCodeModeBindingPlan(allowedNames);
+    const bindings = new Map(
+      plan.bindings.map((binding) => [binding.name, binding]),
+    );
+    const topLevelBindingNames = new Set(
+      tools
+        .filter((tool) => tool.name !== ToolNames.EXEC)
+        .filter((tool) => bindings.has(tool.name))
+        .map((tool) => tool.name),
+    );
+    const canRevealDeferred = tools.some(
+      (tool) => tool.name === ToolNames.TOOL_SEARCH,
+    );
+    return tools.map((tool) => {
+      if (tool.name === ToolNames.EXEC) {
+        return buildExecDeclaration(
+          tool,
+          plan,
+          false,
+          topLevelBindingNames,
+          canRevealDeferred,
+        );
+      }
+      const binding = bindings.get(tool.name);
+      return binding
+        ? augmentDeclarationForCodeMode(tool.schema, binding)
+        : tool.schema;
+    });
   }
 
   private getCodeModeFunctionDeclarations(
@@ -1049,6 +1091,19 @@ export class ToolRegistry {
   preloadDeferredToolsWithinBudget(budgetTokens: number): number {
     const candidates: string[] = [];
     let totalChars = 0;
+    const execTool = this.tools.get(ToolNames.EXEC);
+    const codeModeBindings =
+      this.config.getToolMode?.() === ToolMode.CodeMode &&
+      execTool !== undefined &&
+      this.isToolAvailable(execTool.name) &&
+      this.isToolDeclared(execTool.name)
+        ? new Map(
+            this.getCodeModeBindingPlan().bindings.map((binding) => [
+              binding.name,
+              binding,
+            ]),
+          )
+        : undefined;
     for (const tool of this.tools.values()) {
       if (!this.isToolAvailable(tool.name)) continue;
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
@@ -1061,7 +1116,12 @@ export class ToolRegistry {
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);
-      totalChars += JSON.stringify(tool.schema).length;
+      const binding = codeModeBindings?.get(tool.name);
+      totalChars += JSON.stringify(
+        binding
+          ? augmentDeclarationForCodeMode(tool.schema, binding)
+          : tool.schema,
+      ).length;
     }
     const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
     if (candidates.length === 0) {
@@ -1098,20 +1158,41 @@ export class ToolRegistry {
   /**
    * Retrieves a filtered list of tool schemas based on a list of tool names.
    * @param toolNames - An array of tool names to include.
+   * @param codeModeAllowedNames - Optional nested binding allowlist when the
+   * direct and exec surfaces differ.
    * @returns An array of FunctionDeclarations for the specified tools.
    * @remarks Requires all tool factories to be resolved first. Call
    * {@link warmAll} before invoking this method, otherwise factory-registered
    * tools that have not yet been loaded will be silently omitted.
    */
-  getFunctionDeclarationsFiltered(toolNames: string[]): FunctionDeclaration[] {
+  getFunctionDeclarationsFiltered(
+    toolNames: string[],
+    codeModeAllowedNames?: ReadonlySet<string>,
+  ): FunctionDeclaration[] {
     if (this.factories.size > 0) {
       debugLogger.warn(
         `getFunctionDeclarationsFiltered() called with ${this.factories.size} unloaded ` +
           `tool factories. Call warmAll() first to avoid incomplete results.`,
       );
     }
-    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+    const toolMode = this.config.getToolMode?.();
+    if (toolMode === ToolMode.CodeModeOnly) {
       return this.getCodeModeFunctionDeclarations(new Set(toolNames));
+    }
+    if (toolMode === ToolMode.CodeMode) {
+      const allowedNames = new Set(toolNames);
+      const tools = Array.from(this.tools.values())
+        .filter(
+          (tool) =>
+            allowedNames.has(tool.name) &&
+            this.isToolAvailable(tool.name) &&
+            this.isToolDeclared(tool.name),
+        )
+        .sort(ToolRegistry.compareToolsByDeclarationName);
+      return this.decorateCodeModeDeclarations(
+        tools,
+        codeModeAllowedNames ?? allowedNames,
+      );
     }
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
