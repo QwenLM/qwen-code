@@ -830,7 +830,7 @@ describe('qwen-autofix workflow', () => {
         { env: { ...process.env }, encoding: 'utf8' },
       );
     const started = '2026-08-10T10:05:49Z';
-    // A live review-pr blocks — in every pending-ish status the rollup uses.
+    // Only a running review blocks; a queued review has no work to lose.
     for (const status of [
       'QUEUED',
       'IN_PROGRESS',
@@ -847,7 +847,7 @@ describe('qwen-autofix workflow', () => {
             startedAt: started,
           },
         ]),
-      ).toBe('true');
+      ).toBe(status === 'IN_PROGRESS' ? 'true' : 'false');
     }
     expect(
       run([
@@ -874,103 +874,7 @@ describe('qwen-autofix workflow', () => {
       run([{ name: 'Test (ubuntu-latest, Node 22.x)', status: 'IN_PROGRESS' }]),
     ).toBe('false');
 
-    // Delay-window fallback: during the review workflow's 10-minute delay the
-    // review-pr check-run does not exist yet, so the rollup alone misses it;
-    // the scan falls back to queued runs of the review workflow by head SHA.
-    expect(reviewScanJob).toContain('REVIEW_WF_ID=');
-    expect(reviewScanJob).toContain(
-      'actions/workflows/${REVIEW_WF_ID}/runs?per_page=100',
-    );
-    expect(reviewScanJob).not.toContain(
-      'REVIEW_RUNS_JSON="$(gh api --paginate',
-    );
-    expect(reviewScanJob).toContain(
-      'IN("queued", "waiting", "pending", "requested", "in_progress")',
-    );
-    expect(reviewScanJob).not.toContain(
-      "grep -qE '^(queued|waiting|pending)$'",
-    );
-    expect(reviewScanJob).toContain('REVIEW_RUN_STARTED_AT=');
-    expect(reviewScanJob).toContain('.run_started_at // .created_at');
-    expect(reviewScanJob).toContain('any(.pull_requests[]?');
-    expect(reviewScanJob).toContain(
-      'select((.event // "") == "pull_request_target")',
-    );
-
-    // Replay the REAL runs-API fallback filter over fixtures (R1-8): the
-    // toContain pins above would still pass if the jq body were dead.
-    const runsFilter = reviewScanJob.match(
-      /REVIEW_RUN_STARTED_AT="\$\(jq -r[\s\S]*?<<< "\$\{REVIEW_RUNS_JSON\}"\)"/,
-    )?.[0];
-    expect(runsFilter).toBeTruthy();
-    const runRuns = (runs) =>
-      execFileSync(
-        'bash',
-        [
-          '-c',
-          `REVIEW_WF_ID='77' PR='42' PR_HEAD_OID='abc123'\nREVIEW_RUNS_JSON='${JSON.stringify(runs)}'\n${runsFilter}\nprintf '%s' "$REVIEW_RUN_STARTED_AT"`,
-        ],
-        { env: { ...process.env }, encoding: 'utf8' },
-      );
-    const runs = (...overrides) => ({
-      workflow_runs: overrides.map((o) => ({
-        workflow_id: 77,
-        event: 'pull_request_target',
-        status: 'in_progress',
-        head_sha: 'abc123',
-        head_branch: 'feat/x',
-        run_started_at: '2026-08-13T01:00:00Z',
-        pull_requests: [],
-        ...o,
-      })),
-    });
-    // A live automatic review on the head blocks — every pending-ish status
-    // the runs API uses, including requested/in_progress (R2-2).
-    for (const status of [
-      'queued',
-      'waiting',
-      'pending',
-      'requested',
-      'in_progress',
-    ]) {
-      expect(runRuns(runs({ status }))).toBe('2026-08-13T01:00:00Z');
-    }
-    // An explicit-trigger run is NOT cancelable by synchronize — no hold (R2-1).
-    expect(runRuns(runs({ event: 'issue_comment' }))).toBe('');
-    // A run of another workflow id never blocks (R2-1 binding).
-    expect(runRuns(runs({ workflow_id: 99 }))).toBe('');
-    // A concluded run does not block.
-    expect(runRuns(runs({ status: 'completed' }))).toBe('');
-    // A fork-controlled bare branch name alone is not identity.
-    expect(
-      runRuns(
-        runs({
-          head_sha: 'other',
-          head_branch: 'feat/x',
-          pull_requests: [],
-        }),
-      ),
-    ).toBe('');
-    // Immutable head SHA alone is still enough.
-    expect(
-      runRuns(
-        runs({
-          head_sha: 'abc123',
-          head_branch: 'other',
-          pull_requests: [],
-        }),
-      ),
-    ).toBe('2026-08-13T01:00:00Z');
-    // Matching also works via pull_requests association, not only head SHA.
-    expect(
-      runRuns(
-        runs({
-          head_sha: 'other',
-          head_branch: 'other',
-          pull_requests: [{ number: 42 }],
-        }),
-      ),
-    ).toBe('2026-08-13T01:00:00Z');
+    expect(reviewScanJob).not.toContain('REVIEW_RUNS_JSON');
 
     // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
     // visible acknowledgment per in-flight review run (marker keyed on the
@@ -978,9 +882,6 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('"${REVIEW_SENDER}" != "${REVIEW_BOT}"');
     expect(reviewScanJob).toContain('autofix-review-deferred');
     expect(reviewScanJob).toContain('select((.user.login // "") == $ab)');
-    expect(reviewScanJob).toContain(
-      '[[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"',
-    );
     expect(workflow).toContain(
       "review_sender: '${{ github.event.review.user.login }}'",
     );
@@ -13966,6 +13867,7 @@ exit 1
       'packages/core/.gitattributes',
       'packages/desktop-shell/.npmrc',
       'eslint.legacy-filenames.mjs',
+      'eslint.legacy-core-barrel-imports.mjs',
       '.github/workflows/qwen-pr-safety-precheck.yml',
     ]);
     expect(classes).toContain('.github/actions/a/action.yml=ci-workflows');
@@ -13991,6 +13893,9 @@ exit 1
     );
     expect(classes).toContain('packages/desktop-shell/.npmrc=toolchain-config');
     expect(classes).toContain('eslint.legacy-filenames.mjs=lint-config');
+    expect(classes).toContain(
+      'eslint.legacy-core-barrel-imports.mjs=lint-config',
+    );
     expect(classes).toContain(
       '.github/workflows/qwen-pr-safety-precheck.yml=autofix-loop',
     );

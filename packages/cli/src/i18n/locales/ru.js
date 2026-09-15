@@ -137,11 +137,11 @@ export default {
   'Search:': 'Поиск:',
   'type to filter…': 'введите для фильтрации…',
   'No skills are currently available.': 'Сейчас навыков нет.',
-  'All available skills are locked at a higher scope (see below).':
-    'Все доступные навыки заблокированы на более высоком уровне (см. ниже).',
   'No skills match the search.': 'Нет навыков, соответствующих поиску.',
   'Locked by settings entries you cannot toggle here:':
     'Заблокированы записями настроек (здесь переключить нельзя):',
+  '{{count}} locked not shown':
+    'Не показано заблокированных навыков: {{count}}',
   'higher scope': 'более высокий уровень',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [заблокировано: {{scope}}]',
@@ -578,6 +578,8 @@ export default {
     'Это расширение установит следующие навыки:',
   'This extension will install the following subagents:':
     'Это расширение установит следующие подагенты:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Это расширение установит следующие рабочие процессы (скрипты JavaScript, которые могут запускать подагентов):',
   'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',
@@ -642,6 +644,7 @@ export default {
   'Context files:': 'Контекстные файлы:',
   'Skills:': 'Навыки:',
   'Agents:': 'Агенты:',
+  'Workflows:': 'Рабочие процессы:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'Не удалось установить связанное расширение.',
@@ -2228,6 +2231,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

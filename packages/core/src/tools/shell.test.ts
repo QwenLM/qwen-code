@@ -15,9 +15,16 @@ import {
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
+const mockExecFile = vi.hoisted(() => vi.fn());
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
   warn: vi.fn(),
+}));
+vi.mock('node:child_process', async (importOriginal) => ({
+  // Only execFile is stubbed: the attribution helpers consume it for their
+  // post-commit git probes. execFileSync, spawn, exec, ... stay original.
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  execFile: (...args: unknown[]) => mockExecFile(...args),
 }));
 vi.mock('../services/shellExecutionService.js', () => ({
   ShellExecutionService: { execute: mockShellExecutionService },
@@ -122,6 +129,23 @@ describe('ShellTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+
+    // Default the execFile seam to failure, matching what real git does
+    // against the tests' nonexistent cwd ('/test/dir'). Tests driving the
+    // attribution-note path override this per git subcommand.
+    mockExecFile.mockImplementation(
+      (
+        _file: unknown,
+        _args: unknown,
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        queueMicrotask(() =>
+          callback(new Error('execFile stubbed: default failure'), '', ''),
+        );
+        return { on: vi.fn() };
+      },
+    );
 
     mockFileSystemService = {
       readTextFile: vi.fn(),
@@ -3952,6 +3976,404 @@ describe('ShellTool', () => {
           spy.mockRestore();
         }
       });
+
+      describe('outputBudgetApplied', () => {
+        // The scheduler's generic spill gate sits at the GLOBAL threshold
+        // (25k default) + 3k headroom ≈ 28k, below this tool's own 30k budget.
+        // Output in that window is inside Shell's budget, so the marker has to
+        // be set even when nothing was cut — otherwise the gate re-bounds the
+        // body under a stricter head-only policy and the surviving preview
+        // collapses from the whole output to a short head.
+        it('marks a body that fits the threshold, leaving it untouched', async () => {
+          const output = 'x'.repeat(29_000);
+          const invocation = shellTool.build({
+            command: 'mid-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output, exitCode: 0 });
+
+          const result = await promise;
+
+          expect(result.outputBudgetApplied).toBe(true);
+          expect(result.llmContent).toContain(output);
+          expect(result.persistedOutputFiles).toBeUndefined();
+        });
+
+        it('marks a body that exceeded the threshold', async () => {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(35_000), exitCode: 0 });
+
+          const result = await promise;
+
+          expect(result.outputBudgetApplied).toBe(true);
+        });
+
+        // The scheduler skips its error gate only when `error.message` is still
+        // byte-for-byte the marked body, so this identity is load-bearing.
+        it('marks a non-zero exit and reports the same text as error.message', async () => {
+          const invocation = shellTool.build({
+            command: 'failing-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'y'.repeat(29_000), exitCode: 1 });
+
+          const result = await promise;
+
+          expect(result.outputBudgetApplied).toBe(true);
+          expect(result.error?.message).toBe(result.llmContent);
+        });
+
+        it('leaves an explicit background launch unmarked', async () => {
+          const invocation = shellTool.build({
+            command: 'sleep 100',
+            is_background: true,
+          });
+
+          const result = await invocation.execute(mockAbortSignal);
+
+          // Assert the background receipt first: `toBeUndefined` alone would
+          // also pass for a result that never reached this path.
+          expect(result.llmContent).toContain('Background shell started.');
+          expect(result.outputBudgetApplied).toBeUndefined();
+        });
+
+        it('marks a timed-out foreground body carrying the partial output', async () => {
+          // The scheduler's timeout branch stands its generic gate down for a
+          // marked body, so the marker on `llmContent` is the single thing
+          // deciding whether a ~29k timed-out body reaches the model whole.
+          const partial = 'x'.repeat(29_000);
+          const invocation = shellTool.build({
+            command: 'long-running-command',
+            is_background: false,
+            timeout: 5000,
+          });
+          const mockCombinedSignal = {
+            aborted: true,
+            reason: new DOMException('timed out', 'TimeoutError'),
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          } as unknown as AbortSignal;
+          const originalAbortSignal = globalThis.AbortSignal;
+          vi.stubGlobal('AbortSignal', {
+            ...originalAbortSignal,
+            timeout: vi.fn().mockReturnValue(mockCombinedSignal),
+            any: vi.fn().mockReturnValue(mockCombinedSignal),
+          });
+
+          try {
+            const promise = invocation.execute(mockAbortSignal);
+            resolveShellExecution({
+              output: partial,
+              exitCode: null,
+              aborted: true,
+            });
+            const result = await promise;
+
+            expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+            expect(result.outputBudgetApplied).toBe(true);
+            expect(result.llmContent).toContain(partial);
+            // The timeout error.message is deliberately the short summary
+            // alone, so the marker is the only bound signal on this path.
+            expect(result.error?.message).not.toBe(result.llmContent);
+          } finally {
+            vi.stubGlobal('AbortSignal', originalAbortSignal);
+          }
+        });
+
+        it('reserves the appended advisory out of the body budget', async () => {
+          // The long-run advisory is appended AFTER the in-tool sizing, so its
+          // size comes out of the body budget: the assembled string must still
+          // fit the declared 30k budget, or the scheduler's per-tool pass
+          // would re-bound it under a second policy. A formatted body in the
+          // (budget - advisory, budget] band is sized as over-budget instead.
+          // (The formatted body adds a ~100-char Command/Directory/Exit-Code
+          // header over the raw output, so 29_700 lands in the band.)
+          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+          try {
+            const output = 'x'.repeat(29_700);
+            const invocation = shellTool.build({
+              command: 'mid-output-cmd',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            // Advance past the 60s advisory threshold so the hint appends.
+            await vi.advanceTimersByTimeAsync(60_000);
+            resolveShellExecution({ output, exitCode: 0 });
+            const result = await promise;
+
+            expect(result.outputBudgetApplied).toBe(true);
+            expect(result.llmContent).toContain(
+              'this foreground command ran for 60s',
+            );
+            // Without the reservation the body would fit whole here and the
+            // advisory would push the assembled string past the budget.
+            expect(result.llmContent).not.toContain(output);
+            expect(String(result.llmContent).length).toBeLessThanOrEqual(
+              30_000,
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('reserves the appended attribution warning out of the body budget', async () => {
+          // The attribution warning is the other half of the reservation: it
+          // is appended after the in-tool sizing, so a commit body that fits
+          // the declared 30k budget on its own but not together with the
+          // warning must be sized as over-budget here — otherwise the
+          // assembled string exceeds the budget the marker vouches for. The
+          // formatted header adds ~121 chars over the raw output, so 29,850
+          // lands the body inside the (budget - warning, budget] band.
+          const preSha = 'a'.repeat(40);
+          const postSha = 'b'.repeat(40);
+          const longMessage = `notes exploded: ${'x'.repeat(300)}`;
+
+          // attachCommitAttribution's git probes go through
+          // childProcess.execFile: HEAD moved (pre -> post) and exactly one
+          // commit landed.
+          mockExecFile.mockImplementation(
+            (
+              _file: unknown,
+              args: unknown,
+              _options: unknown,
+              callback: (
+                error: Error | null,
+                stdout: string,
+                stderr: string,
+              ) => void,
+            ) => {
+              const argv = args as string[];
+              const joined = argv.join(' ');
+              const respond =
+                joined === 'rev-parse HEAD'
+                  ? `${postSha}\n`
+                  : joined.startsWith('rev-list --count')
+                    ? '1\n'
+                    : null;
+              queueMicrotask(() =>
+                respond === null
+                  ? callback(
+                      new Error(`unexpected git call: ${joined}`),
+                      '',
+                      '',
+                    )
+                  : callback(null, respond, ''),
+              );
+              return { on: vi.fn() };
+            },
+          );
+
+          // The diff analysis goes through the (mocked)
+          // ShellExecutionService: the main commit command gets the deferred
+          // result, the runGit probes get canned per-subcommand output.
+          mockShellExecutionService.mockImplementation((cmd: string) => {
+            if (cmd.startsWith('git commit')) {
+              return {
+                pid: 12345,
+                result: new Promise<ShellExecutionResult>((resolve) => {
+                  resolveExecutionPromise = resolve;
+                }),
+              };
+            }
+            const probeOutput = cmd.includes('rev-parse --verify')
+              ? `${preSha}\n`
+              : cmd.includes('log -1 --pretty=%P')
+                ? `${preSha}\n`
+                : cmd.includes('rev-parse --show-toplevel')
+                  ? '/test/dir\n'
+                  : cmd.includes('--name-only')
+                    ? 'file.txt\n'
+                    : cmd.includes('--name-status')
+                      ? 'M\tfile.txt\n'
+                      : cmd.includes('--numstat')
+                        ? '1\t0\tfile.txt\n'
+                        : '';
+            return {
+              pid: 12345,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(probeOutput),
+                output: probeOutput,
+                exitCode: 0,
+                signal: null,
+                error: null,
+                aborted: false,
+                pid: 12345,
+                executionMethod: 'child_process',
+              } as ShellExecutionResult),
+            };
+          });
+
+          // One AI-touched file to attribute, then the note payload build
+          // throws so the catch branch produces the warning.
+          const attributionService = CommitAttributionService.getInstance();
+          vi.spyOn(attributionService, 'hasAttributions').mockReturnValue(true);
+          vi.spyOn(attributionService, 'matchCommittedFiles').mockReturnValue(
+            new Set(['/test/dir/file.txt']),
+          );
+          vi.spyOn(
+            attributionService,
+            'generateNotePayload',
+          ).mockImplementation(() => {
+            throw new Error(longMessage);
+          });
+
+          const output = 'x'.repeat(29_850);
+          const invocation = shellTool.build({
+            command: 'git commit -m "x"',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.waitFor(() =>
+            expect(mockShellExecutionService).toHaveBeenCalled(),
+          );
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(output),
+            output,
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          const result = await promise;
+
+          expect(result.outputBudgetApplied).toBe(true);
+          expect(result.llmContent).toContain(
+            `AI attribution note skipped: ${longMessage.slice(0, 120)}.`,
+          );
+          // The reservation sized the body as over-budget: the raw output is
+          // gone, the sentinel is present, and the assembled string (body +
+          // warning) still fits the declared budget.
+          expect(String(result.llmContent)).not.toContain(output);
+          expect(result.llmContent).toContain(
+            'Tool output was too large and has been truncated',
+          );
+          expect(String(result.llmContent).length).toBeLessThanOrEqual(30_000);
+        });
+
+        it('still delivers a band-fitting body whole with the advisory', async () => {
+          // Guard against the reservation over-shrinking: a body comfortably
+          // under budget-minus-advisory is delivered whole, advisory included.
+          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+          try {
+            const output = 'x'.repeat(29_000);
+            const invocation = shellTool.build({
+              command: 'mid-output-cmd',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            await vi.advanceTimersByTimeAsync(60_000);
+            resolveShellExecution({ output, exitCode: 0 });
+            const result = await promise;
+
+            expect(result.outputBudgetApplied).toBe(true);
+            expect(result.llmContent).toContain(output);
+            expect(result.llmContent).toContain(
+              'this foreground command ran for 60s',
+            );
+            expect(result.llmContent).not.toContain(
+              'Tool output was too large and has been truncated',
+            );
+            expect(String(result.llmContent).length).toBeLessThanOrEqual(
+              30_000,
+            );
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('keeps a sub-advisory explicit threshold from disarming the pass it marks', async () => {
+          // Regression: the reservation subtracts the advisory size from the
+          // declared threshold. An explicit `truncateToolOutputThreshold`
+          // below the advisory length (the setting has no schema minimum)
+          // drove the in-tool threshold non-positive, and truncateToolOutput
+          // returns the body untouched on `threshold <= 0` — while the
+          // unconditional marker still vouched for it, standing the
+          // scheduler's failure-path gate down with nothing behind it. The
+          // clamp keeps the pass running so the marker never attests to a
+          // sizing that did not happen.
+          (
+            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+          ).mockReturnValue(true);
+          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+            100,
+          );
+          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+          try {
+            const output = 'x'.repeat(5_000);
+            const invocation = shellTool.build({
+              command: 'mid-output-cmd',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            // Past the 60s advisory threshold so the ~619-char reservation
+            // exceeds the explicit 100-char threshold.
+            await vi.advanceTimersByTimeAsync(60_000);
+            resolveShellExecution({ output, exitCode: 3, error: null });
+            const result = await promise;
+
+            // The failure-path branch makes error.message BE llmContent, so
+            // the sentinel on the body is the only bound the model sees.
+            expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+            expect(result.error?.message).toBe(result.llmContent);
+            expect(result.outputBudgetApplied).toBe(true);
+            expect(result.llmContent).toContain(
+              'Tool output was too large and has been truncated',
+            );
+            expect(String(result.llmContent)).not.toContain(output);
+            expect(result.persistedOutputFiles?.length).toBeGreaterThan(0);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('keeps the exit-code line when the reservation would eat a sub-advisory threshold', async () => {
+          // Companion to the sub-advisory pin above: at an explicit 600-char
+          // threshold the ~620-char advisory reservation alone would consume
+          // the whole body budget, leaving a 1-char preview whose head-and-tail
+          // keeps neither the rows nor the trailing `Exit Code:` line. The
+          // reservation is capped at half the threshold, so the tail preview
+          // keeps the exit-code line.
+          (
+            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+          ).mockReturnValue(true);
+          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+            600,
+          );
+          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+          try {
+            const output = 'x'.repeat(5_000);
+            const invocation = shellTool.build({
+              command: 'mid-output-cmd',
+              is_background: false,
+            });
+            const promise = invocation.execute(mockAbortSignal);
+            // Past the 60s advisory threshold so the reservation fires.
+            await vi.advanceTimersByTimeAsync(60_000);
+            resolveShellExecution({ output, exitCode: 3, error: null });
+            const result = await promise;
+
+            expect(result.outputBudgetApplied).toBe(true);
+            expect(result.llmContent).toContain(
+              'this foreground command ran for 60s',
+            );
+            expect(result.llmContent).toContain(
+              'Tool output was too large and has been truncated',
+            );
+            expect(String(result.llmContent)).not.toContain(output);
+            expect(result.llmContent).toContain('Exit Code: 3');
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+      });
     });
 
     it('retains shell truncation without an artifact and records the persistence decision', async () => {
@@ -6025,6 +6447,143 @@ describe('ShellTool', () => {
         expect(observedCmd).toContain('\\"');
         // The `-m "..."` quote pair must stay closed.
         expect(observedCmd).toMatch(/-m\s+".+"/s);
+      });
+
+      describe('attachCommitAttribution note failure warning', () => {
+        // The warning the note-write catch branch appends is the only bound
+        // on that text once the scheduler's error gate stands down for the
+        // marked body (the identity comparison happens after the appends, so
+        // it never sees the growth). The exception text is capped at 120
+        // chars; the full cause stays in the debug log.
+        it('caps the note-failure exception text at 120 characters', async () => {
+          const preSha = 'a'.repeat(40);
+          const postSha = 'b'.repeat(40);
+          const longMessage = `notes exploded: ${'x'.repeat(300)}`;
+
+          // attachCommitAttribution's git probes go through childProcess.execFile:
+          // HEAD moved (pre -> post) and exactly one commit landed.
+          mockExecFile.mockImplementation(
+            (
+              _file: unknown,
+              args: unknown,
+              _options: unknown,
+              callback: (
+                error: Error | null,
+                stdout: string,
+                stderr: string,
+              ) => void,
+            ) => {
+              const argv = args as string[];
+              const joined = argv.join(' ');
+              const respond =
+                joined === 'rev-parse HEAD'
+                  ? `${postSha}\n`
+                  : joined.startsWith('rev-list --count')
+                    ? '1\n'
+                    : null;
+              queueMicrotask(() =>
+                respond === null
+                  ? callback(
+                      new Error(`unexpected git call: ${joined}`),
+                      '',
+                      '',
+                    )
+                  : callback(null, respond, ''),
+              );
+              return { on: vi.fn() };
+            },
+          );
+
+          // The diff analysis goes through the (mocked) ShellExecutionService:
+          // the main commit command gets the deferred result, the runGit
+          // probes get canned per-subcommand output.
+          mockShellExecutionService.mockImplementation((cmd: string) => {
+            if (cmd.startsWith('git commit')) {
+              return {
+                pid: 12345,
+                result: new Promise<ShellExecutionResult>((resolve) => {
+                  resolveExecutionPromise = resolve;
+                }),
+              };
+            }
+            const output = cmd.includes('rev-parse --verify')
+              ? `${preSha}\n`
+              : cmd.includes('log -1 --pretty=%P')
+                ? `${preSha}\n`
+                : cmd.includes('rev-parse --show-toplevel')
+                  ? '/test/dir\n'
+                  : cmd.includes('--name-only')
+                    ? 'file.txt\n'
+                    : cmd.includes('--name-status')
+                      ? 'M\tfile.txt\n'
+                      : cmd.includes('--numstat')
+                        ? '1\t0\tfile.txt\n'
+                        : '';
+            return {
+              pid: 12345,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(output),
+                output,
+                exitCode: 0,
+                signal: null,
+                error: null,
+                aborted: false,
+                pid: 12345,
+                executionMethod: 'child_process',
+              } as ShellExecutionResult),
+            };
+          });
+
+          // Stub the attribution singleton's surface so the commit has one
+          // AI-touched file to attribute (the mocked `crypto` in this file
+          // makes the real recordEdit's hashing unusable), then make the note
+          // payload build throw with an over-long message so the catch branch
+          // produces the warning.
+          const attributionService = CommitAttributionService.getInstance();
+          vi.spyOn(attributionService, 'hasAttributions').mockReturnValue(true);
+          vi.spyOn(attributionService, 'matchCommittedFiles').mockReturnValue(
+            new Set(['/test/dir/file.txt']),
+          );
+          vi.spyOn(
+            attributionService,
+            'generateNotePayload',
+          ).mockImplementation(() => {
+            throw new Error(longMessage);
+          });
+
+          const invocation = shellTool.build({
+            command: 'git commit -m "x"',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          await vi.waitFor(() =>
+            expect(mockShellExecutionService).toHaveBeenCalled(),
+          );
+          resolveExecutionPromise({
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 12345,
+            executionMethod: 'child_process',
+          });
+          const result = await promise;
+
+          expect(String(result.llmContent)).toContain(
+            `AI attribution note skipped: ${longMessage.slice(0, 120)}.`,
+          );
+          expect(String(result.llmContent)).not.toContain(
+            longMessage.slice(0, 200),
+          );
+          expect(String(result.returnDisplay)).toContain(
+            `AI attribution note skipped: ${longMessage.slice(0, 120)}.`,
+          );
+          expect(String(result.returnDisplay)).not.toContain(
+            longMessage.slice(0, 200),
+          );
+        });
       });
     });
 

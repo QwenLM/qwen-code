@@ -582,6 +582,7 @@ export interface ServeWorkspaceProviderCurrent {
 }
 
 export interface ServeWorkspaceProviderModel {
+  configurationKey?: string;
   modelId: string;
   baseModelId: string;
   name: string;
@@ -697,7 +698,8 @@ export interface ServeSessionSupportedCommandsStatus {
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
-    source: 'project' | 'user';
+    /** `extension` definitions are named `<extension>:<workflow>`. */
+    source: 'project' | 'user' | 'extension';
   }>;
 }
 
@@ -714,7 +716,7 @@ export interface ServeSessionSavedWorkflowDetail {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   name: string;
-  source: 'project' | 'user';
+  source: 'project' | 'user' | 'extension';
   /** Absolute path of the `.js` file the definition was read from. */
   scriptPath: string;
   /** Full script source, `export const meta` included. */

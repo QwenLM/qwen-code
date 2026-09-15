@@ -1068,3 +1068,198 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 });
+
+const goalObjective =
+  'Outcome: Audit open PRs. Done when: Every PR has evidence. Must not: Push or comment. Budget: 20 turns. On block: Report missing access. Context: Preserve the exact budget assumption.';
+const goalNotice =
+  'Replace the paused Goal and start working toward this objective?';
+const goalRequest: PermissionRequest = {
+  ...request,
+  id: 'goal-request',
+  toolName: 'propose_goal',
+  title: `Propose Goal: ${goalObjective}`,
+  rawInput: { objective: goalObjective },
+  content: [{ type: 'text', text: `${goalNotice}\n\n${goalObjective}` }],
+};
+
+function switchGoalTab(value: string) {
+  const tab =
+    container!.querySelectorAll<HTMLButtonElement>('[role="tab"]')[
+      value === 'full' ? 1 : 0
+    ];
+  act(() => {
+    tab.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+    );
+  });
+}
+
+describe('goal approval', () => {
+  it('formats the draft without hiding constraints or the replacement notice', () => {
+    render(false, goalRequest, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('确认会话目标');
+    expect(container!.textContent).toContain('设置并继续');
+    expect(container!.textContent).toContain('暂不设置');
+    expect(container!.textContent).toContain(goalNotice);
+    expect(container!.textContent).toContain('Push or comment.');
+    expect(container!.textContent).toContain(
+      'Preserve the exact budget assumption.',
+    );
+    expect(container!.textContent).not.toContain('Propose Goal:');
+    expect(container!.querySelector('pre')).toBeNull();
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('retains arbitrary objectives and fallback confirmation content', () => {
+    render(false, { ...goalRequest, rawInput: undefined });
+    expect(container!.textContent!.split(goalNotice)).toHaveLength(2);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    rerender(false, {
+      ...goalRequest,
+      id: 'plain',
+      rawInput: { objective: '原样保留\n  command --flag' },
+      content: [],
+    });
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe('原样保留\n  command --flag');
+  });
+
+  it('does not invoke approval shortcuts while reading goal tabs or text', () => {
+    render(false, goalRequest);
+    const panel = container!.querySelector(
+      '[role="tabpanel"][data-state="active"]',
+    )!;
+    act(() => {
+      for (const key of ['1', '2', 'j', 'k', 'Home', 'End', 'Escape']) {
+        panel.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true }),
+        );
+      }
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('disables duplicate submissions and retains the full view when retrying', async () => {
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    render(false, goalRequest);
+    switchGoalTab('full');
+    const approve = container!.querySelector<HTMLButtonElement>(
+      '[data-option-id="proceed"]',
+    )!;
+    act(() => {
+      approve.click();
+      approve.click();
+    });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(approve.disabled).toBe(true);
+    await act(async () => {
+      fail(new Error('offline'));
+    });
+    expect(approve.disabled).toBe(false);
+    expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+      'Please try again',
+    );
+    expect(
+      container!.querySelector('[role="tab"][data-state="active"]')!
+        .textContent,
+    ).toBe('Full content');
+    act(() => approve.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('goal-request', 'proceed');
+  });
+
+  it('rearms synchronous failures and ignores late rejection of an older request', async () => {
+    onConfirm.mockImplementationOnce(() => {
+      throw new Error('offline');
+    });
+    render(false, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(container!.querySelector('[role="alert"]')).not.toBeNull();
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    rerender(false, { ...goalRequest, id: 'next-goal' });
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    await act(async () => {
+      fail(new Error('old request'));
+    });
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe('successive goal approvals', () => {
+  it('focuses the safe default when a pending request is replaced', () => {
+    render(true, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    rerender(true, { ...goalRequest, id: 'new-goal' });
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-option-id="reject"]'),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="reject"]')!
+        .disabled,
+    ).toBe(false);
+  });
+});
+
+describe('goal approval objective whitespace', () => {
+  it('does not repeat an objective trimmed by the confirmation producer', () => {
+    render(false, {
+      ...goalRequest,
+      rawInput: { objective: `  ${goalObjective}\n` },
+    });
+    expect(container!.textContent!.split('Audit open PRs.')).toHaveLength(2);
+    expect(container!.textContent).toContain(goalNotice);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+  });
+});

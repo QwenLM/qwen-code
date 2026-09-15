@@ -1456,7 +1456,9 @@ describe('SessionAttachmentStore', () => {
       );
       await fs.mkdir(directory, { recursive: true });
       await fs.writeFile(path.join(directory, 'notes.txt'), 'a');
-      await fs.writeFile(path.join(directory, 'bad?.txt'), 'b');
+      if (process.platform !== 'win32') {
+        await fs.writeFile(path.join(directory, 'bad?.txt'), 'b');
+      }
       await fs.mkdir(path.join(directory, 'sub'));
 
       expect((await store.list()).map((item) => item.attachmentId)).toEqual([

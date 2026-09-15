@@ -135,12 +135,12 @@ export default {
   'type to filter…': 'tapez pour filtrer…',
   'No skills are currently available.':
     'Aucune compétence n’est actuellement disponible.',
-  'All available skills are locked at a higher scope (see below).':
-    'Toutes les compétences disponibles sont verrouillées à une portée supérieure (voir ci-dessous).',
   'No skills match the search.':
     'Aucune compétence ne correspond à la recherche.',
   'Locked by settings entries you cannot toggle here:':
     'Verrouillées par des entrées de paramètres (impossible de basculer ici) :',
+  '{{count}} locked not shown':
+    '{{count}} compétences verrouillées non affichées',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [verrouillée : {{scope}}]',
@@ -634,6 +634,8 @@ export default {
     'Cette extension installera les compétences suivantes :',
   'This extension will install the following subagents:':
     'Cette extension installera les sous-agents suivants :',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Cette extension installera les workflows suivants (scripts JavaScript pouvant lancer des sous-agents) :',
   'Installation cancelled for "{{name}}".':
     'Installation annulée pour "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -699,6 +701,7 @@ export default {
   'Context files:': 'Fichiers de contexte :',
   'Skills:': 'Compétences :',
   'Agents:': 'Agents :',
+  'Workflows:': 'Workflows :',
   'MCP servers:': 'MCP servers :',
   'Link extension failed to install.':
     "Échec de l'installation de l'extension liée.",
@@ -2258,6 +2261,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

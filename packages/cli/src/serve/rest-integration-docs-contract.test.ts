@@ -502,12 +502,11 @@ describe('REST integration documentation contract', () => {
     ).toEqual([]);
 
     const anchors = protocolAnchors();
-    const broken = [
+    const protocolLinks = [
       ...guide.matchAll(/\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)/g),
-    ]
-      .map((match) => match[1])
-      .filter((anchor) => !anchors.has(anchor));
-    expect(broken).toEqual([]);
+    ].map((match) => match[1]);
+    expect(protocolLinks.length).toBeGreaterThan(0);
+    expect(protocolLinks.filter((anchor) => !anchors.has(anchor))).toEqual([]);
   });
 
   it('points every guide flow command at the published server', () => {
@@ -557,7 +556,7 @@ describe('REST integration documentation contract', () => {
     );
   });
 
-  it('keeps the resume request contract to the fields resume reads', () => {
+  it('publishes the resume request schema without the load-only fields', () => {
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
     ) as OpenApiDocument;

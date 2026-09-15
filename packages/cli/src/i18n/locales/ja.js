@@ -99,11 +99,10 @@ export default {
   'Search:': '検索：',
   'type to filter…': 'フィルタを入力…',
   'No skills are currently available.': '利用可能なスキルはありません。',
-  'All available skills are locked at a higher scope (see below).':
-    'すべての利用可能なスキルは上位スコープでロックされています（下記参照）。',
   'No skills match the search.': '検索に一致するスキルはありません。',
   'Locked by settings entries you cannot toggle here:':
     '設定エントリによってロックされています（ここでは切替不可）：',
+  '{{count}} locked not shown': 'ロック中の {{count}} 件を非表示',
   'higher scope': '上位スコープ',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [ロック中：{{scope}}]',
@@ -1703,6 +1702,8 @@ export default {
     'この拡張機能は次のスキルをインストールします:',
   'This extension will install the following subagents:':
     'この拡張機能は次のサブエージェントをインストールします:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'この拡張機能は次のワークフローをインストールします（サブエージェントを起動できる JavaScript スクリプト）:',
   'Installation cancelled for "{{name}}".':
     '"{{name}}" のインストールをキャンセルしました。',
   '--ref and --auto-update are not applicable for marketplace extensions.':
@@ -1761,6 +1762,7 @@ export default {
   'Context files:': 'コンテキストファイル:',
   'Skills:': 'スキル:',
   'Agents:': 'エージェント:',
+  'Workflows:': 'ワークフロー:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'リンク拡張機能のインストールに失敗しました。',
@@ -2022,6 +2024,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

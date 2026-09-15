@@ -69,6 +69,7 @@ import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import * as pemCertificateBlocks from './pem-certificate-blocks.js';
@@ -750,6 +751,153 @@ it('marks only the live-conversation bridge with the Conversations provenance en
   }
 });
 
+it.each([
+  ['chat', false],
+  ['image', false],
+  ['voice', false],
+  ['image', true],
+] as const)(
+  'preserves saved %s configuration through the provider HTTP installer (environment auth: %s)',
+  async (purpose, environmentAuth) => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qws-provider-reconnect-'),
+    );
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    fs.mkdirSync(home);
+    fs.mkdirSync(workspace);
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ]) {
+      vi.stubEnv(key, '');
+    }
+    if (environmentAuth) {
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'OPENAI_API_KEY=environment-chat-key\nOPENAI_MODEL=environment-chat\nOPENAI_BASE_URL=https://chat.example/v1\n',
+      );
+    }
+    vi.stubEnv('QWEN_HOME', home);
+    const baseUrl = 'https://media.example/v1';
+    const id = purpose === 'voice' ? 'qwen3-asr-flash' : `${purpose}-model`;
+    const envKey =
+      qwenCore.generateCustomEnvKey(qwenCore.AuthType.USE_OPENAI, baseUrl) +
+      (purpose === 'chat' ? '' : `_${purpose.toUpperCase()}`);
+    vi.stubEnv(envKey, 'before');
+    const model = {
+      id,
+      baseUrl,
+      envKey,
+      name: 'My tuned model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        samplingParams: { max_tokens: 4000 },
+        customHeaders: { 'X-Route': 'paid' },
+      },
+      ...(purpose === 'image'
+        ? { imageOnly: true, supportsImageGeneration: true }
+        : {}),
+      ...(purpose === 'voice' ? { voiceOnly: true } : {}),
+    };
+    const file = path.join(home, 'settings.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        $version: 4,
+        env: { [envKey]: 'before' },
+        modelProviders: { openai: [model] },
+      }),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          preheatBridge: false,
+          trustedWorkspace: true,
+          daemonLogBaseDir: path.join(root, 'debug'),
+        },
+      );
+      const response = await fetch(`${handle.url}/workspace/auth/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl,
+          apiKey: 'after',
+          modelIds: [id],
+        }),
+      });
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as { message: string };
+      if (purpose !== 'chat') {
+        expect(result.message).toBe(
+          environmentAuth
+            ? 'Service models saved.'
+            : 'Service models saved. Configure a conversation model to start chatting.',
+        );
+      }
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      expect(saved.modelProviders.openai).toEqual([model]);
+      expect(saved.env[envKey]).toBe('after');
+      if (purpose !== 'chat') {
+        expect(saved.security?.auth?.selectedType).toBeUndefined();
+        expect(saved.model?.name).toBeUndefined();
+      }
+      const cleared = await fetch(`${handle.url}/workspace/auth/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl,
+          apiKey: 'after',
+          modelIds: [id],
+          advancedConfig: { replaceExisting: true },
+        }),
+      });
+      expect(cleared.status).toBe(200);
+      expect(
+        JSON.parse(fs.readFileSync(file, 'utf8')).modelProviders.openai,
+      ).toEqual([
+        {
+          ...model,
+          generationConfig: { customHeaders: { 'X-Route': 'paid' } },
+        },
+      ]);
+    } finally {
+      await handle?.close();
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 function writeWebShellFixture(workspaceDir: string): string {
   const shellDir = path.join(workspaceDir, 'web-shell');
   fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
@@ -893,6 +1041,199 @@ describe('workspace skill settings persistence', () => {
     else process.env['QWEN_HOME'] = previousQwenHome;
     settingsRuntime.resetHomeEnvBootstrapForTesting();
     vi.restoreAllMocks();
+  });
+
+  const skillStatus = (
+    name: string,
+    level: ServeWorkspaceSkillStatus['level'],
+    extensionName?: string,
+  ): ServeWorkspaceSkillStatus => ({
+    kind: 'skill',
+    status: 'ok',
+    name,
+    description: name,
+    level,
+    modelInvocable: true,
+    ...(extensionName ? { extensionName } : {}),
+  });
+
+  const writeSkillSettings = (
+    workspaceDisabled: string[],
+    userDisabled: string[] = [],
+  ) => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-identity-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-identity-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: workspaceDisabled } }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ skills: { disabled: userDisabled } }),
+    );
+  };
+
+  const captureSkillPersistence = async (
+    skills: ServeWorkspaceSkillStatus[],
+  ) => {
+    const originalCreateServeApp = serverModule.createServeApp;
+    let deps: Parameters<typeof serverModule.createServeApp>[2];
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      deps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    const bridge = {
+      ...makeRuntimeBridge(),
+      queryWorkspaceStatus: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills,
+      }),
+    } as unknown as HttpAcpBridge;
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge },
+    );
+    await handle.runtimeReady;
+    expect(deps?.persistDisabledSkills).toBeDefined();
+    expect(deps?.persistDisabledSkillsBatch).toBeDefined();
+    return deps!;
+  };
+
+  it('uses catalog identity for a non-extension skill whose name contains a colon', async () => {
+    writeSkillSettings(['rust:chat', 'chat']);
+    const { persistDisabledSkills } = await captureSkillPersistence([
+      skillStatus('rust:chat', 'project'),
+    ]);
+
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:chat', true),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['chat'],
+      settingsChanges: [
+        { key: 'skills.disabled', value: ['chat'] },
+        { key: 'skills.enabled', value: ['rust:chat'] },
+      ],
+    });
+  });
+
+  it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
+    writeSkillSettings([], ['pdf', 'legacy']);
+    const { persistDisabledSkills } = await captureSkillPersistence([
+      skillStatus('rust:pdf', 'extension', 'rust'),
+    ]);
+
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:pdf', true),
+    ).resolves.toMatchObject({
+      changed: false,
+      block: { entry: 'pdf', scope: 'User' },
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:legacy', true),
+    ).resolves.toMatchObject({
+      changed: false,
+      block: { entry: 'legacy', scope: 'User' },
+    });
+  });
+
+  it('makes a batch enable order-independent without bypassing a user block', async () => {
+    writeSkillSettings(['pdf'], ['locked']);
+    const { persistDisabledSkillsBatch } = await captureSkillPersistence([
+      skillStatus('pdf', 'user'),
+      skillStatus('rust:pdf', 'extension', 'rust'),
+      skillStatus('rust:locked', 'extension', 'rust'),
+    ]);
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+
+    const first = await persistDisabledSkillsBatch!(
+      workspace,
+      ['pdf', 'rust:pdf'],
+      true,
+    );
+    expect(first.outcomes).toEqual([
+      { skillName: 'pdf', changed: true },
+      { skillName: 'rust:pdf', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['pdf'] } }),
+    );
+    setValues.mockClear();
+
+    const reversed = await persistDisabledSkillsBatch!(
+      workspace,
+      ['rust:pdf', 'pdf'],
+      true,
+    );
+    expect(reversed.outcomes).toEqual([
+      { skillName: 'rust:pdf', changed: true },
+      { skillName: 'pdf', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: [] } }),
+    );
+    setValues.mockClear();
+
+    const blocked = await persistDisabledSkillsBatch!(
+      workspace,
+      ['rust:locked'],
+      true,
+    );
+    expect(blocked.outcomes).toEqual([
+      { skillName: 'rust:locked', changed: false },
+    ]);
+    expect(setValues).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a batch until a multi-step alias chain converges', async () => {
+    writeSkillSettings(['y:z', 'z']);
+    const { persistDisabledSkillsBatch } = await captureSkillPersistence([
+      skillStatus('x:y:z', 'extension', 'x'),
+      skillStatus('y:z', 'extension', 'y'),
+      skillStatus('z', 'project'),
+    ]);
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+
+    const result = await persistDisabledSkillsBatch!(
+      workspace,
+      ['x:y:z', 'y:z', 'z'],
+      true,
+    );
+
+    expect(result.outcomes).toEqual([
+      { skillName: 'x:y:z', changed: true },
+      { skillName: 'y:z', changed: true },
+      { skillName: 'z', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
   });
 
   it('canonicalizes, deduplicates, preserves orphans, and serializes updates across settings scopes', async () => {
@@ -13111,7 +13452,7 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
-  it('reports the wildcard bound address, not the inet_aton spelling', async () => {
+  it('reports what the socket bound, not what the operator typed', async () => {
     mockRemoteQuickstart.print.mockClear();
     vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-aton-pin');
     tmpDir = fs.realpathSync(
@@ -13122,7 +13463,7 @@ describe('runQwenServe channel worker supervisor', () => {
       started = await runQwenServe(
         {
           port: 0,
-          hostname: '0',
+          hostname: '0.0.0.0',
           mode: 'http-bridge',
           serveWebShell: false,
           workspace: tmpDir,
@@ -13131,10 +13472,21 @@ describe('runQwenServe channel worker supervisor', () => {
       );
       expect(mockRemoteQuickstart.print).toHaveBeenCalledOnce();
       const arg = mockRemoteQuickstart.print.mock.calls[0][0];
-      // The operator spelling and the socket address differ here, so this
-      // pins that boot reports what the socket bound, not what was typed.
-      expect(arg.bind).toBe('0');
-      expect(arg.boundAddress).toBe('0.0.0.0');
+      const socket = started.server.address() as {
+        address: string;
+        port: number;
+      };
+      // This case used to bind the inet_aton spelling '0' so the typed value
+      // and the socket address differed, but Windows answers that with
+      // `getaddrinfo ENOTFOUND 0`. remote-quickstart.test.ts already pins the
+      // spelling normalisation ('0', '0.0', '::0', …) platform-independently,
+      // so what is left to witness here is the port: the operator typed 0, so
+      // a report echoing its own input would show 0 rather than the ephemeral
+      // port the listener actually got.
+      expect(arg.bind).toBe('0.0.0.0');
+      expect(arg.boundAddress).toBe(socket.address);
+      expect(arg.port).toBe(socket.port);
+      expect(arg.port).not.toBe(0);
     } finally {
       vi.unstubAllEnvs();
       await started?.close();

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.23.3",
+  "version": "0.23.4",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -44,6 +44,10 @@
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"
+    },
+    "./board": {
+      "types": "./dist/src/board.d.ts",
+      "import": "./dist/src/board.js"
     },
     "./noFollowOpen": {
       "types": "./dist/src/utils/no-follow-open.d.ts",

@@ -1563,6 +1563,19 @@ export class PermissionManager {
   }
 
   /**
+   * Drop every session allow rule, including any stashed by AUTO mode.
+   * Called when the process swaps sessions: `PermissionManager` outlives the
+   * swap, so a skill's `allowedTools` granted for one session would otherwise
+   * keep auto-approving in the next.
+   */
+  clearSessionAllowRules(): void {
+    this.sessionRules.allow = [];
+    if (this.strippedAllowRules) {
+      this.strippedAllowRules.session = [];
+    }
+  }
+
+  /**
    * Return a snapshot of currently-stashed dangerous allow rules.
    * Used by the UI to surface a "the following rules are disabled in AUTO
    * mode" notice. Returns `undefined` when not currently in AUTO.

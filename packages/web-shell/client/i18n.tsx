@@ -541,6 +541,21 @@ const EN: Messages = {
       : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
   'visionBridge.ok': (v) =>
     `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
+  'approval.goal.title': 'Confirm session goal',
+  'approval.goal.overview': 'Goal overview',
+  'approval.goal.full': 'Full content',
+  'approval.goal.outcome': 'Outcome',
+  'approval.goal.doneWhen': 'Completion criteria',
+  'approval.goal.mustNot': 'Constraints',
+  'approval.goal.budget': 'Budget',
+  'approval.goal.onBlock': 'When blocked',
+  'approval.goal.context': 'Context',
+  'approval.goal.confirm': 'Set goal and continue',
+  'approval.goal.reject': 'Not now',
+  'approval.goal.hint':
+    'Setting this goal continues execution and checks progress after each turn. Blockers will be reported.',
+  'approval.goal.pending': 'Submitting…',
+  'approval.goal.failed': 'Could not submit your choice. Please try again.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -858,7 +873,7 @@ const EN: Messages = {
   'contextUsage.builtinTools': 'Built-in tools',
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
-  'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedOverhead': 'Estimated base overhead',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -868,15 +883,14 @@ const EN: Messages = {
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
     'No active session yet. Send your first message before viewing context usage.',
-  'contextUsage.noApiResponse':
-    'No API response yet. Send a message to see actual usage.',
+  'contextUsage.usageUnavailable':
+    'Current context usage is unavailable. The estimates below cover base overhead only, excluding conversation messages.',
   'contextUsage.overLimit':
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': 'System prompt',
   'contextUsage.title': 'Context Usage',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
   'contextUsage.accessibleUsage': (v) =>
     `${v?.used} of ${v?.total} tokens used`,
@@ -1262,6 +1276,8 @@ const EN: Messages = {
   'workflowRuns.user': 'User',
   'workflowRuns.projectDescription': 'Available in this project',
   'workflowRuns.userDescription': 'Available across projects',
+  'workflowRuns.extension': 'Extension',
+  'workflowRuns.extensionDescription': 'Provided by an installed extension',
   'workflowRuns.detail.toggle': (v) => `Show details for ${v?.name ?? ''}`,
   'workflowRuns.detail.loading': 'Loading workflow definition…',
   'workflowRuns.detail.unavailable':
@@ -1471,6 +1487,8 @@ const EN: Messages = {
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.protocolMismatch':
+    'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
   'localFiles.trigger': 'Local files',
   'localFiles.hint':
@@ -1839,6 +1857,14 @@ const EN: Messages = {
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
+  'background.result': 'Background result',
+  'background.agent': 'Background agent',
+  'background.running': 'Background tasks running',
+  'background.task': 'Background task',
+  'background.details': 'View details',
+  'background.processing': (v) => `Processing ${v?.label ?? ''} results`,
+  'background.source': 'Source',
+  'background.pending': 'Awaiting processing',
   'system.taskCompleted': 'Background task completed',
   'system.taskFailed': 'Background task failed',
   'system.taskCancelled': 'Background task cancelled',
@@ -2006,7 +2032,7 @@ const EN: Messages = {
   'auth.documentation': 'Documentation',
   'auth.modelsRequired': 'Model IDs cannot be empty.',
   'auth.review': 'Review',
-  'auth.reviewText': 'The following JSON will be saved to settings.json:',
+  'auth.reviewText': 'Review the connection and model settings before saving.',
   'auth.save': 'Save',
   'auth.saving': 'Saving...',
   'auth.termsTitle': 'Terms of Services and Privacy Notice',
@@ -2016,7 +2042,7 @@ const EN: Messages = {
   'auth.advanced.prompt': 'Optional: configure advanced generation settings.',
   'auth.advanced.thinking': 'Enable thinking',
   'auth.advanced.thinkingDesc':
-    'Allows the model to perform extended reasoning before responding.',
+    'Enable extended reasoning. Leave off to use the model default.',
   'auth.advanced.modality': 'Enable modality',
   'auth.advanced.modalityDesc':
     'Enables multimodal input capabilities (image, video, etc.).',
@@ -2026,8 +2052,17 @@ const EN: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': 'Context window',
   'auth.advanced.contextDesc':
-    'Max input tokens (leave empty to auto-detect from model name).',
+    'Context window capacity in tokens. Leave empty to infer the limit from the model ID.',
   'auth.advanced.contextPlaceholder': 'Context window (optional)',
+  'auth.advanced.maxTokens': 'Maximum output tokens',
+  'auth.advanced.maxTokensDesc':
+    'Maximum tokens per response. Leave empty to infer the limit from the model ID.',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token limit'} must be a whole number between 1 and 10,000,000.`,
+  'auth.advanced.modalitiesRequired':
+    'Select at least one input type or turn off modality.',
+  'auth.advanced.defaults': 'Use model defaults',
+  'auth.apiKeySet': 'Set (hidden)',
   'local.btw':
     'Ask a quick side question without affecting the main conversation. Usage: /btw <your question>',
   'btw.empty': 'Please provide a question. Usage: /btw <your question>',
@@ -2618,6 +2653,36 @@ const EN: Messages = {
   'reasoning.updateFailed': 'Failed to update reasoning options',
   'model.setFast': 'Set Fast Model',
   'model.setVoice': 'Set Voice Model',
+  'auth.purpose.label': 'Model purpose',
+  'auth.purpose.chat': 'Conversation',
+  'auth.purpose.chatHint':
+    'Use this provider for conversation. The current model is retained when it is included in the configuration.',
+  'auth.purpose.image': 'Image generation',
+  'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.imageHint':
+    'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
+  'auth.purpose.voiceHint':
+    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+  'settings.models.editWindow': 'Edit context window',
+  'settings.models.windowHint':
+    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
+  'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
+  'settings.models.saved': 'Saved',
+  'model.setAdvisor': 'Set Advisor Model',
+  'settings.label.advisorModel': 'Advisor Model',
+  'settings.label.imageModel': 'Image Model',
+  'settings.label.voiceModel': 'Voice Model',
+  'settings.description.advisorModel':
+    'Model used to review recent conversation progress. Leave empty to use the main model.',
+  'settings.description.imageModel':
+    'Model used for image generation. Add a custom model with Image generation purpose, then select it here.',
+  'settings.description.voiceModel':
+    'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
+
+  'model.setImage': 'Set Image Model',
+  'model.useMain': 'Use main model',
+  'model.disabled': 'Disabled',
+
   'model.setVision': 'Set Vision Model',
   'model.switch': 'Switch Model',
   'model.unknown': 'unknown',
@@ -2784,8 +2849,26 @@ const EN: Messages = {
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
   'contextUsage.refresh': 'Refresh',
+  'contextUsage.remaining': 'Remaining',
+  'contextUsage.advanced': 'Advanced · usage by category',
+  'contextUsage.snapshot': 'Snapshot',
+  'contextUsage.viewCurrent': 'View current context',
+  'contextUsage.compress': 'Compress context',
+  'contextUsage.compressing': 'Compressing…',
+  'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressCancelled':
+    'Cancellation requested. Refresh to check current usage.',
+  'contextUsage.compressInterrupted':
+    'Connection changed during compression. Refresh to check current usage.',
+  'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.compressRefreshFailed':
+    'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
+  'contextUsage.compressUnavailable':
+    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.previousReading':
+    'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
@@ -2865,6 +2948,8 @@ const EN: Messages = {
   'planExecution.unblocks': 'Unblocks:',
   'planExecution.unassigned': 'Unassigned executions',
   'planExecution.attention': 'Needs attention',
+  'planExecution.agentCount': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count ?? 0) === 1 ? 'agent' : 'agents'}`,
   'planExecution.status.running': 'Running',
   'planExecution.status.paused': 'Paused',
   'planExecution.status.completed': 'Completed',
@@ -2904,6 +2989,7 @@ const EN: Messages = {
   'workflow.dependencies.unblocks': 'Unblocks',
   'workflow.dependencies.noDownstream': 'No downstream steps',
   'workflow.activity.empty': 'No Agent runs are linked to a Todo yet.',
+  'workflow.activity.showAll': (v) => `Show all ${v?.count ?? 0} runs`,
   'workflow.deliverables.title': 'Session deliverables',
   'workflow.deliverables.none': 'No artifacts have been published yet',
   'workflow.status.running': 'Running',
@@ -3478,6 +3564,14 @@ const EN: Messages = {
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
   'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.dws.senderPolicy': 'Sender policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
+  'channels.editor.field.dws.dmPolicy': 'Direct message access',
+  'channels.editor.field.dws.dmPolicy.description':
+    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
+  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
+  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
   'channels.editor.field.shared.senderPolicy.description':
     'Choose who can start a direct conversation with this Channel.',
   'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
@@ -3632,10 +3726,15 @@ const EN: Messages = {
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
+  'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
+  'settings.models.credentialEnv': 'Key environment variable',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
   'settings.models.current': 'Current',
   'settings.models.runtime': 'Runtime',
+  'settings.models.savedConfiguration': 'Saved configuration',
+  'settings.models.ambiguousWindow':
+    'Multiple configurations share this route. Its context window cannot be edited here.',
   'settings.models.delete': 'Delete',
   'settings.models.confirmDelete': 'Confirm',
   'settings.models.cancel': 'Cancel',
@@ -4271,6 +4370,21 @@ const ZH: Messages = {
       : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
   'visionBridge.ok': (v) =>
     `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
+  'approval.goal.title': '确认会话目标',
+  'approval.goal.overview': '目标概览',
+  'approval.goal.full': '完整内容',
+  'approval.goal.outcome': '目标',
+  'approval.goal.doneWhen': '完成条件',
+  'approval.goal.mustNot': '执行边界',
+  'approval.goal.budget': '预算',
+  'approval.goal.onBlock': '遇到阻塞时',
+  'approval.goal.context': '上下文',
+  'approval.goal.confirm': '设置并继续',
+  'approval.goal.reject': '暂不设置',
+  'approval.goal.hint':
+    '设置后将继续执行，并在每轮结束时检查目标进展；遇到阻塞会说明原因。',
+  'approval.goal.pending': '正在提交…',
+  'approval.goal.failed': '提交失败，请重试。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -4553,7 +4667,7 @@ const ZH: Messages = {
   'contextUsage.builtinTools': '内置工具',
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
-  'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedOverhead': '基础开销估算',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -4563,15 +4677,14 @@ const ZH: Messages = {
   'contextUsage.model': '模型',
   'contextUsage.noSession':
     '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
-  'contextUsage.noApiResponse':
-    '尚无 API 响应。发送一条消息后可查看实际使用量。',
+  'contextUsage.usageUnavailable':
+    '当前上下文用量暂不可用。下方仅为基础开销估算，不含对话消息。',
   'contextUsage.overLimit':
     '上下文已超过限制！请使用 /compress 或 /clear 减少占用。',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': '系统提示词',
   'contextUsage.title': '上下文使用情况',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
   'contextUsage.accessibleUsage': (v) => `已用 ${v?.used} / ${v?.total} tokens`,
   'contextUsage.viewDetails': '查看明细',
@@ -4929,6 +5042,8 @@ const ZH: Messages = {
   'workflowRuns.user': '用户',
   'workflowRuns.projectDescription': '仅在当前项目中可用',
   'workflowRuns.userDescription': '在所有项目中可用',
+  'workflowRuns.extension': '扩展',
+  'workflowRuns.extensionDescription': '由已安装的扩展提供',
   'workflowRuns.detail.toggle': (v) => `查看 ${v?.name ?? ''} 的详情`,
   'workflowRuns.detail.loading': '正在加载工作流定义…',
   'workflowRuns.detail.unavailable': '这个工作流定义已不可用。',
@@ -5124,6 +5239,8 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.protocolMismatch':
+    '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
   'localFiles.trigger': '本地文件',
   'localFiles.hint':
@@ -5465,6 +5582,14 @@ const ZH: Messages = {
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
+  'background.result': '后台结果',
+  'background.agent': '后台智能体',
+  'background.running': '后台任务执行中',
+  'background.task': '后台任务',
+  'background.details': '查看详情',
+  'background.processing': (v) => `正在处理 ${v?.label ?? ''} 结果`,
+  'background.source': '来源',
+  'background.pending': '等待处理',
   'system.taskCompleted': '后台任务执行完成',
   'system.taskFailed': '后台任务执行失败',
   'system.taskCancelled': '后台任务已取消',
@@ -5611,7 +5736,7 @@ const ZH: Messages = {
   'auth.documentation': '文档',
   'auth.modelsRequired': '模型 ID 不能为空。',
   'auth.review': '确认',
-  'auth.reviewText': '以下 JSON 将保存到 settings.json：',
+  'auth.reviewText': '保存前请确认连接信息和模型参数。',
   'auth.save': '保存',
   'auth.saving': '正在保存...',
   'auth.termsTitle': '服务条款和隐私声明',
@@ -5620,7 +5745,7 @@ const ZH: Messages = {
     `输入以逗号分隔的模型 ID。例如：${v?.modelIds ?? ''}`,
   'auth.advanced.prompt': '可选：配置高级生成设置。',
   'auth.advanced.thinking': '启用 thinking',
-  'auth.advanced.thinkingDesc': '允许模型在回复前进行扩展推理。',
+  'auth.advanced.thinkingDesc': '启用扩展推理；不勾选时保留模型默认行为。',
   'auth.advanced.modality': '启用多模态',
   'auth.advanced.modalityDesc': '启用图片、视频等多模态输入能力。',
   'auth.advanced.modalityImage': '图片',
@@ -5629,8 +5754,17 @@ const ZH: Messages = {
   'auth.advanced.modalityPdf': 'PDF',
   'auth.advanced.contextWindow': '上下文窗口',
   'auth.advanced.contextDesc':
-    '最大输入 token 数（留空则根据模型名称自动检测）。',
+    '模型的上下文窗口 Token 容量，留空根据模型 ID 自动推断。',
   'auth.advanced.contextPlaceholder': '上下文窗口（可选）',
+  'auth.advanced.maxTokens': '最大输出 Token',
+  'auth.advanced.maxTokensDesc':
+    '每次回复的最大 Token 数，留空根据模型 ID 自动推断。',
+  'auth.advanced.tokenLimitInvalid': (v) =>
+    `${v?.field ?? 'Token 上限'}必须是 1 到 10,000,000 之间的整数。`,
+  'auth.advanced.modalitiesRequired':
+    '请至少选择一种输入类型，或关闭多模态选项。',
+  'auth.advanced.defaults': '使用模型默认值',
+  'auth.apiKeySet': '已设置（隐藏）',
   'local.btw': '快速问一个不影响主对话的侧边问题。用法：/btw <your question>',
   'btw.empty': '请提供一个问题。用法：/btw <你的问题>',
   'btw.side.empty': '请提供一个问题。用法：/btw side <你的问题>',
@@ -6176,6 +6310,35 @@ const ZH: Messages = {
   'reasoning.updateFailed': '更新思考选项失败',
   'model.setFast': '设置 Fast Model',
   'model.setVoice': '设置语音模型',
+  'auth.purpose.label': '模型用途',
+  'auth.purpose.chat': '对话',
+  'auth.purpose.chatHint':
+    '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
+  'auth.purpose.image': '生图',
+  'auth.purpose.voice': '语音转写',
+  'auth.purpose.imageHint':
+    '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
+  'auth.purpose.voiceHint':
+    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+  'settings.models.editWindow': '配置窗口大小',
+  'settings.models.windowHint':
+    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
+  'settings.models.windowSaved': '已保存，重启已有会话后生效。',
+  'settings.models.saved': '已保存',
+  'model.setAdvisor': '设置顾问模型',
+  'settings.label.advisorModel': '顾问模型',
+  'settings.label.imageModel': '生图模型',
+  'settings.label.voiceModel': '语音转写模型',
+  'settings.description.advisorModel': '用于复查近期对话进展，默认使用主模型。',
+  'settings.description.imageModel':
+    '用于生成图片。添加自定义模型时选择“生图”用途，再在这里选择。',
+  'settings.description.voiceModel':
+    '用于将语音转成文字。添加自定义模型时选择“语音转写”用途，再在这里选择。',
+
+  'model.setImage': '设置生图模型',
+  'model.useMain': '使用主模型',
+  'model.disabled': '不启用',
+
   'model.setVision': '设置视觉模型',
   'model.switch': '切换模型',
   'model.unknown': '未知',
@@ -6331,8 +6494,24 @@ const ZH: Messages = {
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
   'contextUsage.refresh': '刷新',
+  'contextUsage.remaining': '剩余',
+  'contextUsage.advanced': '高级 · 用量分类',
+  'contextUsage.snapshot': '历史快照',
+  'contextUsage.viewCurrent': '查看当前上下文',
+  'contextUsage.compress': '手动压缩',
+  'contextUsage.compressing': '正在压缩…',
+  'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
+  'contextUsage.compressInterrupted':
+    '压缩期间连接发生变化，请刷新查看当前使用量。',
+  'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.compressRefreshFailed':
+    '压缩已完成，但用量刷新失败。请点击刷新重试。',
+  'contextUsage.compressUnavailable':
+    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
@@ -6411,6 +6590,7 @@ const ZH: Messages = {
   'planExecution.unblocks': '解锁：',
   'planExecution.unassigned': '未关联的执行',
   'planExecution.attention': '需要关注',
+  'planExecution.agentCount': (v) => `${v?.count ?? 0} 个 Agent`,
   'planExecution.status.running': '运行中',
   'planExecution.status.paused': '已暂停',
   'planExecution.status.completed': '已完成',
@@ -6449,6 +6629,7 @@ const ZH: Messages = {
   'workflow.dependencies.unblocks': '解除阻塞',
   'workflow.dependencies.noDownstream': '没有下游步骤',
   'workflow.activity.empty': '还没有关联到待办的 Agent 执行。',
+  'workflow.activity.showAll': (v) => `查看全部 ${v?.count ?? 0} 条执行`,
   'workflow.deliverables.title': '会话交付物',
   'workflow.deliverables.none': '尚未发布产物',
   'workflow.status.running': '运行中',
@@ -6976,6 +7157,14 @@ const ZH: Messages = {
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
   'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
+  'channels.editor.field.dws.dmPolicy': '私聊访问',
+  'channels.editor.field.dws.dmPolicy.description':
+    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
+  'channels.editor.field.dws.dmPolicy.option.open': '开放',
+  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
   'channels.editor.field.shared.senderPolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
   'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
@@ -7125,10 +7314,15 @@ const ZH: Messages = {
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
+  'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
+  'settings.models.credentialEnv': '密钥环境变量',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
   'settings.models.current': '当前',
   'settings.models.runtime': '运行时',
+  'settings.models.savedConfiguration': '已保存配置',
+  'settings.models.ambiguousWindow':
+    '多个配置共用此模型端点，无法在此修改窗口大小。',
   'settings.models.delete': '删除',
   'settings.models.confirmDelete': '确认删除',
   'settings.models.cancel': '取消',

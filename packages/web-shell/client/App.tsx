@@ -71,6 +71,7 @@ import type {
   DaemonStandaloneSessionLookup,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceSkillsStatus,
   GoalSnapshotV2,
   ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
@@ -102,6 +103,7 @@ import type {
 import { TranscriptViewport } from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
+import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -110,9 +112,9 @@ import {
   getTaskActivityKey,
   hasActiveTaskActivity,
 } from './utils/taskActivity';
-import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
+import type { VoiceModelOption } from './voice/voiceModels';
 import {
-  loadVoiceProviders,
+  loadVoiceStatus,
   resolveVoiceWorkspaceTarget,
   setVoiceModelSetting,
   supportsVoiceModelSettings,
@@ -127,6 +129,11 @@ import {
   loadSessionCatalogOnce,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
 } from './session-catalog/session-catalog-store';
+import {
+  useContextUsageControls,
+  type ContextUsageControls,
+  type RegisterContextUsageControls,
+} from './hooks/useContextUsageControls';
 import { useWorkspaceSessionLiveState } from './session-catalog/workspace-session-live-state';
 import { isAbsolutePath } from './components/sidebar/WorkspaceSection';
 import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
@@ -604,6 +611,8 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
   main: 'model.select',
   fast: 'model.setFast',
   voice: 'model.setVoice',
+  advisor: 'model.setAdvisor',
+  image: 'model.setImage',
   vision: 'model.setVision',
 };
 
@@ -1191,7 +1200,11 @@ export interface WebShellProps {
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Imperative handle for externally opening WebShell surfaces. */
   shellRef?: React.Ref<WebShellApi>;
-  /** Built-in composer toolbar actions to show. Plan must be explicitly included. */
+  /**
+   * Built-in composer toolbar actions to show. Omitted uses the defaults.
+   * Excluding gitBranch skips chat Git reads unless the environment panel
+   * needs them. Plan must be explicitly included.
+   */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
@@ -3432,13 +3445,15 @@ export function App({
         : undefined
       : connection.workspaceCwd;
   const {
-    hasActivePrompt: sessionHasActivePrompt,
+    hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
   } = useDaemonSessionActivityBridge(
     workspace.client,
     activePromptWorkspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePrompt =
+    daemonHasActivePrompt || !!connection.backgroundTurn;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const trustedPrimaryWorkspaceCwd = useMemo(
@@ -3909,87 +3924,11 @@ export function App({
       ? (connection.supportedCommands?.workflowsEnabled ??
         workspaceWorkflowsEnabled)
       : workspaceWorkflowsEnabled;
-  // Worktree sessions query git status with the worktree path (?cwd=
-  // parameter); the chip prefers the live branch from that status, falling
-  // back to the creation-time sessionWorktree.branch.
-  useEffect(() => {
-    if (!activeWorkspaceCwd || isKnownLiveWorkspaceCwd(activeWorkspaceCwd)) {
-      gitStatusWorkspaceCwdRef.current = undefined;
-      setSelectedWorkspaceGitStatus(undefined);
-      return;
-    }
-    const statusTarget = sessionWorktree?.path ?? activeWorkspaceCwd;
-    if (gitStatusWorkspaceCwdRef.current !== statusTarget) {
-      gitStatusWorkspaceCwdRef.current = statusTarget;
-      setSelectedWorkspaceGitStatus(undefined);
-    }
-    let cancelled = false;
-    const fetchStatus = () => {
-      const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
-      // Fast path: last-known cache (branch-only on a cold start) paints the
-      // chip immediately.
-      void git
-        .workspaceGit({ cwd: sessionWorktree?.path })
-        .then((status) => {
-          if (!cancelled) {
-            setSelectedWorkspaceGitStatus((current) =>
-              isSameGitStatus(current, status) ? current : status,
-            );
-          }
-        })
-        .catch(() => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
-        });
-      // Fresh path: resolves when the daemon's recomputation lands, so the
-      // enriched counters fill in without depending on SSE — the
-      // `git_status_changed` push only flows on a per-session event stream,
-      // which doesn't exist before the first prompt (deferred connect).
-      // Daemon-side in-flight dedup shares one `git status` computation
-      // across both requests. Worktree `?cwd=` reads always compute
-      // directly, so a second request would be a duplicate there.
-      if (!sessionWorktree) {
-        void git
-          .workspaceGit({ wait: true })
-          .then((status) => {
-            if (!cancelled) {
-              setSelectedWorkspaceGitStatus((current) =>
-                isSameGitStatus(current, status) ? current : status,
-              );
-            }
-          })
-          .catch((err) => {
-            console.warn('[web-shell] git status fresh path failed:', err);
-          });
-      }
-    };
-    fetchStatus();
-    // Refresh triggers stay on focus and on a slow poll for the active
-    // workspace only. A live branch change re-runs this effect via the
-    // connection.gitBranch dependency. With an active session the daemon's
-    // `git_status_changed` push (mirrored by the effect below) additionally
-    // covers realtime updates between polls.
-    const onFocus = () => fetchStatus();
-    window.addEventListener('focus', onFocus);
-    const poll = window.setInterval(() => {
-      if (document.visibilityState === 'visible') fetchStatus();
-    }, 30_000);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('focus', onFocus);
-      window.clearInterval(poll);
-    };
-  }, [
-    activeWorkspaceCwd,
-    connection.gitBranch,
-    isKnownLiveWorkspaceCwd,
-    workspace.client,
-    sessionWorktree,
-  ]);
   // Mirror the daemon's `git_status_changed` push (surfaced as
   // connection.gitStatus by the session provider) into the chip state so the
   // enriched counters fill in right after the branch-only first paint.
   // Worktree sessions bypass the daemon cache/SSE path — their status comes
-  // from the ?cwd= fetch above.
+  // from the worktree-qualified ?cwd= fetch.
   useEffect(() => {
     const status = connection.gitStatus;
     if (!status || sessionWorktree) return;
@@ -5481,6 +5420,15 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openCurrentContextUsagePanel = useCallback(() => {
+    if (connection.sessionId)
+      openContextUsagePanel(connection.sessionId, sessionActions);
+  }, [connection.sessionId, openContextUsagePanel, sessionActions]);
+  const openPaneContextUsagePanel = useCallback(
+    (sessionId: string, actions: DaemonSessionActions) =>
+      openContextUsagePanel(sessionId, actions, true),
+    [openContextUsagePanel],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -5875,6 +5823,29 @@ export function App({
                 workspaceCwd: tab.workspaceCwd,
               };
             }
+          }
+        }
+        if (!restored && tab.targetKind === 'subagent' && tab.taskId) {
+          const snapshot = await workspace.client.sessionTasks(
+            tab.sourceSessionId,
+          );
+          const task =
+            snapshot.sessionId === tab.sourceSessionId
+              ? snapshot.tasks.find(
+                  (item) => item.kind === 'agent' && item.id === tab.taskId,
+                )
+              : undefined;
+          if (task?.kind === 'agent') {
+            const rootTool = agentTaskAsToolCall(task);
+            restored = {
+              id: tab.id,
+              kind: 'subagent',
+              title: tab.title,
+              sessionId: tab.sourceSessionId,
+              rootToolCallId: rootTool.callId,
+              rootTool,
+              workspaceCwd: tab.workspaceCwd,
+            };
           }
         }
         if (!restored) {
@@ -6580,6 +6551,44 @@ export function App({
         onRightPanelOpen(request);
         return;
       }
+      if (request.kind === 'background_task') {
+        if (!request.sourceSessionId) return;
+        const turn = request.backgroundTurn;
+        const tab: ArtifactPanelTab =
+          turn.kind === 'workflow'
+            ? {
+                id: `workflow:${request.sourceSessionId}`,
+                kind: 'workflow',
+                title: request.title,
+                sessionId: request.sourceSessionId,
+              }
+            : {
+                id: request.id,
+                kind: 'pending',
+                title: request.title,
+                targetKind: turn.kind === 'agent' ? 'subagent' : turn.kind,
+                sourceSessionId: request.sourceSessionId,
+                rootToolCallId: turn.toolUseId,
+                taskId: turn.taskId,
+                workspaceCwd: request.workspaceCwd,
+              };
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+        if (tab.kind === 'pending') {
+          const existing = artifactPanelTabsRef.current.find(
+            (item) => item.id === tab.id,
+          );
+          if (!existing || existing.kind === 'pending')
+            void hydratePendingArtifactPanelTab(tab);
+        }
+        return;
+      }
       if (request.kind === 'review') {
         openReviewPanel(
           request.changes,
@@ -6728,6 +6737,7 @@ export function App({
     },
     [
       getDefaultReviewPanelWidth,
+      hydratePendingArtifactPanelTab,
       onFileReviewOpen,
       onRightPanelOpen,
       openReviewPanel,
@@ -7558,6 +7568,7 @@ export function App({
   }
   previousStreamingStateRef.current = streamingState;
   const activeTurnStartedAt = useMemo(() => {
+    if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (streamingState === 'idle') return undefined;
     for (let i = displayMessages.length - 1; i >= 0; i--) {
       const message = displayMessages[i];
@@ -7566,7 +7577,7 @@ export function App({
       }
     }
     return localStreamingStartedAtRef.current;
-  }, [displayMessages, streamingState]);
+  }, [displayMessages, streamingState, connection.backgroundTurn]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
@@ -7593,6 +7604,16 @@ export function App({
   const [showRetryHint, setShowRetryHint] = useState(false);
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
+  const disarmSubmittedPromptRetry = useCallback(() => {
+    lastSubmittedPromptRef.current = '';
+    lastSubmittedImagesRef.current = undefined;
+    lastSubmittedFilesRef.current = undefined;
+    lastSubmittedInputAnnotationsRef.current = undefined;
+    retryableTurnErrorIdRef.current = null;
+    retryableTurnErrorIdentityRef.current = undefined;
+    retriedTurnErrorIdRef.current = null;
+    failedTurnErrorRetryRef.current = null;
+  }, []);
   const rearmFailedTurnErrorRetry = useCallback(
     (
       retryableTurnError: DaemonTranscriptBlock,
@@ -7871,6 +7892,51 @@ export function App({
   ]);
   const connected = connection.status === 'connected';
   const workspaceEventSignals = useWorkspaceEventSignals();
+  const [showHelpDialog, setShowHelpDialog] = useState(false);
+  const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
+  const skillsCatalogActive =
+    composerSkillsOpen || showHelpDialog || Boolean(renderFooter);
+  const skillsCatalogForNewSession = connection.sessionId === undefined;
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsLoadError, setSkillsLoadError] = useState(false);
+  const skillsLoadRef = useRef<
+    | {
+        key: object;
+        cwd: string | undefined;
+        forNewSession: boolean;
+        notifyOnError: boolean;
+        request: number;
+        promise: Promise<DaemonWorkspaceSkillsStatus | false | undefined>;
+      }
+    | undefined
+  >(undefined);
+  const skillsCatalogCacheRef = useRef<
+    | {
+        key: object;
+        promise: Promise<DaemonWorkspaceSkillsStatus | false | undefined>;
+      }
+    | undefined
+  >(undefined);
+  const skillsCatalogKey = useMemo(
+    () => ({
+      cwd: connection.workspaceCwd,
+      forNewSession: skillsCatalogForNewSession,
+      client: workspace.client,
+      settings: workspaceEventSignals?.settingsVersion,
+      extensions: workspaceEventSignals?.extensionsVersion,
+      skills: workspaceEventSignals?.skillsVersion,
+    }),
+    [
+      connection.workspaceCwd,
+      skillsCatalogForNewSession,
+      workspace.client,
+      workspaceEventSignals?.settingsVersion,
+      workspaceEventSignals?.extensionsVersion,
+      workspaceEventSignals?.skillsVersion,
+    ],
+  );
+  const skillsCatalogKeyRef = useRef(skillsCatalogKey);
+  skillsCatalogKeyRef.current = skillsCatalogKey;
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
   const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
   const [loadedSkillsFallback, setLoadedSkillsFallback] = useState<{
@@ -7886,96 +7952,184 @@ export function App({
     skills: connection.skills,
   };
   const loadedSkillsRequestRef = useRef(0);
+  const skillsConfigRuntimeSupported = Boolean(
+    workspace.capabilities?.features?.includes(
+      'workspace_skills_config_runtime',
+    ),
+  );
+  const skillsAcpPreheatSupported = Boolean(
+    workspace.capabilities?.features?.includes('workspace_acp_preheat'),
+  );
   const reloadLoadedSkills = useCallback(
     async (
       workspaceCwd?: string,
       notifyOnError = false,
       forNewSession = false,
     ) => {
+      const key = skillsCatalogKeyRef.current;
+      const pending = skillsLoadRef.current;
+      if (
+        pending?.key === key &&
+        pending.cwd === workspaceCwd &&
+        pending.forNewSession === forNewSession &&
+        pending.request === loadedSkillsRequestRef.current
+      ) {
+        pending.notifyOnError ||= notifyOnError;
+        return pending.promise;
+      }
       const request = ++loadedSkillsRequestRef.current;
-      try {
-        if (
-          forNewSession &&
-          workspaceCwd &&
-          workspace.client &&
-          workspace.capabilities?.features?.includes(
-            'workspace_skills_config_runtime',
-          )
-        ) {
-          const target = workspace.client.workspaceByCwd(workspaceCwd);
-          const status = await target.workspaceConfigSkills();
+      setSkillsLoading(true);
+      setSkillsLoadError(false);
+      const load = async () => {
+        try {
+          if (
+            forNewSession &&
+            workspaceCwd &&
+            workspace.client &&
+            skillsConfigRuntimeSupported
+          ) {
+            const target = workspace.client.workspaceByCwd(workspaceCwd);
+            const status = await target.workspaceConfigSkills();
+            if (request !== loadedSkillsRequestRef.current) return;
+            if (status.initialized === false)
+              throw new Error(
+                status.errors?.[0]?.error ??
+                  'Skills configuration is unavailable',
+              );
+            setLoadedSkills(availableSkillInfos(status));
+            setLoadedSkillsReady(true);
+            const runtime = await target.ensureRuntime();
+            const runtimeStatus = await loadReadyWorkspaceSkills(
+              target,
+              runtime,
+              () => request !== loadedSkillsRequestRef.current,
+            );
+            if (request !== loadedSkillsRequestRef.current) return;
+            if (!runtimeStatus)
+              throw new Error(
+                runtime.capabilities?.skills?.error?.message ??
+                  'Skills runtime is not ready',
+              );
+            setLoadedSkills(availableSkillInfos(runtimeStatus));
+            return status;
+          }
+          const status =
+            workspaceCwd && workspace.client
+              ? await workspace.client
+                  .workspaceByCwd(workspaceCwd)
+                  .workspaceSkills()
+              : await workspaceActions.loadSkillsStatus();
           if (request !== loadedSkillsRequestRef.current) return;
+          if (status.initialized === false)
+            throw new Error(
+              status.errors?.[0]?.error ?? 'Skills catalog is unavailable',
+            );
           setLoadedSkills(availableSkillInfos(status));
           setLoadedSkillsReady(true);
-          void target
-            .ensureRuntime()
-            .then(async (runtime) => {
-              const runtimeStatus = await loadReadyWorkspaceSkills(
-                target,
-                runtime,
-                () => request !== loadedSkillsRequestRef.current,
+          if (
+            forNewSession &&
+            workspaceCwd &&
+            workspaceCwd === workspace.capabilities?.workspaceCwd &&
+            skillsAcpPreheatSupported
+          ) {
+            const prepared = await workspace.client.workspaceAcpPreheat(5_000);
+            if (request !== loadedSkillsRequestRef.current) return;
+            if (!prepared.ready) throw new Error('Skills runtime is not ready');
+            const refreshed = await workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .workspaceSkills();
+            if (request !== loadedSkillsRequestRef.current) return;
+            if (refreshed.initialized === false)
+              throw new Error(
+                refreshed.errors?.[0]?.error ?? 'Skills catalog is unavailable',
               );
-              if (!runtimeStatus) return;
-              setLoadedSkills(availableSkillInfos(runtimeStatus));
-            })
-            .catch((error: unknown) => {
-              if (notifyOnError) {
-                pushToast(
-                  'error',
-                  formatError(error, 'Failed to refresh composer skills'),
-                );
-              }
-            });
+            setLoadedSkills(availableSkillInfos(refreshed));
+            return refreshed;
+          }
           return status;
+        } catch (error) {
+          if (request === loadedSkillsRequestRef.current)
+            setSkillsLoadError(true);
+          if (
+            notifyOnError ||
+            (skillsLoadRef.current?.request === request &&
+              skillsLoadRef.current.notifyOnError)
+          ) {
+            pushToast(
+              'error',
+              formatError(error, 'Failed to refresh composer skills'),
+            );
+          }
+          return false as const;
         }
-        const status =
-          workspaceCwd && workspace.client
-            ? await workspace.client
-                .workspaceByCwd(workspaceCwd)
-                .workspaceSkills()
-            : await workspaceActions.loadSkillsStatus();
-        if (request !== loadedSkillsRequestRef.current) return;
-        setLoadedSkills(availableSkillInfos(status));
-        setLoadedSkillsReady(true);
-        return status;
-      } catch (error) {
-        if (notifyOnError) {
-          pushToast(
-            'error',
-            formatError(error, 'Failed to refresh composer skills'),
-          );
-        }
-        return false;
-      }
+      };
+      const promise = load().finally(() => {
+        if (request === loadedSkillsRequestRef.current) setSkillsLoading(false);
+        if (skillsLoadRef.current?.promise === promise)
+          skillsLoadRef.current = undefined;
+      });
+      skillsLoadRef.current = {
+        key,
+        cwd: workspaceCwd,
+        forNewSession,
+        notifyOnError,
+        request,
+        promise,
+      };
+      return promise;
     },
     [
       pushToast,
-      workspace.capabilities?.features,
+      skillsConfigRuntimeSupported,
+      skillsAcpPreheatSupported,
+      workspace.capabilities?.workspaceCwd,
       workspace.client,
       workspaceActions,
     ],
   );
   useEffect(() => {
-    if (!connected) return;
-    if (!workspaceContextActive) {
-      loadedSkillsRequestRef.current += 1;
-      setLoadedSkills([]);
-      setLoadedSkillsReady(true);
-      setLoadedSkillsFallback(undefined);
+    loadedSkillsRequestRef.current += 1;
+    skillsCatalogCacheRef.current = undefined;
+    setLoadedSkills([]);
+    setLoadedSkillsReady(false);
+    setSkillsLoading(false);
+    setSkillsLoadError(false);
+    setLoadedSkillsFallback(undefined);
+  }, [connection.workspaceCwd, workspaceContextActive, reloadLoadedSkills]);
+  useEffect(() => {
+    if (!connected || !workspaceContextActive || !skillsCatalogActive) return;
+    // Attached sessions already supply their authoritative Skill commands.
+    if (
+      connectionSkillSnapshotRef.current.sessionId &&
+      connectionSkillSnapshotRef.current.skills !== undefined
+    )
       return;
-    }
-    void reloadLoadedSkills(
+    if (skillsCatalogCacheRef.current?.key === skillsCatalogKey) return;
+    const promise = reloadLoadedSkills(
       connection.workspaceCwd,
       false,
-      connectionSkillSnapshotRef.current.sessionId === undefined,
+      skillsCatalogForNewSession,
     );
+    skillsCatalogCacheRef.current = { key: skillsCatalogKey, promise };
+    void promise.then((status) => {
+      if (
+        status === false &&
+        skillsCatalogCacheRef.current?.promise === promise
+      ) {
+        skillsCatalogCacheRef.current = undefined;
+      }
+    });
   }, [
     connected,
     connection.workspaceCwd,
     reloadLoadedSkills,
+    skillsCatalogActive,
+    skillsCatalogForNewSession,
+    skillsCatalogKey,
     workspaceContextActive,
   ]);
   const handledSkillMutationKeysRef = useRef(new Set<string>());
+  const [, setHandledSkillMutationRevision] = useState(0);
   const pendingSkillTogglesByContextRef = useRef(
     new Map<string, Array<{ name: string; enabled: boolean }>>(),
   );
@@ -7989,6 +8143,7 @@ export function App({
       handledSkillMutationKeysRef.current.clear();
       return;
     }
+    if (!skillsCatalogActive) return;
     const sessionId = connection.sessionId;
     const workspaceCwd = connection.workspaceCwd;
     const contextKey = `${workspaceCwd ?? ''}\n${sessionId ?? ''}`;
@@ -8009,6 +8164,7 @@ export function App({
       for (const mutationKey of mutationKeys) {
         handledSkillMutationKeysRef.current.add(mutationKey);
       }
+      setHandledSkillMutationRevision((revision) => revision + 1);
     };
     const priorPending =
       pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
@@ -8033,10 +8189,10 @@ export function App({
       return;
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
-    let cancelled = false;
+    const owner = sessionOwnerGuard.capture();
     void reloadLoadedSkills(workspaceCwd, true, sessionId === undefined).then(
       (status) => {
-        if (cancelled || !status) return;
+        if (!owner.isCurrent() || !status) return;
         markHandled();
         if (!sessionId) {
           pendingSkillTogglesByContextRef.current.delete(contextKey);
@@ -8073,9 +8229,6 @@ export function App({
         setLoadedSkillsFallback({ sessionId, workspaceCwd });
       },
     );
-    return () => {
-      cancelled = true;
-    };
   }, [
     connected,
     connection.sessionId,
@@ -8084,6 +8237,8 @@ export function App({
     workspaceEventSignals?.lastSkillMutation,
     workspaceEventSignals?.skillMutationsByCwd,
     workspaceContextActive,
+    skillsCatalogActive,
+    sessionOwnerGuard,
   ]);
   useEffect(() => {
     if (!loadedSkillsFallback) return;
@@ -8139,7 +8294,6 @@ export function App({
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
   const [showRewindDialog, setShowRewindDialog] = useState(false);
-  const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
   // The workspace the Git dialog reads. Set by whichever entry point opened
@@ -9140,7 +9294,13 @@ export function App({
     };
   }, []);
 
-  // Refresh commands when extensions change (install/uninstall/update).
+  // Extension changes invalidate command suggestions until their next use.
+  const commandsRefreshSessionRef = useRef<string | undefined>(undefined);
+  const commandsRefreshRequestRef = useRef(0);
+  const [commandsRefreshErrorOwner, setCommandsRefreshErrorOwner] =
+    useState<DaemonSessionOwnerSnapshot>();
+  const [commandsRefreshingSession, setCommandsRefreshingSession] =
+    useState<string>();
   const extensionsVersionRef = useRef(
     workspaceEventSignals?.extensionsVersion ?? 0,
   );
@@ -9188,22 +9348,62 @@ export function App({
           },
         ]);
       }
-      sessionActions.refreshCommands().catch(() => {
-        store.dispatch([
-          {
-            type: 'error',
-            text: t('extensions.commands.refreshFailed'),
-          },
-        ]);
-      });
+      commandsRefreshSessionRef.current = connection.sessionId;
     }
+    if (
+      !skillsCatalogActive ||
+      !connection.sessionId ||
+      commandsRefreshSessionRef.current !== connection.sessionId
+    )
+      return;
+    const sessionId = connection.sessionId;
+    const owner = sessionOwnerGuard.capture();
+    commandsRefreshSessionRef.current = undefined;
+    const request = ++commandsRefreshRequestRef.current;
+    setCommandsRefreshingSession(sessionId);
+    setCommandsRefreshErrorOwner(undefined);
+    sessionActions
+      .refreshCommands()
+      .catch(() => {
+        if (!owner.isCurrent() || commandsRefreshRequestRef.current !== request)
+          return;
+        commandsRefreshSessionRef.current = sessionId;
+        setCommandsRefreshErrorOwner(owner);
+        store.dispatch([
+          { type: 'error', text: t('extensions.commands.refreshFailed') },
+        ]);
+      })
+      .finally(() => {
+        if (commandsRefreshRequestRef.current === request) {
+          setCommandsRefreshingSession(undefined);
+        }
+      });
   }, [
+    connection.sessionId,
+    skillsCatalogActive,
     workspaceEventSignals?.extensionsVersion,
     workspaceEventSignals?.lastExtensionChange,
     sessionActions,
+    sessionOwnerGuard,
     store,
     t,
   ]);
+  const sessionCatalogPending =
+    Boolean(connection.sessionId) &&
+    (extensionsVersionRef.current !==
+      (workspaceEventSignals?.extensionsVersion ?? 0) ||
+      commandsRefreshSessionRef.current === connection.sessionId ||
+      commandsRefreshingSession === connection.sessionId ||
+      skillMutationsForWorkspace(
+        workspaceEventSignals?.lastSkillMutation,
+        workspaceEventSignals?.skillMutationsByCwd,
+        connection.workspaceCwd,
+      ).some(
+        (mutation) =>
+          !handledSkillMutationKeysRef.current.has(
+            `${connection.workspaceCwd ?? ''}\n${connection.sessionId ?? ''}\n${mutation.id}`,
+          ),
+      ));
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
     'workspace',
   );
@@ -9959,14 +10159,7 @@ export function App({
         // A slash submit is never retried; disarm the previous submit's
         // recorded retry state so a turn error on the slash turn cannot
         // resend the already-succeeded earlier prompt.
-        lastSubmittedPromptRef.current = '';
-        lastSubmittedImagesRef.current = undefined;
-        lastSubmittedFilesRef.current = undefined;
-        lastSubmittedInputAnnotationsRef.current = undefined;
-        retryableTurnErrorIdRef.current = null;
-        retryableTurnErrorIdentityRef.current = undefined;
-        retriedTurnErrorIdRef.current = null;
-        failedTurnErrorRetryRef.current = null;
+        disarmSubmittedPromptRetry();
       }
       setShowRetryHint(false);
       finishPreparing();
@@ -10065,6 +10258,7 @@ export function App({
     [
       beginPromptPreparation,
       clearFollowup,
+      disarmSubmittedPromptRetry,
       ensureSessionForPrompt,
       finishPromptPreparation,
       getComposerWorkspaceCwd,
@@ -10183,7 +10377,7 @@ export function App({
         }
       : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
-  // git-status effect targets (computed once above), so the chip and the
+  // git-status effect targets, so the chip and the
   // dialog always target the same repo.
   const gitDiffWorkspaceCwd = isKnownLiveWorkspaceCwd(activeWorkspaceCwd)
     ? undefined
@@ -10846,6 +11040,12 @@ export function App({
     const onBtwShortcut = (e: KeyboardEvent) => {
       if (interactionBlocked || pendingApproval || isWebTerminalTarget(e))
         return;
+      const target = e.composedPath()[0] ?? e.target;
+      if (
+        target instanceof Element &&
+        target.closest('[data-web-shell-context-popover]')
+      )
+        return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 
@@ -10965,10 +11165,14 @@ export function App({
     autoLoad: projectFeaturesAvailable,
     enabled: projectFeaturesAvailable,
   });
+  const providersEnabled =
+    projectFeaturesAvailable && activePanel === 'settings';
   const providersState = useProviders({
-    autoLoad: projectFeaturesAvailable,
-    enabled: projectFeaturesAvailable,
+    autoLoad: providersEnabled,
+    enabled: providersEnabled,
   });
+  const modelConfigurations = useModelConfigurations(projectFeaturesAvailable);
+  const reloadModelConfigurations = modelConfigurations.reload;
   // useProviders returns a fresh object each render, but its `reload` identity is
   // stable — pull it out so callbacks can depend on the function alone without
   // re-creating on every render (and without an exhaustive-deps warning).
@@ -10992,6 +11196,7 @@ export function App({
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
     ),
+    activePanel === 'settings',
   );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
@@ -11160,6 +11365,72 @@ export function App({
     );
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
+  const currentAdvisorModel = readScopedModelSetting(
+    workspaceSettings,
+    modelSettingScope,
+    'advisorModel',
+  );
+  const currentImageModel = readScopedModelSetting(
+    workspaceSettings,
+    modelSettingScope,
+    'imageModel',
+  );
+  const roleModelsReady =
+    !modelConfigurations.loading &&
+    !modelConfigurations.error &&
+    modelConfigurations.data !== undefined;
+  const advisorModels: ModelDialogModel[] =
+    roleModelsReady && !providersState.loading && !providersState.error
+      ? [
+          { id: '', label: t('model.useMain') },
+          ...providersState.providers.flatMap((provider) =>
+            provider.models.flatMap((model) => {
+              if (
+                model.isRuntime ||
+                !isVisibleComposerModel({ id: model.modelId })
+              )
+                return [];
+              const configuration = modelConfigurations.models.find(
+                (entry) => entry.key === model.configurationKey,
+              );
+              const id =
+                configuration?.advisorModel ??
+                (provider.authType === 'qwen-oauth'
+                  ? `${provider.authType}:${model.baseModelId}`
+                  : undefined);
+              return id
+                ? [
+                    {
+                      id,
+                      baseModelId: model.baseModelId,
+                      label: model.name,
+                      authType: provider.authType,
+                      baseUrl: model.baseUrl,
+                      envKey: model.envKey,
+                      contextWindow: model.contextLimit,
+                      modalities: model.modalities,
+                    },
+                  ]
+                : [];
+            }),
+          ),
+        ]
+      : [];
+  const imageModels = modelConfigurations.models.flatMap((model) =>
+    model.imageModel
+      ? [
+          {
+            id: model.imageModel,
+            baseModelId: model.modelId,
+            label: model.name ?? model.modelId,
+            authType: model.authType,
+            baseUrl: model.baseUrl,
+            envKey: model.envKey,
+            contextWindow: model.contextWindowSize,
+          },
+        ]
+      : [],
+  );
   const currentModelFallbacks = useMemo(() => {
     const value = readScopedModelSetting(
       workspaceSettings,
@@ -11302,7 +11573,7 @@ export function App({
         !showFallbacksDialogRef.current &&
         !showAuthDialogRef.current;
       try {
-        const status = await loadVoiceProviders(workspace.client, target);
+        const status = await loadVoiceStatus(workspace.client, target);
         if (!intentIsCurrent()) {
           if (request === voicePickerRequestRef.current) {
             pendingVoicePickerSourceRef.current = undefined;
@@ -11311,7 +11582,16 @@ export function App({
         }
         pendingVoicePickerSourceRef.current = undefined;
         voicePickerTargetRef.current = target;
-        setVoiceModels(extractVoiceModels(status));
+        setVoiceModels(
+          status.availableVoiceModels.map((model) => ({
+            id: model.id,
+            label: model.name,
+            baseUrl: model.baseUrl,
+            contextWindow: model.contextWindow,
+            authType: 'openai',
+            modalities: { audio: true },
+          })),
+        );
         setModelSettingScope(scope);
         setModelDialogMode('voice');
       } catch (error) {
@@ -12525,12 +12805,7 @@ export function App({
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
         focusRequest = scheduleComposerFocus();
-        await Promise.all([
-          clearPromise,
-          nextContext?.kind === 'workspace'
-            ? reloadLoadedSkills(targetWorkspaceCwd, false, true)
-            : Promise.resolve(undefined),
-        ]);
+        await clearPromise;
         // Clear after successful clearSession — if it rejects, the old
         // session's worktree/branch state is preserved.
         setSessionWorktree(undefined);
@@ -12558,7 +12833,6 @@ export function App({
       reportError,
       refreshWorkspaceBrand,
       refreshWorkspaceCapabilities,
-      reloadLoadedSkills,
       scheduleComposerFocus,
       setPendingSessionContext,
       sessionActions,
@@ -14671,7 +14945,7 @@ export function App({
               inputAnnotations: submittedInputAnnotations,
             });
           }
-          if (startedWithoutSession && !admissionStarted) {
+          if (!admissionStarted && (startedWithoutSession || !failedMessage)) {
             const editor = editorRef.current;
             if (editor && !editor.hasInput()) {
               editor.setText(submittedPromptText);
@@ -16426,6 +16700,12 @@ export function App({
           // A transient reload failure shouldn't surface as "delete failed" —
           // the model was already removed. Just log it. Reload settings too so a
           // cleared active model / scrubbed fallback isn't shown stale.
+          void reloadModelConfigurations().catch((error: unknown) =>
+            console.warn(
+              '[web-shell] failed to reload model configurations',
+              error,
+            ),
+          );
           reloadProviders().catch((err: unknown) => {
             console.warn(
               '[web-shell] failed to reload providers after delete',
@@ -16454,6 +16734,7 @@ export function App({
     [
       workspaceActions,
       reloadProviders,
+      reloadModelConfigurations,
       reloadWorkspaceSettings,
       reportError,
       sessionOwnerGuard,
@@ -16465,16 +16746,18 @@ export function App({
   const handleCloseAuthDialog = useCallback(() => {
     setShowAuthDialog(false);
     if (!projectFeaturesAvailable) return;
-    // The provider install flow doesn't broadcast a settings change, so refresh
-    // the model list on close to surface any newly added models. Log a failed
-    // reload (leaves stale model data) rather than swallowing it.
+    void reloadModelConfigurations().catch((error: unknown) =>
+      console.warn('[web-shell] failed to reload model configurations', error),
+    );
+    // Refresh visible Settings after provider installation; hidden Settings
+    // reloads when opened.
     reloadProviders().catch((err: unknown) => {
       console.warn(
         '[web-shell] failed to reload providers after auth dialog close',
         err,
       );
     });
-  }, [reloadProviders, projectFeaturesAvailable]);
+  }, [reloadProviders, reloadModelConfigurations, projectFeaturesAvailable]);
 
   const handleFallbacksConfirm = useCallback(
     (baseIds: string[]) => {
@@ -16605,7 +16888,7 @@ export function App({
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
       // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
-      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      // not ACP format. The voice status API supplies the raw model id.
       const bareModelId = extractBareModelId(modelId);
       const target = voicePickerTargetRef.current;
       if (!target || target.ownerKey !== mainVoiceTargetRef.current?.ownerKey) {
@@ -16653,11 +16936,82 @@ export function App({
     ],
   );
 
+  const handleRoleModelSelect = (
+    key: 'advisorModel' | 'imageModel',
+    value: string,
+  ) => {
+    if (
+      !projectFeaturesAvailable ||
+      !roleModelsReady ||
+      !(
+        key === 'advisorModel' ? advisorModels : [{ id: '' }, ...imageModels]
+      ).some((model) => model.id === value)
+    )
+      return;
+    const owner = sessionOwnerGuard.capture();
+    void setWorkspaceSetting(modelSettingScope, key, value)
+      .then((result) => {
+        if (owner.isCurrent() && result?.requiresRestart) {
+          store.dispatch([
+            { type: 'status', text: t('settings.requiresRestart') },
+          ]);
+        }
+      })
+      .catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(
+            error,
+            t(key === 'imageModel' ? 'model.setImage' : 'model.setAdvisor'),
+          );
+      });
+  };
+
+  const handleModelContextWindowUpdate = async (
+    key: string,
+    size: number | null,
+  ) => {
+    const token = ++modelActionTokenRef.current;
+    setModelActionBusy(true);
+    try {
+      const result = await workspace.client.updateModelContextWindow(key, size);
+      await Promise.allSettled([
+        reloadModelConfigurations(),
+        reloadProviders(),
+      ]);
+      return result;
+    } finally {
+      if (modelActionTokenRef.current === token) setModelActionBusy(false);
+    }
+  };
+  const modelDialogModels: Partial<
+    Record<ModelDialogMode, ModelDialogModel[]>
+  > = {
+    voice: voiceModels,
+    advisor: advisorModels,
+    image: roleModelsReady
+      ? [{ id: '', label: t('model.disabled') }, ...imageModels]
+      : [],
+  };
+  const modelDialogCurrent: Partial<Record<ModelDialogMode, string>> = {
+    voice: currentVoiceModel,
+    vision: currentVisionModel,
+    fast: currentFastModel,
+    advisor:
+      typeof currentAdvisorModel === 'string'
+        ? (advisorModels.find(
+            (model) => model.id === `${currentAdvisorModel}\0`,
+          )?.id ?? currentAdvisorModel)
+        : '',
+    image: typeof currentImageModel === 'string' ? currentImageModel : '',
+  };
+
   const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
     main: handleModelSelect,
     fast: handleFastModelSelect,
     voice: handleVoiceModelSelect,
     vision: handleVisionModelSelect,
+    advisor: (id) => handleRoleModelSelect('advisorModel', id),
+    image: (id) => handleRoleModelSelect('imageModel', id),
   };
 
   // Once every settings-launched model surface is closed (the model picker via
@@ -16855,7 +17209,9 @@ export function App({
     : sessionBranch
       ? (selectedWorkspaceGitStatus?.branch ?? sessionBranch.name)
       : connection.sessionId
-        ? connection.gitBranch
+        ? (connection.gitBranch ??
+          selectedWorkspaceGitStatus?.branch ??
+          undefined)
         : (selectedWorkspaceGitStatus?.branch ?? undefined);
   const environmentPanelCanDock =
     contextBodyWidth === null ||
@@ -16868,6 +17224,91 @@ export function App({
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
+  const workspaceGitStatusEnabled =
+    !activePanel &&
+    !artifactPanelFullscreen &&
+    !showMissingSessionState &&
+    mainView === 'chat' &&
+    (visibleComposerToolbarActions.includes('gitBranch') ||
+      (environmentGitReplacementEnabled && environmentPanelVisible));
+  // Worktree sessions query git status with the worktree path (?cwd=
+  // parameter); the chip prefers the live branch from that status, falling
+  // back to the creation-time sessionWorktree.branch.
+  useEffect(() => {
+    if (!activeWorkspaceCwd || isKnownLiveWorkspaceCwd(activeWorkspaceCwd)) {
+      gitStatusWorkspaceCwdRef.current = undefined;
+      setSelectedWorkspaceGitStatus(undefined);
+      return;
+    }
+    const statusTarget = sessionWorktree?.path ?? activeWorkspaceCwd;
+    if (gitStatusWorkspaceCwdRef.current !== statusTarget) {
+      gitStatusWorkspaceCwdRef.current = statusTarget;
+      setSelectedWorkspaceGitStatus(undefined);
+    }
+    if (!workspaceGitStatusEnabled) return;
+    let cancelled = false;
+    const fetchStatus = () => {
+      const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
+      // Fast path: last-known cache (branch-only on a cold start) paints the
+      // chip immediately.
+      void git
+        .workspaceGit({ cwd: sessionWorktree?.path })
+        .then((status) => {
+          if (!cancelled) {
+            setSelectedWorkspaceGitStatus((current) =>
+              isSameGitStatus(current, status) ? current : status,
+            );
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
+        });
+      // Fresh path: resolves when the daemon's recomputation lands, so the
+      // enriched counters fill in without depending on SSE — the
+      // `git_status_changed` push only flows on a per-session event stream,
+      // which doesn't exist before the first prompt (deferred connect).
+      // Daemon-side in-flight dedup shares one `git status` computation
+      // across both requests. Worktree `?cwd=` reads always compute
+      // directly, so a second request would be a duplicate there.
+      if (!sessionWorktree) {
+        void git
+          .workspaceGit({ wait: true })
+          .then((status) => {
+            if (!cancelled) {
+              setSelectedWorkspaceGitStatus((current) =>
+                isSameGitStatus(current, status) ? current : status,
+              );
+            }
+          })
+          .catch((err) => {
+            console.warn('[web-shell] git status fresh path failed:', err);
+          });
+      }
+    };
+    fetchStatus();
+    // Refresh triggers stay on focus and on a slow poll for the active
+    // workspace only. A live branch change re-runs this effect via the
+    // connection.gitBranch dependency. With an active session the daemon's
+    // `git_status_changed` push (mirrored into chip state) additionally
+    // covers realtime updates between polls.
+    const onFocus = () => fetchStatus();
+    window.addEventListener('focus', onFocus);
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') fetchStatus();
+    }, 30_000);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(poll);
+    };
+  }, [
+    activeWorkspaceCwd,
+    connection.gitBranch,
+    workspaceGitStatusEnabled,
+    isKnownLiveWorkspaceCwd,
+    workspace.client,
+    sessionWorktree,
+  ]);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -17101,11 +17542,149 @@ export function App({
     };
   }, [appClassName, appStyle, portalRoot, selectedLanguage, selectedTheme]);
 
+  const prepareContextCompression = useCallback(() => {
+    disarmSubmittedPromptRetry();
+    setShowRetryHint(false);
+    clearFollowup();
+  }, [clearFollowup, disarmSubmittedPromptRetry]);
+  const preparePaneContextCompression = useCallback(
+    (sessionId: string) => {
+      if (sessionId === connection.sessionId) prepareContextCompression();
+    },
+    [connection.sessionId, prepareContextCompression],
+  );
+  const primaryContextControls = useContextUsageControls({
+    connection,
+    actions: sessionActions,
+    ownerGuard: sessionOwnerGuard,
+    onBeforeCompress: prepareContextCompression,
+    busy: streamingState !== 'idle' || sessionHasActivePrompt,
+    writeBlocked:
+      isDisabled ||
+      isStartingNewSessionSuggestion ||
+      approvalOverlayActive ||
+      unknownPromptAdmission?.payloadAvailable === true,
+  });
+  const [paneContextControls, setPaneContextControls] = useState<
+    Record<string, ContextUsageControls>
+  >({});
+  const registerContextUsageControls =
+    useCallback<RegisterContextUsageControls>((controls) => {
+      setPaneContextControls((current) => ({
+        ...current,
+        [controls.sessionId]: controls,
+      }));
+      return () =>
+        setPaneContextControls((current) => {
+          if (current[controls.sessionId] !== controls) return current;
+          const next = { ...current };
+          delete next[controls.sessionId];
+          return next;
+        });
+    }, []);
+  const [compressionResults, setCompressionResults] = useState<
+    Record<string, NonNullable<ContextUsageControls['result']>>
+  >({});
+  const observedCompressionResults = useRef(
+    new WeakSet<NonNullable<ContextUsageControls['result']>>(),
+  );
+  const reconciledContextReaders = useRef(
+    new WeakMap<
+      ContextUsageControls['getContextUsage'],
+      {
+        result: NonNullable<ContextUsageControls['result']>;
+        owner: ReturnType<ContextUsageControls['captureOwner']>;
+      }
+    >(),
+  );
+  useEffect(() => {
+    const updates: typeof compressionResults = {};
+    const owners = [
+      primaryContextControls,
+      ...Object.values(paneContextControls),
+    ];
+    for (const controls of owners) {
+      const result = controls?.result;
+      if (result && !observedCompressionResults.current.has(result)) {
+        observedCompressionResults.current.add(result);
+        updates[controls.sessionId] = result;
+        reconciledContextReaders.current.set(controls.getContextUsage, {
+          result,
+          owner: controls.captureOwner(),
+        });
+      }
+    }
+    if (Object.keys(updates).length > 0)
+      setCompressionResults((current) => ({ ...current, ...updates }));
+    for (const controls of owners) {
+      const result =
+        controls &&
+        (updates[controls.sessionId] ?? compressionResults[controls.sessionId]);
+      const reconciled =
+        controls &&
+        reconciledContextReaders.current.get(controls.getContextUsage);
+      if (
+        !controls?.canCompress ||
+        !result ||
+        result.kind === 'failed' ||
+        (reconciled?.result === result && reconciled.owner.isCurrent())
+      )
+        continue;
+      reconciledContextReaders.current.set(controls.getContextUsage, {
+        result,
+        owner: controls.captureOwner(),
+      });
+      // Reattachment can restore old replay counters even on the same reader.
+      // Reconcile through its current owner, never copy another one's counters.
+      void controls
+        .getContextUsage({ silent: true, syncCounters: true })
+        .catch(() => undefined);
+    }
+  }, [primaryContextControls, paneContextControls, compressionResults]);
+  const reconciledContextControls = useRef(
+    new WeakMap<ContextUsageControls, ContextUsageControls>(),
+  );
+  const contextUsageControls = useMemo(() => {
+    const live =
+      primaryContextControls &&
+      (mainView !== 'split' ||
+        !splitSessionIds.includes(primaryContextControls.sessionId))
+        ? {
+            ...paneContextControls,
+            [primaryContextControls.sessionId]: primaryContextControls,
+          }
+        : paneContextControls;
+    return Object.fromEntries(
+      Object.entries(live).map(([id, controls]) => {
+        const result = controls.compressing
+          ? undefined
+          : controls.result &&
+              !observedCompressionResults.current.has(controls.result)
+            ? controls.result
+            : (compressionResults[id] ?? controls.result);
+        const previous = reconciledContextControls.current.get(controls);
+        const reconciled =
+          previous && previous.result === result
+            ? previous
+            : { ...controls, result };
+        reconciledContextControls.current.set(controls, reconciled);
+        return [id, reconciled];
+      }),
+    );
+  }, [
+    mainView,
+    splitSessionIds,
+    paneContextControls,
+    primaryContextControls,
+    compressionResults,
+  ]);
+
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
+    contextUsageControls,
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
     selectedReviewPath,
@@ -17215,19 +17794,23 @@ export function App({
             >
               <ModelDialog
                 mode={modelDialogMode}
-                models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                models={modelDialogModels[modelDialogMode]}
+                loading={
+                  (modelDialogMode === 'advisor' && providersState.loading) ||
+                  ((modelDialogMode === 'advisor' || modelDialogMode === 'image') &&
+                    modelConfigurations.loading)
+                }
+                error={
+                  modelDialogMode === 'advisor'
+                    ? providersState.error ?? modelConfigurations.error
+                    : modelDialogMode === 'image'
+                      ? modelConfigurations.error
+                      : undefined
+                }
                 filterModel={
                   modelDialogMode === 'main' ? mainModelFilter : undefined
                 }
-                currentModelId={
-                  modelDialogMode === 'voice'
-                    ? currentVoiceModel
-                    : modelDialogMode === 'vision'
-                      ? currentVisionModel
-                      : modelDialogMode === 'fast'
-                        ? currentFastModel
-                        : undefined
-                }
+                currentModelId={modelDialogCurrent[modelDialogMode]}
                 onSelect={(modelId) => {
                   if (modelDialogMode) {
                     modelHandlers[modelDialogMode](modelId);
@@ -17681,7 +18264,7 @@ export function App({
                             workspaceCwd,
                             // A worktree session commits in the worktree checkout,
                             // not the base workspace cwd — but only for the active
-                            // session's own workspace chip; another workspace's chip
+                            // session's own workspace row; another workspace's row
                             // has no association with this session's worktree.
                             gitCwd:
                               workspaceCwd === activeWorkspaceCwd
@@ -18100,10 +18683,15 @@ export function App({
                         onChatWidthModeChange={handleChatWidthModeChange}
                         modelManagement={{
                           providers: providersState.providers,
+                          configurations: modelConfigurations.models,
+                          onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
                             connection.currentModel ?? undefined,
-                          loading: providersState.loading,
-                          error: providersState.error,
+                          loading:
+                            providersState.loading ||
+                            modelConfigurations.loading,
+                          error:
+                            providersState.error ?? modelConfigurations.error,
                           busy: modelActionBusy,
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
@@ -18114,7 +18702,14 @@ export function App({
                           // the reset effect is gated on the dialog/fallback/auth
                           // flags, so it never runs for the approvalMode dialog
                           // and would leave a stale scope behind.
-                          if (key === 'fastModel') {
+                          if (key === 'advisorModel' || key === 'imageModel') {
+                            void reloadModelConfigurations();
+                            if (key === 'advisorModel') void reloadProviders();
+                            setModelSettingScope(scope);
+                            setModelDialogMode(
+                              key === 'advisorModel' ? 'advisor' : 'image',
+                            );
+                          } else if (key === 'fastModel') {
                             setModelSettingScope(scope);
                             setModelDialogMode('fast');
                           } else if (key === 'visionModel') {
@@ -18586,6 +19181,9 @@ export function App({
                         onRightPanelOpen={handleTurnOutputOpen}
                         onOpenMonitor={openMonitorPanel}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
+                        registerContextUsageControls={registerContextUsageControls}
+                        onBeforeContextCompress={preparePaneContextCompression}
+                        onOpenContextUsage={openPaneContextUsagePanel}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
@@ -18803,6 +19401,18 @@ export function App({
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
+                                onOpenBackground={(turn) => {
+                                  if (!connection.sessionId) return;
+                                  handleTurnOutputOpen({
+                                    id: `background:${connection.sessionId}:${turn.taskId}`,
+                                    kind: 'background_task',
+                                    title: turn.label ?? turn.kind,
+                                    turnId: turn.turnId,
+                                    backgroundTurn: turn,
+                                    sourceSessionId: connection.sessionId,
+                                    workspaceCwd: connection.workspaceCwd,
+                                  });
+                                }}
                               >
                                 {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
@@ -19122,6 +19732,10 @@ export function App({
                                 activeTurnStartedAt
                               }
                               hasActivePrompt={sessionHasActivePrompt}
+                              backgroundLabel={
+                                connection.backgroundTurn?.label ??
+                                connection.backgroundTurn?.kind
+                              }
                             />
                           )
                         ) : newSessionSuggestion ? (
@@ -19304,6 +19918,31 @@ export function App({
                           }
                           commands={commands}
                           skills={composerSkills}
+                          onSkillsOpenChange={
+                            workspaceContextActive
+                              ? setComposerSkillsOpen
+                              : undefined
+                          }
+                          skillsLoading={
+                            skillsLoading || Boolean(
+                              connection.sessionId &&
+                                commandsRefreshingSession === connection.sessionId,
+                            )
+                          }
+                          skillsLoadError={
+                            skillsLoadError ||
+                            commandsRefreshErrorOwner?.isCurrent() === true
+                          }
+                          skillsLoaded={
+                            !sessionCatalogPending &&
+                            (Boolean(
+                              connection.sessionId &&
+                                connection.skills !== undefined,
+                            ) ||
+                              (loadedSkillsReady &&
+                                skillsCatalogCacheRef.current?.key ===
+                                  skillsCatalogKey))
+                          }
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
                           autoSubmitSlashCommands={autoSubmitSlashCommands}
                           builtinAtProviders={
@@ -19372,6 +20011,14 @@ export function App({
                           }
                           onShowContextUsage={
                             contextUsageAvailable ? handleShowContextUsage : undefined
+                          }
+                          contextUsageControls={
+                            connection.sessionId
+                              ? contextUsageControls[connection.sessionId]
+                              : undefined
+                          }
+                          onOpenContextUsage={
+                            contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
