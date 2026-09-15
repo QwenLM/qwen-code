@@ -3156,17 +3156,20 @@ jobs:
           fi
           # A review-pr job no runner ever picked up has no runner and no
           # steps: GitHub ends a job queued for 24 hours (as failure or
-          # cancelled), and the `ecs-review` pool is closed by
-          # day (qwen-review-runner-schedule.yml). Nothing ran, so "the
-          # review pipeline failed" would be false; the PR's next push
-          # queues a fresh review. An unreadable job list keeps the comment
-          # (fail toward telling the author something).
+          # cancelled), and the `ecs-review` pool is closed by day
+          # (qwen-review-runner-schedule.yml). The generic body's "did not
+          # complete successfully / retried automatically" would both be
+          # false, and silence is not the alternative: ack-review-request
+          # already promised this requester a result here, and a head nobody
+          # pushes again never queues another run. So it gets its own body
+          # below. An unreadable job list keeps the generic comment (fail
+          # toward telling the author something).
+          never_started="unknown"
           if [ "$REVIEW_PR_RESULT" = "failure" ] || [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
             never_started="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:?}/jobs?per_page=100" \
               --jq '[.jobs[] | select(.name == "review-pr")] | if length == 0 then "unknown" elif all(.[]; (.runner_name // "") == "" and ((.steps // []) | length) == 0) then "true" else "false" end' 2>/dev/null)" || never_started="unknown"
             if [ "$never_started" = "true" ]; then
-              echo "Skipping fallback comment: review-pr in run ${GITHUB_RUN_ID} was never started by a runner (queue expired); no review ran." >> "$GITHUB_STEP_SUMMARY"
-              exit 0
+              echo "review-pr in run ${GITHUB_RUN_ID} was never started by a runner (queue expired); posting the queue-expiry body." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           # A push landing mid-review leaves this comment pointing at a dead
@@ -3294,7 +3297,9 @@ jobs:
           # gets one body accurate for both flavors. It keeps the
           # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
           # anchors on, and the retry instruction the timeout flavor needs.
-          if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+          if [ "$never_started" = "true" ]; then
+            body="**Qwen Code review never started.** No runner picked up the review job before its queue expired: the \`ecs-review\` pool is only open for part of the day (\`qwen-review-runner-schedule.yml\`), and GitHub ends a job that has been queued for 24 hours. No review ran for this head and nothing picks it up on its own — request one again with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          elif [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
             body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           else
             body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."

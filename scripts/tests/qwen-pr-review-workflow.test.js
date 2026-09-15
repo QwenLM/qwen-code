@@ -3673,13 +3673,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
-    // Same invariant for the fallback job's TWO bodies (failure and
-    // cancelled): the cross-job dedup matches `actions/runs/<id>)`, anchored
-    // on the markdown link's closing paren — a body that rendered the URL
-    // differently would escape it.
+    // Same invariant for the fallback job's THREE bodies (queue-expiry,
+    // cancelled and failure): the cross-job dedup matches
+    // `actions/runs/<id>)`, anchored on the markdown link's closing paren — a
+    // body that rendered the URL differently would escape it.
     expect(
       step.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -4155,38 +4155,52 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   });
 
   it.skipIf(!hasJq)(
-    'skips the fallback comment when no runner ever started review-pr',
+    'posts the queue-expiry body when no runner ever started review-pr',
     () => {
       // The review pool is closed for 12 of every 24 hours, so a review-pr job
       // queued into the dark window can expire without a runner ever picking it
       // up: no runner_name and no steps. Nothing ran, so the failure body's
       // "did not complete successfully / retried automatically" claims would
-      // both be false — the step records the skip and posts nothing.
-      const r = runFallbackStep('never_started', {
-        reviewPrResult: 'failure',
-        jobs: JSON.stringify({
-          total_count: 2,
-          jobs: [
-            {
-              name: 'precheck-pr',
-              runner_name: 'ubuntu-latest',
-              steps: [{ name: 'Checkout' }],
-            },
-            { name: 'review-pr', runner_name: '', status: 'queued', steps: [] },
-          ],
-        }),
+      // both be false. Silence is not the alternative to a false claim, though:
+      // ack-review-request has already told a hand-requesting maintainer the
+      // result is posted here and that a command-triggered review is not listed
+      // under this PR's checks, and a head nobody pushes again never queues
+      // another run. So the branch posts a body that is true instead, under the
+      // same marker-plus-run-URL shape the dedupe anchors on.
+      const jobs = JSON.stringify({
+        total_count: 2,
+        jobs: [
+          {
+            name: 'precheck-pr',
+            runner_name: 'ubuntu-latest',
+            steps: [{ name: 'Checkout' }],
+          },
+          { name: 'review-pr', runner_name: '', status: 'queued', steps: [] },
+        ],
       });
-      expect(r.status).toBe(0);
-      expect(r.posted).toBe('');
-      expect(r.calls).not.toContain('pr comment');
-      expect(r.summary).toContain('never started by a runner');
+      for (const reviewPrResult of ['failure', 'cancelled']) {
+        const r = runFallbackStep('never_started', {
+          reviewPrResult,
+          jobs,
+        });
+        expect(r.status).toBe(0);
+        expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+        expect(r.posted).toContain('never started');
+        expect(r.posted).toContain('actions/runs/12345)');
+        expect(r.posted).toContain('@qwen-code /review');
+        expect(r.posted).not.toContain('did not complete successfully');
+        expect(r.posted).not.toContain('retried automatically');
+        expect(r.summary).toContain('never started by a runner');
+      }
     },
   );
 
   it.skipIf(!hasJq)('still posts when review-pr did run on a runner', () => {
-    // The control for the skip above: the same job list with a runner
-    // recorded must keep the failure comment, or the "never started" branch
-    // would swallow every genuine failure too.
+    // The control for the body above: the same job list with a runner recorded
+    // must keep the failure body. Without it the never-started branch could
+    // widen (an `and` relaxed to an `or`, the runner_name clause dropped) and
+    // relabel every genuine failure as a queue expiry, telling the author to
+    // re-request a review that actually ran and failed.
     const r = runFallbackStep('ran', {
       reviewPrResult: 'failure',
       jobs: JSON.stringify({
