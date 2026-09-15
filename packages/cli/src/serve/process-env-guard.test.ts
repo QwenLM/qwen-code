@@ -38,7 +38,7 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
-    'packages/acp-bridge/src/bridge.ts',
+    'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
       accesses: { 'key:QWEN_SERVE_DEBUG': 1 },
