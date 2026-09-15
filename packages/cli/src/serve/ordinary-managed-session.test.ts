@@ -1232,6 +1232,30 @@ describe('ordinary REST session Managed owner', () => {
     expect(res.body?.sessionId).toBeUndefined();
   });
 
+  it('keeps deferred session sources on the legacy factory at the same REST entry', async () => {
+    vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
+    await writeSettings();
+    spawnHarness.blockLegacySpawn = true;
+    app = bootApp();
+
+    for (const body of [
+      { sourceType: 'scheduled_task' },
+      { sourceType: 'channel' },
+      {
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ]) {
+      const res = await request(app)
+        .post('/session')
+        .set('Host', host())
+        .send(body);
+      expect(res.status).not.toBe(200);
+      expect(JSON.stringify(res.body)).toContain('legacy-spawn-blocked');
+      expect(res.body?.sessionId).toBeUndefined();
+    }
+  });
+
   it('keeps ordinary user hooks on the legacy factory at the same REST entry', async () => {
     vi.stubEnv('OPENAI_BASE_URL', modelBaseUrl);
     await writeSettings({
