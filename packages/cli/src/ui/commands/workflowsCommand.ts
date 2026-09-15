@@ -28,6 +28,10 @@ export function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     runId: s.runId,
     ...(s.toolUseId ? { toolUseId: s.toolUseId } : {}),
     ...(s.sourceRef ? { sourceRef: { ...s.sourceRef } } : {}),
+    ...(s.workflowCalls
+      ? { workflowCalls: s.workflowCalls.map((call) => ({ ...call })) }
+      : {}),
+    ...(s.workflowCallsTruncated ? { workflowCallsTruncated: true } : {}),
     ...(s.workflowName ? { workflowName: s.workflowName } : {}),
     description: s.meta?.name ?? s.runId,
     meta: s.meta,
