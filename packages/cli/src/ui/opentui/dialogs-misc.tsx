@@ -8,7 +8,7 @@
 
 /**
  * Compact native OpenTUI dialogs for the remaining long-tail commands
- * (M3, #8677): editor/auth/trust/delete/resume/branch/hooks/rewind/diff/
+ * (M3, #8677): editor/auth/trust/delete/resume/branch/rewind/diff/
  * arena/subagent_create/subagent_list. Each mounts a real panel (info or
  * confirm) instead of "unsupported". Heavy ones (diff/resume/arena/subagents/
  * editor) are compact here and get fidelity passes in M4.
@@ -566,21 +566,6 @@ export function readHooksEnabled(
         (settings.merged as { disableAllHooks?: boolean }).disableAllHooks ??
         false
       );
-}
-
-export function OpenTuiHooksDialog({ config, settings, onClose }: P) {
-  useEsc(onClose);
-  const enabled = readHooksEnabled(config, settings);
-  return (
-    <Shell title="Hooks" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <Row label="Hooks enabled:" value={enabled ? 'yes' : 'no'} />
-        <text fg={C.dim}>
-          {'Lifecycle hooks run around tool/session events.'}
-        </text>
-      </box>
-    </Shell>
-  );
 }
 
 export function OpenTuiRewindDialog({ onClose }: P) {

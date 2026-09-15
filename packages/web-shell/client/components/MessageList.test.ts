@@ -2854,3 +2854,361 @@ describe('findTurnIdForIndex', () => {
     ]);
   });
 });
+
+it('retains a complete main reply when a later background tool-only execution ends', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('main-reply'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'Background result',
+    },
+    makeMultiToolGroup('automatic-read'),
+    makeUserMessage('u2'),
+    makeAssistantMessage('next-reply'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'main-reply',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'marker',
+    ),
+  ).toBe(true);
+  const ordinary = collapseItems(
+    groupParallelAgents(messages.filter((message) => message.id !== 'marker')),
+  );
+  expect(
+    ordinary.some(
+      (item) => item.type === 'message' && item.message.id === 'main-reply',
+    ),
+  ).toBe(false);
+});
+
+describe('background completion markers', () => {
+  it.each(['agent', 'shell'] as const)(
+    'reconciles a consumed %s completion from the transcript producer without a task record',
+    async (kind) => {
+      const {
+        normalizeDaemonEvent,
+        createDaemonTranscriptState,
+        reduceDaemonTranscriptEvents,
+      } = await import('@qwen-code/sdk/daemon');
+      const { transcriptBlocksToDaemonMessages } = await import(
+        '../adapters/transcriptToMessages'
+      );
+      const backgroundTurn = {
+        turnId: 'auto-without-task-record',
+        taskId: 'bg_1234abcd',
+        kind,
+        toolUseId: 'call-a1',
+        startedAt: 100,
+      };
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1 }),
+        normalizeDaemonEvent({
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          promptId: backgroundTurn.turnId,
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Task result received' },
+              _meta: {
+                source: 'background_notification_turn_started',
+                backgroundTurn,
+              },
+            },
+          },
+        }),
+        { now: 100 },
+      );
+      const markers = transcriptBlocksToDaemonMessages(state.blocks);
+      expect(markers).toHaveLength(1);
+      expect(markers[0]).toMatchObject({
+        source: 'background_notification_turn_started',
+        data: { ...backgroundTurn, backgroundTask: undefined },
+      });
+      const launch =
+        kind === 'agent'
+          ? makeBackgroundAgentToolGroup('a1')
+          : makeBackgroundShellToolGroup('shell', backgroundTurn.taskId);
+      const messages: Message[] = [
+        makeUserMessage('u1'),
+        launch,
+        makeAssistantMessage('launched'),
+        makeUserMessage('u2'),
+        makeMultiToolGroup('other'),
+        makeAssistantMessage('other-answer'),
+      ];
+      expect(
+        collapseOf(collapseItems(groupParallelAgents(messages)), 'u1')
+          ?.collapsed,
+      ).toBe(false);
+      const collapsed = collapseItems(
+        groupParallelAgents([
+          ...messages,
+          ...markers,
+          makeAssistantMessage('summary'),
+        ]),
+      );
+      expect(collapseOf(collapsed, 'u1')?.collapsed).toBe(true);
+      expect(rowIds(collapsed)).toContain(markers[0]!.id);
+    },
+  );
+
+  it.each(['agent', 'shell'] as const)(
+    'reconciles a consumed %s completion from marker metadata',
+    (kind) => {
+      const launch =
+        kind === 'agent'
+          ? makeBackgroundAgentToolGroup('a1')
+          : makeBackgroundShellToolGroup('shell', 'bg_1234abcd');
+      const messages: Message[] = [
+        makeUserMessage('u1'),
+        launch,
+        makeAssistantMessage('launched'),
+        makeUserMessage('u2'),
+        makeMultiToolGroup('other'),
+        makeAssistantMessage('other-answer'),
+      ];
+      expect(
+        collapseOf(collapseItems(groupParallelAgents(messages)), 'u1')
+          ?.collapsed,
+      ).toBe(false);
+      messages.push(
+        {
+          id: 'marker',
+          role: 'system',
+          source: 'background_notification_turn_started',
+          variant: 'info',
+          content: 'Task completed',
+          data: {
+            backgroundTask: {
+              kind,
+              status: 'completed',
+              toolUseId: 'call-a1',
+              taskId: 'bg_1234abcd',
+            },
+          },
+        },
+        makeAssistantMessage('summary'),
+      );
+      const collapsed = collapseItems(groupParallelAgents(messages));
+      expect(collapseOf(collapsed, 'u1')?.collapsed).toBe(true);
+      expect(collapseOf(collapsed, 'u2')?.collapsed).toBe(true);
+      expect(rowIds(collapsed)).toContain('marker');
+    },
+  );
+
+  function backgroundTurn(taskId: string) {
+    return {
+      turnId: `auto-${taskId}`,
+      taskId,
+      kind: 'agent' as const,
+      sourceTurnId: 'user-1',
+      toolUseId: `tool-${taskId}`,
+      startedAt: 100,
+    };
+  }
+
+  function marker(taskId: string): Message {
+    return {
+      id: `marker-${taskId}`,
+      role: 'system',
+      source: 'background_notification_turn_started',
+      variant: 'info',
+      content: `${taskId} completed`,
+      backgroundTurn: backgroundTurn(taskId),
+    };
+  }
+
+  it('keeps both completion markers and only the last parent reply when collapsed', () => {
+    const messages: Message[] = [
+      makeUserMessage('user-1'),
+      makeMultiToolGroup('launch-tools'),
+      makeAssistantMessage('launch-ack'),
+      marker('baidu'),
+      makeThinkingMessage('baidu-thinking'),
+      makeAssistantMessage('baidu-reply'),
+      marker('alibaba'),
+      makeMultiToolGroup('comparison-tools'),
+      makeAssistantMessage('comparison-final'),
+    ];
+    const items = groupParallelAgents(messages);
+    const collapsed = collapseItems(items);
+    expect(rowIds(collapsed)).toEqual([
+      'user-1',
+      'tc-user-1',
+      'marker-baidu',
+      'marker-alibaba',
+      'comparison-final',
+    ]);
+    expect(collapseOf(collapsed, 'user-1')).toMatchObject({
+      collapsed: true,
+      hiddenCount: 5,
+    });
+    expect(
+      getSessionTimelineEntries(messages).map((entry) => entry.id),
+    ).toEqual(['user-1']);
+    expect(getTurnTimelineNode(messageById(items, 'marker-baidu')).kind).toBe(
+      'none',
+    );
+    expect(new Set(getTurnIdByDisplayIndex(items))).toEqual(
+      new Set(['user-1']),
+    );
+    expect(
+      rowIds(collapseItems(items, { overrides: new Map([['user-1', true]]) })),
+    ).toEqual(['user-1', 'tc-user-1', ...rowIds(items).slice(1)]);
+  });
+
+  it('keeps user interleaving chronological without turning old-task results into prompts', () => {
+    const messages: Message[] = [
+      makeUserMessage('user-1'),
+      makeAssistantMessage('launch-ack'),
+      makeUserMessage('user-2'),
+      makeAssistantMessage('second-answer'),
+      marker('baidu'),
+      {
+        id: 'steering',
+        role: 'system',
+        source: 'mid_turn_message_injected',
+        variant: 'info',
+        content: 'Verify',
+      },
+      makeAssistantMessage('auto-answer'),
+    ];
+    const items = groupParallelAgents(messages);
+    expect(findTurnIdForIndex(items, 1)).toBe('user-1');
+    expect(findTurnIdForIndex(items, 4)).toBe('user-2');
+    expect(findTurnIdForIndex(items, 6)).toBe('user-2');
+    expect(
+      getSessionTimelineEntries(messages).map((entry) => entry.id),
+    ).toEqual(['user-1', 'user-2']);
+    expect(rowIds(collapseItems(items))).toEqual([
+      'user-1',
+      'launch-ack',
+      'user-2',
+      'tc-user-2',
+      'marker-baidu',
+      'steering',
+      'auto-answer',
+    ]);
+  });
+});
+
+describe('completion during a streamed final answer', () => {
+  it.each(['shell', 'agent-loaded', 'agent-unloaded'])(
+    'preserves both answer segments around %s completion',
+    async (kind) => {
+      const { normalizeDaemonEvent } = await import('@qwen-code/sdk/daemon');
+      const { createDaemonTranscriptState, reduceDaemonTranscriptEvents } =
+        await import('@qwen-code/sdk/daemon');
+      const { transcriptBlocksToDaemonMessages } = await import(
+        '../adapters/transcriptToMessages'
+      );
+      let state = createDaemonTranscriptState({ now: 1 });
+      let id = 0;
+      const push = (update: Record<string, unknown>, promptId = 'new-user') => {
+        state = reduceDaemonTranscriptEvents(
+          state,
+          normalizeDaemonEvent({
+            v: 1,
+            id: ++id,
+            type: 'session_update',
+            promptId,
+            data: { update },
+          }),
+          { now: id },
+        );
+      };
+      const user = (text: string, promptId: string) =>
+        push(
+          {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+          promptId,
+        );
+      const answer = (text: string, promptId = 'new-user') =>
+        push(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+          },
+          promptId,
+        );
+      user('Old question', 'old-user');
+      if (kind === 'agent-loaded')
+        push(
+          {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'old-tool',
+            status: 'completed',
+            title: 'Agent old',
+            rawInput: { subagent_type: 'Explore', description: 'Old task' },
+            rawOutput: { task_id: 'old-task' },
+            _meta: { toolName: 'Task' },
+          },
+          'old-user',
+        );
+      answer('Old reply', 'old-user');
+      user('New question', 'new-user');
+      answer('Answer first half. ');
+      push({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Old task completed' },
+        _meta: {
+          source: 'background_task_completed',
+          backgroundTask: {
+            taskId: 'old-task',
+            kind: kind === 'shell' ? 'shell' : 'agent',
+            toolUseId: 'old-tool',
+            status: 'completed',
+            description: 'Old task',
+          },
+        },
+      });
+      answer('Answer second half.');
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          v: 1,
+          id: ++id,
+          type: 'turn_complete',
+          promptId: 'new-user',
+          data: { stopReason: 'end_turn' },
+        }),
+        { now: id },
+      );
+      const blocks = state.blocks;
+      const messages = transcriptBlocksToDaemonMessages(blocks);
+      const items = groupParallelAgents(messages);
+      const collapsed = collapseItems(items, {
+        backgroundSummaryGraceActive: false,
+      });
+      const visible = collapsed
+        .filter((x) => x.type === 'message')
+        .map((x) => x.message.content);
+      if (kind === 'agent-loaded')
+        expect(visible).toContain('Answer first half. Answer second half.');
+      else {
+        expect(visible).toContain('Answer second half.');
+        expect(visible).toContain('Answer first half. ');
+        expect(visible.indexOf('Answer first half. ')).toBeLessThan(
+          visible.indexOf('Old task completed'),
+        );
+        expect(visible.indexOf('Old task completed')).toBeLessThan(
+          visible.indexOf('Answer second half.'),
+        );
+      }
+    },
+  );
+});
