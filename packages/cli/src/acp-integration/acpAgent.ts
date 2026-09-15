@@ -152,6 +152,7 @@ import {
   qualifySkillName,
   sessionIdContext,
   registerSession,
+  getLastPeerInboxFailure,
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
@@ -338,6 +339,7 @@ import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -4717,7 +4719,16 @@ class QwenAgent implements Agent {
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
-        if (messaging === null) this.peerMessagingStart = null;
+        // Except for a platform with no inbox transport. That refusal is
+        // decided before any filesystem call and holds for every candidate
+        // path, so no later session in this process can succeed; keep the
+        // settled null so the attempt, and its log line, happen once.
+        if (
+          messaging === null &&
+          getLastPeerInboxFailure()?.cause !== 'unsupported_platform'
+        ) {
+          this.peerMessagingStart = null;
+        }
         return messaging;
       } catch (error) {
         debugLogger.error(
@@ -4767,7 +4778,7 @@ class QwenAgent implements Agent {
     // from more than one workspace, and a record exists to be addressed,
     // so it is written only when that session's settings turn messaging
     // on. The process's startup settings answer for nobody else.
-    if (settings.merged.agents?.crossSessionMessaging !== true) return;
+    if (!isCrossSessionMessagingEnabled(settings.merged)) return;
     // Bound by the first session that needs it rather than at startup: an
     // ACP process with no session has nothing to advertise and nobody to
     // receive for, and this is also the first moment the agent exists.
