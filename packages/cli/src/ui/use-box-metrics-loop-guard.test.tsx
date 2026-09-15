@@ -289,7 +289,9 @@ describe('ink useBoxMetrics loop guard', () => {
       stdout,
     );
     const afterTrip = renders;
-    expect(afterTrip).toBeGreaterThan(1);
+    // The reset below only matters if the budget was actually exhausted, so
+    // assert that state rather than "more than one render".
+    expect(afterTrip).toBeGreaterThanOrEqual(16);
 
     // The sibling shrinks with the terminal, so the oscillator's own left moves
     // and its metrics have genuinely changed by the time it re-measures.
@@ -337,7 +339,8 @@ describe('ink useBoxMetrics loop guard', () => {
       stdout,
     );
     const afterTrip = renders;
-    expect(afterTrip).toBeGreaterThan(1);
+    // Exhaustion is what this case's refill depends on - same precondition.
+    expect(afterTrip).toBeGreaterThanOrEqual(16);
 
     await act(async () => {
       bumpSibling();
@@ -452,6 +455,9 @@ describe('ink useBoxMetrics loop guard', () => {
     // raised to 23 or 26 takes this cascade to 46 or 52 while the suite stays
     // green without the bound below.
     expect(lastFrame()).toContain('fallback');
+    // The floor is the budget: the cascade spends all 16 charged commits, so a
+    // hook that settles early passes the ceiling below without ever reaching it.
+    expect(renders).toBeGreaterThanOrEqual(16);
     expect(renders).toBeLessThanOrEqual(34);
   });
 
