@@ -348,7 +348,7 @@ export function StandaloneAuth({
               app-level check below is the stricter one: it also rejects
               non-http(s) schemes, credentials, paths, queries and hashes. */}
           <form
-            className="flex flex-col gap-3"
+            className="flex flex-col gap-4"
             noValidate
             onSubmit={(event) => {
               event.preventDefault();
@@ -371,36 +371,41 @@ export function StandaloneAuth({
               setAttempt((n) => n + 1);
             }}
           >
-            <Label htmlFor="daemon-address">{copy.addressLabel}</Label>
-            <Input
-              id="daemon-address"
-              type="url"
-              inputMode="url"
-              autoComplete="url"
-              autoFocus={invalidTarget}
-              placeholder="https://daemon.example.com:4170"
-              className="h-11 font-mono"
-              value={address}
-              onChange={(event) => {
-                retireProbe();
-                setConfirming(true);
-                setBusy(false);
-                setStatus(copy.addressChanged);
-                setAddress(event.target.value);
-                setToken('');
-              }}
-            />
-            <Label htmlFor="daemon-bearer-token">{copy.tokenLabel}</Label>
-            <Input
-              id="daemon-bearer-token"
-              type="password"
-              autoComplete="off"
-              autoFocus={needsToken}
-              placeholder={copy.tokenLabel}
-              className="h-11 font-mono text-base tracking-[0.18em]"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-            />
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="daemon-address">{copy.addressLabel}</Label>
+              <Input
+                id="daemon-address"
+                type="url"
+                inputMode="url"
+                autoComplete="url"
+                autoFocus={invalidTarget}
+                placeholder="https://daemon.example.com:4170"
+                className="h-11 font-mono"
+                value={address}
+                onChange={(event) => {
+                  retireProbe();
+                  setConfirming(true);
+                  setBusy(false);
+                  setStatus(copy.addressChanged);
+                  setAddress(event.target.value);
+                  setToken('');
+                }}
+              />
+            </div>
+            {/* No placeholder: it would repeat the label above and pick up the
+                masked value's wide tracking. */}
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="daemon-bearer-token">{copy.tokenLabel}</Label>
+              <Input
+                id="daemon-bearer-token"
+                type="password"
+                autoComplete="off"
+                autoFocus={needsToken}
+                className="h-11 font-mono text-base tracking-[0.18em]"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+              />
+            </div>
             <Button
               type="submit"
               size="lg"

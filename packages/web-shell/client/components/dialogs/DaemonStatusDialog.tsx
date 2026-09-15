@@ -819,7 +819,10 @@ function DaemonStatusDialogInner({
               });
           }}
         >
-          <Label htmlFor="daemon-connection-address">
+          <Label
+            htmlFor="daemon-connection-address"
+            className="text-[13px] font-normal text-muted-foreground"
+          >
             {t('daemon.connection.address')}
           </Label>
           <Input
@@ -850,7 +853,10 @@ function DaemonStatusDialogInner({
               {connectionError}
             </p>
           )}
-          <Label htmlFor="daemon-connection-token">
+          <Label
+            htmlFor="daemon-connection-token"
+            className="text-[13px] font-normal text-muted-foreground"
+          >
             {t('daemon.connection.token')}
           </Label>
           <Input
@@ -862,6 +868,7 @@ function DaemonStatusDialogInner({
           />
           <Button
             type="submit"
+            variant="outline"
             size="sm"
             className="mt-1 w-full"
             disabled={connectBusy}
