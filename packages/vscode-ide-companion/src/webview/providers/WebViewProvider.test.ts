@@ -105,8 +105,6 @@ const {
   >(() => Promise.resolve(undefined)),
   mockWindowState: { focused: true },
   mockQwenAgentManagerInstances: [] as Array<{
-    onPermissionRequest: ReturnType<typeof vi.fn>;
-    onAskUserQuestion: ReturnType<typeof vi.fn>;
     disconnect: ReturnType<typeof vi.fn>;
   }>,
   mockClipboardWriteText: vi.fn(),
@@ -278,8 +276,6 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     });
     onToolCall = vi.fn();
     onPlan = vi.fn();
-    onPermissionRequest = vi.fn();
-    onAskUserQuestion = vi.fn();
     onTranscriptUpdate = vi.fn(
       (callback: (notification: Record<string, unknown>) => void) => {
         transcriptUpdateCallbackRef.current = callback;
@@ -868,20 +864,6 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
-  });
-
-  it('does not register the retired legacy ACP input bridge', async () => {
-    const { postMessage } = await setupAttachedProvider();
-    const agentManager = mockQwenAgentManagerInstances.at(-1);
-
-    expect(agentManager?.onPermissionRequest).not.toHaveBeenCalled();
-    expect(agentManager?.onAskUserQuestion).not.toHaveBeenCalled();
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'permissionRequest' }),
-    );
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'permissionResolved' }),
-    );
   });
 
   it('replays available skills to the webview after webviewReady', async () => {

@@ -2227,37 +2227,29 @@ export class WebViewProvider {
    * Forward a permission decision from a managed diff to its owning web shell.
    */
   respondToPendingPermission(
-    choice: 'accept' | 'allow' | 'reject' | 'cancel',
+    choice: 'allow' | 'cancel',
     context?: { fromDiffEditor?: boolean; permissionRequestId?: string },
   ): void {
     // Web-shell approvals are bound to the request id stored on the managed
     // diff. The target web shell validates that exact id again before voting,
     // so an original file or a stale/stacked diff cannot resolve another
     // session's approval.
-    if (
-      typeof choice === 'string' &&
-      context?.fromDiffEditor &&
-      context.permissionRequestId
-    ) {
-      const decision =
-        choice === 'accept' || choice === 'allow'
-          ? 'allow'
-          : choice === 'cancel' || choice === 'reject'
-            ? 'reject'
-            : undefined;
-      const webview = decision
-        ? Array.from(this.webShellPermissionOwners).find(
-            ([, requestId]) => requestId === context.permissionRequestId,
-          )?.[0]
-        : undefined;
-      if (webview && decision) {
-        void webview.postMessage({
-          type: 'webShellPermissionDecision',
-          data: { decision, requestId: context.permissionRequestId },
-        });
-      }
+    if (!context?.fromDiffEditor || !context.permissionRequestId) {
       return;
     }
+    const webview = Array.from(this.webShellPermissionOwners).find(
+      ([, requestId]) => requestId === context.permissionRequestId,
+    )?.[0];
+    if (!webview) {
+      return;
+    }
+    void webview.postMessage({
+      type: 'webShellPermissionDecision',
+      data: {
+        decision: choice === 'allow' ? 'allow' : 'reject',
+        requestId: context.permissionRequestId,
+      },
+    });
   }
 
   /**
