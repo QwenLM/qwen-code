@@ -2327,6 +2327,7 @@ async function loadServeRuntimeModules() {
     workspaceRegistryModule,
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
+    daemonExecutionEnginesModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -2341,6 +2342,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-registry.js'),
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
+    import('./daemon-execution-engines.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -2371,6 +2373,9 @@ async function loadServeRuntimeModules() {
     getWorkspaceRuntimeCoordinatorIfSupported:
       workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
+    createDaemonExecutionEngines:
+      daemonExecutionEnginesModule.createDaemonExecutionEngines,
+    daemonManagedHostArgv: daemonExecutionEnginesModule.daemonManagedHostArgv,
   };
 }
 
@@ -4593,6 +4598,9 @@ async function runQwenServeImpl(
   let managedGatewaySessionEvents = deps.managedGatewaySessionEvents;
   let managedGatewayModelRunner = deps.managedGatewayModelRunner;
   let managedRuntimeProvider = deps.managedRuntimeProvider;
+  const managedToolRuntimeProviderRef: {
+    current: ManagedRuntimeProvider | undefined;
+  } = { current: managedRuntimeProvider };
   let managedRuntimeWorkerProvider = deps.managedRuntimeWorkerProvider;
   let localRuntimeActivator: LocalProcessRuntimeActivator | undefined;
   const runtimePromptBindings = new WeakMap<
@@ -4616,6 +4624,7 @@ async function runQwenServeImpl(
     );
     ownedManagedRuntimeProviders.clear();
     managedRuntimeProvider = undefined;
+    managedToolRuntimeProviderRef.current = undefined;
     managedRuntimeWorkerProvider = undefined;
   };
   const discardManagedGatewayRuntime = (sessionId: string): void => {
@@ -5491,6 +5500,38 @@ async function runQwenServeImpl(
         ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
     });
+    const pairOrdinaryExecutionEngines = (
+      legacyFactory: typeof channelFactory,
+      params: {
+        workspaceCwd: string;
+        sessionRuntimeBaseDir: string;
+        runtimeEnvironment: Readonly<NodeJS.ProcessEnv>;
+        workspaceTrusted: boolean;
+        generationGuard: typeof primaryGenerationGuard;
+        workspaceId: string;
+      },
+    ) =>
+      deps.bridge || deps.ownedManagedRuntime
+        ? undefined
+        : runtime.createDaemonExecutionEngines({
+            ...params,
+            argv: runtime.daemonManagedHostArgv(opts),
+            legacyFactory,
+            resolveToolRuntimeProvider: () =>
+              managedToolRuntimeProviderRef.current,
+          });
+    const ordinaryChannelOptions = (
+      legacyFactory: typeof channelFactory,
+      params: Parameters<typeof pairOrdinaryExecutionEngines>[1],
+    ) => {
+      const executionEngines = pairOrdinaryExecutionEngines(
+        legacyFactory,
+        params,
+      );
+      return executionEngines
+        ? { executionEngines }
+        : { channelFactory: legacyFactory };
+    };
     const statusProvider = runtime.createDaemonStatusProvider({
       env: runtimeEffectiveEnv,
     });
@@ -5944,7 +5985,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory,
+        ...ordinaryChannelOptions(channelFactory, {
+          workspaceCwd: boundWorkspace,
+          sessionRuntimeBaseDir: primarySessionRuntimeBaseDir,
+          runtimeEnvironment: runtimeEffectiveEnv,
+          workspaceTrusted: trustedWorkspace,
+          generationGuard: primaryGenerationGuard,
+          workspaceId: daemonWorkspaceHash,
+        }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
@@ -6518,7 +6566,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory: secondaryChannelFactory,
+        ...ordinaryChannelOptions(secondaryChannelFactory, {
+          workspaceCwd: workspaceInput.cwd,
+          sessionRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+          runtimeEnvironment: secondaryEnv.effectiveEnv,
+          workspaceTrusted: secondaryTrusted,
+          generationGuard: secondaryGenerationGuard,
+          workspaceId: secondaryWorkspaceHash,
+        }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
@@ -7051,6 +7106,15 @@ async function runQwenServeImpl(
         harnessSlots: 4,
       });
     }
+    if (!deps.bridge && !deps.ownedManagedRuntime) {
+      if (!managedRuntimeProvider) {
+        managedRuntimeProvider = new LocalManagedRuntimeProvider(
+          workspaceRegistry,
+        );
+        ownedManagedRuntimeProviders.add(managedRuntimeProvider);
+      }
+      managedToolRuntimeProviderRef.current = managedRuntimeProvider;
+    }
     const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
 
     core.registerDaemonGaugeCallbacks({
@@ -7530,7 +7594,14 @@ async function runQwenServeImpl(
                     PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
                 }
               : childEnvOverrides,
-          channelFactory: wsChannelFactory,
+          ...ordinaryChannelOptions(wsChannelFactory, {
+            workspaceCwd: cwd,
+            sessionRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+            runtimeEnvironment: wsEnv.effectiveEnv,
+            workspaceTrusted: trusted,
+            generationGuard,
+            workspaceId: wsHash,
+          }),
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
@@ -9306,48 +9377,51 @@ async function runQwenServeImpl(
       ): Promise<void> => {
         const error = err instanceof Error ? err : new Error(String(err));
         markServeAppStartupFailed(error);
-        await stopOwnedManagedAgentResources();
-        if (runtimeStartupSettled) {
+        try {
+          if (runtimeStartupSettled) {
+            disposeRuntimeAppResources(runtimeApp ?? runtimeAppForCleanup);
+            await shutdownBridgeAfterFailedStartup(bridgeForCleanup);
+            return;
+          }
+          runtimeStartupSettled = true;
           disposeRuntimeAppResources(runtimeApp ?? runtimeAppForCleanup);
-          await shutdownBridgeAfterFailedStartup(bridgeForCleanup);
-          return;
-        }
-        runtimeStartupSettled = true;
-        disposeRuntimeAppResources(runtimeApp ?? runtimeAppForCleanup);
-        runtimeApp = undefined;
-        clearRuntimeStartupTimer();
-        const message = error.message;
-        runtimeStartupError = message;
-        if (
-          startup.preheat.status === 'scheduled' ||
-          startup.preheat.status === 'running'
-        ) {
-          startup.preheat.status = 'failed';
-          startup.preheat.error = message;
-        }
-        writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
-        daemonLog.error('runtime startup failed', error);
-        markRuntimeFailed(error);
-        if (closeServerAfterChannelWorkerStartupFailure && server.listening) {
-          server.close((closeErr) => {
-            if (closeErr) {
-              daemonLog.error(
-                'server close after runtime startup error failed',
-                closeErr,
-              );
-            }
-          });
-          server.closeAllConnections();
-        }
-        const channelWorkerStopped =
-          await stopChannelWorkerAfterFailedStartup();
-        disposeDaemonEventLoopMonitor();
-        if (channelWorkerStopped) removeCurrentServePidfile();
-        const bridgesForCleanup = bridgeForCleanup
-          ? [bridgeForCleanup, ...getRuntimeBridgesForCleanup()]
-          : getRuntimeBridgesForCleanup();
-        for (const bridge of [...new Set(bridgesForCleanup)]) {
-          await shutdownBridgeAfterFailedStartup(bridge);
+          runtimeApp = undefined;
+          clearRuntimeStartupTimer();
+          const message = error.message;
+          runtimeStartupError = message;
+          if (
+            startup.preheat.status === 'scheduled' ||
+            startup.preheat.status === 'running'
+          ) {
+            startup.preheat.status = 'failed';
+            startup.preheat.error = message;
+          }
+          writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
+          daemonLog.error('runtime startup failed', error);
+          markRuntimeFailed(error);
+          if (closeServerAfterChannelWorkerStartupFailure && server.listening) {
+            server.close((closeErr) => {
+              if (closeErr) {
+                daemonLog.error(
+                  'server close after runtime startup error failed',
+                  closeErr,
+                );
+              }
+            });
+            server.closeAllConnections();
+          }
+          const channelWorkerStopped =
+            await stopChannelWorkerAfterFailedStartup();
+          disposeDaemonEventLoopMonitor();
+          if (channelWorkerStopped) removeCurrentServePidfile();
+          const bridgesForCleanup = bridgeForCleanup
+            ? [bridgeForCleanup, ...getRuntimeBridgesForCleanup()]
+            : getRuntimeBridgesForCleanup();
+          for (const bridge of [...new Set(bridgesForCleanup)]) {
+            await shutdownBridgeAfterFailedStartup(bridge);
+          }
+        } finally {
+          await stopOwnedManagedAgentResources();
         }
       };
       const armRuntimeStartupTimer = (): void => {
@@ -9772,9 +9846,9 @@ async function runQwenServeImpl(
         runtimeStarting = buildRuntime()
           .then(async (runtime) => {
             if (runtimeStartupSettled) {
-              await stopOwnedManagedAgentResources();
               disposeRuntimeAppResources(runtime.app);
               await shutdownBridgeAfterFailedStartup(runtime.bridge);
+              await stopOwnedManagedAgentResources();
               return;
             }
             bridgeRef = runtime.bridge;
@@ -10146,7 +10220,6 @@ async function runQwenServeImpl(
                 });
                 beginRuntimeCoordinatorDrains(appForCleanup);
                 startProcessRegistryShutdown();
-                await stopOwnedManagedAgentResources();
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
                 // Writer terminals are already in flight. Stop the worker
@@ -10217,6 +10290,9 @@ async function runQwenServeImpl(
                   );
                   bridgeShutdownError ??= processRegistryError;
                 }
+                // In-process Managed hosts finish during bridge shutdown;
+                // dispose the Tool Runtime only after those channels drain.
+                await stopOwnedManagedAgentResources();
               })
               .then(
                 () => finish(),

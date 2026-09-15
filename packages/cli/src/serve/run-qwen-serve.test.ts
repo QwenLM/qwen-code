@@ -5482,6 +5482,16 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );
+      for (const [options] of createBridge.mock.calls.slice(0, 2)) {
+        expect(options).not.toHaveProperty('channelFactory');
+        expect(options.executionEngines).toEqual(
+          expect.objectContaining({
+            legacy: expect.any(Function),
+            managed: expect.any(Function),
+            select: expect.any(Function),
+          }),
+        );
+      }
       const firstDynamicEpochSource =
         createBridge.mock.calls[1]?.[0].runtimeEpochSource;
       expect(firstDynamicEpochSource?.allocate()).toBe(1);
@@ -5879,6 +5889,16 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         channelIdleTimeoutMs: 0,
       });
+      expect(createBridge.mock.calls[0]?.[0]).not.toHaveProperty(
+        'channelFactory',
+      );
+      expect(createBridge.mock.calls[0]?.[0].executionEngines).toEqual(
+        expect.objectContaining({
+          legacy: expect.any(Function),
+          managed: expect.any(Function),
+          select: expect.any(Function),
+        }),
+      );
     } finally {
       await handle.close();
     }
@@ -5954,6 +5974,16 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
       });
+      for (const [options] of createBridge.mock.calls) {
+        expect(options).not.toHaveProperty('channelFactory');
+        expect(options.executionEngines).toEqual(
+          expect.objectContaining({
+            legacy: expect.any(Function),
+            managed: expect.any(Function),
+            select: expect.any(Function),
+          }),
+        );
+      }
     } finally {
       await handle.close();
     }

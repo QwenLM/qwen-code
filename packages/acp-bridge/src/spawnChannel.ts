@@ -739,3 +739,8 @@ export function scrubChildEnv(
   }
   return childEnv;
 }
+
+export {
+  channelFactoryForwardsChildEnv,
+  markChannelFactoryForwardsChildEnv,
+} from './child-env-forwarding.js';

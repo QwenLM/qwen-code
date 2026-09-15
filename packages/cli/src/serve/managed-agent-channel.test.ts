@@ -12,6 +12,7 @@ import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { FakeAgent } from '@qwen-code/acp-bridge/internal/testUtils';
 import { createAcpSessionBridge } from '@qwen-code/acp-bridge/bridge';
 import { AcpChannelTeardownError } from '@qwen-code/acp-bridge/channel';
+import { channelFactoryForwardsChildEnv } from '@qwen-code/acp-bridge/spawnChannel';
 import {
   PRIVATE_ACP_CAPABILITY_ENV,
   Storage,
@@ -140,6 +141,10 @@ describe('managed Agent channel', () => {
       toolRuntime,
     });
   }
+
+  it('attests that Managed factories forward child env overrides', () => {
+    expect(channelFactoryForwardsChildEnv(factory())).toBe(true);
+  });
 
   it('passes the same lazy tool Session producer to bootstrap and actual Session hosts', async () => {
     let availableProvider: ManagedRuntimeProvider | undefined = undefined;

@@ -167,6 +167,17 @@ workspace reload 当前只发送 legacy 控制命令，Managed factory 当前冻
 
 验收须同时证明：无实验 flag 的四入口正向、绑定前零启动、并发只建一个对应 provider/worker、一个 workspace 清理不杀另一引擎/工作区、实际工具与 writer/history 先清理再物理退出、reload 后新环境且失败不解封。旧双 host test-script 不能替代这些普通资源组合。
 
+### 2026-09-15 拓扑答案（R2.3 接线）
+
+四处普通入口现注入同一 `executionEngines` 配对；injected Bridge/registry 与 Tool-only worker 不接管。以下四条与实现一致，不能事后改口径：
+
+1. **堆预算。** 现有 `childHeapPolicy` 只挂在 legacy spawn factory 上。`limits.memory.enforced` 仍是字面 `false`（观测，不是硬强制）。Managed in-process host 没有 ACP child，不对不存在的 child 报 enforced。injected `deps.bridge` 仍不建这份 policy。
+2. **processRegistry。** 只登记 spawn children。Managed in-process host 不造假 PID。Tool Runtime 的 `managed-gateway` 会话必须选 legacy spawn，那些 child 才进 registry。
+3. **崩溃半径。** in-process Agent host 可带走 daemon 进程；不声称与 legacy ACP child 同等的进程隔离。工具 worker 仍是子进程。
+4. **并发预算。** 双 slot 共用 Bridge 的 `maxSessions` / `freshSessionAdmission` / session owner index，不因两个 factory 翻倍。`activeAcpChildren` 只数 live spawn channel，不含 in-process host。
+
+选择器正向路径：普通 `default`/缺省/`api`、trusted、无 MCP/Hooks、已证明空扩展 → `managed`。Channel / cron / `managed-gateway` / standalone / 子会话 / worktree / 未知来源 / 未信任工作区 / 未证明空扩展（含扩展目录或 store 中的额外文件） → `legacy`。冷恢复读严格 owner；Managed 不兼容（含工作区已不再信任）则失败，不改选 legacy。本记录不是 R3/R4 完成证据。
+
 ## 实施与验收顺序
 
 | 次序 | 实现范围                                                    | 必须证明                                                                                               |

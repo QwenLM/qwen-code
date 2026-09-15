@@ -51,10 +51,19 @@ describe('createServeApp default ACP child extraArgs', () => {
       mode: 'http-bridge',
     });
 
-    expect(harness.spawnFactoryCalls).toEqual([]);
+    expect(harness.spawnFactoryCalls).toEqual([{}]);
     expect(
       harness.createAcpSessionBridge.mock.calls[0]?.[0],
     ).not.toHaveProperty('channelFactory');
+    expect(
+      harness.createAcpSessionBridge.mock.calls[0]?.[0].executionEngines,
+    ).toEqual(
+      expect.objectContaining({
+        legacy: expect.any(Function),
+        managed: expect.any(Function),
+        select: expect.any(Function),
+      }),
+    );
   });
 
   it('forwards --restore-ask-user-question to the default child factory', () => {
@@ -71,5 +80,17 @@ describe('createServeApp default ACP child extraArgs', () => {
     expect(harness.createAcpSessionBridge.mock.calls[0]?.[0]).toMatchObject({
       restoreAskUserQuestion: true,
     });
+    expect(
+      harness.createAcpSessionBridge.mock.calls[0]?.[0],
+    ).not.toHaveProperty('channelFactory');
+    expect(
+      harness.createAcpSessionBridge.mock.calls[0]?.[0].executionEngines,
+    ).toEqual(
+      expect.objectContaining({
+        legacy: expect.any(Function),
+        managed: expect.any(Function),
+        select: expect.any(Function),
+      }),
+    );
   });
 });

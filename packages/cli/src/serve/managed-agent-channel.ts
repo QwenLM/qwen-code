@@ -19,7 +19,10 @@ import {
   type ChannelFactory,
 } from '@qwen-code/acp-bridge';
 import { AcpChannelTeardownError } from '@qwen-code/acp-bridge/channel';
-import { scrubChildEnv } from '@qwen-code/acp-bridge/spawnChannel';
+import {
+  markChannelFactoryForwardsChildEnv,
+  scrubChildEnv,
+} from '@qwen-code/acp-bridge/spawnChannel';
 import {
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
@@ -280,7 +283,7 @@ export function createManagedAgentChannelFactory(
   };
 
   let previousTeardown = Promise.resolve();
-  return (cwd, overrides) => {
+  const factory: ChannelFactory = (cwd, overrides) => {
     const environmentOverrides = { ...overrides };
     const previous = previousTeardown;
     let resolveTeardown!: () => void;
@@ -305,4 +308,6 @@ export function createManagedAgentChannelFactory(
         throw error;
       });
   };
+  markChannelFactoryForwardsChildEnv(factory);
+  return factory;
 }

@@ -95,6 +95,11 @@ import {
 } from './types.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
+  createDaemonExecutionEngines,
+  daemonManagedHostArgv,
+} from './daemon-execution-engines.js';
+import { LocalManagedRuntimeProvider } from './managed-runtime-provider.js';
+import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
@@ -236,6 +241,7 @@ import {
 } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
   createWorkspaceSessionOwnerIndex,
   WorkspaceGenerationClosedError,
   type WorkspaceRegistry,
@@ -1189,6 +1195,15 @@ export function createServeApp(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
+  const ownsDefaultBridge =
+    injectedWorkspaceRegistry === undefined && deps.bridge === undefined;
+  const defaultGenerationGuard = ownsDefaultBridge
+    ? createWorkspaceGenerationGuard()
+    : undefined;
+  const managedToolRuntimeProviderRef: {
+    current: LocalManagedRuntimeProvider | undefined;
+  } = { current: undefined };
+  let ownedEmbedManagedRuntimeProvider: LocalManagedRuntimeProvider | undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1216,13 +1231,25 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs
-        ? {
-            channelFactory: createSpawnChannelFactory({
-              extraArgs: acpChildArgs,
-            }),
-          }
-        : {}),
+      executionEngines: createDaemonExecutionEngines({
+        workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        runtimeEnvironment: primaryEffectiveEnv ?? process.env,
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+        generationGuard:
+          defaultGenerationGuard ??
+          (() => {
+            throw new Error(
+              'Default Managed pairing requires a generation guard.',
+            );
+          })(),
+        argv: daemonManagedHostArgv(opts),
+        workspaceId: hashDaemonWorkspace(boundWorkspace),
+        legacyFactory: createSpawnChannelFactory({
+          ...(acpChildArgs ? { extraArgs: acpChildArgs } : {}),
+        }),
+        resolveToolRuntimeProvider: () => managedToolRuntimeProviderRef.current,
+      }),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1401,6 +1428,12 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  if (ownsDefaultBridge) {
+    ownedEmbedManagedRuntimeProvider = new LocalManagedRuntimeProvider(
+      workspaceRegistry,
+    );
+    managedToolRuntimeProviderRef.current = ownedEmbedManagedRuntimeProvider;
+  }
   const getSessionBridges =
     deps.getSessionBridges ??
     (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge));
@@ -3582,6 +3615,8 @@ export function createServeApp(
           .listManaged()
           .map((runtime) => runtime.bridge.shutdown()),
       );
+      stopAppResource(() => defaultGenerationGuard?.close());
+      stopAppResource(() => ownedEmbedManagedRuntimeProvider?.dispose());
       const errors = [
         ...cleanupErrors,
         ...[...drains, ...bridgeDrains]
