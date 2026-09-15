@@ -49,6 +49,7 @@ it('serves preview documents with CSP scoped to the selected daemon', async ({
       '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
       "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
     ],
+    ['//', "connect-src 'self'"],
     ['', "connect-src 'self'"],
   ]) {
     const response = await fetch(`${baseUrl}${query}`);

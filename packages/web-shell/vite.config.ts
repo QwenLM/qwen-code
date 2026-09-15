@@ -67,9 +67,10 @@ export const WEB_SHELL_BUILD_TARGET = 'es2021';
 
 // Development permits same-origin ancestors; production denies them by default.
 function developmentCsp(requestUrl: string): string {
-  const raw = new URL(requestUrl, 'http://localhost').searchParams.get(
-    'daemon',
-  );
+  const queryStart = requestUrl.indexOf('?');
+  const raw = new URLSearchParams(
+    queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
+  ).get('daemon');
   const origin = getAllowedDaemonOrigin(raw || '');
   const connectOrigins: string[] = [];
   if (origin) {
