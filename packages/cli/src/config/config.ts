@@ -2451,6 +2451,7 @@ export async function loadCliConfig(
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
+    customModelCatalog: settings.model?.customCatalog,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
     toolOutputBatchBudget: settings.tools?.toolOutputBatchBudget,

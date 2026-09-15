@@ -1,3 +1,5 @@
+import { lookupModelCatalog } from '../models/model-catalog.js';
+
 type Model = string;
 type TokenCount = number;
 
@@ -323,6 +325,11 @@ function findTokenLimit(
   type: TokenLimitType = 'input',
 ): TokenCount | undefined {
   const norm = normalize(model);
+  const catalog = lookupModelCatalog(norm);
+  const fromCatalog = type === 'output' ? catalog?.output : catalog?.context;
+  if (fromCatalog !== undefined) {
+    return fromCatalog;
+  }
   const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
 
   for (const [regex, limit] of patterns) {
@@ -336,15 +343,19 @@ function findTokenLimit(
 
 /**
  * Check if a model has an explicitly defined output token limit.
- * This distinguishes between models with known limits in OUTPUT_PATTERNS
- * and unknown models that would fallback to DEFAULT_OUTPUT_TOKEN_LIMIT.
+ * This distinguishes between models with known limits in the models.dev
+ * catalog or OUTPUT_PATTERNS and unknown models that would fallback to
+ * DEFAULT_OUTPUT_TOKEN_LIMIT.
  *
  * @param model - The model name to check
  * @returns true if the model has an explicit output limit definition, false if it uses the default fallback
  */
 export function hasExplicitOutputLimit(model: Model): boolean {
   const norm = normalize(model);
-  return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
+  return (
+    lookupModelCatalog(norm)?.output !== undefined ||
+    OUTPUT_PATTERNS.some(([regex]) => regex.test(norm))
+  );
 }
 
 export function knownTokenLimit(

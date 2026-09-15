@@ -722,6 +722,10 @@
           "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
           "type": "string"
         },
+        "customCatalog": {
+          "description": "URL or local file path of an additional model catalog merged over the bundled models.dev data (per-model context window, output limit, input modalities). Accepts the models.dev api.json format or {\"models\":{\"<model id>\":{\"context\":N,\"output\":N,\"modalities\":{\"image\":true}}}}. Meant for environments that cannot reach models.dev.",
+          "type": "string"
+        },
         "reasoningEffort": {
           "type": "string",
           "enum": [
