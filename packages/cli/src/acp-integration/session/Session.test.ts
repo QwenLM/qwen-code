@@ -27352,6 +27352,41 @@ describe('Session', () => {
           expect(agentTelemetry.captures[0]?.writeToSpan).toHaveBeenCalledWith(
             agentTelemetry.span,
           );
+          const history = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.map(([content]: [Content]) => content);
+          vi.mocked(mockChat.getHistory).mockReturnValue(history);
+          expect(session.getRecoveryStatus()).toEqual({
+            kind: 'clean',
+            canContinue: false,
+          });
+          const boundary = history.at(-1)!;
+          expect(
+            mockChatRecordingService.recordGoalRuntimeMessage,
+          ).toHaveBeenCalledWith(boundary.parts, permit);
+          const replay = core.buildApiHistoryFromConversation({
+            messages: [
+              {
+                uuid: 'goal-boundary',
+                parentUuid: null,
+                sessionId: 'test-session-id',
+                timestamp: new Date().toISOString(),
+                type: 'user',
+                subtype: 'goal_runtime',
+                provenance: 'goal_runtime',
+                cwd: '/test',
+                version: 'test',
+                goalContext: permit,
+                message: boundary,
+              },
+            ],
+          });
+          expect(core.detectTurnInterruption(replay)).toEqual({ kind: 'none' });
+          history.push({ role: 'user', parts: [{ text: 'next request' }] });
+          expect(session.getRecoveryStatus()).toEqual({
+            kind: 'interrupted_prompt',
+            canContinue: true,
+          });
         });
 
         it('runs managed memory effects after an early Goal turn end', async () => {

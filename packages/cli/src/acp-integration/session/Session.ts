@@ -8518,6 +8518,19 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
+    const boundaryParts: Part[] = [
+      {
+        text: wrapSystemReminder(
+          'The Goal runtime intentionally ended this turn after recording the tool results. No further model response is required for this turn.',
+        ),
+      },
+    ];
+    // Keep this structural boundary in both live and restored history so a
+    // tool-only Goal ending is not mistaken for an interrupted user prompt.
+    this.config
+      .getChatRecordingService()
+      ?.recordGoalRuntimeMessage(boundaryParts, goalTurn.permit);
+    this.#getCurrentChat().addHistory({ role: 'user', parts: boundaryParts });
     return true;
   }
 
