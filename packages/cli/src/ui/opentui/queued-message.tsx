@@ -15,7 +15,7 @@
 import { useRef } from 'react';
 import { useTerminalDimensions } from '@opentui/react';
 import { t } from '../../i18n/index.js';
-import { truncateToWidth } from '../utils/textUtils.js';
+import { sanitizeTerminalText, truncateToWidth } from '../utils/textUtils.js';
 import { C } from './theme.js';
 
 const MAX_DISPLAYED_QUEUED_MESSAGES = 3;
@@ -58,7 +58,10 @@ export const OpenTuiQueuedMessageDisplay = ({
         .map((message, index) => (
           <box key={index} paddingLeft={QUEUE_ROW_INDENT}>
             <text fg={C.dim}>
-              {truncateToWidth(message.replace(/\s+/g, ' '), rowBudget)}
+              {truncateToWidth(
+                sanitizeTerminalText(message.replace(/\s+/g, ' ')),
+                rowBudget,
+              )}
             </text>
           </box>
         ))}

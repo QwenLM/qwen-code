@@ -114,4 +114,12 @@ describe('OpenTuiQueuedMessageDisplay', () => {
       mocks.state.dimensions = { width: 100, height: 40 };
     }
   });
+
+  it('strips terminal escapes from a queued prompt before it reaches the screen', () => {
+    // UserRow prints this same string through sanitizeTerminalText once the
+    // queue is consumed; the waiting row must not write escapes raw first.
+    const { container } = render(queueRows(['\u001b[31mred\u001b[0m']));
+    const row = container.querySelector('div > span');
+    expect(row?.textContent ?? '').not.toContain('\u001b');
+  });
 });
