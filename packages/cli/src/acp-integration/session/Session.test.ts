@@ -1962,9 +1962,11 @@ describe('Session', () => {
 
   it('serializes concurrent workflow approvals for single-flight ACP clients', async () => {
     let resolveFirst:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     let resolveSecond:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -2029,9 +2031,11 @@ describe('Session', () => {
 
   it('does not serialize permissions across sessions sharing one ACP connection', async () => {
     let settleFirst:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     let settleSecond:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -2130,7 +2134,8 @@ describe('Session', () => {
 
   it('advances the permission queue when a request is aborted without waiting for the orphaned RPC', async () => {
     let settleFirstTransport:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -2177,7 +2182,8 @@ describe('Session', () => {
 
   it('drops a queued permission request that was abandoned before the head settled', async () => {
     let settleFirst:
-      ((response: RequestPermissionResponse) => void) | undefined;
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
@@ -2831,7 +2837,8 @@ describe('Session', () => {
   it('attributes a delayed title notification to the persisted record session', () => {
     const callback = mockChatRecordingService.setTitleRecordedCallback.mock
       .calls[0]?.[0] as
-      ((title: string, source: string, sessionId: string) => void) | undefined;
+      | ((title: string, source: string, sessionId: string) => void)
+      | undefined;
 
     callback?.('Durable title', 'auto', 'persisted-session-id');
 
@@ -4078,7 +4085,8 @@ describe('Session', () => {
     };
     const isWorkflowRunLiveInSiblingSession = (runId: string): boolean => {
       const entry = siblingRegistry.get(runId) as
-        { status: core.WorkflowStatus } | undefined;
+        | { status: core.WorkflowStatus }
+        | undefined;
       if (entry && !core.isTerminalWorkflowStatus(entry.status)) return true;
       return siblingRegistry.getHandle(runId) !== undefined;
     };
@@ -7572,9 +7580,11 @@ describe('Session', () => {
           if (key !== 'model.reasoningEffort') return;
           const target = scope === SettingScope.Workspace ? workspace : user;
           target.settings.model.reasoningEffort = value as
-            typeof selection | undefined;
+            | typeof selection
+            | undefined;
           target.originalSettings.model.reasoningEffort = value as
-            typeof selection | undefined;
+            | typeof selection
+            | undefined;
           mockSettings.recomputeMerged();
         },
       );
@@ -12892,7 +12902,8 @@ describe('Session', () => {
         (params) =>
           (
             params.update._meta?.['backgroundTask'] as
-              { turnId?: string } | undefined
+              | { turnId?: string }
+              | undefined
           )?.turnId,
       );
       expect(responseTurnIds[0]).toMatch(
@@ -13070,7 +13081,8 @@ describe('Session', () => {
       const terminalUpdateIndex = interceptUpdate.mock.calls.findIndex(
         ([update]) => {
           const backgroundTask = update._meta?.['backgroundTask'] as
-            { turnComplete?: boolean } | undefined;
+            | { turnComplete?: boolean }
+            | undefined;
           return (
             update._meta?.['source'] === 'background_notification_response' &&
             backgroundTask?.turnComplete === true
@@ -13164,7 +13176,8 @@ describe('Session', () => {
             update as { content?: { type?: string; text?: string } }
           ).content;
           const backgroundTask = update._meta?.['backgroundTask'] as
-            { turnComplete?: boolean } | undefined;
+            | { turnComplete?: boolean }
+            | undefined;
           return (
             content?.type === 'text' &&
             content.text === '' &&
@@ -13291,7 +13304,8 @@ describe('Session', () => {
       const markerIndex = sessionUpdate.mock.calls.findIndex(([params]) => {
         const update = (params as SessionNotification).update;
         const backgroundTask = update._meta?.['backgroundTask'] as
-          { turnComplete?: boolean; partial?: boolean } | undefined;
+          | { turnComplete?: boolean; partial?: boolean }
+          | undefined;
         return (
           update._meta?.['source'] === 'background_notification_response' &&
           backgroundTask?.turnComplete === true &&
@@ -13427,7 +13441,8 @@ describe('Session', () => {
       const markerIndex = sessionUpdate.mock.calls.findIndex(([params]) => {
         const update = (params as SessionNotification).update;
         const backgroundTask = update._meta?.['backgroundTask'] as
-          { turnComplete?: boolean; partial?: boolean } | undefined;
+          | { turnComplete?: boolean; partial?: boolean }
+          | undefined;
         return (
           update._meta?.['source'] === 'background_notification_response' &&
           backgroundTask?.turnComplete === true &&
@@ -14356,7 +14371,8 @@ describe('Session', () => {
           update as { content?: { type?: string; text?: string } }
         ).content;
         const backgroundTask = update._meta?.['backgroundTask'] as
-          { partial?: boolean; turnComplete?: boolean } | undefined;
+          | { partial?: boolean; turnComplete?: boolean }
+          | undefined;
         return (
           content?.type === 'text' &&
           content.text === '' &&
@@ -24957,7 +24973,8 @@ describe('Session', () => {
         mockConfig.getWorkingDir = vi.fn(() => currentRoot);
 
         let fire:
-          ((job: { prompt: string; cronExpr?: string }) => void) | undefined;
+          | ((job: { prompt: string; cronExpr?: string }) => void)
+          | undefined;
         const scheduler = {
           size: 1,
           hasPendingWork: true,
@@ -27356,7 +27373,8 @@ describe('Session', () => {
           subscribe: vi.fn().mockReturnValue(() => {}),
         };
         let capturedHooks:
-          { startNewSession?: (sessionId: string) => void } | undefined;
+          | { startNewSession?: (sessionId: string) => void }
+          | undefined;
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
         ).mockImplementationOnce(
