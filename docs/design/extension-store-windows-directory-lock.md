@@ -133,11 +133,16 @@ destination. The copy path is:
    to work under a descendant handle. The copy lands first at
    `${backupDirectory}.partial` and is published with one rename, because a
    half-copied backup is worse than none: recovery would restore it over a
-   destination that is still intact. A crash inside the copy leaves only an orphan
-   `.partial` directory in the rollback area, which no journal points at.
-2. **Apply by copy.** `fsp.cp(stagingDirectory, destinationDirectory, { recursive:
-true, force: true })`, preserving symlinks (`dereference` stays false).
-   Relative symlink targets remain valid because the tree shape is identical.
+   destination that is still intact. A crash inside the copy leaves the `.partial`
+   tree unpublished; both journal teardown paths remove it, so recovering that
+   transaction sweeps it.
+2. **Reconcile types, then apply by copy.** Remove only the destination entries
+   whose type differs from the staged entry at the same relative path - `fsp.cp`
+   refuses to replace those, and refuses before a prune could reach them - then
+   `fsp.cp(stagingDirectory, destinationDirectory, { recursive: true,
+force: true })`, preserving symlinks and timestamps (`dereference` stays false,
+   `preserveTimestamps` on). Relative symlink targets remain valid because the
+   tree shape is identical.
 3. **Prune.** Walk the destination against the staging tree and remove every path
    staging does not carry, recursing into directories present on both sides.
    Running the walk after the apply is what keeps freshly copied content from
@@ -145,15 +150,28 @@ true, force: true })`, preserving symlinks (`dereference` stays false).
    could leave the extension missing content as narrow as a copy-based swap
    allows.
 4. For `uninstall`, replace steps 2-3 with: wipe the destination's children, then
-   `rmdir` the destination itself. If that `rmdir` fails, the directory is held
-   open as a working directory; restore from the backup copy and raise the locked
-   error. A manifest-less husk must not survive, because `pathExists()` would
-   report it as installed and block a later reinstall.
+   remove the destination itself; a linked destination is unlinked rather than
+   emptied. If the wipe fails, the directory is held open as a working directory;
+   restore from the backup copy and raise the locked error. A manifest-less husk
+   must not survive, because `pathExists()` would report it as installed and block
+   a later reinstall.
+
+The copy strategy refuses a destination whose real path leaves the extensions
+root, because every walk below reaches that root and `readdir` follows a link
+there. It also refuses a destination that is not a real directory, before it
+copies anything. The walks themselves enumerate a root only when it is a real directory, and
+unlink it instead, so journal recovery reaches the same conclusion without a
+caller-side check.
 
 `rollbackJournal()` gains the matching direction: with `swapStrategy: 'copy'` it
-wipes the destination's children and copies `backupDirectory` back instead of
-renaming. Recovery needs no new concept - `recoverTransactionsUnlocked()` keeps
-its existing phase comparison and simply calls the strategy-aware rollback.
+restores by copying `backupDirectory` over the destination and pruning what the
+backup does not carry, rather than emptying the destination first, and then
+deletes the backup, which a copy leaves in place where a rename would have
+consumed it. Restoring over the live tree is what keeps a manifest-less husk out
+of reach when an entry cannot be deleted: the swap fails, but the tree it failed
+over is the installed one. Recovery needs no new concept -
+`recoverTransactionsUnlocked()` keeps its existing phase comparison and simply
+calls the strategy-aware rollback.
 
 **B - actionable failure text.** Alongside the existing store errors:
 
@@ -163,15 +181,19 @@ export class ExtensionDirectoryLockedError extends Error {
 }
 ```
 
-The message names the directory and states that another Qwen Code session or
-process may still have it open. It has one throw site: the final `rmdir` of a
-copy-mode uninstall refusing because the directory is in use. Every other failure
-propagates unchanged for the caller to report, and a rollback that itself fails
-still goes through the existing `AggregateError` path. Lock classification lives
-here rather than in `renameWithRetry`, and covers `EPERM`, `EACCES` and `EBUSY` -
-the last because a child process whose working directory is the directory being
-renamed reports that code rather than `EPERM`, and neither error is otherwise
-retried or explained.
+The message names the directory and states that a process still has it open, this
+session included. It is raised wherever a descendant handle can
+defeat the swap - the backup copy and its publish rename, the apply copy, the
+prune walk, and the wipe and removal of a copy-mode uninstall - so a holder
+blocking any of those steps produces the actionable message instead of a raw
+errno, rather than only the last one doing so. A rollback that itself fails still
+goes through the existing `AggregateError` path. Lock classification lives here
+rather than in `renameWithRetry`, and covers
+`EPERM` and `EBUSY` - the latter because a child process whose working directory
+is the directory being renamed reports that code rather than `EPERM`, and neither
+error is otherwise retried or explained. `EACCES` is deliberately excluded: a
+permission denial is not a held handle, and treating it as one would divert a
+permission problem into a copy that fails later with a different error.
 
 ## Decisions and Rejected Alternatives
 
@@ -214,9 +236,13 @@ Rejected:
   uncommitted transaction - including once `artifact_swapped` is recorded, since
   the snapshot is what makes a transaction committed. The window is small and the
   state is always resolvable, but it is wider than the rename path's.
-- **Orphan `.partial` backups** can accumulate in `extension-store/rollback/` when
-  a copy-mode backup is interrupted. Nothing reads them and no journal points at
-  them; they cost disk space until removed out of band.
+- **An interrupted backup leaves its `.partial` tree until the journal is torn
+  down.** The journal is written before the copy starts, so a `.partial` belongs to
+  a transaction whose teardown deletes it (both teardown paths do) - which is why no
+  process-wide sweep is needed, and a journal that is quarantined rather than
+  replayed is the one case that would leave it behind. A copy-mode rollback
+  likewise deletes the backup it restored from, so a failed swap does not grow the
+  rollback area.
 - **Concurrent out-of-band edits** to the destination during the copy window can be
   pruned or overwritten. The rename path has the same class of race with different
   timing; nothing here makes it safe.
@@ -231,19 +257,33 @@ Rejected:
   quarantined.
 - Copy and prune must not follow symlinks out of the destination tree - the staging
   content is already validated by `archive-safety`, but the prune walk has to treat
-  a symlink as a leaf.
+  a symlink as a leaf. The same rule covers the root: the walks enumerate only a
+  real directory and unlink a linked one instead of emptying it, which is what keeps
+  a relocated extension (a junction) from being deleted through its link.
+- **A type change is reconciled before the copy.** `fsp.cp` with `force` cannot
+  replace a file with a directory or the reverse, so those entries are removed
+  ahead of the copy - the only deletion allowed before it, since a blanket
+  prune-before-copy would widen the crash window.
+- **A failed swap leaves extra content, not a hole.** Restoring over the live tree
+  means an entry that cannot be deleted leaves stale files in place instead of
+  emptying the destination; the next successful swap prunes them.
 
 ## Verification and Acceptance
 
 Unit tests colocated in `extension-store.test.ts` run on a real filesystem under
-`os.tmpdir()` with a module-level seam injected over `fs.rename`, and cover: the
+`os.tmpdir()` with a module-level seam injected over `renameWithRetry`, and cover: the
 copy fallback engaging on a Windows lock error with stale files pruned; no
 fallback and an unchanged tree when the same error arrives off Windows; uninstall
 in copy mode removing the directory; recovery of a copy-mode journal by copying
-the backup back, including removing content the partial apply added;
-quarantining a journal whose strategy is unrecognised; and the pre-existing
+the backup back, including removing content the partial apply added; a blocked copy
+step surfacing the locked-directory error with the tree restored and the rollback
+area empty; the rollback restoring over the live tree rather than emptying it; a
+destination that resolves outside the extensions root, and a linked root inside it,
+each being refused with the relocated tree left intact; an entry whose type changes
+between versions being reconciled so the copy runs; an interrupted backup's `.partial` tree being removed by
+recovery; quarantining a journal whose strategy is unrecognised; and the pre-existing
 journals without the field keeping their current behaviour. The one branch that is
-not unit-testable off Windows is the final `rmdir` refusing because a process has
+not unit-testable off Windows is the final removal refusing because a process has
 the directory as its working directory - it needs a real OS-level lock, which the
 harness and the `EBUSY` row above cover.
 

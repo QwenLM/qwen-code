@@ -13,6 +13,7 @@ import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ExtensionConflictError,
+  ExtensionDirectoryLockedError,
   ExtensionStore,
   ExtensionStoreCorruptError,
 } from './extension-store.js';
@@ -25,7 +26,8 @@ import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
  */
 const renameFault = vi.hoisted(() => ({
   inspect: undefined as
-    ((src: string, dest: string) => Error | undefined) | undefined,
+    | ((src: string, dest: string) => Error | undefined)
+    | undefined,
 }));
 
 vi.mock('../utils/atomicFileWrite.js', async (importOriginal) => {
@@ -2892,9 +2894,9 @@ describe('ExtensionStore', () => {
   describe('locked extension directory', () => {
     const originalPlatform = process.platform;
 
-    const lockError = (src: string, code = 'EPERM') =>
-      Object.assign(new Error(`${code}: operation not permitted, rename`), {
-        code,
+    const lockError = (src: string) =>
+      Object.assign(new Error('EPERM: operation not permitted, rename'), {
+        code: 'EPERM',
         path: src,
       });
 
@@ -3024,6 +3026,214 @@ describe('ExtensionStore', () => {
       expect(fs.existsSync(destination)).toBe(false);
       expect(await fsp.readdir(path.join(storeDir, 'rollback'))).toEqual([]);
       expect(await leftoverJournals()).toEqual([]);
+    });
+
+    it('names the directory when a copy-swap step is blocked', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'e2'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      const staging = await stageUpdate(store);
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+      const internals = store as unknown as {
+        emptyDirectory: (directory: string) => Promise<void>;
+        pruneStalePaths: (
+          stagingDirectory: string,
+          destinationDirectory: string,
+        ) => Promise<void>;
+      };
+      const emptied = vi.spyOn(internals, 'emptyDirectory');
+      vi.spyOn(internals, 'pruneStalePaths').mockRejectedValueOnce(
+        lockError(destination),
+      );
+      const installed = (await fsp.readdir(destination)).sort();
+
+      const failure: unknown = await store
+        .commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: staging,
+          destinationDirectory: destination,
+        })
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(ExtensionDirectoryLockedError);
+      expect((failure as Error).message).toContain(destination);
+      expect(
+        await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).toBe('one');
+      expect(
+        await fsp.readFile(path.join(destination, 'stale.md'), 'utf8'),
+      ).toBe('one');
+      expect(fs.existsSync(path.join(destination, 'added.md'))).toBe(false);
+      // Restored, not emptied: an undeletable entry cannot leave a hole.
+      expect(emptied).not.toHaveBeenCalled();
+      expect((await fsp.readdir(destination)).sort()).toEqual(installed);
+      expect(await fsp.readdir(path.join(storeDir, 'rollback'))).toEqual([]);
+      expect(await leftoverJournals()).toEqual([]);
+    });
+
+    it('refuses a destination that resolves outside the extensions directory', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'f1'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      const staging = await stageUpdate(store);
+      // A junction relocates the installed extension out of the store.
+      const relocated = path.join(root, 'relocated-demo');
+      await fsp.rename(destination, relocated);
+      await fsp.writeFile(path.join(relocated, 'canary.txt'), 'user data');
+      await fsp.symlink(relocated, destination, 'junction');
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+
+      await expect(
+        store.commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: staging,
+          destinationDirectory: destination,
+        }),
+      ).rejects.toThrow(/resolves outside the extensions directory/);
+      await expect(
+        store.commitArtifact({
+          operation: 'uninstall',
+          identity,
+          destinationDirectory: destination,
+        }),
+      ).rejects.toThrow(/resolves outside the extensions directory/);
+
+      expect(
+        await fsp.readFile(path.join(relocated, 'canary.txt'), 'utf8'),
+      ).toBe('user data');
+      expect(await fsp.readFile(path.join(relocated, 'version'), 'utf8')).toBe(
+        'one',
+      );
+    });
+
+    it('refuses a linked destination root the walks cannot enter', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'f3'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      const staging = await stageUpdate(store);
+      // A junction that stays inside the root, so containment alone admits it.
+      const relocated = path.join(extensionsDir, 'demo-data');
+      await fsp.rename(destination, relocated);
+      await fsp.writeFile(path.join(relocated, 'canary.txt'), 'user data');
+      await fsp.symlink(relocated, destination, 'junction');
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+
+      await expect(
+        store.commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: staging,
+          destinationDirectory: destination,
+        }),
+      ).rejects.toThrow(/is not a directory this store can replace/);
+      await expect(
+        store.commitArtifact({
+          operation: 'uninstall',
+          identity,
+          destinationDirectory: destination,
+        }),
+      ).rejects.toThrow(/is not a directory this store can replace/);
+
+      expect(fs.lstatSync(destination).isSymbolicLink()).toBe(true);
+      expect(
+        await fsp.readFile(path.join(relocated, 'canary.txt'), 'utf8'),
+      ).toBe('user data');
+      expect(await fsp.readFile(path.join(relocated, 'version'), 'utf8')).toBe(
+        'one',
+      );
+    });
+
+    it('updates by copy when an entry changes kind', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'f2'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      const staging = await stageUpdate(store);
+      // `docs` is a file here and a directory in the staged version.
+      await fsp.writeFile(path.join(destination, 'docs'), 'one');
+      await fsp.mkdir(path.join(staging, 'docs'));
+      await fsp.writeFile(path.join(staging, 'docs', 'a.md'), 'two');
+      // And `skills/keep.md` is a directory here, a file in the staged version.
+      await fsp.rm(path.join(destination, 'skills', 'keep.md'));
+      await fsp.mkdir(path.join(destination, 'skills', 'keep.md'));
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+
+      await store.commitArtifact({
+        operation: 'update',
+        identity,
+        stagingDirectory: staging,
+        destinationDirectory: destination,
+      });
+
+      expect(
+        await fsp.readFile(path.join(destination, 'docs', 'a.md'), 'utf8'),
+      ).toBe('two');
+      expect(
+        await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).toBe('two');
+      expect(
+        await fsp.readFile(path.join(destination, 'skills', 'keep.md'), 'utf8'),
+      ).toBe('two');
+      expect(fs.existsSync(path.join(destination, 'stale.md'))).toBe(false);
+    });
+
+    it('removes a backup the interrupted swap left half-copied', async () => {
+      const store = makeStore();
+      const identity = { id: 'e4'.repeat(32), name: 'demo' };
+      const initial = await store.ensureInitialized([identity]);
+      const targetSnapshot = structuredClone(initial);
+      targetSnapshot.generation = 1;
+      const transactionId = 'interrupted-copy-swap';
+      const destination = path.join(extensionsDir, 'demo');
+      const backup = path.join(storeDir, 'rollback', transactionId);
+      const partialBackup = `${backup}.partial`;
+      await fsp.mkdir(path.join(destination, 'skills'), { recursive: true });
+      await fsp.writeFile(path.join(destination, 'version'), 'old');
+      // The copy died before the backup was published; only `.partial` exists.
+      await fsp.mkdir(path.join(partialBackup, 'skills'), { recursive: true });
+      await fsp.writeFile(path.join(partialBackup, 'version'), 'old');
+      await fsp.writeFile(
+        path.join(storeDir, 'transactions', `${transactionId}.json`),
+        JSON.stringify({
+          version: 1,
+          transactionId,
+          operation: 'update',
+          phase: 'prepared',
+          destinationDirectory: destination,
+          stagingDirectory: path.join(storeDir, 'staging', transactionId),
+          backupDirectory: backup,
+          swapStrategy: 'copy',
+          previousGeneration: 0,
+          targetGeneration: 1,
+          targetSnapshot,
+        }),
+      );
+
+      await store.ensureInitialized([identity]);
+
+      expect(fs.existsSync(partialBackup)).toBe(false);
+      expect(await fsp.readdir(path.join(storeDir, 'rollback'))).toEqual([]);
+      expect(await leftoverJournals()).toEqual([]);
+      expect(
+        await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+      ).toBe('old');
     });
 
     it('restores a copy-swap transaction by copying the backup back', async () => {
