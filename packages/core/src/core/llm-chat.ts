@@ -668,6 +668,14 @@ interface TryCompressOptions {
    * under the same gateway body limit.
    */
   requestPayloadTooLarge?: boolean;
+  /**
+   * Reports each retry backoff (delay in ms) from the compression side
+   * queries, threaded down from the send's {@link LlmChatSendOptions.onRetry}
+   * so a background agent's watchdog can extend its model deadline while
+   * compression waits out provider-directed backoff. Reporting only — the
+   * compression budget itself is unchanged.
+   */
+  onRetry?: (delayMs: number) => void;
 }
 
 // Model-output validation errors (protocol tag leaks, malformed tool calls)
@@ -2677,6 +2685,7 @@ export class LlmChat {
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
       requestPayloadTooLarge: options?.requestPayloadTooLarge,
+      onRetry: options?.onRetry,
       signal,
     });
     // The service owns the compression outcome; LlmChat owns the input
@@ -3148,6 +3157,7 @@ export class LlmChat {
             requestGenerationConfig: params.config,
             requestRouteKey,
             deferChatCompressionRecord: shouldForceFromHard,
+            onRetry: options?.onRetry,
             // Hard-rescue is force=true to bypass the cheap-gate breaker
             // but it remains a semantically AUTOMATIC trigger. Tag the
             // compactTrigger explicitly as 'auto' so PostCompact hooks are
@@ -4098,6 +4108,7 @@ export class LlmChat {
                       requestRouteKey,
                       trigger: 'auto',
                       requestPayloadTooLarge: requestPayloadOverflow.isTooLarge,
+                      onRetry: options?.onRetry,
                     },
                   );
 

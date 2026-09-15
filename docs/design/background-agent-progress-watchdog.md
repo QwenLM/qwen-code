@@ -20,7 +20,10 @@ internal deadlines:
 Model streaming, round transitions, usage, and external input renew the model
 deadline. Tool output and liveness heartbeats renew only that tool's deadline.
 Retry delays surfaced by qwen-code extend the model deadline by at most six
-hours; provider-internal retries remain covered by the ordinary deadline. A
+hours; provider-internal retries remain covered by the ordinary deadline. The
+reporting loops are the send's own model call and the context-compression
+side queries that run inside the same awaited send (both threaded through
+`LlmChatSendOptions.onRetry`); other side queries do not report. A
 tool's own deadline starts when the scheduler reports it executing, so a silent
 tool is not charged to the model deadline. Parallel tools retain independent
 deadlines.
