@@ -11,8 +11,12 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileW
 
 const PROMPT_STASH_FILE = 'prompt-stash.json';
 
-interface PromptStashData {
-  version: 1;
+// Version 2 marks a stash this build writes: only composer (user-authored)
+// text ever reaches savePromptStash, so a restore keeps it verbatim. A
+// version-1 stash predates that contract and can hold model-facing text
+// with an injected envelope, so the restore shape-strips it as a fallback.
+export interface PromptStashData {
+  version: 1 | 2;
   text: string;
 }
 
@@ -24,7 +28,7 @@ export function savePromptStash(targetDir: string, text: string): boolean {
   try {
     const filePath = getPromptStashPath(targetDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    const data: PromptStashData = { version: 1, text };
+    const data: PromptStashData = { version: 2, text };
     atomicWriteFileSync(filePath, JSON.stringify(data), {
       mode: 0o600,
       forceMode: true,
@@ -36,7 +40,7 @@ export function savePromptStash(targetDir: string, text: string): boolean {
   }
 }
 
-export function loadPromptStash(targetDir: string): string | null {
+export function loadPromptStash(targetDir: string): PromptStashData | null {
   try {
     const raw = fs.readFileSync(getPromptStashPath(targetDir), 'utf8');
     const parsed: unknown = JSON.parse(raw);
@@ -44,10 +48,11 @@ export function loadPromptStash(targetDir: string): string | null {
       typeof parsed === 'object' &&
       parsed !== null &&
       !Array.isArray(parsed) &&
-      (parsed as Partial<PromptStashData>).version === 1 &&
+      ((parsed as Partial<PromptStashData>).version === 1 ||
+        (parsed as Partial<PromptStashData>).version === 2) &&
       typeof (parsed as Partial<PromptStashData>).text === 'string'
     ) {
-      return (parsed as PromptStashData).text;
+      return parsed as PromptStashData;
     }
   } catch {
     // A missing or malformed stash must never prevent CLI startup.
@@ -58,13 +63,13 @@ export function loadPromptStash(targetDir: string): string | null {
 export function restorePromptStash(
   targetDir: string,
   currentText: string,
-  onRestore: (text: string) => void,
+  onRestore: (text: string, version: PromptStashData['version']) => void,
 ): boolean {
-  const stashedPrompt = loadPromptStash(targetDir);
-  if (stashedPrompt === null || currentText.length > 0) {
+  const stashed = loadPromptStash(targetDir);
+  if (stashed === null || currentText.length > 0) {
     return false;
   }
-  onRestore(stashedPrompt);
+  onRestore(stashed.text, stashed.version);
   return true;
 }
 

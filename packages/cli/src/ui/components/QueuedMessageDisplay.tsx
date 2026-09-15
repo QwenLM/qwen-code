@@ -44,6 +44,9 @@ export const QueuedMessageDisplay = ({
       {messageQueue
         .slice(0, MAX_DISPLAYED_QUEUED_MESSAGES)
         .map((message, index) => {
+          // `messageQueue` entries are producer-resolved display text (see
+          // useMessageQueue): render them verbatim — a user-authored leading
+          // envelope in a projection is content, not injected context.
           const preview = message.replace(/\s+/g, ' ');
 
           return (

@@ -167,13 +167,33 @@ export type HistoryItemUser = HistoryItemBase & {
   text: string;
   promptId?: string;
   /**
+   * The submit-time text of the turn — injected one-shot envelopes plus the
+   * typed prompt — captured before @-expansion and the vision bridge rewrite
+   * the request, kept when it differs from `text` (which has the envelopes
+   * stripped for display). Read only to recover the envelope prefix for a
+   * re-arm on cancel/rewind restore; it is not the request payload. Set on
+   * items produced live this session and on rebuilt items on resume when
+   * the strip changed the text.
+   */
+  modelText?: string;
+  /**
+   * The producer's decomposition of the injected `<system-reminder>`
+   * envelope run `modelText` carried (see `aggregateUserMessages`), kept
+   * when the dispatch adoption gate used it. A mid-aggregate envelope is
+   * invisible to the rewind restore's leading-only split, so the restore
+   * re-arms exactly this run. Absent on items rebuilt from a resumed
+   * session, which never carry a decomposition.
+   */
+  reminders?: string;
+  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible
    * slash-command invocations may be handled locally without entering API
-   * history. Regular user messages leave this undefined and are classified by
-   * the legacy lexical fallback in isRealUserTurn. New user-item paths with
-   * ambiguous model-history behavior must set this explicitly.
+   * history. Regular user prompts are stamped `true` at the write site and
+   * on the resume rebuild; only legacy resumed items rely on the legacy
+   * lexical fallback in isRealUserTurn. New user-item paths with ambiguous
+   * model-history behavior must set this explicitly.
    */
   sentToModel?: boolean;
 };
