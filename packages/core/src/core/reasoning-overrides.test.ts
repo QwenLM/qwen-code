@@ -187,6 +187,7 @@ describe('reasoning declarations', () => {
     ['qwen3.5-plus', 'https://coding.dashscope.aliyuncs.com/v1'],
     ['qwen3-max-2026-01-23', 'https://coding.dashscope.aliyuncs.com/v1'],
     ['kimi-k2.5', 'https://coding.dashscope.aliyuncs.com/v1'],
+    ['kimi-k2.6', 'https://api.moonshot.ai/v1'],
     [
       'qwen3.6-flash',
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
@@ -200,7 +201,9 @@ describe('reasoning declarations', () => {
     expect(
       resolveReasoningCapabilities(target, { canDisable: false }),
     ).toMatchObject({
-      profile: 'dashscope-thinking',
+      disableField: baseUrl.includes('moonshot')
+        ? 'thinking'
+        : 'enable_thinking',
       toggleOnly: true,
       canDisable: false,
     });
@@ -233,18 +236,21 @@ describe('reasoning declarations', () => {
     ).toBeUndefined();
   });
 
-  it('infers OpenRouter nested reasoning for a partial GPT override', () => {
-    expect(
-      resolveReasoningCapabilities(
-        {
-          ...route,
-          model: 'openai/gpt-5.4',
-          baseUrl: 'https://openrouter.ai/api/v1',
-        },
-        { defaultEffort: 'medium' },
-      ),
-    ).toMatchObject({ profile: 'openai-reasoning', defaultEffort: 'medium' });
-  });
+  it.each(['openai/gpt-5.4', 'openai/gpt-5.4:batch'])(
+    'infers nested reasoning for %s',
+    (model) => {
+      expect(
+        resolveReasoningCapabilities(
+          {
+            ...route,
+            model,
+            baseUrl: 'https://openrouter.ai/api/v1',
+          },
+          { defaultEffort: 'medium' },
+        ),
+      ).toMatchObject({ profile: 'openai-reasoning', defaultEffort: 'medium' });
+    },
+  );
 
   it('ignores misleading Qwen hosts during inference', () => {
     expect(
@@ -263,17 +269,7 @@ describe('reasoning declarations', () => {
 describe('prompt reasoning snapshots', () => {
   it('retains staged reasoning across unmatched route edits and tolerates malformed entries', () => {
     const { config, generation } = snapshotConfig([model()]);
-    config.stageReasoningOverrides({
-      openai: [
-        {
-          id: 'alias',
-          baseUrl: route.baseUrl,
-          capabilities: {
-            reasoning: { ...declaration, defaultEffort: 'high' },
-          },
-        },
-      ],
-    });
+    config.stageReasoningOverrides({ openai: [model('alias', 'high')] });
     config.stageReasoningOverrides({ openai: [null] } as unknown as Parameters<
       Config['stageReasoningOverrides']
     >[0]);
@@ -296,17 +292,7 @@ describe('prompt reasoning snapshots', () => {
     const client = new BaseLlmClient({} as ContentGenerator, config);
     Object.assign(config, { baseLlmClient: client });
     const first = await client.resolveForModel('child', { failClosed: true });
-    config.stageReasoningOverrides({
-      openai: [
-        {
-          id: 'child',
-          baseUrl: route.baseUrl,
-          capabilities: {
-            reasoning: { ...declaration, defaultEffort: 'high' },
-          },
-        },
-      ],
-    });
+    config.stageReasoningOverrides({ openai: [model('child', 'high')] });
     config.applyReasoningOverrides();
     const second = await client.resolveForModel('child', { failClosed: true });
     expect(
@@ -326,27 +312,18 @@ describe('prompt reasoning snapshots', () => {
   });
 
   it.each([
-    [false, 'high'],
-    [true, 'medium'],
+    [false, false, 'high'],
+    [true, false, 'medium'],
+    [false, true, 'medium'],
   ] as const)(
     'owns promotion only for a primary user prompt (concurrent=%s)',
-    async (isConcurrentSideQuery, expected) => {
+    async (isConcurrentSideQuery, refused, expected) => {
       const { config, generation } = snapshotConfig([model()]);
-      config.stageReasoningOverrides({
-        openai: [
-          {
-            id: 'alias',
-            baseUrl: route.baseUrl,
-            capabilities: {
-              reasoning: { ...declaration, defaultEffort: 'high' },
-            },
-          },
-        ],
-      });
+      config.stageReasoningOverrides({ openai: [model('alias', 'high')] });
       const cutoff = new Error('post-admission cutoff');
       Object.assign(config, {
         assertCanStartTurn: () => {
-          throw cutoff;
+          if (refused) throw cutoff;
         },
         getTelemetryIncludeSensitiveSpanAttributes: () => false,
       });
@@ -356,7 +333,13 @@ describe('prompt reasoning snapshots', () => {
         'probe',
         new AbortController().signal,
         'probe',
-        { type: SendMessageType.UserQuery, isConcurrentSideQuery },
+        {
+          type: SendMessageType.UserQuery,
+          isConcurrentSideQuery,
+          get goalSignal(): never {
+            throw cutoff;
+          },
+        },
       );
       await expect(stream.next()).rejects.toBe(cutoff);
       expect(resolveReasoningForModel(config, generation)).toMatchObject({
@@ -365,22 +348,26 @@ describe('prompt reasoning snapshots', () => {
     },
   );
 
-  it('preserves the implicit route when a child inherits its model', () => {
-    const { config } = snapshotConfig(
-      [
-        { ...model('alias', 'low'), registryBaseUrl: undefined },
-        model('alias', 'high'),
-      ],
-      null,
-    );
-    const child = buildAgentContentGeneratorConfig(config, undefined, {
-      authType: AuthType.USE_OPENAI,
-    });
-    expect(child.reasoningRouteBaseUrl).toBeNull();
-    expect(resolveReasoningForModel(config, child)).toMatchObject({
-      defaultEffort: 'low',
-    });
-  });
+  it.each([undefined, route.baseUrl])(
+    'preserves the inherited implicit route with endpoint %s',
+    (baseUrl) => {
+      const { config } = snapshotConfig(
+        [
+          { ...model('alias', 'low'), registryBaseUrl: undefined },
+          model('alias', 'high'),
+        ],
+        null,
+      );
+      const child = buildAgentContentGeneratorConfig(config, undefined, {
+        baseUrl,
+        authType: AuthType.USE_OPENAI,
+      });
+      expect(child.reasoningRouteBaseUrl).toBeNull();
+      expect(resolveReasoningForModel(config, child)).toMatchObject({
+        defaultEffort: 'low',
+      });
+    },
+  );
 
   it('degrades invalid initial declarations without losing healthy routes', () => {
     const invalid = model('invalid');
@@ -432,6 +419,18 @@ describe('prompt reasoning snapshots', () => {
       },
     ];
     const snapshot = captureReasoningSnapshot(models);
+    expect(
+      resolveReasoningForModel(
+        undefined,
+        {
+          ...route,
+          model: 'parent',
+          thinkingMandatory: true,
+          reasoningSnapshot: snapshot,
+        },
+        'alias',
+      )?.canDisable,
+    ).toBeUndefined();
     models[0]!.capabilities = {
       reasoning: { ...declaration, defaultEffort: 'low' },
     };

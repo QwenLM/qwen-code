@@ -9,7 +9,6 @@ import type { SessionSourceService } from '../services/session-sources.js';
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import {
   captureReasoningSnapshot,
-  validateReasoningDeclaration,
   validateReasoningCapabilities,
   resolveReasoningForModel,
   type ReasoningSnapshot,
@@ -4869,8 +4868,7 @@ export class Config {
     try {
       const next = captureReasoningSnapshot(models);
       for (const row of next) {
-        validateReasoningDeclaration({ model: row.id }, row.reasoning);
-        if (row.registryBaseUrl || row.reasoning?.profile) {
+        if (row.authType !== AuthType.QWEN_OAUTH || row.reasoning?.profile) {
           validateReasoningCapabilities(
             { model: row.id, authType: row.authType, baseUrl: row.baseUrl },
             row.reasoning,

@@ -274,7 +274,8 @@ function buildInheritedAgentContentGeneratorConfig(
   if (
     !sameProvider ||
     nextConfig.model !== parentConfig.model ||
-    authOverrides.baseUrl !== undefined
+    (authOverrides.baseUrl !== undefined &&
+      authOverrides.baseUrl !== parentConfig.baseUrl)
   )
     nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
   nextConfig.baseUrl =

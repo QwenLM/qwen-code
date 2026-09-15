@@ -283,7 +283,7 @@ import {
   startChildHeapProbe,
   type ChildHeapProbe,
 } from './child-heap-probe.js';
-import { resolveReasoningForModel } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
@@ -7853,7 +7853,7 @@ class QwenAgent implements Agent {
           ? config.getResolvedModelConfig?.(
               model.authType,
               model.id,
-              model.registryBaseUrl ?? model.baseUrl,
+              model.registryBaseUrl,
             )
           : undefined;
         const generation: ContentGeneratorConfig = {
@@ -7861,15 +7861,16 @@ class QwenAgent implements Agent {
           model: model.id,
           authType: model.authType,
           baseUrl: resolved?.baseUrl,
-          reasoningSnapshot:
-            config.getContentGeneratorConfig?.()?.reasoningSnapshot,
-          reasoningRouteBaseUrl: model.registryBaseUrl ?? null,
         };
         const configOptions = model.isRuntimeModel
           ? undefined
           : buildModelReasoningRoutePreview(
               generation,
-              resolveReasoningForModel(config, generation),
+              resolveReasoningCapabilities(
+                generation,
+                model.capabilities?.reasoning ??
+                  resolved?.capabilities?.reasoning,
+              ),
               settings.merged.model?.reasoningEffort,
               modelId.startsWith(ACP_ROUTE_ID_PREFIX),
             );

@@ -389,7 +389,14 @@ export function isReasoningSelectionSupported(
 export function clearReasoningRequestOverrides(
   generation: ContentGeneratorConfig,
 ): void {
-  if (getGptReasoningCapabilities(generation.model)) return;
+  if (
+    getGptReasoningCapabilities(generation.model) ||
+    getGptReasoningOverrideState(
+      generation,
+      resolveReasoningForModel(undefined, generation),
+    )?.blocksTierChange
+  )
+    return;
   for (const source of ['extra_body', 'samplingParams'] as const) {
     const layer = generation[source];
     if (!layer) continue;

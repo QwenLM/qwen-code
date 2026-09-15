@@ -171,7 +171,7 @@ function buildWorkspaceProvidersStatus(
       const resolved = modelsConfig.getResolvedModel(
         model.authType,
         model.id,
-        model.registryBaseUrl ?? model.baseUrl,
+        model.registryBaseUrl,
       );
       const generation: ContentGeneratorConfig = {
         ...resolved?.generationConfig,

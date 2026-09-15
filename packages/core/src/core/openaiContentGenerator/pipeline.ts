@@ -1151,17 +1151,29 @@ export class ContentGenerationPipeline {
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
+    if (
+      (profile === 'openai-effort' || profile === 'dashscope-effort') &&
+      isReasoningEffortPlaceholder(providerRequest.reasoning_effort) &&
+      effectiveReasoning &&
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined
+    )
+      providerRequest.reasoning_effort =
+        effectiveReasoning.effort as typeof providerRequest.reasoning_effort;
     if (reasoningDisabled && profile) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      if (request.config?.thinkingConfig?.includeThoughts === false) {
+      if (
+        !thinkingMandatory ||
+        request.config?.thinkingConfig?.includeThoughts === false
+      ) {
         delete typed['reasoning'];
         delete typed['reasoning_effort'];
       }
       if (!thinkingMandatory) {
-        delete typed['reasoning'];
-        delete typed['reasoning_effort'];
-        if (isDashScope && profile === 'dashscope-effort')
+        if (isDashScope && profile === 'dashscope-effort') {
           delete typed['thinking_budget'];
+          delete typed['enable_thinking'];
+        }
         const template = asObject(typed['chat_template_kwargs']);
         Object.assign(typed, profileReasoning(profile, false));
         if (profile === 'qwen-chat-template') {

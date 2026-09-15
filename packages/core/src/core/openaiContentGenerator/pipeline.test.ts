@@ -2375,12 +2375,13 @@ describe('ContentGenerationPipeline', () => {
         {
           baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
           reasoning: false,
-          extra_body: { thinking_budget: 4096 },
+          extra_body: { thinking_budget: 4096, enable_thinking: true },
         },
         'qwen3.8-max',
       );
       expect(effort['reasoning_effort']).toBe('none');
       expect(effort['thinking_budget']).toBeUndefined();
+      expect(effort['enable_thinking']).toBeUndefined();
     });
 
     it.each(['samplingParams', 'extra_body'] as const)(
@@ -2516,6 +2517,9 @@ describe('ContentGenerationPipeline', () => {
           { defaultEffort: 'medium' },
           {
             baseUrl,
+            extra_body: model.startsWith('openai/')
+              ? undefined
+              : { reasoning_effort: null },
           },
           model,
         );

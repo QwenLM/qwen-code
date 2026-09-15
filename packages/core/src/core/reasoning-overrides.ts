@@ -63,29 +63,29 @@ type Route = Pick<
   'model' | 'authType' | 'baseUrl' | 'thinkingMandatory'
 >;
 
+function invalidReasoning(route: Route): never {
+  throw new Error(
+    `Model "${route.model}" capabilities.reasoning: invalid profile, efforts or defaultEffort`,
+  );
+}
+
 export function validateReasoningDeclaration(
   route: Route,
   declaration: unknown,
 ): ModelReasoningOverride | undefined {
   if (declaration === undefined) return undefined;
-  const fail = (): never => {
-    throw new Error(
-      `Model "${route.model}" capabilities.reasoning: invalid profile, efforts or defaultEffort`,
-    );
-  };
   if (
     !declaration ||
     typeof declaration !== 'object' ||
     Array.isArray(declaration)
   )
-    return fail();
+    return invalidReasoning(route);
   const input = declaration as ModelReasoningOverride;
-  const legacy = parseModelReasoningCapabilities(input);
   if (
     input.profile === undefined &&
     ('thinking' in input || 'disableField' in input)
   )
-    return legacy;
+    return parseModelReasoningCapabilities(input);
   if (
     !Object.keys(input).length ||
     Object.keys(input).some(
@@ -101,7 +101,7 @@ export function validateReasoningDeclaration(
         ].includes(key),
     )
   )
-    return fail();
+    return invalidReasoning(route);
   if (
     (input.profile !== undefined &&
       !REASONING_PROFILES.includes(input.profile)) ||
@@ -109,7 +109,7 @@ export function validateReasoningDeclaration(
     (input.toggleOnly !== undefined && typeof input.toggleOnly !== 'boolean') ||
     (input.canDisable !== undefined && input.canDisable !== false)
   )
-    return fail();
+    return invalidReasoning(route);
   if (
     input.efforts !== undefined &&
     (!Array.isArray(input.efforts) ||
@@ -117,13 +117,13 @@ export function validateReasoningDeclaration(
       input.efforts.some((tier) => !REASONING_EFFORT_TIERS.includes(tier)) ||
       new Set(input.efforts).size !== input.efforts.length)
   )
-    return fail();
+    return invalidReasoning(route);
   if (
     input.defaultEffort !== undefined &&
     (!REASONING_EFFORT_TIERS.includes(input.defaultEffort) ||
       (input.efforts && !input.efforts.includes(input.defaultEffort)))
   )
-    return fail();
+    return invalidReasoning(route);
   if (
     !input.profile &&
     !getGptReasoningCapabilities(route.model) &&
@@ -136,7 +136,7 @@ export function validateReasoningDeclaration(
       ),
     )
   )
-    return fail();
+    return invalidReasoning(route);
   return input;
 }
 
@@ -159,11 +159,6 @@ export function validateReasoningCapabilities(
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)
     return parseModelReasoningCapabilities(input);
-  const fail = (): never => {
-    throw new Error(
-      `Model "${route.model}" capabilities.reasoning: invalid profile, efforts or defaultEffort`,
-    );
-  };
   const model = normalize(route.model);
   const provider = ALL_PROVIDERS.find((candidate) =>
     typeof candidate.baseUrl === 'string'
@@ -175,12 +170,17 @@ export function validateReasoningCapabilities(
     provider?.models?.find((candidate) => candidate.id === model)
   )?.capabilities?.reasoning;
   const inherited = parseModelReasoningCapabilities(known);
-  const gpt = getGptReasoningCapabilities(model);
+  if (!input.profile && inherited?.toggleOnly) {
+    if (input.efforts || input.defaultEffort) return invalidReasoning(route);
+    return parseModelReasoningCapabilities({ ...inherited, ...input });
+  }
+  const gpt = getGptReasoningCapabilities(route.model);
   const claude =
     route.authType === 'anthropic'
       ? parseClaudeModelVersion(route.model)
       : undefined;
-  if (!inherited && !gpt && !claude && !input.profile) return fail();
+  if (!inherited && !gpt && !claude && !input.profile)
+    return invalidReasoning(route);
   const auth = route.authType;
   let host = '';
   try {
@@ -210,19 +210,15 @@ export function validateReasoningCapabilities(
                     (claude.major === 4 && claude.minor >= 6))
                 ? 'anthropic-adaptive'
                 : 'anthropic-manual'
-            : inherited?.toggleOnly
+            : model.startsWith('qwen')
               ? dashscope
-                ? 'dashscope-thinking'
+                ? inherited?.disableField === 'reasoning_effort'
+                  ? 'dashscope-effort'
+                  : 'dashscope-thinking'
                 : 'qwen-chat-template'
-              : model.startsWith('qwen')
-                ? dashscope
-                  ? inherited?.disableField === 'reasoning_effort'
-                    ? 'dashscope-effort'
-                    : 'dashscope-thinking'
-                  : 'qwen-chat-template'
-                : inherited?.disableField === 'thinking'
-                  ? 'deepseek-openai'
-                  : 'openai-effort');
+              : inherited?.disableField === 'thinking'
+                ? 'deepseek-openai'
+                : 'openai-effort');
   const protocol =
     profile === 'gemini'
       ? 'gemini'
@@ -239,7 +235,7 @@ export function validateReasoningCapabilities(
             ? 'openai'
             : auth))
   )
-    return fail();
+    return invalidReasoning(route);
   const toggleOnly =
     profile === 'dashscope-thinking' || profile === 'qwen-chat-template';
   const disableField =
@@ -271,7 +267,7 @@ export function validateReasoningCapabilities(
     (profile === 'gemini' &&
       efforts?.some((tier) => tier === 'xhigh' || tier === 'max'))
   )
-    return fail();
+    return invalidReasoning(route);
   const result = {
     ...input,
     thinking: true,
@@ -286,7 +282,7 @@ export function validateReasoningCapabilities(
       : {}),
   };
   const parsed = parseModelReasoningCapabilities(result);
-  if (!parsed) return fail();
+  if (!parsed) return invalidReasoning(route);
   return {
     ...parsed,
     profile,
@@ -363,7 +359,15 @@ export function resolveReasoningForModel(
   }
   return (
     strict ? validateReasoningCapabilities : resolveReasoningCapabilities
-  )({ ...generation, model }, declaration);
+  )(
+    {
+      ...generation,
+      model,
+      thinkingMandatory:
+        model === generation.model ? generation.thinkingMandatory : undefined,
+    },
+    declaration,
+  );
 }
 
 export function getEffectiveReasoning(

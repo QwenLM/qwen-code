@@ -10568,12 +10568,22 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('keeps healthy model previews when another captured reasoning declaration is invalid', async () => {
+  it('keeps healthy model previews when another live reasoning declaration is invalid, ignoring bootstrap snapshots', async () => {
     const models = ['healthy', 'broken'].map((id) => ({
       id,
       label: id,
       authType: AuthType.USE_OPENAI,
       baseUrl: `https://${id}.example/v1`,
+      capabilities: {
+        reasoning:
+          id === 'healthy'
+            ? {
+                profile: 'openai-effort',
+                efforts: ['low', 'medium'],
+                defaultEffort: 'medium',
+              }
+            : { profile: 'invalid-profile' },
+      },
     }));
     mockConfig = {
       ...mockConfig,
@@ -10585,17 +10595,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getContentGeneratorConfig: vi.fn(() => ({
         model: 'healthy',
         authType: AuthType.USE_OPENAI,
-        reasoningSnapshot: models.map((model) => ({
-          ...model,
-          reasoning:
-            model.id === 'healthy'
-              ? {
-                  profile: 'openai-effort',
-                  efforts: ['low', 'medium'],
-                  defaultEffort: 'medium',
-                }
-              : { profile: 'invalid-profile' },
-        })),
+        reasoningSnapshot: [],
       })),
       getResolvedModelConfig: vi.fn((_auth: string, id: string) => ({
         baseUrl: `https://${id}.example/v1`,

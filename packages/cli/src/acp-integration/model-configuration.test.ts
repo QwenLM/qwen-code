@@ -881,6 +881,20 @@ describe('external reasoning controls', () => {
         profile === 'openai-effort'
           ? { reasoning_effort: 'high' }
           : { reasoning: { effort: 'high' } };
+      const raw = {
+        ...generation,
+        extra_body,
+        reasoningSnapshot: [
+          {
+            id: generation.model,
+            authType: generation.authType!,
+            baseUrl: generation.baseUrl,
+            reasoning: { ...declaration, profile },
+          },
+        ],
+      };
+      clearReasoningRequestOverrides(raw);
+      expect(raw.extra_body).toEqual(extra_body);
       expect(
         buildModelReasoningRoutePreview(
           { ...generation, extra_body },

@@ -2877,11 +2877,6 @@ export class LlmClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
-    if (
-      messageType === SendMessageType.UserQuery &&
-      !options?.isConcurrentSideQuery
-    )
-      this.config.applyReasoningOverrides?.();
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Retry ||
@@ -2941,6 +2936,11 @@ export class LlmClient {
     ) {
       await this.config.assertCanStartTurn();
     }
+    if (
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery
+    )
+      this.config.applyReasoningOverrides?.();
     const signal = options?.goalSignal
       ? AbortSignal.any([callerSignal, options.goalSignal])
       : callerSignal;
