@@ -6,6 +6,14 @@
 
 import type { SessionSourceService } from '../services/session-sources.js';
 
+import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import {
+  captureReasoningSnapshot,
+  validateReasoningCapabilities,
+  resolveReasoningForModel,
+  type ReasoningSnapshot,
+} from '../core/reasoning-overrides.js';
+
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -142,6 +150,7 @@ import { isImageGenerationCapable } from '../models/image-generation-capability.
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
+import { TurnBudget } from '../core/turn-budget.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -820,8 +829,13 @@ export {
 } from './mcp-server-config.js';
 
 export interface SandboxConfig {
-  command: 'docker' | 'podman' | 'sandbox-exec';
-  image: string;
+  command: 'docker' | 'podman' | 'sandbox-exec' | 'bwrap';
+  /**
+   * Container image, required by `docker` and `podman`. The in-place backends
+   * (`sandbox-exec`, `bwrap`) confine the current process instead of starting a
+   * container, so `loadSandboxConfig` leaves this unset for them.
+   */
+  image?: string;
 }
 
 /**
@@ -2533,6 +2547,9 @@ export class Config {
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   private readonly workflowRunRegistry = new WorkflowRunRegistry();
+  // Derived Configs reach this one through the prototype, on purpose: a
+  // workflow started inside a subagent measures against its session's turn.
+  private readonly turnBudget = new TurnBudget();
   // Derived Configs do not run field initializers. getFileReadCache()
   // lazily installs an own cache to keep child state isolated.
   private fileReadCache: FileReadCache = new FileReadCache();
@@ -2895,8 +2912,17 @@ export class Config {
   private fastModel?: string;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
+  /**
+   * Per-session web_search call count. An object that is never reassigned:
+   * derived Configs (`deriveConfig` → `Object.create(base)`) must mutate the
+   * same counter, and `this.count++` on a wrapper would create an own
+   * property that shadows the session-global value.
+   */
+  private readonly webSearchSessionUsage = { calls: 0 };
   private visionModel?: string;
   private compactionModel?: string;
+  private reasoningSnapshot?: ReasoningSnapshot;
+  private latestReasoningSnapshot?: ReasoningSnapshot;
   private imageModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
@@ -4804,7 +4830,104 @@ export class Config {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.captureLatestReasoning();
     this.baseLlmClient?.clearPerModelGeneratorCache();
+  }
+
+  getReasoningSnapshot(): ReasoningSnapshot {
+    return (this.reasoningSnapshot ??= captureReasoningSnapshot(
+      this.getAllConfiguredModels(),
+    ));
+  }
+
+  stageReasoningOverrides(
+    providers: ModelProvidersConfig | undefined,
+    protocols: ProviderProtocolConfig = {},
+  ): string | undefined {
+    const previous =
+      this.latestReasoningSnapshot ?? this.getReasoningSnapshot();
+    const models = this.getAllConfiguredModels().map((model) => {
+      const prior = previous.find(
+        (row) =>
+          row.id === model.id &&
+          row.authType === model.authType &&
+          row.registryBaseUrl === model.registryBaseUrl,
+      );
+      const configured = Object.entries(providers ?? {})
+        .flatMap(([provider, entries]) =>
+          model.authType !== AuthType.QWEN_OAUTH &&
+          resolveProviderProtocol(provider, protocols) === model.authType &&
+          Array.isArray(entries)
+            ? entries
+            : [],
+        )
+        .find(
+          (entry) =>
+            entry?.id === model.id && entry.baseUrl === model.registryBaseUrl,
+        );
+      return {
+        ...model,
+        capabilities: {
+          ...model.capabilities,
+          reasoning: configured
+            ? configured.capabilities?.reasoning
+            : prior
+              ? prior.reasoning
+              : model.capabilities?.reasoning,
+        },
+      };
+    });
+    return this.captureLatestReasoning(models);
+  }
+
+  private captureLatestReasoning(
+    models = this.getAllConfiguredModels(),
+  ): string | undefined {
+    try {
+      const next = captureReasoningSnapshot(models);
+      for (const row of next) {
+        if (row.authType !== AuthType.QWEN_OAUTH || row.reasoning?.profile) {
+          validateReasoningCapabilities(
+            { model: row.id, authType: row.authType, baseUrl: row.baseUrl },
+            row.reasoning,
+          );
+        }
+      }
+      const generation = this.getContentGeneratorConfig();
+      if (generation)
+        resolveReasoningForModel(
+          this,
+          {
+            ...generation,
+            reasoningSnapshot: next,
+          },
+          generation.model,
+          true,
+        );
+      this.latestReasoningSnapshot = next;
+      return undefined;
+    } catch (error) {
+      const message = `Reasoning settings not applied; keeping the previous configuration. ${getErrorMessage(error)}`;
+      // eslint-disable-next-line no-console -- configuration rejection must be visible without debug logging
+      console.warn(message);
+      return message;
+    }
+  }
+
+  applyReasoningOverrides(): boolean {
+    if (!this.latestReasoningSnapshot) this.captureLatestReasoning();
+    const next = this.latestReasoningSnapshot;
+    if (
+      !next ||
+      JSON.stringify(next) === JSON.stringify(this.reasoningSnapshot)
+    )
+      return false;
+    this.reasoningSnapshot = next;
+    const generation = this.getContentGeneratorConfig();
+    if (generation) generation.reasoningSnapshot = next;
+    this.baseLlmClient?.clearPerModelGeneratorCache();
+    this.notifyModelChangeListeners();
+    return true;
   }
 
   /**
@@ -5095,6 +5218,8 @@ export class Config {
       // Skill grants belong to the session that loaded the skill; a resumed
       // session re-arms its own from history during `initialize()`.
       this.permissionManager?.clearSessionAllowRules();
+      // The web search budget belongs to the session, like the grants above.
+      this.webSearchSessionUsage.calls = 0;
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
@@ -5642,6 +5767,14 @@ export class Config {
     return this.webSearchSettings;
   }
 
+  /**
+   * Mutable web_search call count for the current session, shared with
+   * derived Configs and reset by {@link startNewSession}.
+   */
+  getWebSearchSessionUsage(): { calls: number } {
+    return this.webSearchSessionUsage;
+  }
+
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
@@ -5800,10 +5933,7 @@ export class Config {
       return undefined;
     }
 
-    const configuredReasoning = cfg.authType
-      ? this.getResolvedModelConfig(cfg.authType, cfg.model, cfg.baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
+    const configuredReasoning = resolveReasoningForModel(this, cfg);
     const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
     if (!tieredModel) return undefined;
 
@@ -6074,6 +6204,8 @@ export class Config {
       // setReasoningEffort() below. Do not add `reasoning` here — that would
       // overwrite the live tier with the new model's default and make the
       // restore a no-op.
+      this.contentGeneratorConfig.reasoningRouteBaseUrl =
+        config.reasoningRouteBaseUrl;
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
@@ -10048,6 +10180,14 @@ export class Config {
 
   getWorkflowRunRegistry(): WorkflowRunRegistry {
     return this.workflowRunRegistry;
+  }
+
+  /**
+   * The current turn's output-token target and starting point, written when
+   * an interaction starts and read by a workflow at launch.
+   */
+  getTurnBudget(): TurnBudget {
+    return this.turnBudget;
   }
 
   /**

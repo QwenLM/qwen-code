@@ -23,13 +23,33 @@ import timelineStyles from './MessageList.module.css';
 const ROW_HEIGHT = 16;
 const OVERSCAN = 4;
 
+function revealOrdinal(
+  element: HTMLElement,
+  ordinal: number,
+  height: number,
+): boolean {
+  const topEdge = ordinal * ROW_HEIGHT;
+  const bottomEdge = topEdge + ROW_HEIGHT;
+  const target =
+    topEdge < element.scrollTop
+      ? topEdge
+      : bottomEdge > element.scrollTop + height
+        ? bottomEdge - height
+        : undefined;
+  if (target === undefined) return false;
+  element.scrollTop = target;
+  return true;
+}
+
 export function GlobalTurnNavigation({
   state,
   store,
+  follow,
   onSelect,
 }: {
   state: DaemonTurnNavigationSnapshot;
   store: DaemonTurnNavigationStore;
+  follow?: { start: number; end: number; current: number };
   onSelect: (ordinal: number) => void;
 }) {
   const { t } = useI18n();
@@ -76,6 +96,23 @@ export function GlobalTurnNavigation({
     setFocus(count - 1);
     setInitializedSession(state.sessionId);
   }, [count, state.sessionId, height, initializedSession]);
+
+  const selected = state.selected;
+  const currentOrdinal =
+    selected?.status === 'loading'
+      ? selected.ordinal
+      : (follow?.current ?? selected?.ordinal);
+  useLayoutEffect(() => {
+    if (currentOrdinal === undefined) return;
+    const element = viewport.current;
+    if (!element) return;
+    if (!revealOrdinal(element, currentOrdinal, height)) return;
+    if (element.contains(document.activeElement)) {
+      pendingFocus.current = true;
+      setFocus(currentOrdinal);
+    }
+    setTop(element.scrollTop);
+  }, [currentOrdinal, count, height]);
 
   const missing = new Set<number>();
   for (
@@ -132,7 +169,7 @@ export function GlobalTurnNavigation({
         {/* Allow hover ticks to expand past the gutter without covering message hit targets. */}
         <div
           ref={viewport}
-          className="-mr-8 min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="-mr-8 min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden"
           style={{ height: Math.min(count * ROW_HEIGHT, 360) }}
           onScroll={(event) => setTop(event.currentTarget.scrollTop)}
         >
@@ -147,11 +184,17 @@ export function GlobalTurnNavigation({
                 entry?.label ??
                 state.provisionalTurns[ordinal - state.totalTurns]?.label;
               const title = `${t('timeline.turnPrefix', { index: ordinal + 1 })}${label ? ` · ${label}` : ''}`;
+              const isCurrent = ordinal === currentOrdinal;
+              const inRange =
+                follow !== undefined &&
+                ordinal >= follow.start &&
+                ordinal <= follow.end;
               return (
                 <li
                   key={ordinal}
                   aria-posinset={ordinal + 1}
                   aria-setsize={count}
+                  data-in-current-range={inRange || undefined}
                   className={`${timelineStyles.sessionTimelineItem} left-0 right-0`}
                   style={{
                     position: 'absolute',
@@ -163,14 +206,10 @@ export function GlobalTurnNavigation({
                     <TooltipTrigger asChild>
                       <button
                         type="button"
-                        className={`${timelineStyles.sessionTimelineButton} pointer-events-auto ${state.selected?.ordinal === ordinal ? timelineStyles.sessionTimelineButtonCurrent : ''}`}
+                        className={`${timelineStyles.sessionTimelineButton} pointer-events-auto ${inRange ? timelineStyles.sessionTimelineButtonInRange : ''} ${isCurrent ? timelineStyles.sessionTimelineButtonCurrent : ''}`}
                         style={{ top: 0, width: '100%' }}
                         aria-label={title}
-                        aria-current={
-                          state.selected?.ordinal === ordinal
-                            ? 'location'
-                            : undefined
-                        }
+                        aria-current={isCurrent ? 'location' : undefined}
                         data-turn-ordinal={ordinal}
                         tabIndex={focusOrdinal === ordinal ? 0 : -1}
                         onFocus={() => setFocus(ordinal)}
@@ -198,14 +237,7 @@ export function GlobalTurnNavigation({
                           event.preventDefault();
                           const target = Math.max(0, Math.min(count - 1, next));
                           const element = viewport.current!;
-                          if (target * ROW_HEIGHT < element.scrollTop)
-                            element.scrollTop = target * ROW_HEIGHT;
-                          else if (
-                            (target + 1) * ROW_HEIGHT >
-                            element.scrollTop + height
-                          )
-                            element.scrollTop =
-                              (target + 1) * ROW_HEIGHT - height;
+                          revealOrdinal(element, target, height);
                           setTop(element.scrollTop);
                           pendingFocus.current = true;
                           setFocus(target);

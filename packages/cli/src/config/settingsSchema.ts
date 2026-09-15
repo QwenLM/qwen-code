@@ -20,7 +20,9 @@ import {
   GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
   MAX_WEB_SEARCH_TIMEOUT_MS,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
@@ -66,6 +68,15 @@ export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
   'boolean',
   'enum',
 ]);
+
+/**
+ * Setting types edited as a number in the settings dialogs. `integer` is a
+ * number the write-time validator also requires to be whole; handling it as
+ * anything else leaves the setting uneditable.
+ */
+export function isNumericSettingType(type: SettingsType | undefined): boolean {
+  return type === 'number' || type === 'integer';
+}
 
 export interface SettingEnumOption {
   value: string | number;
@@ -1803,7 +1814,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         description:
-          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -2754,7 +2765,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
+          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2788,7 +2799,7 @@ const SETTINGS_SCHEMA = {
             showInDialog: true,
           },
           timeoutMs: {
-            type: 'number',
+            type: 'integer',
             label: 'Search Timeout (ms)',
             category: 'Tools',
             requiresRestart: true,
@@ -2796,6 +2807,17 @@ const SETTINGS_SCHEMA = {
             minimum: 1,
             maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
             description: `Total time budget for one web_search call, in milliseconds (default ${DEFAULT_WEB_SEARCH_TIMEOUT_MS}, max ${MAX_WEB_SEARCH_TIMEOUT_MS}; other values fall back to the default). The search agent runs several queries and may open result pages; a search that exceeds the budget returns whatever arrived as a partial result once at least one search call has completed — if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. A per-tool execution cap (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) below this budget fires first and discards the partial result; keep it above timeoutMs. Env override: WEB_SEARCH_TIMEOUT_MS.`,
+            showInDialog: true,
+          },
+          maxPerSession: {
+            type: 'integer',
+            label: 'Max Searches per Session',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as number | undefined,
+            minimum: 1,
+            maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
+            description: `Maximum web_search calls in one session (default ${DEFAULT_WEB_SEARCH_MAX_PER_SESSION}, max ${MAX_WEB_SEARCH_MAX_PER_SESSION}; other values fall back to the default). The count is shared with subagents and resets when the session changes (/clear, /resume, branching). Once it is reached, further searches are skipped and the model is told to continue with what it has gathered. Env override: WEB_SEARCH_MAX_PER_SESSION.`,
             showInDialog: true,
           },
         },
@@ -3512,9 +3534,9 @@ const SETTINGS_SCHEMA = {
         label: 'Cross-Session Messaging',
         category: 'Advanced',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.',
+          'Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session\'s own review class, which nothing authenticates. Set to false to keep this session invisible and unreachable.',
         showInDialog: false,
       },
       crossSessionInbound: {
