@@ -280,7 +280,6 @@ describe('extensionConsentString', () => {
         extensionName: 'gcp',
         scriptPath: '/ext/gcp/workflows/audit.js',
         contentDigest: '0123456789abcdef',
-        contentDigest: '0123456789abcdef',
         description: 'Audits\n\u001b[31mthe project\u001b[0m',
       },
     ]);
