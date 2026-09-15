@@ -10719,6 +10719,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('keeps healthy model previews when another live reasoning declaration is invalid, ignoring bootstrap snapshots', async () => {
+    const models = ['healthy', 'broken'].map((id) => ({
+      id,
+      label: id,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: `https://${id}.example/v1`,
+      capabilities: {
+        reasoning:
+          id === 'healthy'
+            ? {
+                profile: 'openai-effort',
+                efforts: ['low', 'medium'],
+                defaultEffort: 'medium',
+              }
+            : { profile: 'invalid-profile' },
+      },
+    }));
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn(() => '/work/status'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+      getModel: vi.fn(() => 'healthy'),
+      getAllConfiguredModels: vi.fn(() => models),
+      getContentGeneratorConfig: vi.fn(() => ({
+        model: 'healthy',
+        authType: AuthType.USE_OPENAI,
+        reasoningSnapshot: [],
+      })),
+      getResolvedModelConfig: vi.fn((_auth: string, id: string) => ({
+        baseUrl: `https://${id}.example/v1`,
+        generationConfig: {},
+      })),
+    } as unknown as Config;
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    try {
+      const status = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        {},
+      );
+      expect(status['errors']).toBeUndefined();
+      expect(status).toMatchObject({
+        providers: [
+          {
+            models: [
+              {
+                baseModelId: 'healthy',
+                configOptions: [{ currentValue: 'medium' }],
+              },
+              { baseModelId: 'broken' },
+            ],
+          },
+        ],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('uses the target provider raw override for cold reasoning preview', async () => {
     mockConfig = {
       ...mockConfig,
