@@ -64,7 +64,8 @@ Injected globals, and nothing else:
 - `workflow(nameOrRef, args?)` — run a saved workflow inline. See **Saved
   workflows and workflow()**.
 - `args` — the structured value the caller passed, or `undefined`.
-- `budget` — `budget.total` (`null` = uncapped) and `budget.spent()`.
+- `budget` — `{ total, spent(), remaining() }`. See **Scaling to the token
+  budget**.
 
 Pass THUNKS to `parallel()`, not eager calls: `parallel([() => agent(...)])`,
 not `parallel([agent(...)])`. The eager form is refused outright: a
@@ -217,9 +218,9 @@ at its index.
   come back `null` — but a value above the clamp is silently cut down to it.
 - Stall retries: 3 attempts per `agent()` call; the stall timeout itself
   (`QWEN_CODE_WORKFLOW_STALL_SECONDS`) is applied as given.
-- Tokens: a per-run output-token cap may be in effect — read `budget.total`
-  (`null` = uncapped) before committing to a large fan-out, because once the
-  cap is reached every further `agent()` call is refused.
+- Tokens: a token target or cap may be in effect — read `budget.total`
+  (`null` = uncapped) before committing to a large fan-out, because once it is
+  reached every further `agent()` call is refused.
 
 ## Default to `pipeline()`
 
@@ -441,3 +442,16 @@ it needs, handles each `null` in the stage that dispatched the agent, gives
 every verify dispatch its own label, `log()`s every dimension and agent it
 loses, and returns what the verifiers refuted next to what they confirmed — a
 verifier can be wrong too, and nothing is silently omitted.
+
+## Scaling to the token budget
+
+When the user's message sets a turn target with a `+500k`-style directive
+(`+1m`, "use 300k tokens"), `budget.total` is that target and `spent()` then
+counts every output token this turn — the main loop and every agent, not just
+this run. Otherwise `total` is an operator's per-run cap, or `null`. Once
+`spent()` reaches `total`, further `agent()` calls throw; agents already
+running are not stopped by it. Loop with
+`while (budget.total && budget.remaining() > 50_000) { ... }` — guard on
+`budget.total`, since with no target `remaining()` is `Infinity` and the loop
+runs to the 1000-agent cap — or size a fan-out once with
+`const FLEET = budget.total ? Math.floor(budget.total / 100_000) : 5;`.

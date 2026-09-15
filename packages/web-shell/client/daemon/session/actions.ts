@@ -42,7 +42,11 @@ import {
   isStaleBranchPointError,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
+import {
+  extractHttpStatus,
+  isInvalidClientIdError,
+  isAcpChildCapacityError,
+} from './httpErrors.js';
 import {
   getPlanExecutionMode,
   mapProviderStatus,
@@ -3542,7 +3546,9 @@ function dispatchActionError(
       severity: 'error',
       category: 'user_action',
       operation,
-      code: `daemon.${operation}.failed`,
+      code: isAcpChildCapacityError(error)
+        ? 'acp_child_capacity_exhausted'
+        : `daemon.${operation}.failed`,
       message: `${action}: ${message}`,
       debugMessage: message,
       recoverable: true,
