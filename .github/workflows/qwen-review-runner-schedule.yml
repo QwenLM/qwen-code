@@ -33,7 +33,14 @@ concurrency:
 
 jobs:
   converge:
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    # The ref clause is the in-repo half of the fence on RUNNER_ADMIN_PAT:
+    # `workflow_dispatch` can be aimed at any branch, and this job checks out
+    # and executes the script from the dispatched ref. Without it the only
+    # thing stopping branch-chosen script code from running with an admin
+    # token is the environment's deployment-branch policy, which lives in
+    # repository settings and is invisible here. `schedule` events always
+    # evaluate against the default branch, so this only blocks dispatches.
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     # deployment: false — the job needs the environment's secret, not a

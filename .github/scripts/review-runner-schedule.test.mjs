@@ -106,19 +106,19 @@ describe('review runner schedule', () => {
     );
     assert.ok(schedule.includes('"$GITHUB_REPOSITORY" "$POOL"'));
     assert.ok(schedule.includes('secrets.RUNNER_ADMIN_PAT'));
+    // The in-repo half of the fence on the admin PAT. Losing it is silent:
+    // a dispatch from any other branch still runs, now executing that
+    // branch's copy of the planner with the token in its environment.
+    assert.ok(schedule.includes("github.ref == 'refs/heads/main'"));
   });
 });
 
-it(
-  'adds before deleting and preserves the old pool when adding fails',
-  { skip: process.platform === 'win32' },
-  () => {
-    const dir = mkdtempSync(join(tmpdir(), 'runner-switch-'));
-    try {
-      const log = join(dir, 'calls');
-      writeFileSync(
-        join(dir, 'gh'),
-        `#!/usr/bin/env node
+// The planner's own entry path, driven through a fake `gh` that logs every
+// label call and serves PROBE_RUNNERS as the runner listing.
+const writeFakeGh = (dir) =>
+  writeFileSync(
+    join(dir, 'gh'),
+    `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 const method = args[args.indexOf('--method') + 1];
@@ -129,36 +129,46 @@ if (!args.includes('--method')) {
   if (method === 'POST' && process.env.PROBE_FAIL === 'true') process.exit(1);
 }
 `,
-        { mode: 0o755 },
-      );
+    { mode: 0o755 },
+  );
+
+const spawnPlanner = (dir, runners, { fail = false } = {}) =>
+  spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL('./review-runner-schedule.mjs', import.meta.url)),
+      'example/repo',
+      'review',
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: dir + delimiter + process.env.PATH,
+        RUNNER_ADMIN_TOKEN: 'test-only',
+        GITHUB_STEP_SUMMARY: '',
+        PROBE_LOG: join(dir, 'calls'),
+        PROBE_FAIL: String(fail),
+        PROBE_RUNNERS: JSON.stringify(runners),
+      },
+    },
+  );
+
+it(
+  'adds before deleting and preserves the old pool when adding fails',
+  { skip: process.platform === 'win32' },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-switch-'));
+    try {
+      const log = join(dir, 'calls');
+      writeFakeGh(dir);
       for (const [labels, fail, expected] of [
         [['ecs-qwen', 'ecs-agent'], false, ['POST', 'DELETE']],
         [['ecs-qwen', 'ecs-agent'], true, ['POST']],
         [['ecs-qwen', 'ecs-review', 'ecs-agent'], false, ['DELETE']],
       ]) {
         writeFileSync(log, '');
-        const result = spawnSync(
-          process.execPath,
-          [
-            fileURLToPath(
-              new URL('./review-runner-schedule.mjs', import.meta.url),
-            ),
-            'example/repo',
-            'review',
-          ],
-          {
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              PATH: dir + delimiter + process.env.PATH,
-              RUNNER_ADMIN_TOKEN: 'test-only',
-              GITHUB_STEP_SUMMARY: '',
-              PROBE_LOG: log,
-              PROBE_FAIL: String(fail),
-              PROBE_RUNNERS: JSON.stringify([runner(1, labels)]),
-            },
-          },
-        );
+        const result = spawnPlanner(dir, [runner(1, labels)], { fail });
         assert.equal(result.status, fail ? 1 : 0, result.stderr);
         assert.deepEqual(
           readFileSync(log, 'utf8').trim().split('\n'),
@@ -169,6 +179,39 @@ if (!args.includes('--method')) {
             result.stderr,
             /::error::1 runner label change\(s\) failed/,
           );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  'fails loudly when no hk1 or hk2 runner exists instead of switching nothing',
+  { skip: process.platform === 'win32' },
+  () => {
+    // Without the guard a renamed or empty fleet exits 0 after reporting
+    // "0 runners to switch": the pool never opens, review-pr queues into a
+    // closed `ecs-review` pool, and GitHub ends each job at 24 hours. There
+    // is no periodic reconciliation, so that state holds until someone reads
+    // a green run.
+    const dir = mkdtempSync(join(tmpdir(), 'runner-switch-'));
+    try {
+      const log = join(dir, 'calls');
+      writeFakeGh(dir);
+      for (const runners of [
+        [],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk3-1' })],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk1-1-extra' })],
+      ]) {
+        writeFileSync(log, '');
+        const result = spawnPlanner(dir, runners);
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(
+          result.stderr,
+          /::error::no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found/,
+        );
+        assert.equal(readFileSync(log, 'utf8'), '');
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });

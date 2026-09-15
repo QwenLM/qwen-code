@@ -52,6 +52,8 @@ async function main() {
       'usage: review-runner-schedule.mjs <owner/repo> <review|ci>',
     );
   }
+  // Validate the mode before spending an authenticated call on it; the real
+  // plan happens below. Reads as a no-op, so it needs the note.
   planLabels([], mode);
   if (!process.env.RUNNER_ADMIN_TOKEN) {
     throw new Error(

@@ -4226,8 +4226,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       // accepted review-pr and the job was lost before it recorded a step
       // (worker killed, host deregistered mid-assignment). Both clauses must
       // hold for "nothing ran" — widening the `and` to an `or`, or dropping
-      // the runner_name clause, reads this row as never-started and silently
-      // swallows a genuine failure, the outcome the control above forbids.
+      // the runner_name clause, reads this row as never-started and relabels
+      // a genuine failure as a queue expiry — the body assertion below is
+      // what forbids it.
       const r = runFallbackStep('ran_no_steps', {
         reviewPrResult: 'failure',
         jobs: JSON.stringify({
@@ -4239,6 +4240,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       });
       expect(r.status).toBe(0);
       expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+      expect(r.posted).toContain('did not complete successfully');
+      expect(r.posted).not.toContain('never started');
     },
   );
 
@@ -4265,6 +4268,11 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       });
       expect(r.status).toBe(0);
       expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+      // Dropping the filter's `length == 0` arm makes jq's `all` vacuously
+      // true on an empty list, and this row then claims a review never
+      // started when the step simply could not see it.
+      expect(r.posted).toContain('did not complete successfully');
+      expect(r.posted).not.toContain('never started');
     },
   );
 
@@ -4276,6 +4284,10 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    // The guard's read site is `= "true"`, not `!= "false"`: the third state
+    // has to fall through to the generic body, not into the queue-expiry one.
+    expect(r.posted).toContain('did not complete successfully');
+    expect(r.posted).not.toContain('never started');
   });
 
   it('dedupes on the marker plus this run URL', () => {
