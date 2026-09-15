@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  BackgroundNotificationTurn,
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
@@ -116,6 +117,8 @@ export type BridgePromptContentBlock =
 
 export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
   prompt: BridgePromptContentBlock[];
+  /** Per-prompt projection before ring retention and fan-out; defaults to full. */
+  eventDetailMode?: LiveReplayMode;
 };
 
 export interface RewindRequest {
@@ -187,6 +190,55 @@ export interface BridgeStandaloneSpawnRequest {
   approvalMode?: ApprovalMode;
 }
 
+export type { BackgroundNotificationTurn } from '@qwen-code/qwen-code-core';
+
+export function parseBackgroundNotificationTurn(
+  value: unknown,
+): BackgroundNotificationTurn | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const { turnId, taskId, kind, startedAt } = record;
+  if (
+    typeof turnId !== 'string' ||
+    !turnId ||
+    turnId.length > 256 ||
+    typeof taskId !== 'string' ||
+    !taskId ||
+    taskId.length > 256 ||
+    (kind !== 'agent' &&
+      kind !== 'monitor' &&
+      kind !== 'shell' &&
+      kind !== 'workflow') ||
+    typeof startedAt !== 'number' ||
+    !Number.isFinite(startedAt) ||
+    startedAt < 0
+  )
+    return undefined;
+  for (const key of ['toolUseId', 'sourceTurnId', 'label']) {
+    if (
+      record[key] !== undefined &&
+      (typeof record[key] !== 'string' || (record[key] as string).length > 4096)
+    )
+      return undefined;
+  }
+  return {
+    turnId,
+    taskId,
+    kind,
+    startedAt,
+    ...(record['toolUseId'] !== undefined
+      ? { toolUseId: record['toolUseId'] as string }
+      : {}),
+    ...(record['sourceTurnId'] !== undefined
+      ? { sourceTurnId: record['sourceTurnId'] as string }
+      : {}),
+    ...(record['label'] !== undefined
+      ? { label: record['label'] as string }
+      : {}),
+  };
+}
+
 export interface BridgeSession {
   sessionId: string;
   /**
@@ -208,6 +260,8 @@ export interface BridgeSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   /**
    * Only present when this spawn carried a `parentSessionId`. `true` iff the
    * parent lineage was durably written to the child's transcript (survives a
@@ -253,6 +307,8 @@ export interface BridgeRestoreSessionRequest {
   historyPageSize?: number;
   /** Load-only live-turn replay projection; defaults to the complete journal. */
   liveReplayMode?: LiveReplayMode;
+  /** Load response projection for durable replay; defaults to full. */
+  compactedReplayMode?: LiveReplayMode;
   /** Keep inherited fork records as model context without replaying them. */
   hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
@@ -462,6 +518,8 @@ export interface ActiveWorkHoldV1 {
 export interface ActiveWorkSessionSnapshotV1 {
   sessionId: string;
   holds: ActiveWorkHoldV1[];
+  hasRunningBackgroundTasks?: boolean;
+  finishedBackgroundTurnId?: string;
 }
 
 /**
@@ -825,6 +883,8 @@ export interface BridgeSessionSummary {
   /** Per-session active-work observation. `idle` is emitted only from a
    * fresh snapshot that covers every negotiated hold category. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   /** True while a non-question permission request awaits a response. */
   isWaitingForPermission?: boolean;
   /** True while an ask_user_question request awaits a response. */
@@ -884,7 +944,7 @@ export interface BridgeSessionGoal {
     /** Canonical Goal turns completed so far. */
     iterations: number;
     setAt: number;
-    /** The judge's verdict on the most recent turn, when it has run. */
+    /** Why the Goal last stopped, or the verifier's most recent reason. */
     lastReason?: string;
   } | null;
 }
@@ -1065,6 +1125,7 @@ export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
 // dependency path between them, so a cross-package test pins the value.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -1113,7 +1174,8 @@ export const MID_TURN_RECONCILIATION_RING_SIZE = 200;
 /**
  * Child-to-parent request that atomically assigns the next Todo Stop Guard
  * model send to the current daemon FIFO owner. `promptId`, when present, is
- * the trusted bridge invocation id rather than the provider-facing prompt id.
+ * the trusted bridge invocation id or admitted background execution id,
+ * rather than the provider-facing prompt id.
  */
 export const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
@@ -1172,6 +1234,7 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
 
 /** One daemon-owned, session-global queued mid-turn message. */
 export interface MidTurnQueueEntry {
+  eventDetailMode?: LiveReplayMode;
   messageId: string;
   text: string;
   /**
@@ -1204,6 +1267,7 @@ export interface BridgeMidTurnMessagesSnapshot {
  * `removePendingPrompt` can cancel a queued-but-not-yet-started prompt.
  */
 export interface PendingPromptEntry {
+  eventDetailMode?: LiveReplayMode;
   promptId: string;
   queuedAt: number;
   startedAt?: number;
@@ -1315,6 +1379,8 @@ export interface BridgeDaemonSessionDiagnostic {
   pendingPromptCount: number;
   pendingPermissionCount: number;
   hasActivePrompt: boolean;
+  backgroundTurn?: BackgroundNotificationTurn;
+  hasRunningBackgroundTasks?: boolean;
   lastEventId: number;
   lastSeenAt?: number;
   currentModelId?: string;
@@ -2322,6 +2388,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
+      /** Applied only if the message is promoted into a new prompt. */
+      eventDetailMode?: LiveReplayMode;
       content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
