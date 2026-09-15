@@ -1009,6 +1009,9 @@ const CONFIRM_MAX_PHASES = 12;
 
 /** Rows of the script's static structure shown in the approval dialog. */
 const CONFIRM_MAX_STRUCTURE_ROWS = 12;
+/** Says what a row's number is, so no reader takes it for an agent count. */
+const CONFIRM_STRUCTURE_HEADING =
+  'Structure (where the script calls agent(); a loop or a fan-out runs each call many times):';
 
 /**
  * Sanitize a value that will be rendered on one line of the approval dialog.
@@ -1198,7 +1201,7 @@ function buildConfirmationPrompt(
   if (structureSource) {
     const structure = buildConfirmationStructure(structureSource);
     if (structure.length > 0) {
-      lines.push('', 'Structure:', ...structure);
+      lines.push('', CONFIRM_STRUCTURE_HEADING, ...structure);
     }
   }
 
@@ -1237,24 +1240,26 @@ function buildConfirmationPrompt(
  * Where the script's agents are, read statically: one row per run of step
  * calls, per fan-out and per loop, with the first prompts of each. Declared
  * phases say what the author meant; this says what the code does, and a reader
- * approving a run that may dispatch hundreds of agents needs both. No estimate
- * is shown — a loop or a fan-out over `args` has no static count.
+ * approving a run that may dispatch hundreds of agents needs both. A row counts
+ * `agent()` call sites, never agents: a loop or a fan-out over `args` has no
+ * static count, so a number shaped like one would read as a promise.
  */
 function buildConfirmationStructure(script: string): string[] {
   const shape = scanWorkflowScriptShape(script);
   const shown = shape.rows.slice(0, CONFIRM_MAX_STRUCTURE_ROWS);
   const lines = shown.map((row) => {
-    const times = row.count > 1 ? ` × ${row.count}` : '';
     const label =
-      row.kind === 'parallel'
-        ? `parallel × ${row.count}`
-        : row.kind === 'loop'
-          ? `loop ${sanitizeLine(row.condition ?? '')}${times}`
-          : `step${times}`;
+      row.kind === 'loop'
+        ? `loop ${sanitizeLine(row.condition ?? '')}`
+        : row.kind;
+    if (row.count === 0) {
+      return `  ${label} — runs functions built elsewhere in the script`;
+    }
+    const sites = row.count > 1 ? `, ${row.count} agent() call sites` : '';
     const prompts = row.prompts
       .map((prompt) => `"${sanitizeLine(prompt)}"`)
       .join(', ');
-    return prompts ? `  ${label} — ${prompts}` : `  ${label}`;
+    return prompts ? `  ${label}${sites} — ${prompts}` : `  ${label}${sites}`;
   });
   if (shape.rows.length > shown.length) {
     lines.push(`  … and ${shape.rows.length - shown.length} more`);

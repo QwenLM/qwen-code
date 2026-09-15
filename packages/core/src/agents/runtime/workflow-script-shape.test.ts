@@ -129,6 +129,44 @@ describe('scanWorkflowScriptShape — rows', () => {
     expect(shape.rows.map((r) => r.kind)).toEqual(['step', 'parallel', 'step']);
   });
 
+  // No dataflow: the calls stay where they are written, but the fan-out that
+  // runs them is still listed, so it is not presented as a sequential step.
+  it('gives a fan-out over functions built elsewhere a row of its own', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        'const thunks = args.files.map((f) => () => agent(`read ${f}`))',
+        'const read = await parallel(thunks)',
+        'const tasks = []',
+        'for (const r of read) tasks.push(() => agent(`check ${r}`))',
+        'await pipeline(tasks)',
+        "await agent('summarize')",
+      ),
+    );
+    expect(shape.agentCalls).toBe(3);
+    expect(shape.rows.map((r) => [r.kind, r.count, r.line])).toEqual([
+      ['step', 1, 1],
+      ['parallel', 0, 2],
+      ['loop', 1, 4],
+      ['parallel', 0, 5],
+      ['step', 1, 6],
+    ]);
+  });
+
+  it('lists nested fan-outs over functions built elsewhere once', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        'const stages = args.stages.map((s) => (x) => agent(`${s} ${x}`))',
+        'await parallel(args.groups.map((g) => () => pipeline(g, stages)))',
+        "await parallel([() => parallel([() => agent('inner')])])",
+      ),
+    );
+    expect(shape.rows.map((r) => [r.kind, r.count, r.line])).toEqual([
+      ['step', 1, 1],
+      ['parallel', 0, 2],
+      ['parallel', 1, 3],
+    ]);
+  });
+
   it('classifies a call by its innermost context', () => {
     const shape = scanWorkflowScriptShape(
       script(
@@ -170,6 +208,9 @@ describe('scanWorkflowScriptShape — determinism', () => {
         'const d = new Date()',
         'const p = Date.parse("2026-01-01")',
         'const u = Date . UTC(2026, 0, 1)',
+        'const s = Date().toString()',
+        'const n = new  Date ()',
+        'const b = Date ()',
       ),
     );
     expect(shape.determinismViolations).toEqual([
@@ -178,6 +219,9 @@ describe('scanWorkflowScriptShape — determinism', () => {
       { call: 'new Date()', line: 4 },
       { call: 'Date.parse()', line: 5 },
       { call: 'Date.UTC()', line: 6 },
+      { call: 'Date()', line: 7 },
+      { call: 'new Date()', line: 8 },
+      { call: 'Date()', line: 9 },
     ]);
   });
 
@@ -203,6 +247,10 @@ describe('scanWorkflowScriptShape — determinism', () => {
         'args.Date.now()',
         'const MathX = { random: () => 1 }',
         'MathX.random()',
+        'const renew = () => 1',
+        'myDate()',
+        'args.Date()',
+        'renew(Date)',
         "tools.agent('not the global')",
       ),
     );

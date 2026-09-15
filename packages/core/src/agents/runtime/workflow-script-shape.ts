@@ -17,17 +17,25 @@
  *
  * It is a tokenizer, not a parser. String contents, template text and comments
  * are masked out, so an `agent(` or `Date.now(` inside them is not code;
- * template `${...}` expressions are kept, because they are code. Two limits are
- * accepted: a regular-expression literal is not recognised (a quote inside one
- * can desynchronise the masking for the rest of that line), and a local
- * binding that shadows `Date` or `Math` still counts as the global.
+ * template `${...}` expressions are kept, because they are code. Three limits
+ * are accepted: a regular-expression literal is not recognised (a quote inside
+ * one can desynchronise the masking for the rest of that line); a local binding
+ * that shadows `Date` or `Math` still counts as the global; and there is no
+ * dataflow, so a call is placed where it is written. A fan-out over functions
+ * built before the call (`const thunks = files.map(...); parallel(thunks)`)
+ * gets a row of its own with no call sites, while the `agent(` calls inside
+ * those functions stay on the step or loop row where they are written.
  */
 
 export type WorkflowShapeRowKind = 'step' | 'parallel' | 'loop';
 
 export interface WorkflowShapeRow {
   readonly kind: WorkflowShapeRowKind;
-  /** `agent(` call sites in this row. A loop or fan-out runs each many times. */
+  /**
+   * `agent(` call sites in this row — not a count of agents: a loop or a
+   * fan-out runs each many times. `0` on a fan-out over functions built
+   * elsewhere, whose call sites are counted where they are written.
+   */
   count: number;
   /** The loop head, e.g. `while (budget.remaining() > 50_000)`. Loops only. */
   readonly condition?: string;
@@ -39,6 +47,7 @@ export interface WorkflowShapeRow {
 
 export type WorkflowNonDeterministicCall =
   | 'Math.random()'
+  | 'Date()'
   | 'Date.now()'
   | 'Date.parse()'
   | 'Date.UTC()'
@@ -211,6 +220,10 @@ function readPromptSummary(source: string, from: number): string | undefined {
 interface Context {
   readonly kind: 'parallel' | 'loop';
   readonly id: number;
+  /** 1-based line of the keyword that opened the context. */
+  readonly line: number;
+  /** `rows.length` when the context opened: no row since means none inside. */
+  readonly rowsAtOpen: number;
   /** Bracket depth outside the context. */
   readonly openDepth: number;
   /** Index where the body starts; calls before it (a loop head) are outside. */
@@ -256,6 +269,14 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     while (k >= 0 && SPACE.test(code[k])) k--;
     return k;
   };
+  const followsNew = (start: number): boolean => {
+    const k = previousNonSpaceIndex(start);
+    return (
+      k >= 2 &&
+      code.slice(k - 2, k + 1) === 'new' &&
+      !IDENT_PART.test(code[k - 3] ?? '')
+    );
+  };
   const matchingClose = (open: number): number => {
     let d = 0;
     for (let k = open; k < n; k++) {
@@ -283,7 +304,24 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
       if (!closes) break;
       stack.pop();
       if (top.isDo) doBodyCloses.add(closeIndex);
+      if (top.kind === 'parallel') recordEmptyFanOut(top);
     }
+  };
+  // A fan-out with no `agent(` call site in its own span runs functions built
+  // elsewhere. It still gets a row, so the dialog does not present its agents
+  // as a sequential step only; an enclosing fan-out takes the row instead.
+  const recordEmptyFanOut = (closed: Context): void => {
+    if (rows.length !== closed.rowsAtOpen) return;
+    if (stack.some((context) => context.kind === 'parallel')) return;
+    const row: WorkflowShapeRow = {
+      kind: 'parallel',
+      count: 0,
+      prompts: [],
+      line: closed.line,
+    };
+    rows.push(row);
+    lastRow = row;
+    lastRowWasTopLevel = false;
   };
   const popEndedStatements = (): void => {
     while (stack.length > 0) {
@@ -356,6 +394,8 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
         stack.push({
           kind: 'parallel',
           id: nextId++,
+          line,
+          rowsAtOpen: rows.length,
           openDepth: depth,
           bodyStart: open,
           statement: false,
@@ -388,6 +428,8 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
         stack.push({
           kind: 'loop',
           id: nextId++,
+          line,
+          rowsAtOpen: rows.length,
           openDepth: depth,
           bodyStart: body,
           statement: code[body] !== '{',
@@ -403,6 +445,8 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
         stack.push({
           kind: 'loop',
           id: nextId++,
+          line,
+          rowsAtOpen: rows.length,
           openDepth: depth,
           bodyStart: body,
           statement: false,
@@ -415,9 +459,16 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
       case 'Math':
         recordMemberCall('Math', end, ['random']);
         return;
-      case 'Date':
+      case 'Date': {
+        // `Date()` called bare returns the current time as a string; the
+        // `new Date(` spelling is reported by the `new` case instead.
+        if (code[skipSpace(end)] === '(') {
+          if (!followsNew(start)) violations.push({ call: 'Date()', line });
+          return;
+        }
         recordMemberCall('Date', end, ['now', 'parse', 'UTC']);
         return;
+      }
       case 'new': {
         const target = skipSpace(end);
         if (

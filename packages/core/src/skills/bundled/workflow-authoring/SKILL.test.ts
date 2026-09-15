@@ -177,6 +177,7 @@ describe('bundled workflow-authoring skill', () => {
     // Determinism: all of Date, and the workaround.
     ['so does all of `Date`'],
     ['`new Date()`'],
+    ['`Date()`, `new Date()`'],
     ['stamp the result after the workflow returns'],
     // pipeline(): null drops the item and skips its later stages.
     ['its remaining stages are skipped'],

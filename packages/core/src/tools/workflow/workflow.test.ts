@@ -336,9 +336,9 @@ await agent('scan package.json')
       const prompt = (details as { prompt: string }).prompt;
       expect(prompt).toContain(
         [
-          'Structure:',
+          'Structure (where the script calls agent(); a loop or a fan-out runs each call many times):',
           '  step — "plan the audit"',
-          '  parallel × 2 — "scan src/core", "scan src/cli"',
+          '  parallel, 2 agent() call sites — "scan src/core", "scan src/cli"',
           '  loop while (budget.remaining() > 50_000) — "look again"',
         ].join('\n'),
       );
@@ -351,7 +351,7 @@ await agent('scan package.json')
       ).join('\n');
       const prompt = ((await detailsFor({ script })) as { prompt: string })
         .prompt;
-      expect(prompt).toContain('  parallel × 1 — "batch 11"');
+      expect(prompt).toContain('  parallel — "batch 11"');
       expect(prompt).not.toContain('"batch 12"');
       expect(prompt).toContain('  … and 2 more');
     });
@@ -360,7 +360,29 @@ await agent('scan package.json')
       const prompt = (
         (await detailsFor({ script: 'return 1' })) as { prompt: string }
       ).prompt;
-      expect(prompt).not.toContain('Structure:');
+      expect(prompt).not.toContain('Structure');
+    });
+
+    // A fan-out's width is data, so no row prints a number an approver could
+    // take for its agent count, and one over functions built earlier is still
+    // listed as a fan-out rather than left looking like a single step.
+    it('shows no agent count for a fan-out, however it is written', async () => {
+      const details = await detailsFor({
+        script: [
+          'const thunks = args.files.map((f) => () => agent(`read ${f}`))',
+          'const read = await parallel(thunks)',
+          'await parallel(read.map((r) => () => agent(`check ${r}`)))',
+        ].join('\n'),
+      });
+      const prompt = (details as { prompt: string }).prompt;
+      expect(prompt).toContain(
+        [
+          '  step — "read …"',
+          '  parallel — runs functions built elsewhere in the script',
+          '  parallel — "check …"',
+        ].join('\n'),
+      );
+      expect(prompt).not.toContain('×');
     });
 
     it('names the workflow, its purpose and its phases', async () => {
@@ -3034,6 +3056,23 @@ describe('WorkflowTool — saved workflows by name', () => {
         sha256: digest,
       }),
     ).toBe(false);
+  });
+
+  it('shows the structure of the script it loaded', async () => {
+    await saveWorkflow(
+      'nightly-audit',
+      `${APPROVED}await parallel([() => agent('audit src'), () => agent('audit docs')]);\n`,
+    );
+    const invocation = new WorkflowTool(nameConfig()).build({
+      name: 'nightly-audit',
+    });
+    await invocation.getDefaultPermission();
+    const details = (await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    )) as { prompt: string };
+    expect(details.prompt).toContain(
+      '  parallel, 2 agent() call sites — "audit src", "audit docs"',
+    );
   });
 
   it('runs the content that was approved, not a later edit', async () => {

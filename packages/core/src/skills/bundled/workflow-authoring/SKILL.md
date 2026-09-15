@@ -74,7 +74,7 @@ has already been admitted, counted against the caps, and spent — with its
 result discarded.
 
 A script must be deterministic so a resume replays the same call sequence.
-`Math.random()` throws, and so does all of `Date` — `new Date()`,
+`Math.random()` throws, and so does all of `Date` — `Date()`, `new Date()`,
 `Date.now()`, `Date.parse()` and `Date.UTC()` alike. Pass timestamps in via
 `args`, or stamp the result after the workflow returns. A script that calls any
 of them is refused before it starts, so none of its agents runs first.
