@@ -255,7 +255,13 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { parsePromptAgentRun } from './agent-run-meta.js';
-import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import {
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+} from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
@@ -447,10 +453,6 @@ import {
 } from './repeated-tool-failure-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
-const permissionRequestTails = new WeakMap<
-  AgentSideConnection,
-  Promise<void>
->();
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
@@ -1072,6 +1074,7 @@ const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
 // burn a core for the whole wait, which on the conditional-close path is the
 // full drain budget.
 const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
+const CHANNEL_TASK_POLL_INTERVAL_MS = 100;
 const MAX_MID_TURN_DRAIN_ITEMS = 10;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
@@ -1578,7 +1581,19 @@ interface PromptChannelDelivery {
   target: CronTaskDelivery['target'];
 }
 
+interface ChannelTaskResponseCapture {
+  daemonPromptId?: string;
+  workChainId?: string;
+  finalText?: string;
+  finalResponseTurnId?: string;
+  partial?: boolean;
+  controller: AbortController;
+  signal: AbortSignal;
+}
+
 interface AgentResponseCapture {
+  channelTask?: ChannelTaskResponseCapture;
+  backgroundResponse?: (text: string) => Promise<void>;
   goalProposalTurn?: {
     turnKey: string;
     controller: AbortController;
@@ -1613,11 +1628,17 @@ function beginChannelDeliveryResponseBlock(
   capture?.agentOutput.beginResponse();
   if (capture?.channelDelivery) capture.channelDelivery.finalText = '';
   if (capture?.turnResult) capture.turnResult.finalText = '';
-  if (!capture?.channelDelivery && !capture?.turnResult) return undefined;
+  if (
+    !capture?.channelDelivery &&
+    !capture?.turnResult &&
+    !capture?.backgroundResponse
+  ) {
+    return undefined;
+  }
   return {
     parts: [],
     chars: 0,
-    ...(capture?.channelDelivery
+    ...(capture?.channelDelivery || capture?.backgroundResponse
       ? {}
       : { capChars: TURN_RESULT_TEXT_MAX_CHARS + 1 }),
   };
@@ -2144,6 +2165,8 @@ export class Session implements SessionContext {
   private currentAgentNotificationTaskId: string | null = null;
   private currentWorkflowNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
+  private currentNotificationWorkChainId?: string;
+  private readonly channelTaskCaptures = new Set<ChannelTaskResponseCapture>();
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
@@ -2270,6 +2293,14 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  /**
+   * Tail of this session's permission queue. The serialization unit is the
+   * session, not the `AgentSideConnection`: one daemon child owns a single
+   * connection that every session on it multiplexes onto, so a connection-wide
+   * queue makes unrelated sessions inherit the wait behind a question nobody
+   * is going to answer. Mirrors `promptQueue`, which is per session bridge-side.
+   */
+  private permissionRequestTail: Promise<void> = Promise.resolve();
 
   constructor(
     id: string,
@@ -3147,12 +3178,23 @@ export class Session implements SessionContext {
   ): Promise<TodoStopGuardClaimResult> {
     const context = getInvocationContext();
     const background = backgroundTurnContext.getStore();
+    const channelTask =
+      context === undefined && this.currentNotificationWorkChainId
+        ? [...this.channelTaskCaptures].find(
+            (capture) =>
+              capture.workChainId === this.currentNotificationWorkChainId &&
+              capture.daemonPromptId &&
+              !capture.signal.aborted,
+          )
+        : undefined;
+    // Only the Guard claim borrows the waiting prompt's ownership. Background
+    // tools must keep their independent invocation context.
     const ownerPromptId =
       background?.active && background.sessionId === this.sessionId
         ? background.turn.turnId
         : context?.sessionId === this.sessionId
           ? context.promptId
-          : undefined;
+          : channelTask?.daemonPromptId;
     if (ownerPromptId) {
       this.todoStopGuardClaimOwnerCounts.set(
         ownerPromptId,
@@ -3175,7 +3217,11 @@ export class Session implements SessionContext {
         );
       });
       const response = await Promise.race([claimPromise, timeoutPromise]);
-      if (abortSignal.aborted || !isRecord(response)) {
+      if (
+        abortSignal.aborted ||
+        channelTask?.signal.aborted ||
+        !isRecord(response)
+      ) {
         return 'unavailable';
       }
       if (
@@ -4111,7 +4157,11 @@ export class Session implements SessionContext {
   }
 
   isTurnIdle(): boolean {
-    return !this.closing && !this.#hasActiveTurn();
+    return (
+      !this.closing &&
+      this.channelTaskCaptures.size === 0 &&
+      !this.#hasActiveTurn()
+    );
   }
 
   isIdle(): boolean {
@@ -4223,6 +4273,8 @@ export class Session implements SessionContext {
   }
 
   #hasActiveTurn(): boolean {
+    // Task captures wait for queued turns; a temporary close gate must drain
+    // only executing turns so it can reopen and let those queues progress.
     return Boolean(
       this.pendingPrompt ||
         this.historyMutationActive ||
@@ -4241,7 +4293,7 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
-    if (this.#hasActiveTurn()) {
+    if (!this.isTurnIdle()) {
       throw new RequestError(-32602, 'Session is busy processing a turn', {
         errorKind: 'session_busy',
       });
@@ -4356,6 +4408,9 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    for (const capture of this.channelTaskCaptures) {
+      capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
+    }
     clearTimeout(this.notificationAdmissionRetry);
     this.notificationAdmissionRetry = undefined;
     this.backgroundTurn = undefined;
@@ -4532,7 +4587,7 @@ export class Session implements SessionContext {
       );
     }
 
-    if (this.closing || this.#hasActiveTurn()) {
+    if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',
@@ -4615,7 +4670,7 @@ export class Session implements SessionContext {
   }
 
   restoreHistory(history: Content[]): void {
-    if (this.closing || this.#hasActiveTurn()) {
+    if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot restore history while a prompt is running',
@@ -4656,7 +4711,13 @@ export class Session implements SessionContext {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-    if (!hadPrompt && !hadCron && !hadNotification && !hadQueuedGoalTurn) {
+    if (
+      !hadPrompt &&
+      !hadCron &&
+      !hadNotification &&
+      !hadQueuedGoalTurn &&
+      this.channelTaskCaptures.size === 0
+    ) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
 
@@ -4665,6 +4726,9 @@ export class Session implements SessionContext {
       this.closing || this.disposed
         ? SESSION_DISPOSE_ABORT_REASON
         : USER_CANCEL_ABORT_REASON;
+    for (const capture of this.channelTaskCaptures) {
+      capture.controller.abort(abortReason);
+    }
 
     if (this.pendingPrompt) {
       this.pendingPrompt.abort(abortReason);
@@ -4753,6 +4817,19 @@ export class Session implements SessionContext {
       );
     }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    const controller = new AbortController();
+    const channelTask =
+      params._meta?.[CHANNEL_PROMPT_META_KEY] === true &&
+      params._meta?.[CHANNEL_OUTPUT_MODE_META_KEY] === 'per_task'
+        ? {
+            daemonPromptId: invocationContext?.promptId,
+            controller,
+            signal: admissionCancellation
+              ? AbortSignal.any([admissionCancellation, controller.signal])
+              : controller.signal,
+          }
+        : undefined;
+    if (channelTask) this.channelTaskCaptures.add(channelTask);
     const recordAdmissionCancellation = () => {
       if (turnRecording) turnRecording.cancelledAt ??= Date.now();
     };
@@ -4765,14 +4842,18 @@ export class Session implements SessionContext {
     );
     if (admissionCancellation?.aborted) recordAdmissionCancellation();
     try {
-      const result = await this.#promptWithTurnRecording(
+      let result = await this.#promptWithTurnRecording(
         params,
         invocationContext,
         admissionCancellation,
         modelPrompt,
         scheduledGoalTurn,
         turnRecording,
+        channelTask,
       );
+      if (channelTask && result.stopReason === 'end_turn') {
+        result = await this.#waitForChannelTaskResult(channelTask, result);
+      }
       await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
@@ -4804,11 +4885,109 @@ export class Session implements SessionContext {
       await this.#settleTurnRecording('error', turnRecording, undefined, error);
       throw error;
     } finally {
+      if (channelTask) {
+        this.channelTaskCaptures.delete(channelTask);
+        void this.#drainNotificationQueue();
+      }
       admissionCancellation?.removeEventListener(
         'abort',
         recordAdmissionCancellation,
       );
     }
+  }
+
+  #hasPendingChannelTaskWork(workChainId: string): boolean {
+    return (
+      this.config
+        .getBackgroundTaskRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId &&
+            task.isBackgrounded &&
+            (task.status === 'running' ||
+              task.status === 'paused' ||
+              (task.status === 'cancelled' && !task.notified)),
+        ) ||
+      this.config
+        .getBackgroundShellRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId && task.status === 'running',
+        ) ||
+      this.config
+        .getMonitorRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId && task.status === 'running',
+        ) ||
+      this.config
+        .getWorkflowRunRegistry()
+        .list()
+        .some(
+          (task) =>
+            task.todoWorkChainId === workChainId &&
+            !isTerminalWorkflowStatus(task.status),
+        ) ||
+      this.notificationQueue.some(
+        (item) =>
+          item.todoWorkChainId === workChainId &&
+          (!this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+            this.#notificationContinuesTodoStopGuardWorkChain(item)),
+      ) ||
+      this.currentNotificationWorkChainId === workChainId
+    );
+  }
+
+  async #waitForChannelTaskResult(
+    capture: ChannelTaskResponseCapture,
+    result: PromptResponse,
+  ): Promise<PromptResponse> {
+    while (true) {
+      // Registry completion and notification enqueue happen in the same turn.
+      // Let both settle before interpreting an empty work set as terminal.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (
+        capture.daemonPromptId &&
+        this.todoStopGuardQueuedPromptPriority &&
+        this.todoStopGuardQueuedPromptOwnerPromptId === capture.daemonPromptId
+      ) {
+        // The daemon FIFO cannot admit the queued prompt until this request
+        // settles; its priority also keeps background notifications queued.
+        capture.controller.abort(NEW_PROMPT_ABORT_REASON);
+      }
+      if (capture.signal.aborted || this.disposed) {
+        return { ...result, stopReason: 'cancelled' };
+      }
+      if (
+        !capture.workChainId ||
+        !this.#hasPendingChannelTaskWork(capture.workChainId)
+      ) {
+        break;
+      }
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          capture.signal.removeEventListener('abort', finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, CHANNEL_TASK_POLL_INTERVAL_MS);
+        capture.signal.addEventListener('abort', finish, { once: true });
+        if (capture.signal.aborted) finish();
+      });
+    }
+    return capture.finalText
+      ? {
+          ...result,
+          _meta: {
+            ...result._meta,
+            [CHANNEL_TASK_RESULT_META_KEY]: capture.finalText,
+            [CHANNEL_TASK_RESULT_PARTIAL_META_KEY]: capture.partial === true,
+          },
+        }
+      : result;
   }
 
   async #promptWithTurnRecording(
@@ -4818,6 +4997,7 @@ export class Session implements SessionContext {
     modelPrompt: string | undefined,
     scheduledGoalTurn: AcpGoalTurn | undefined,
     turnRecording: InFlightTurnRecording | null,
+    channelTask?: ChannelTaskResponseCapture,
   ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -5071,6 +5251,7 @@ export class Session implements SessionContext {
     this.duplicateProviderToolCallResponseIds.clear();
     const channelDelivery = parsePromptChannelDelivery(params);
     const responseCapture: AgentResponseCapture = {
+      ...(channelTask ? { channelTask } : {}),
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
@@ -6102,6 +6283,10 @@ export class Session implements SessionContext {
                 : undefined,
             );
             this.activeTodoWorkChainPromptId = promptId;
+            if (responseCapture.channelTask) {
+              responseCapture.channelTask.workChainId =
+                this.config.getActiveTodoWorkChainOwner(promptId);
+            }
 
             // Snapshot file state before this turn (mirrors the makeSnapshot
             // block in LlmClient.sendMessageStream). Placed after
@@ -7631,11 +7816,16 @@ export class Session implements SessionContext {
             const candidate = response.value.candidates[0];
             for (const part of candidate.content?.parts ?? []) {
               if (!part.text) continue;
-              this.messageEmitter.emitMessage(
-                part.text,
-                'assistant',
-                part.thought,
-              );
+              if (
+                !options.responseCapture?.backgroundResponse ||
+                part.thought
+              ) {
+                this.messageEmitter.emitMessage(
+                  part.text,
+                  'assistant',
+                  part.thought,
+                );
+              }
               if (!part.thought) {
                 options.responseCapture?.agentOutput.appendText(part.text);
                 appendChannelDeliveryResponseText(
@@ -7765,6 +7955,11 @@ export class Session implements SessionContext {
         channelDeliveryResponseBlock,
         functionCalls.length > 0,
       );
+      if (options.responseCapture?.backgroundResponse) {
+        await options.responseCapture.backgroundResponse(
+          channelDeliveryResponseBlock?.parts.join('') ?? '',
+        );
+      }
 
       if (usageMetadata) {
         this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
@@ -10673,6 +10868,7 @@ export class Session implements SessionContext {
         this.currentWorkflowNotificationTaskId =
           item.kind === 'workflow' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
+        this.currentNotificationWorkChainId = item.todoWorkChainId;
         this.#activeWorkChanged();
         try {
           // A notification fires from async resources created inside the
@@ -10690,6 +10886,13 @@ export class Session implements SessionContext {
             ...(item.label ? { label: item.label } : {}),
             startedAt: Date.now(),
           });
+          const channelTask = item.todoWorkChainId
+            ? [...this.channelTaskCaptures].find(
+                (capture) =>
+                  capture.workChainId === item.todoWorkChainId &&
+                  !capture.signal.aborted,
+              )
+            : undefined;
           const context = { sessionId: this.sessionId, turn, active: true };
           try {
             // A notification fires as a continuation of whatever context
@@ -10699,7 +10902,7 @@ export class Session implements SessionContext {
             // main-session-owned: run it with no agent frame, or its
             // persisted records lose their backgroundTurn attribution and
             // model resolution follows the finished subagent (#7156 shape).
-            await backgroundTurnContext.run(context, () =>
+            const execute = () =>
               goalTurnContext.exit(() =>
                 runOutsideAgentContext(() =>
                   runWithInvocationContext(undefined, () =>
@@ -10707,12 +10910,16 @@ export class Session implements SessionContext {
                       this.#executeBackgroundNotificationPromptInner(
                         item,
                         turn,
+                        channelTask,
                       ),
                     ),
                   ),
                 ),
-              ),
-            );
+              );
+            // A related per_task response still belongs to its waiting RPC.
+            // Independent admission would wait for that same RPC to finish.
+            if (channelTask) await backgroundTurnContext.exit(execute);
+            else await backgroundTurnContext.run(context, execute);
           } finally {
             context.active = false;
           }
@@ -10720,6 +10927,7 @@ export class Session implements SessionContext {
           this.currentAgentNotificationTaskId = null;
           this.currentWorkflowNotificationTaskId = null;
           this.currentShellNotificationActive = false;
+          this.currentNotificationWorkChainId = undefined;
           this.#activeWorkChanged();
         }
       }
@@ -10749,15 +10957,26 @@ export class Session implements SessionContext {
   #nextNotificationQueueIndex(): number {
     if (this.notificationQueue.length === 0) return -1;
     if (this.todoStopGuardQueuedPromptPriority) return -1;
-    if (!this.todoStopGuard.blocksUnrelatedAutomaticTurns) return 0;
-    return this.notificationQueue.findIndex((item) =>
-      this.#notificationContinuesTodoStopGuardWorkChain(item),
+    const channelTasks = [...this.channelTaskCaptures].filter(
+      (capture) => capture.workChainId && !capture.signal.aborted,
+    );
+    // Independent admission waits for the parent RPC to settle. Do not let
+    // an unrelated queue head block the related results that RPC awaits.
+    return this.notificationQueue.findIndex(
+      (item) =>
+        (!this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
+          this.#notificationContinuesTodoStopGuardWorkChain(item)) &&
+        (channelTasks.length === 0 ||
+          channelTasks.some(
+            (capture) => capture.workChainId === item.todoWorkChainId,
+          )),
     );
   }
 
   async #executeBackgroundNotificationPromptInner(
     item: QueuedBackgroundNotification,
     turn: BackgroundNotificationTurn,
+    channelTask?: ChannelTaskResponseCapture,
   ): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -10784,13 +11003,28 @@ export class Session implements SessionContext {
               );
               responseTurnComplete = true;
               await this.messageRewriter?.flushTurn(ac.signal);
+              await this.messageRewriter?.waitForPendingRewrites();
             } catch (error) {
               debugLogger.warn(
                 `Failed to complete background notification response: ${this.#formatError(error)}`,
               );
             }
           }
-          await this.#emitBackgroundNotificationEndTurn(reason, promptId);
+          await this.#emitBackgroundNotificationEndTurn(
+            reason,
+            channelTask ? undefined : promptId,
+          );
+        };
+        const emitBackgroundResponse = async (text: string): Promise<void> => {
+          if (!text.length) return;
+          await this.#emitBackgroundNotificationResponse(
+            item,
+            text,
+            ac.signal,
+            promptId,
+            false,
+          );
+          responseSegmentEmitted = true;
         };
         this.notificationAbortController = ac;
         const continuesCurrentWorkChain =
@@ -10802,45 +11036,51 @@ export class Session implements SessionContext {
             this.notificationQueue.unshift(item);
             return;
           }
-          let admission: Record<string, unknown> | undefined;
-          let admissionTimeoutHandle: NodeJS.Timeout | undefined;
-          try {
-            // The admission RPC is request-shaped: a host that silently drops
-            // unknown ext methods never settles it, so without the deadline
-            // the await would wedge the notification pipeline, the next user
-            // prompt, and the settle/close loop. A timeout rethrows into the
-            // outer catch, which retains the item via #deferBackgroundAdmission.
-            admission = await Promise.race([
-              this.client.extMethod('_qwencode/start_turn', {
-                sessionId: this.sessionId,
-                source: 'background_notification',
-                ...turn,
-                ...(this.lastCompletedRpcPromptId
-                  ? { afterPromptId: this.lastCompletedRpcPromptId }
-                  : {}),
-              }),
-              new Promise<never>((_, reject) => {
-                admissionTimeoutHandle = setTimeout(
-                  () => reject(new BackgroundTurnAdmissionTimeoutError()),
-                  MID_TURN_QUEUE_DRAIN_TIMEOUT_MS,
-                );
-              }),
-            ]);
-          } catch (error) {
-            const code =
-              error && typeof error === 'object' && 'code' in error
-                ? error.code
-                : undefined;
-            if (code !== -32601) throw error;
-          } finally {
-            clearTimeout(admissionTimeoutHandle);
-          }
-          if (admission?.['accepted'] === false) {
+          if (channelTask?.signal.aborted) {
             this.#deferBackgroundAdmission(item);
             return;
           }
+          if (!channelTask) {
+            let admission: Record<string, unknown> | undefined;
+            let admissionTimeoutHandle: NodeJS.Timeout | undefined;
+            try {
+              // The admission RPC is request-shaped: a host that silently drops
+              // unknown ext methods never settles it, so without the deadline
+              // the await would wedge the notification pipeline, the next user
+              // prompt, and the settle/close loop. A timeout rethrows into the
+              // outer catch, which retains the item via #deferBackgroundAdmission.
+              admission = await Promise.race([
+                this.client.extMethod('_qwencode/start_turn', {
+                  sessionId: this.sessionId,
+                  source: 'background_notification',
+                  ...turn,
+                  ...(this.lastCompletedRpcPromptId
+                    ? { afterPromptId: this.lastCompletedRpcPromptId }
+                    : {}),
+                }),
+                new Promise<never>((_, reject) => {
+                  admissionTimeoutHandle = setTimeout(
+                    () => reject(new BackgroundTurnAdmissionTimeoutError()),
+                    MID_TURN_QUEUE_DRAIN_TIMEOUT_MS,
+                  );
+                }),
+              ]);
+            } catch (error) {
+              const code =
+                error && typeof error === 'object' && 'code' in error
+                  ? error.code
+                  : undefined;
+              if (code !== -32601) throw error;
+            } finally {
+              clearTimeout(admissionTimeoutHandle);
+            }
+            if (admission?.['accepted'] === false) {
+              this.#deferBackgroundAdmission(item);
+              return;
+            }
+          }
           admitted = true;
-          this.backgroundTurn = turn;
+          if (!channelTask) this.backgroundTurn = turn;
           if (ac.signal.aborted) {
             delete item.turn;
             this.notificationQueue.unshift(item);
@@ -11037,16 +11277,7 @@ export class Session implements SessionContext {
               }
             }
 
-            if (responseText.length > 0) {
-              await this.#emitBackgroundNotificationResponse(
-                item,
-                responseText,
-                ac.signal,
-                promptId,
-                false,
-              );
-              responseSegmentEmitted = true;
-            }
+            await emitBackgroundResponse(responseText);
 
             if (this.messageRewriter) {
               await this.messageRewriter.flushTurn(ac.signal);
@@ -11112,20 +11343,29 @@ export class Session implements SessionContext {
           }
 
           let stopReason: PromptResponse['stopReason'] = 'end_turn';
+          let loopProtectionStopped = false;
           if (this.todoStopGuard.needsStopInspection) {
-            stopReason = (
-              await this.#handleStopHookLoop(
-                ac,
-                promptId,
-                false,
-                undefined,
-                false,
-              )
-            ).stopReason;
+            const responseCapture: AgentResponseCapture = {
+              agentOutput: new AgentOutputMessageCapture(this.config),
+              backgroundResponse: emitBackgroundResponse,
+            };
+            const guardResult = await this.#handleStopHookLoop(
+              ac,
+              promptId,
+              false,
+              undefined,
+              false,
+              undefined,
+              responseCapture,
+            );
+            stopReason = guardResult.stopReason;
+            loopProtectionStopped = guardResult.loopProtectionStopped === true;
           }
           await finishBackgroundNotificationTurn(
             ac.signal.aborted ? 'cancelled' : stopReason,
-            ac.signal.aborted,
+            ac.signal.aborted ||
+              stopReason === 'cancelled' ||
+              loopProtectionStopped,
           );
         } catch (error) {
           if (!admitted) {
@@ -11158,7 +11398,8 @@ export class Session implements SessionContext {
           }
         } finally {
           this.config.endAutomaticActiveTodoWorkChain(promptId);
-          if (admitted) this.finishedBackgroundTurnId = promptId;
+          if (admitted && !channelTask)
+            this.finishedBackgroundTurnId = promptId;
           if (this.backgroundTurn?.turnId === promptId)
             this.backgroundTurn = undefined;
           if (this.notificationAbortController === ac) {
@@ -11214,6 +11455,24 @@ export class Session implements SessionContext {
     turnComplete: boolean,
     partial = false,
   ): Promise<void> {
+    let channelTaskOutput = false;
+    for (const capture of this.channelTaskCaptures) {
+      if (
+        capture.workChainId &&
+        capture.workChainId === item.todoWorkChainId &&
+        !capture.signal.aborted
+      ) {
+        if (text.trim()) {
+          capture.finalText = text;
+          capture.finalResponseTurnId = turnId;
+          capture.partial = false;
+        }
+        if (turnComplete && capture.finalResponseTurnId === turnId) {
+          capture.partial = partial;
+        }
+        channelTaskOutput = true;
+      }
+    }
     const rawLabel =
       item.label ??
       (item.kind === 'agent'
@@ -11226,6 +11485,7 @@ export class Session implements SessionContext {
       _meta: {
         source: 'background_notification_response',
         qwenDiscreteMessage: true,
+        ...(channelTaskOutput ? { [CHANNEL_TASK_OUTPUT_META_KEY]: true } : {}),
         backgroundTask: {
           taskId: item.taskId,
           sourceTurnId: item.sourceTurnId,
@@ -11250,13 +11510,13 @@ export class Session implements SessionContext {
 
   async #emitBackgroundNotificationEndTurn(
     reason: PromptResponse['stopReason'],
-    turnId: string,
+    turnId?: string,
   ): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/end_turn', {
         sessionId: this.sessionId,
         reason,
-        turnId,
+        ...(turnId ? { turnId } : {}),
         source: 'background_notification',
       });
     } catch (error) {
@@ -11374,18 +11634,6 @@ export class Session implements SessionContext {
     await this.sendUpdate(update);
   }
 
-  /**
-   * Requests permission from the client for a tool call.
-   * Used by SubAgentTracker for sub-agent approval requests.
-   */
-  async requestPermission(
-    params: RequestPermissionRequest,
-  ): Promise<RequestPermissionResponse> {
-    return this.client.requestPermission(
-      this.#withBackgroundPermission(params),
-    );
-  }
-
   #withBackgroundPermission(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
@@ -11403,7 +11651,7 @@ export class Session implements SessionContext {
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
     params = this.#withBackgroundPermission(params);
-    const prior = permissionRequestTails.get(this.client) ?? Promise.resolve();
+    const prior = this.permissionRequestTail;
     const transportRequest = prior.then(() =>
       signal.aborted
         ? requestPermissionWithAbort(this.client, params, signal)
@@ -11425,7 +11673,7 @@ export class Session implements SessionContext {
     ]).finally(() => {
       if (abortListener) signal.removeEventListener('abort', abortListener);
     });
-    permissionRequestTails.set(this.client, tail);
+    this.permissionRequestTail = tail;
     return requestPermissionWithAbort(
       { requestPermission: () => transportRequest },
       params,
