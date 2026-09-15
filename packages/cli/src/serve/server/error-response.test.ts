@@ -7,6 +7,7 @@
 import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  AcpChildCapacityExceededError,
   McpAuthenticationInProgressError,
   SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -48,6 +49,57 @@ function responseMock(): {
   json.mockReturnValue(response);
   return { response: response as unknown as Response, set, status, json };
 }
+
+describe('child capacity errors', () => {
+  it.each([false, true])(
+    'preserves capacity through runtime wrapper=%s',
+    (wrapped) => {
+      const capacity = new AcpChildCapacityExceededError(6, 6);
+      const { response, status, json, set } = responseMock();
+      sendBridgeError(
+        response,
+        wrapped ? new WorkspaceRuntimeInitializationError(capacity) : capacity,
+      );
+      expect(status).toHaveBeenCalledWith(503);
+      expect(json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: capacity.code,
+          maxConcurrentChildren: 6,
+          committedAcpChildren: 6,
+        }),
+      );
+      expect(set).not.toHaveBeenCalled();
+    },
+  );
+  it('retains a verified standalone rollback and its capacity cause without Retry-After', () => {
+    const capacity = {
+      code: 'acp_child_capacity_exhausted' as const,
+      maxConcurrentChildren: 1,
+      committedAcpChildren: 1,
+    };
+    const { response, status, json, set } = responseMock();
+    sendBridgeError(
+      response,
+      new StandaloneSessionServiceError(
+        'standalone_creation_rolled_back',
+        'session-1',
+        'rolled back',
+        true,
+        capacity,
+      ),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'standalone_creation_rolled_back',
+        capacity,
+        sessionId: 'session-1',
+        retryable: true,
+      }),
+    );
+    expect(set).not.toHaveBeenCalled();
+  });
+});
 
 describe('sendBridgeError session writer errors', () => {
   it.each(['local', 'rpc'] as const)(
