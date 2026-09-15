@@ -1021,13 +1021,14 @@ editing two.
 ## Decision 31 — a model dialog outcome is recorded as well as shown
 
 The row a `/model` dialog leaves behind — the model a pick settled on, or the
-one an escape kept — reached the transcript but not the session log, so resuming
-the session dropped it where ink keeps it. The dispatcher cannot carry it: that
-result phase closes while the dialog is still open, with an empty output list,
-and ink writes the same empty pair. So ink pairs each of its three outcome sites
-with a second result-phase record naming the command and carrying that one row.
-This renderer now makes the same pairing, over one object: the row shown and the
-row recorded are the same value, built once, so the two cannot drift apart.
+one an escape kept — reached the transcript but not the session log, where ink
+carries a record of each of those three outcomes. The dispatcher cannot carry
+it: that result phase closes while the dialog is still open, with an empty
+output list, and ink writes the same empty pair. So ink pairs each of its three
+outcome sites with a second result-phase record naming the command and carrying
+that one row. This renderer now makes the same pairing, over one object: the row
+shown and the row recorded are the same value, built once, so the two cannot
+drift apart.
 
 Two silences are deliberate. A pick that fails to apply records nothing — ink
 keeps the dialog open with the error, and a recorded row would replay a switch
@@ -1045,9 +1046,13 @@ real machine the slash-dialog scenario opens `/model` and escapes it on both
 legs: each session log now holds nine `slash_command` records, in the same order
 and with the same flags, the fifth being the dialog's own result carrying
 `Kept model as fake-model` on both sides. What is not shown on screen is the
-replay: the shared resume loader reads this payload shape and this renderer's
-session switch calls it, but no scenario resumed a session to watch the row come
-back.
+replay. The adapter that rebuilds a transcript from a log emits a row for a
+slash command's invocation phase only, and this is a result phase, whereas
+ink's replay reads the output rows a result phase carries. So after a resume
+ink still draws the kept-model row and this renderer draws neither that row nor
+any other slash result — the gap Decision 13 names for info rows in general.
+Closing it changes what every slash command leaves behind a resume, so it is
+recorded under Follow-ups rather than taken on here.
 
 ## Decision 32 — a dialog field's caret moves, as ink's does
 
@@ -1808,6 +1813,13 @@ What was verified, and how far the verification reaches:
   (ctrl+k/ctrl+u) and undo/redo (ctrl+z). Every operation they need already exists
   in this model, so it is one change over the line editor and its tests rather
   than a per-dialog one.
+- A resumed session shows fewer rows than its log holds. This renderer's
+  transcript adapter replays a slash command's invocation phase and nothing
+  else, so a result-phase row — the model dialog's kept-model line of Decision
+  31 among them — is recorded and then never drawn again, where ink's resume
+  puts each of them back. That is wider than one dialog: closing it changes what
+  every slash command leaves behind a resume, and no scenario of the acceptance
+  matrix resumes a session at all.
 - What a refused keystroke leaves on screen diverges, as Decision 32 says. The
   context-window field keeps digits only and this renderer prints the accepted
   value, so a letter — or the Space that step binds — vanishes without a trace,
