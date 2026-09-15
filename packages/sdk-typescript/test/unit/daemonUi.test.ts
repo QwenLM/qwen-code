@@ -10444,3 +10444,259 @@ describe('subagent session readiness', () => {
     },
   );
 });
+
+describe('background completion status', () => {
+  it('does not start a model stream for a completed task waiting in the queue', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      id: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Explore completed' },
+          _meta: {
+            source: 'background_task_completed',
+            backgroundTask: {
+              taskId: 'task-1',
+              kind: 'agent',
+              status: 'completed',
+            },
+          },
+        },
+      },
+    });
+    expect(events).toMatchObject([
+      {
+        type: 'status',
+        source: 'background_task_completed',
+        data: { taskId: 'task-1' },
+      },
+    ]);
+    expect(events.some((event) => event.type === 'assistant.text.delta')).toBe(
+      false,
+    );
+  });
+});
+
+it('retains automatic execution provenance on a tool-first replay', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: { backgroundTurn },
+      },
+    },
+  });
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    events,
+  );
+  expect(state.blocks[0]).toMatchObject({
+    kind: 'tool',
+    promptId: 'auto-1',
+    backgroundTurn,
+  });
+});
+
+it('ignores malformed background provenance without coercing untrusted kind values', () => {
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: {
+          backgroundTurn: {
+            turnId: 'auto-1',
+            taskId: 'task-1',
+            kind: Object.create(null),
+            startedAt: 100,
+          },
+        },
+      },
+    },
+  });
+  expect(events).not.toHaveLength(0);
+  for (const event of events)
+    expect(event).not.toHaveProperty('backgroundTurn');
+});
+
+it('retains background execution identity on permission-first updates', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'permission_request',
+    promptId: 'auto-1',
+    data: {
+      requestId: 'permission-1',
+      backgroundTurn,
+      request: {
+        toolCall: { toolCallId: 'tool-1', title: 'Read file' },
+        options: [],
+      },
+    },
+  });
+  expect(events[0]).toMatchObject({ backgroundTurn });
+});
+
+it('ignores background execution descriptors with a negative start time', () => {
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: {
+          backgroundTurn: {
+            turnId: 'auto-1',
+            taskId: 'task-1',
+            kind: 'agent',
+            startedAt: -1,
+          },
+        },
+      },
+    },
+  });
+  expect(events[0]).not.toHaveProperty('backgroundTurn');
+});
+
+it('projects an automatic start as lifecycle status without assistant text', () => {
+  const backgroundTurn = {
+    turnId: 'auto',
+    taskId: 'task',
+    kind: 'agent',
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Worker label' },
+        _meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn,
+          qwenDiscreteMessage: true,
+        },
+      },
+    },
+  });
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    type: 'status',
+    source: 'background_notification_turn_started',
+    backgroundTurn,
+  });
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    events,
+  );
+  expect(state.blocks[0]).toMatchObject({ kind: 'status', backgroundTurn });
+  expect(state.activeAssistantBlockId).toBeUndefined();
+});
+
+it.each(['background_task_completed', 'background_notification_turn_started'])(
+  'keeps text after %s in a separate block',
+  (source) => {
+    const chunk = (text: string, id: number, meta?: Record<string, unknown>) =>
+      normalizeDaemonEvent({
+        v: 1,
+        id,
+        type: 'session_update',
+        promptId: 'prompt-1',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            ...(meta ? { _meta: meta } : {}),
+          },
+        },
+      });
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      ...chunk('A', 1),
+      ...chunk('marker', 2, { source }),
+      ...chunk('B', 3),
+    ]);
+    expect(
+      state.blocks.map((block) => [
+        block.kind,
+        'text' in block ? block.text : undefined,
+      ]),
+    ).toEqual([
+      ['assistant', 'A'],
+      ['status', 'marker'],
+      ['assistant', 'B'],
+    ]);
+  },
+);
+
+it('retains the same background text execution ID for live and replay events', () => {
+  const backgroundTurn = {
+    turnId: 'automatic',
+    taskId: 'task',
+    kind: 'agent',
+    startedAt: 100,
+  };
+  const event = {
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Result' },
+        _meta: { backgroundTurn },
+      },
+    },
+  } as const;
+  for (const promptId of [backgroundTurn.turnId, undefined]) {
+    const events = normalizeDaemonEvent({
+      ...event,
+      ...(promptId ? { promptId } : {}),
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(events[0]).toMatchObject({
+      promptId: backgroundTurn.turnId,
+      backgroundTurn,
+    });
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'Result',
+      promptId: backgroundTurn.turnId,
+    });
+  }
+  expect(
+    normalizeDaemonEvent({ ...event, promptId: 'explicit' })[0],
+  ).toMatchObject({ promptId: 'explicit' });
+});

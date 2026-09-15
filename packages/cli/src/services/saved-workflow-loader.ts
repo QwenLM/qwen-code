@@ -30,6 +30,7 @@ import type {
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { extensionOwnerLabel } from './commandMetadata.js';
 
 const debugLogger = createDebugLogger('SavedWorkflowLoader');
 
@@ -63,13 +64,33 @@ export class SavedWorkflowLoader implements ICommandLoader {
   private toCommand(entry: SavedWorkflowEntry): SlashCommand {
     return {
       name: entry.name,
-      description: `Run the "${entry.name}" saved workflow (${entry.source})`,
+      // An extension workflow shows its own description; its owner is carried
+      // once, by the source badge.
+      description:
+        entry.source === 'extension' && entry.description
+          ? entry.description
+          : `Run the "${entry.name}" saved workflow (${entry.source})`,
       // File-derived command (all execution modes via commandUtils fallback);
       // `source` carries the distinct workflow identity for display/telemetry.
       kind: CommandKind.FILE,
       source: 'workflow-command',
-      sourceLabel: 'Workflow',
-      sourceDetail: entry.source, // 'project' | 'user'
+      // An extension workflow names its owner, which becomes its source badge.
+      sourceLabel: entry.extensionName
+        ? extensionOwnerLabel({
+            name: entry.extensionName,
+            displayName: entry.extensionDisplayName,
+          })
+        : 'Workflow',
+      sourceDetail: entry.source, // 'project' | 'user' | 'extension'
+      // An extension workflow is an extension command. On a collision with its
+      // extension's same-named skill, `CommandService` renames it to
+      // `<extension>.<name>` and the skill keeps its surfaces; `workflowName`
+      // keeps a denylist entry written with the documented name matching. A
+      // user or project custom command of the same name still takes the slash
+      // command, because `FileCommandLoader` loads after this loader.
+      ...(entry.extensionName
+        ? { extensionName: entry.extensionName, workflowName: entry.name }
+        : {}),
       // Interactive only: the action returns a `{type:'tool'}` dispatch, which
       // the non-interactive command adapter converts to `unsupported`. Listing
       // these in headless / ACP modes would advertise a command that then fails

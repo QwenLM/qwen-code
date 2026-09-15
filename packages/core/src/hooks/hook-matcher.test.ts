@@ -90,6 +90,20 @@ describe('matchesHookPattern', () => {
     );
   });
 
+  it('keeps an escaped space at the edge of a list entry', () => {
+    expect(matchesHookPattern('\\.env\\ |\\.pem', '/x/secrets.pem')).toBe(true);
+    expect(matchesHookPattern('\\.env\\ |\\.pem', 'a.env ')).toBe(true);
+    expect(matchesHookPattern('\\.env\\ |\\.pem', 'a.env')).toBe(false);
+    expect(matchesHookPattern('write_file\\ |note.*', 'notebook_edit')).toBe(
+      true,
+    );
+    expect(matchesHookPattern('read_.* | edit', 'read_file')).toBe(true);
+  });
+
+  it('trims a space after an escaped backslash at a list entry edge', () => {
+    expect(matchesHookPattern('C:\\\\temp\\\\ |x', 'C:\\temp\\')).toBe(true);
+  });
+
   it('never splits a list on an escaped pipe', () => {
     expect(matchesHookPattern('notes\\|', 'x/notes|y')).toBe(true);
     expect(matchesHookPattern('a\\||b', 'b')).toBe(true);

@@ -194,11 +194,13 @@ vi.mock('./dialogs-stats-skills.js', () => ({
   OpenTuiStatsDialog: mocks.stub('stats'),
   OpenTuiSkillsDialog: mocks.stub('skills_manage'),
 }));
+vi.mock('./dialogs-hooks.js', () => ({
+  OpenTuiHooksDialog: mocks.stub('hooks'),
+}));
 vi.mock('./dialogs-misc.js', () => ({
   OpenTuiDeleteDialog: mocks.stub('delete'),
   OpenTuiDiffDialog: mocks.stub('diff'),
   OpenTuiEditorDialog: mocks.stub('editor'),
-  OpenTuiHooksDialog: mocks.stub('hooks'),
   OpenTuiResumeDialog: mocks.stub('resume'),
   OpenTuiRewindDialog: mocks.stub('rewind'),
   OpenTuiSubagentCreateDialog: mocks.stub('subagent_create'),

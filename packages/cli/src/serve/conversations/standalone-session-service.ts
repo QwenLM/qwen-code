@@ -438,6 +438,8 @@ function mergeLiveStandaloneSummary(
     ...(live.activeWorkState !== undefined
       ? { activeWorkState: live.activeWorkState }
       : {}),
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     ...(live.isWaitingForPermission !== undefined
       ? { isWaitingForPermission: live.isWaitingForPermission }
       : {}),
