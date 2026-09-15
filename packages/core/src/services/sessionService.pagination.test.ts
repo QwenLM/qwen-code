@@ -75,8 +75,9 @@ function writeSession(sessionId: string, mtimeMs: number): void {
   };
   const filePath = sessionFilePath(sessionId);
   fs.writeFileSync(filePath, JSON.stringify(record) + '\n', 'utf8');
-  const mtime = new Date(mtimeMs);
-  fs.utimesSync(filePath, mtime, mtime);
+  // Numeric utimes form keeps fractional milliseconds (Date would truncate),
+  // matching the fractional mtimeMs statSync reports on real filesystems.
+  fs.utimesSync(filePath, mtimeMs / 1000, mtimeMs / 1000);
 }
 
 /** Follows cursors until exhaustion, returning every session id in order. */
@@ -100,7 +101,9 @@ async function drainAll(size: number): Promise<string[]> {
 describe('listSessions pagination with equal mtimes', () => {
   it('returns every session exactly once when all files share one mtime', async () => {
     const total = 25;
-    const shared = new Date('2026-08-17T00:00:00.000Z').getTime();
+    // Fractional: statSync reports sub-ms mtimes on real filesystems, and the
+    // composite filter's exact-equality half must match them bit-for-bit.
+    const shared = new Date('2026-08-17T00:00:00.000Z').getTime() + 0.467;
     for (let i = 0; i < total; i++) {
       writeSession(sessionIdAt(i), shared);
     }
@@ -115,7 +118,7 @@ describe('listSessions pagination with equal mtimes', () => {
   });
 
   it('does not skip or duplicate when a page boundary splits an mtime tie group', async () => {
-    const shared = new Date('2026-08-17T00:00:00.000Z').getTime();
+    const shared = new Date('2026-08-17T00:00:00.000Z').getTime() + 0.467;
     const older = shared - 1;
     for (let i = 0; i < 5; i++) {
       writeSession(sessionIdAt(i), shared);
@@ -203,6 +206,19 @@ describe('listSessions pagination with equal mtimes', () => {
     expect(second.nextCursor).toBeUndefined();
   });
 
+  it('orders an mtime tie group by file name regardless of creation order', async () => {
+    const shared = new Date('2026-08-17T00:00:00.000Z').getTime() + 0.467;
+    // Descending creation order on purpose: the ordering must come from the
+    // sort, never from readdir order.
+    for (const i of [4, 3, 2, 1, 0]) {
+      writeSession(sessionIdAt(i), shared);
+    }
+
+    expect(await drainAll(1)).toEqual(
+      Array.from({ length: 5 }, (_, i) => sessionIdAt(i)),
+    );
+  });
+
   it('advances the cursor past skipped files, so a scan behind a skipped block stays lossless', async () => {
     // Layout (one shared mtime, file-name order): own A, then
     // MAX_FILES_TO_PROCESS content-empty files (skipped after processing),
@@ -219,8 +235,7 @@ describe('listSessions pagination with equal mtimes', () => {
     for (let i = 1; i <= skippedCount; i++) {
       const filePath = sessionFilePath(sessionIdAt(i));
       fs.writeFileSync(filePath, '', 'utf8');
-      const mtime = new Date(shared);
-      fs.utimesSync(filePath, mtime, mtime);
+      fs.utimesSync(filePath, shared / 1000, shared / 1000);
     }
 
     const page1 = await service.listSessions({ size: 1 });

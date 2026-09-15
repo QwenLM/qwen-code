@@ -57,8 +57,11 @@ const DEFAULT_LIST_LIMIT = 20;
 // Page cap for the locateTask persisted-scan fallback. With the composite
 // session-list cursor, an mtime tie group no longer self-terminates the
 // walk, so a missing thread id would otherwise re-list the whole directory
-// once per page. The cap matches the file budget one unbounded listSessions
-// pass already guarantees (MAX_FILES_TO_PROCESS 10000 / page size 100).
+// once per page. The page count matches the file budget one unbounded
+// listSessions pass guarantees (MAX_FILES_TO_PROCESS 10000 / page size 100)
+// ? but each page re-scans the whole directory (nothing is carried across
+// pages), so the true worst case is ~100x that budget; the cap bounds wasted
+// work for a thread that does not exist, it does not make the walk cheap.
 const MAX_TASK_SCAN_PAGES = 100;
 const DEFAULT_READ_TURN_LIMIT = 3;
 const DEFAULT_WAIT_TIMEOUT_MS = 120_000;

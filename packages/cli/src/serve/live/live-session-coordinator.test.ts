@@ -1124,12 +1124,14 @@ describe('LiveSessionCoordinator', () => {
       2,
       expect.objectContaining({
         cursor: { mtime: 999, sessionId: incompatible(1).sessionId },
+        signal: expect.any(AbortSignal),
       }),
     );
     expect(listSessionsStub).toHaveBeenNthCalledWith(
       3,
       expect.objectContaining({
         cursor: { mtime: 998, sessionId: incompatible(2).sessionId },
+        signal: expect.any(AbortSignal),
       }),
     );
   });
@@ -1190,7 +1192,10 @@ describe('LiveSessionCoordinator', () => {
         String(chunk).includes('live resume scan truncated'),
       );
       expect(truncationLines).toHaveLength(1);
+      // Both halves of the diagnostic: which workspace, and at what budget
+      // the scan gave up (the half that distinguishes "gave up at 100").
       expect(String(truncationLines[0]?.[0])).toContain('/conversations');
+      expect(String(truncationLines[0]?.[0])).toContain('100 pages');
     } finally {
       stderrSpy.mockRestore();
     }
@@ -1201,17 +1206,20 @@ describe('LiveSessionCoordinator', () => {
     // spin the scan to the page cap making no progress: the repeat guard
     // must trip on the second sighting and end the scan. This is not a cap
     // exit, so no truncation line is logged for it.
-    const stuckCursor = {
-      mtime: 1_000,
-      sessionId: '550e8400-e29b-41d4-a716-446655440099',
-    };
+    // A fresh object identity per page with the same content: production
+    // never reuses the reference (listSessions builds a new literal per
+    // call), so an identity-based Set guard would never trip here ? only the
+    // encoded-key comparison can stop the scan.
     // Bounded even with the guard deleted: the page cap still stops the
     // loop at 100, so a regression fails as an assertion, not heap
     // exhaustion.
     listSessionsStub.mockImplementation(async () => ({
       items: [],
       hasMore: true,
-      nextCursor: stuckCursor,
+      nextCursor: {
+        mtime: 1_000,
+        sessionId: '550e8400-e29b-41d4-a716-446655440099',
+      },
     }));
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
@@ -1232,6 +1240,13 @@ describe('LiveSessionCoordinator', () => {
         String(chunk).includes('live resume scan truncated'),
       );
       expect(truncationLines).toHaveLength(0);
+      // The repeat exit is not silent either: exactly one line naming the
+      // repeated cursor, so a stuck cursor producer is distinguishable from
+      // an empty workspace.
+      const repeatLines = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('stopped on a repeated cursor'),
+      );
+      expect(repeatLines).toHaveLength(1);
     } finally {
       stderrSpy.mockRestore();
     }

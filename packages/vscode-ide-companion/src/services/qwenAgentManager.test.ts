@@ -196,6 +196,114 @@ describe('QwenAgentManager.getSessionListPaged', () => {
     expect(page.hasMore).toBe(false);
   });
 
+  it('serves the remainder when the handed-over cursor carries a fractional mtimeMs', async () => {
+    // The daemon mints composite cursors from raw stats.mtimeMs, which is
+    // fractional on real filesystems. Rejecting the fractional form at this
+    // boundary fails closed and silently truncates the list mid-pagination.
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const tie = new Date('2026-08-17T00:02:00.000Z').getTime() + 0.467;
+    const mk = (sessionId: string, mtimeMs: number) => ({
+      sessionId,
+      projectHash: 'p',
+      startTime: new Date(mtimeMs).toISOString(),
+      lastUpdated: new Date(mtimeMs).toISOString(),
+      mtimeMs,
+      messages: [],
+    });
+    const stored = [
+      mk('550e8400-e29b-41d4-a716-446655440000', tie - 60_000),
+      mk('550e8400-e29b-41d4-a716-446655440001', tie),
+      mk('550e8400-e29b-41d4-a716-446655440002', tie),
+      mk('550e8400-e29b-41d4-a716-446655440003', tie + 60_000),
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    // Order: 0003, tie members 0001 then 0002, 0000. Cursor names 0001 with
+    // the true fractional mtime; the remainder must be 0002 then 0000.
+    const page = await manager.getSessionListPaged({
+      cursor: `${tie}:550e8400-e29b-41d4-a716-446655440001`,
+      size: 10,
+    });
+
+    expect(page.sessions.map((session) => session.sessionId)).toEqual([
+      '550e8400-e29b-41d4-a716-446655440002',
+      '550e8400-e29b-41d4-a716-446655440000',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('serves the remainder for a legacy bare cursor with a fractional mtime', async () => {
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const boundary = new Date('2026-08-17T00:02:00.000Z').getTime() + 0.467;
+    const mk = (sessionId: string, mtimeMs: number) => ({
+      sessionId,
+      projectHash: 'p',
+      startTime: new Date(mtimeMs).toISOString(),
+      lastUpdated: new Date(mtimeMs).toISOString(),
+      mtimeMs,
+      messages: [],
+    });
+    const stored = [
+      mk('550e8400-e29b-41d4-a716-446655440000', boundary - 1000),
+      mk('550e8400-e29b-41d4-a716-446655440001', boundary),
+      mk('550e8400-e29b-41d4-a716-446655440002', boundary + 1000),
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    const page = await manager.getSessionListPaged({
+      cursor: String(boundary),
+      size: 10,
+    });
+
+    expect(page.sessions.map((session) => session.sessionId)).toEqual([
+      '550e8400-e29b-41d4-a716-446655440000',
+    ]);
+  });
+
+  it('mints the fallback cursor at full mtimeMs precision so the ACP handback can match it', async () => {
+    // The reverse handover: a fallback-minted cursor must compare exact-equal
+    // against the daemon's fractional mtimeMs, or the unserved tie members
+    // are filtered out when ACP recovers.
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const tie = new Date('2026-08-17T00:02:00.000Z').getTime() + 0.467;
+    const mk = (sessionId: string) => ({
+      sessionId,
+      projectHash: 'p',
+      startTime: new Date(tie).toISOString(),
+      lastUpdated: new Date(tie).toISOString(),
+      mtimeMs: tie,
+      messages: [],
+    });
+    const stored = [
+      mk('550e8400-e29b-41d4-a716-446655440001'),
+      mk('550e8400-e29b-41d4-a716-446655440002'),
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    const page = await manager.getSessionListPaged({ size: 1 });
+
+    expect(page.nextCursor).toBe(`${tie}:550e8400-e29b-41d4-a716-446655440001`);
+    expect(page.hasMore).toBe(true);
+  });
+
   it('pages the filesystem fallback losslessly with the composite cursor it emits', async () => {
     // Slice + cursor advance: page one hands out a composite cursor naming
     // its last row; feeding it back must continue exactly where page one

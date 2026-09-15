@@ -19,6 +19,10 @@ import type {
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
+import {
+  decodeSessionListCursor,
+  type SessionListCursor,
+} from '@qwen-code/qwen-code-core';
 import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
 import type {
@@ -51,26 +55,22 @@ interface FallbackCursor {
 }
 
 /**
- * Parse a session-list cursor for the filesystem fallback. Accepts the
- * legacy bare-mtime form and the composite "<mtimeMs>:<sessionId>" form the
- * daemon hands out; anything else is malformed and the caller fails closed,
+ * Parse a session-list cursor for the filesystem fallback via core's
+ * authoritative decoder ? the same grammar the daemon mints, including
+ * fractional mtimeMs and the full accepted magnitude domain. Anything the
+ * decoder rejects is malformed here too, and the caller fails closed,
  * because an unfiltered page would re-serve page one and duplicate rows.
  */
 function parseFallbackCursor(cursor: string): FallbackCursor | undefined {
-  const separator = cursor.indexOf(':');
-  const mtimePart = separator === -1 ? cursor : cursor.slice(0, separator);
-  if (!/^-?\d+$/.test(mtimePart)) {
+  let decoded: number | SessionListCursor | undefined;
+  try {
+    decoded = decodeSessionListCursor(cursor);
+  } catch {
     return undefined;
   }
-  const mtime = Number(mtimePart);
-  if (!Number.isFinite(mtime)) {
-    return undefined;
-  }
-  if (separator === -1) {
-    return { mtime };
-  }
-  const sessionId = cursor.slice(separator + 1);
-  return sessionId === '' ? undefined : { mtime, sessionId };
+  if (decoded === undefined) return undefined;
+  if (typeof decoded === 'number') return { mtime: decoded };
+  return { mtime: decoded.mtime, sessionId: decoded.sessionId };
 }
 
 /**
@@ -667,10 +667,20 @@ export class QwenAgentManager {
         this.currentWorkingDir,
         false,
       );
-      const allWithMtime = all.map((s) => ({
-        raw: s,
-        mtime: new Date(s.lastUpdated).getTime(),
-      }));
+      // Full-precision mtimeMs: lastUpdated round-trips through an ISO
+      // string and loses sub-millisecond precision, while the daemon's
+      // composite cursor compares mtime with exact equality ? a truncated
+      // boundary would drop the unserved members of a tie group on the
+      // ACP<->disk handover.
+      const allWithMtime = all.map((s) => {
+        const mtime = s.mtimeMs ?? new Date(s.lastUpdated).getTime();
+        return {
+          raw: s,
+          // A legacy session row can lack both timestamps; NaN here would
+          // poison the sort and mint a "NaN:<id>" cursor downstream.
+          mtime: Number.isFinite(mtime) ? mtime : 0,
+        };
+      });
       // The daemon wire cursor is the composite "<mtimeMs>:<sessionId>" form
       // now, so an ACP failure mid-pagination lands here holding one: parse
       // it and keep serving the remainder from disk instead of dropping the
@@ -680,8 +690,16 @@ export class QwenAgentManager {
       // cursor still fails closed with an empty page: re-serving page one
       // would duplicate rows in the webview.
       const parsedCursor =
-        cursor === undefined ? undefined : parseFallbackCursor(cursor);
-      if (cursor !== undefined && parsedCursor === undefined) {
+        cursor === undefined || cursor === ''
+          ? undefined
+          : parseFallbackCursor(cursor);
+      if (cursor !== undefined && cursor !== '' && parsedCursor === undefined) {
+        // Fail closed, but not silently: this is the only exit that decides
+        // the rest of the list is unreachable, so name the rejected cursor.
+        logger.warn(
+          '[QwenAgentManager] Rejecting unparseable session-list cursor in fallback:',
+          cursor,
+        );
         return { sessions: [], hasMore: false };
       }
       const ordered = [...allWithMtime].sort(

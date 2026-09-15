@@ -190,11 +190,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       case 'getQwenSessions':
         await this.handleGetQwenSessions(
-          // The cursor is an opaque string; older webviews sent a number, so
-          // normalize both to the wire form the daemon understands.
-          typeof data?.cursor === 'number'
-            ? String(data.cursor)
-            : ((data?.cursor as string | undefined) ?? undefined),
+          // The cursor is an opaque string minted by the daemon; forward it
+          // verbatim. (No in-repo sender posts a numeric cursor; the shipped
+          // webview pages sessions over the daemon HTTP route directly.)
+          (data?.cursor as string | undefined) ?? undefined,
           (data?.size as number | undefined) ?? undefined,
         );
         break;

@@ -124,10 +124,10 @@ describe('SessionMessageHandler', () => {
     mockRealpath.mockImplementation(async (value: string) => value);
   });
 
-  it('normalizes a numeric webview cursor to the string wire form', async () => {
-    // Older webviews send the cursor as a JSON number; the daemon only
-    // understands the opaque string form (composite "<mtimeMs>:<sessionId>"
-    // or legacy bare mtime), so the handler must stringify on the way in.
+  it('forwards a composite string cursor to getSessionListPaged verbatim', async () => {
+    // The cursor is opaque at this boundary: truncating it to its numeric
+    // half would silently restore the mtime-tie loss upstream of the daemon.
+    const composite = '1755000000000.5:550e8400-e29b-41d4-a716-446655440000';
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
@@ -146,11 +146,11 @@ describe('SessionMessageHandler', () => {
 
     await handler.handle({
       type: 'getQwenSessions',
-      data: { cursor: 1755000000000, size: 20 },
+      data: { cursor: composite, size: 20 },
     });
 
     expect(agentManager.getSessionListPaged).toHaveBeenCalledWith({
-      cursor: '1755000000000',
+      cursor: composite,
       size: 20,
     });
   });

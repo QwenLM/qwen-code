@@ -516,6 +516,17 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
  * (32-36 hex characters, optionally with hyphens).
  */
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
+
+/**
+ * Code-unit (byte) order for session file names. The paginated list's cursor
+ * is a keyset evaluated on every page turn, so the tie-break must be
+ * locale-independent: localeCompare's result for mixed-case hex names depends
+ * on the process's ambient ICU locale and can flip between two page fetches.
+ * Plain relational comparison is identical in every JS process.
+ */
+function compareSessionFileNames(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
@@ -2608,9 +2619,13 @@ export class SessionService {
    * Lists sessions for the current project with pagination.
    *
    * Sessions are ordered by file modification time (most recent first),
-   * tie-broken by file name. Pagination uses a composite
-   * {@link SessionListCursor} so pages never skip or repeat entries, even
-   * when many files share one mtimeMs.
+   * tie-broken by file name in code-unit order. Pagination uses a composite
+   * {@link SessionListCursor} so pages never skip or repeat entries while
+   * the chats directory is static between page turns, even when many files
+   * share one mtimeMs. The cursor is a keyset over live values: a file whose
+   * mtime moves between two page turns, or one created mid-scan, can still
+   * shift the boundary, so callers accumulating pages should key by
+   * sessionId.
    *
    * Only reads the first line of each JSONL file for efficiency.
    * Files are filtered by UUID pattern first, then by project hash.
@@ -2660,7 +2675,9 @@ export class SessionService {
     // ascending so the order is total: mtimeMs alone is not unique (bulk
     // copies, backup restores, coarse-granularity filesystems), and the
     // composite cursor filter below relies on this exact ordering.
-    files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
+    files.sort(
+      (a, b) => b.mtime - a.mtime || compareSessionFileNames(a.name, b.name),
+    );
     signal?.throwIfAborted();
 
     // Apply cursor filter. A bare number is a legacy cursor and keeps its
@@ -2676,7 +2693,7 @@ export class SessionService {
           (f) =>
             f.mtime < cursor.mtime ||
             (f.mtime === cursor.mtime &&
-              f.name.localeCompare(cursorFileName) > 0),
+              compareSessionFileNames(f.name, cursorFileName) > 0),
         );
       }
     }
@@ -4428,10 +4445,12 @@ export class SessionService {
     const chatsDir = this.getChatsDir();
 
     // Scan all session files directly rather than paging through
-    // listSessions(): title search needs an exhaustive sweep anyway, and the
-    // paginated path offers no filter hook. (listSessions has paginated
-    // losslessly across mtime ties since the composite-cursor fix; whether to
-    // route this back through it is separate cleanup.)
+    // listSessions(): title search needs a full sweep anyway, and the
+    // paginated path offers no filter hook. Note the sweep is itself bounded
+    // by MAX_FILES_TO_PROCESS, so sessions past that cap are not
+    // title-searchable either. (listSessions has paginated losslessly across
+    // mtime ties since the composite-cursor fix; whether to route this back
+    // through it is separate cleanup.)
     let fileNames: string[];
     try {
       fileNames = fs.readdirSync(chatsDir);
@@ -4456,7 +4475,9 @@ export class SessionService {
 
     // Sort most-recent first, with filename as a stable tie-breaker so runs
     // are deterministic even when multiple files share an mtime.
-    files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
+    files.sort(
+      (a, b) => b.mtime - a.mtime || compareSessionFileNames(a.name, b.name),
+    );
 
     // Pool the tail-read buffer across files; the title scan in the loop
     // body is otherwise the dominant alloc cost when many candidates exist.

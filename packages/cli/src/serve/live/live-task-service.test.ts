@@ -1475,6 +1475,17 @@ describe('LiveTaskService', () => {
       }),
     ).resolves.toMatchObject({ thread: { id: 'late-thread' } });
     expect(listWorkspaceSessionsForResponse).toHaveBeenCalledTimes(2);
+    // Page 2 must carry page 1's cursor: dropping it re-requests page one
+    // forever and a thread past page one is never reached.
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        cursor: '1779019140000:550e8400-e29b-41d4-a716-446655440000',
+      }),
+      expect.anything(),
+    );
   });
 
   it('routes an explicit standalone follow-up through service admission', async () => {

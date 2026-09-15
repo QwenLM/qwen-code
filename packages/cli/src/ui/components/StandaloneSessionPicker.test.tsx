@@ -714,7 +714,10 @@ describe('SessionPicker', () => {
           .mockResolvedValueOnce({
             items: firstPage,
             hasMore: true,
-            nextCursor: { mtime: Date.now() - 5000, sessionId: 'session-4' },
+            nextCursor: {
+              mtime: 1_755_000_000_000,
+              sessionId: 'session-4',
+            },
           })
           .mockResolvedValueOnce({
             items: secondPage,
@@ -750,7 +753,7 @@ describe('SessionPicker', () => {
         2,
         expect.objectContaining({
           size: SESSION_PAGE_SIZE,
-          cursor: { mtime: expect.any(Number), sessionId: 'session-4' },
+          cursor: { mtime: 1_755_000_000_000, sessionId: 'session-4' },
         }),
       );
 
