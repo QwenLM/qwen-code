@@ -5264,6 +5264,20 @@ export class Session implements SessionContext {
     let promptFailureMessage: string | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
+      const reasoningMeta = (params as { _meta?: Record<string, unknown> })
+        ._meta;
+      if (
+        scheduledGoalTurn === undefined &&
+        !(params as { retry?: boolean }).retry &&
+        !reasoningMeta?.[DAEMON_RETRY_META_KEY] &&
+        !reasoningMeta?.[DAEMON_CONTINUE_META_KEY] &&
+        !reasoningMeta?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] &&
+        this.config.applyReasoningOverrides?.()
+      ) {
+        this.reconcileReasoningSelection(this.config.getModel(), {
+          persist: false,
+        });
+      }
       const result = await this.#executePrompt(
         params,
         pendingSend,

@@ -22,6 +22,7 @@
  * consumer replacing the other.
  */
 
+import type { WorkflowSourceRef } from './workflow-correlation.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Config } from '../config/config.js';
 import type { TaskBase, TaskRegistration } from './tasks/types.js';
@@ -286,6 +287,7 @@ export type WorkflowEvent = WorkflowEventPayload & { id: string };
  * the most recent `phase()` call.
  */
 export interface WorkflowTask extends TaskBase<WorkflowStatus> {
+  sourceRef?: WorkflowSourceRef;
   kind: 'workflow';
   /** Run identifier (e.g. `wf_<8hex>`); aliased to `TaskBase.id`. */
   runId: string;

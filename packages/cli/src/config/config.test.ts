@@ -5983,6 +5983,11 @@ describe('sandbox image resolution precedence', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     delete process.env['QWEN_SANDBOX_IMAGE'];
+    // These cases measure image precedence, not platform-dependent backend
+    // selection: on macOS the un-stubbed resolution picks sandbox-exec, an
+    // in-place backend that carries no image. Pin a container backend — the
+    // probe is answered by the spawnSync mock above (`docker version` → 0).
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
   });
 
   afterEach(() => {

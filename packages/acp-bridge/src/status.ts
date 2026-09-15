@@ -697,6 +697,11 @@ export interface ServeSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    workflowStepId: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
@@ -933,6 +938,7 @@ export type ServeWorkflowEvent =
     });
 
 export interface ServeSessionWorkflowTaskStatus {
+  sourceRef?: { id: string; revision: string };
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */

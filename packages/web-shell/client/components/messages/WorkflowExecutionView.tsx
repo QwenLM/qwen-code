@@ -239,6 +239,8 @@ function downloadWorkflowHistory(
       runs: runs.map((run) => ({
         id: run.id,
         sourceRunId: run.sourceRunId,
+        toolUseId: run.toolUseId,
+        sourceRef: run.sourceRef,
         startMode: run.startMode,
         status: run.status,
         startTime: run.startTime,

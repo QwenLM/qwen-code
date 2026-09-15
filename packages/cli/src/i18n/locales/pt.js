@@ -580,6 +580,8 @@ export default {
     'Esta extensão instalará os seguintes subagentes:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     'Esta extensão instalará os seguintes fluxos de trabalho (scripts JavaScript que podem iniciar subagentes):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Estes scripts de fluxo de trabalho mudaram desde a versão instalada: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Instalação cancelada para "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':

@@ -63,6 +63,16 @@ export interface ToolInvocation<
   requiresUserInteraction?(): boolean;
 
   /**
+   * Parameters that permission rules match against, when they differ from
+   * `params`. Called after {@link getDefaultPermission} resolves, so an
+   * invocation can derive values from work done there, such as the digest of
+   * the file a name resolves to. A derived key must overwrite any value the
+   * model supplied under it: a rule scoped by that key must never match a
+   * value the model chose.
+   */
+  getPermissionMatchParams?(): Record<string, unknown>;
+
+  /**
    * Whether a host-level allow decision may be confirmed without forwarding
    * an interaction payload. Tools that collect data through their approval
    * surface should return false so the host-provided payload is preserved.
