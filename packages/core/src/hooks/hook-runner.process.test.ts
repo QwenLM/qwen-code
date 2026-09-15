@@ -5,7 +5,15 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -81,6 +89,48 @@ const isRunning = (pid: number): boolean => {
   }
   return !result.stdout.trim().startsWith('Z');
 };
+
+describe.skipIf(process.platform === 'win32')(
+  'HookRunner project directory variables',
+  () => {
+    it.each(['CLAUDE_PROJECT_DIR', 'QWEN_PROJECT_DIR'])(
+      'runs a double-quoted "$%s/..." script in a project path with a space',
+      async (variable) => {
+        const projectDir = await mkdtemp(join(tmpdir(), 'qwen hook project-'));
+        try {
+          const hooksDir = join(projectDir, '.qwen', 'hooks');
+          await mkdir(hooksDir, { recursive: true });
+          const scriptPath = join(hooksDir, 'check.sh');
+          await writeFile(scriptPath, '#!/bin/sh\necho project-dir-hook-ran\n');
+          await chmod(scriptPath, 0o755);
+
+          const result = await new HookRunner().executeHook(
+            {
+              type: HookType.Command,
+              command: `"$${variable}/.qwen/hooks/check.sh"`,
+              source: HooksConfigSource.Project,
+            },
+            HookEventName.PreToolUse,
+            {
+              session_id: 'project-dir-test',
+              transcript_path: join(projectDir, 'transcript.jsonl'),
+              cwd: projectDir,
+              hook_event_name: HookEventName.PreToolUse,
+              timestamp: new Date().toISOString(),
+            },
+          );
+
+          expect(result.stderr).toBe('');
+          expect(result.success).toBe(true);
+          expect(result.stdout).toContain('project-dir-hook-ran');
+        } finally {
+          await rm(projectDir, { recursive: true, force: true });
+        }
+      },
+      30_000,
+    );
+  },
+);
 
 describe.skipIf(process.platform === 'win32')(
   'HookRunner process tree cancellation',
