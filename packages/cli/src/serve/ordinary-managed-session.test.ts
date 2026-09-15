@@ -576,6 +576,85 @@ describe('ordinary REST session Managed owner', () => {
     });
   });
 
+  it('keeps an ordinary Managed turn after SSE disconnect and resumes events', async () => {
+    await startModelServer();
+    await writeSettings();
+    app = bootApp();
+    const sessionId = await createManagedSession();
+
+    let releaseHold!: () => void;
+    modelHold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+
+    const admitted = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({ prompt: [{ type: 'text', text: 'say ping' }] });
+    expect(admitted.status).toBe(202);
+    const promptId = admitted.body.promptId as string;
+    const lastEventId = String(admitted.body.lastEventId);
+    const eventEpoch = admitted.body.eventEpoch as string;
+
+    const firstStream = await collectSseUntil(
+      sessionId,
+      {
+        'Last-Event-ID': lastEventId,
+        'X-Qwen-Event-Epoch': eventEpoch,
+      },
+      (buf) => buf.includes('retry:'),
+    );
+    expect(firstStream).toContain('retry:');
+
+    await vi.waitFor(
+      async () => {
+        const running = await request(app!)
+          .get(`/session/${sessionId}/turns/${promptId}`)
+          .set('Host', host());
+        const body = running.body as { state?: string };
+        expect(running.status).toBe(200);
+        expect(body.state).toBe('running');
+      },
+      { timeout: 15_000, interval: 50 },
+    );
+
+    const pending = await request(app)
+      .get(`/session/${sessionId}/pending-prompts`)
+      .set('Host', host());
+    expect(pending.status).toBe(200);
+    expect(pending.body.pendingPrompts).toEqual([
+      expect.objectContaining({ promptId, state: 'running' }),
+    ]);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+
+    const events = collectSseUntil(
+      sessionId,
+      {
+        'Last-Event-ID': lastEventId,
+        'X-Qwen-Event-Epoch': eventEpoch,
+      },
+      (buf) => buf.includes(ASSISTANT_TEXT),
+    );
+    releaseHold();
+    const sse = await events;
+    const turn = await waitForTurn(sessionId, promptId);
+    expect(turn.state).toBe('completed');
+    expect(sse).toContain(ASSISTANT_TEXT);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      sessionId,
+    });
+  });
+
   it('restores a cold ordinary Managed session after the daemon app restarts', async () => {
     await startModelServer();
     await writeSettings();
