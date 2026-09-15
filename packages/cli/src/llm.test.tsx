@@ -441,6 +441,8 @@ describe('llm.tsx main function', () => {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
             EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -510,6 +512,8 @@ describe('llm.tsx main function', () => {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
             EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         },
         onUpdateRelaunch: expect.any(Function),
       }),
@@ -543,6 +547,8 @@ describe('llm.tsx main function', () => {
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -608,6 +614,8 @@ describe('llm.tsx main function', () => {
         childEnv: {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         },
         onUpdateRelaunch: expect.any(Function),
       }),
@@ -715,6 +723,8 @@ describe('llm.tsx main function', () => {
       async (_memoryArgs, _extraArgs, options) => {
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );

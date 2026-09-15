@@ -669,6 +669,7 @@ describe('Gemini Client (client.ts)', () => {
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getJsonSchema: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getExecutionEnvironment: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -4104,6 +4105,40 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
     });
 
+    it.each([false, true])(
+      'synchronizes evicted paths with the execution environment (failure=%s)',
+      async (fails) => {
+        const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+        const invalidateReadCache = vi.fn().mockResolvedValue(undefined);
+        if (fails) {
+          invalidateReadCache.mockRejectedValueOnce(
+            new Error('worker unavailable'),
+          );
+        }
+        vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue({
+          invalidateReadCache,
+        } as unknown as ReturnType<Config['getExecutionEnvironment']>);
+        const { history, paths } = await makeReadFileResponses(6);
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: () => history,
+          setHistory: vi.fn(),
+        } as unknown as LlmChat;
+        client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+        for await (const _ of client.sendMessageStream(
+          [{ text: 'hi' }],
+          new AbortController().signal,
+          'container-compaction',
+          { type: SendMessageType.UserQuery },
+        )) {
+          /* drain */
+        }
+        expect(invalidateReadCache).toHaveBeenCalledWith([paths[0]]);
+        expect(clear).toHaveBeenCalledTimes(fails ? 1 : 0);
+        expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      },
+    );
+
     it('does not abort the turn when microcompaction cleanup fails', async () => {
       const { markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockImplementation(() => {
@@ -5013,6 +5048,38 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
       expect(invalidateByPath).toHaveBeenCalledWith(evictedPath);
       expect(clear).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('preserves fast compression and requires cache resynchronization when worker invalidation fails', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const evictedPath = join(mcTmpDir, 'test-file.ts');
+      const invalidateReadCache = vi
+        .fn()
+        .mockRejectedValue(new Error('worker unavailable'));
+      vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue({
+        invalidateReadCache,
+      } as unknown as ReturnType<Config['getExecutionEnvironment']>);
+      const info = {
+        originalTokenCount: 1000,
+        newTokenCount: 400,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      };
+      client['chat'] = {
+        compressFast: vi.fn().mockReturnValue({
+          info,
+          microcompactMeta: {
+            unresolvedEvictedReads: 0,
+            evictedReadPaths: [evictedPath],
+          },
+        }),
+      } as unknown as LlmChat;
+      client['forceFullIdeContext'] = false;
+
+      expect(await client.tryCompressChatFast()).toEqual(info);
+      expect(invalidateReadCache).toHaveBeenCalledWith([evictedPath]);
+      expect(clear).toHaveBeenCalledOnce();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(true);
     });
 

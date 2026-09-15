@@ -1540,6 +1540,7 @@ export class CoreToolScheduler {
   private toolCalls: ToolCall[] = [];
   private outputUpdateHandler?: OutputUpdateHandler;
   private onAllToolCallsComplete?: AllToolCallsCompleteHandler;
+  private readonly invocationReleases = new Map<string, Promise<void>>();
   private onToolCallsUpdate?: ToolCallsUpdateHandler;
   private getPreferredEditor: () => EditorType | undefined;
   private config: Config;
@@ -1855,6 +1856,25 @@ export class CoreToolScheduler {
       const existingStartTime = currentCall.startTime;
       const toolInstance = currentCall.tool;
       const invocation = currentCall.invocation;
+
+      if (
+        invocation?.release &&
+        (newStatus === 'success' ||
+          newStatus === 'error' ||
+          newStatus === 'cancelled')
+      ) {
+        this.invocationReleases.set(
+          targetCallId,
+          Promise.resolve()
+            .then(() => invocation.release!())
+            .catch((error: unknown) => {
+              debugLogger.warn(
+                'Tool invocation resource cleanup failed:',
+                error,
+              );
+            }),
+        );
+      }
 
       const outcome = currentCall.outcome;
 
@@ -3063,6 +3083,7 @@ export class CoreToolScheduler {
               invocation,
               canonicalName,
               toolParams,
+              signal,
             ),
           );
           if (
@@ -4295,7 +4316,10 @@ export class CoreToolScheduler {
         waitingToolCall.confirmationDetails.type === 'edit' &&
         isModifiableDeclarativeTool(waitingToolCall.tool)
       ) {
-        const modifyContext = waitingToolCall.tool.getModifyContext(signal);
+        const modifyContext = waitingToolCall.tool.getModifyContext(
+          signal,
+          callId,
+        );
         const editorType = this.getPreferredEditor();
         if (!editorType) {
           // No editor configured: ModifyWithEditor cannot proceed. Log so
@@ -4457,7 +4481,11 @@ export class CoreToolScheduler {
     callId: string,
     signal: AbortSignal,
   ) {
-    if (confirmationDetails.type !== 'edit' || !this.config.getIdeMode()) {
+    if (
+      confirmationDetails.type !== 'edit' ||
+      !this.config.getIdeMode() ||
+      this.config.getExecutionEnvironment?.()
+    ) {
       return;
     }
 
@@ -4545,7 +4573,10 @@ export class CoreToolScheduler {
     }
 
     const currentContent = confirmDetails.originalContent ?? '';
-    const modifyContext = toolCall.tool.getModifyContext(signal);
+    const modifyContext = toolCall.tool.getModifyContext(
+      signal,
+      toolCall.request.callId,
+    );
 
     const updatedParams = modifyContext.createUpdatedParams(
       currentContent,
@@ -5736,7 +5767,10 @@ export class CoreToolScheduler {
           new Set([...inputPaths.map((p) => unescapePath(p)), ...resultPaths]),
         );
 
-        if (candidatePaths.length > 0) {
+        if (
+          candidatePaths.length > 0 &&
+          !this.config.getExecutionEnvironment?.()
+        ) {
           const rulesRegistry = this.config.getConditionalRulesRegistry();
           const skillManager = this.config.getSkillManager();
 
@@ -6570,6 +6604,12 @@ export class CoreToolScheduler {
         );
       }
       try {
+        const releases = completedCalls.flatMap((call) => {
+          const pending = this.invocationReleases.get(call.request.callId);
+          this.invocationReleases.delete(call.request.callId);
+          return pending ? [pending] : [];
+        });
+        if (releases.length > 0) await Promise.all(releases);
         const batchBudget = this.config.getToolOutputBatchBudget?.();
         if (
           messageBus &&
@@ -6895,6 +6935,7 @@ export class CoreToolScheduler {
               pendingTool.invocation,
               pendingTool.request.name,
               toolParams,
+              signal,
             ),
         );
         if (

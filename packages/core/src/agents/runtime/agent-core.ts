@@ -708,6 +708,12 @@ export class AgentCore {
     // control-plane tool follows the static exclusion set unchanged.
     const isExcluded = (name: string | undefined): boolean => {
       if (!name) return false;
+      if (
+        name === ToolNames.TASK_STOP &&
+        this.runtimeContext.getExecutionEnvironment?.()
+      ) {
+        return false;
+      }
       if (name === ToolNames.AGENT) return !nestingAllowed;
       return excludedFromSubagents.has(name);
     };
@@ -1068,6 +1074,9 @@ export class AgentCore {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
 
+        if (this.runtimeContext.getExecutionEnvironment?.()) {
+          toolsList = await this.prepareTools();
+        }
         const messageParams = {
           message: currentMessages[0]?.parts || [],
           config: {

@@ -55,6 +55,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import * as transcript from '../../agents/agent-transcript.js';
+import {
+  ExecutionCleanupError,
+  type ExecutionEnvironment,
+} from '../../services/execution-environment.js';
 
 // Type for accessing protected methods in tests
 type AgentToolInvocation = {
@@ -285,6 +289,546 @@ describe('AgentTool', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  describe('container execution', () => {
+    const params: AgentParams = {
+      description: 'Contained work',
+      prompt: 'Inspect the workspace',
+      subagent_type: 'file-search',
+      run_in_background: false,
+    };
+    let environment: ExecutionEnvironment;
+    let mockAgent: AgentHeadless;
+
+    beforeEach(() => {
+      config.getAgentExecutionBackend = () => 'container';
+      environment = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ExecutionEnvironment;
+      config.getExecutionEnvironmentFactory = vi
+        .fn()
+        .mockReturnValue(vi.fn().mockResolvedValue(environment));
+      config.registerExecutionEnvironment = vi.fn().mockReturnValue(vi.fn());
+      for (const getter of [
+        'getProjectRoot',
+        'getTargetDir',
+        'getCwd',
+        'getWorkingDir',
+      ] as const) {
+        vi.mocked(config[getter]).mockReturnValue(os.tmpdir());
+      }
+      MockedContextState.mockImplementation(
+        () => ({ set: vi.fn() }) as unknown as ContextState,
+      );
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
+        getFinalText: vi.fn().mockReturnValue('Contained result'),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getExecutionSummary: vi.fn().mockReturnValue({}),
+        getStatistics: vi.fn().mockReturnValue({}),
+        formatCompactResult: vi.fn().mockReturnValue('Done'),
+        getCore: vi.fn().mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+          getEventEmitter: () => new AgentEventEmitter(),
+        }),
+        setExternalMessageProvider: vi.fn(),
+        setExternalMessageWaiter: vi.fn(),
+        setExternalMessageWaitPredicate: vi.fn(),
+      } as unknown as AgentHeadless;
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
+    });
+
+    it('never advertises a model-visible backend selector', () => {
+      expect(
+        (agentTool.schema.parametersJsonSchema as { properties: object })
+          .properties,
+      ).not.toHaveProperty('execution_backend');
+      const enabled = new AgentTool(config);
+      expect(
+        (enabled.schema.parametersJsonSchema as { properties: object })
+          .properties,
+      ).not.toHaveProperty('execution_backend');
+      config.getExecutionEnvironmentFactory = () => undefined;
+      expect(enabled.validateToolParams(params)).toContain('not enabled');
+    });
+
+    it.each([{ name: 'teammate' }, { subagent_type: 'fork' }])(
+      'rejects unsupported container combinations %j',
+      (extra) => {
+        expect(
+          agentTool.validateToolParams({ ...params, ...extra } as AgentParams),
+        ).not.toBeNull();
+      },
+    );
+
+    it('refuses unconfigured execution even when validation is bypassed', async () => {
+      config.getExecutionEnvironmentFactory = () => undefined;
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain('not enabled');
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it('rejects code mode before starting a container, including when validation is bypassed', async () => {
+      config.getCodeModeOnly = () => true;
+      expect(agentTool.validateToolParams(params)).toContain(
+        'tools.codeModeOnly',
+      );
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain('tools.codeModeOnly');
+      expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it('rejects nested launch rather than defaulting to host tools', async () => {
+      config.getExecutionEnvironment = () => environment;
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain(
+        'Nested agents are unavailable',
+      );
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, 'local', 'remote', 'container'])(
+      'cannot weaken the operator requirement with model selector %s',
+      async (selector) => {
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            ...params,
+            execution_backend: selector,
+          } as AgentParams)
+          .execute();
+        expect(result.error).toBeUndefined();
+        expect(config.getExecutionEnvironmentFactory()).toHaveBeenCalledOnce();
+        expect(
+          vi
+            .mocked(mockSubagentManager.createAgentHeadless)
+            .mock.calls[0][1].getExecutionEnvironment(),
+        ).toBe(environment);
+      },
+    );
+
+    it('keeps unconfigured execution local even when a capability is injected', async () => {
+      config.getAgentExecutionBackend = () => undefined;
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(result.error).toBeUndefined();
+      expect(mockAgent.execute).toHaveBeenCalledOnce();
+      expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0][1].getExecutionEnvironment?.(),
+      ).toBeUndefined();
+    });
+
+    it.each([undefined, 'local', 'container'])(
+      'honors the loaded definition independently of model selector %s',
+      async (selector) => {
+        config.getAgentExecutionBackend = () => undefined;
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...mockSubagents[0],
+          executionBackend: 'container',
+        });
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({
+            ...params,
+            execution_backend: selector,
+          } as AgentParams)
+          .execute();
+        expect(result.error).toBeUndefined();
+        expect(mockSubagentManager.loadSubagent).toHaveBeenCalledOnce();
+        expect(config.getExecutionEnvironmentFactory()).toHaveBeenCalledOnce();
+        expect(
+          vi
+            .mocked(mockSubagentManager.createAgentHeadless)
+            .mock.calls[0][1].getExecutionEnvironment(),
+        ).toBe(environment);
+      },
+    );
+
+    it('refuses a container definition without a host capability', async () => {
+      config.getAgentExecutionBackend = () => undefined;
+      config.getExecutionEnvironmentFactory = () => undefined;
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        executionBackend: 'container',
+      });
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain('not enabled');
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it('refuses an untrusted project container definition before startup', async () => {
+      config.getAgentExecutionBackend = () => undefined;
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        executionBackend: 'container',
+      });
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain('untrusted');
+      expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { executor: { kind: 'acp', command: 'peer' } },
+      { mcpServers: {} },
+      { hooks: {} },
+    ])(
+      'refuses unsupported agent configuration %j before creating a container',
+      async (extra) => {
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...mockSubagents[0],
+          ...extra,
+        } as SubagentConfig);
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation(params)
+          .execute();
+        expect(partToString(result.llmContent)).toContain('does not support');
+        expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([false, true])(
+      'isolates and awaits cleanup for foreground/background=%s',
+      async (background) => {
+        const meta = vi.spyOn(transcript, 'writeAgentMeta');
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({ ...params, run_in_background: background })
+          .execute();
+        await vi.runAllTimersAsync();
+        expect(partToString(result.llmContent)).toContain(
+          background ? 'Background agent launched' : 'Contained result',
+        );
+        const child = vi.mocked(mockSubagentManager.createAgentHeadless).mock
+          .calls[0][1];
+        expect(child).not.toBe(config);
+        expect(child.getExecutionEnvironment()).toBe(environment);
+        expect(child.getWorkingDir()).toBe(fs.realpathSync(os.tmpdir()));
+        expect(config.getExecutionEnvironment?.()).toBeUndefined();
+        expect(
+          config.getToolRegistry().copyDiscoveredToolsFrom,
+        ).not.toHaveBeenCalled();
+        expect(environment.dispose).toHaveBeenCalledTimes(1);
+        expect(
+          config.getBackgroundTaskRegistry().registerResidentAgent,
+        ).not.toHaveBeenCalled();
+        expect(meta).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({
+            isolation: 'container',
+            executionBackend: 'container',
+          }),
+        );
+        if (background) {
+          expect(
+            config.getBackgroundTaskRegistry().complete,
+          ).toHaveBeenCalled();
+          expect(
+            config.getBackgroundTaskRegistry().fail,
+          ).not.toHaveBeenCalled();
+        }
+        meta.mockRestore();
+      },
+    );
+
+    it('disposes the environment when agent construction fails', async () => {
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockRejectedValue(
+        new Error('constructor failed'),
+      );
+      const result = await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      expect(partToString(result.llmContent)).toContain('constructor failed');
+      expect(environment.dispose).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(
+      [false, true].flatMap((background) =>
+        [
+          AgentTerminateMode.GOAL,
+          AgentTerminateMode.CANCELLED,
+          AgentTerminateMode.ERROR,
+        ].map((mode) => ({ background, mode })),
+      ),
+    )(
+      'preserves output, terminal status and environment ownership when cleanup fails: %j',
+      async ({ background, mode }) => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+        vi.mocked(environment.dispose).mockRejectedValue(
+          new ExecutionCleanupError('container still running'),
+        );
+        const result = await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({ ...params, run_in_background: background })
+          .execute();
+        await vi.runAllTimersAsync();
+        const registry = config.getBackgroundTaskRegistry();
+        const publish =
+          mode === AgentTerminateMode.GOAL
+            ? registry.complete
+            : mode === AgentTerminateMode.CANCELLED
+              ? registry.finalizeCancelled
+              : registry.fail;
+        const output = background
+          ? vi.mocked(publish).mock.calls[0]?.[1]
+          : partToString(result.llmContent);
+        expect(output).toContain('Contained result');
+        expect(output).toContain('Container cleanup failed');
+        expect(output).toContain('container still running');
+        expect(output).toContain('Do not automatically rerun');
+        expect(result.error).toBeUndefined();
+        if (background) {
+          expect(publish).toHaveBeenCalledOnce();
+          if (mode !== AgentTerminateMode.GOAL) {
+            expect(registry.complete).not.toHaveBeenCalled();
+          }
+          if (mode !== AgentTerminateMode.ERROR) {
+            expect(registry.fail).not.toHaveBeenCalled();
+          }
+        } else if (mode === AgentTerminateMode.CANCELLED) {
+          expect(output).toContain('cancelled by the user');
+        }
+        expect(registry.registerResidentAgent).not.toHaveBeenCalled();
+        const unregister = vi.mocked(config.registerExecutionEnvironment).mock
+          .results[0].value;
+        expect(unregister).not.toHaveBeenCalled();
+        expect(environment.dispose).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('registers startup ownership before awaiting the environment', async () => {
+      let ready!: (environment: ExecutionEnvironment) => void;
+      const startup = new Promise<ExecutionEnvironment>((resolve) => {
+        ready = resolve;
+      });
+      config.getExecutionEnvironmentFactory = () => () => startup;
+      const execution = (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute();
+      await vi.waitFor(() =>
+        expect(config.registerExecutionEnvironment).toHaveBeenCalledWith(
+          startup,
+        ),
+      );
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+      ready(environment);
+      await execution;
+      const unregister = vi.mocked(config.registerExecutionEnvironment).mock
+        .results[0].value;
+      expect(unregister).toHaveBeenCalledOnce();
+    });
+
+    it('does not launch a background task after cancellation during construction', async () => {
+      const abort = new AbortController();
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockImplementation(
+        async () => {
+          abort.abort();
+          return {
+            subagent: mockAgent,
+            dispose: vi.fn().mockResolvedValue(undefined),
+          };
+        },
+      );
+      await (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation({ ...params, run_in_background: true })
+        .execute(abort.signal);
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+      expect(
+        config.getBackgroundTaskRegistry().register,
+      ).not.toHaveBeenCalled();
+      expect(environment.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('waits for environment disposal before returning a completed result', async () => {
+      let release: () => void = () => {};
+      vi.mocked(environment.dispose).mockReturnValue(
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+      let returned = false;
+      const execution = (agentTool as AgentToolWithProtectedMethods)
+        .createInvocation(params)
+        .execute()
+        .then(() => {
+          returned = true;
+        });
+      await vi.waitFor(() =>
+        expect(environment.dispose).toHaveBeenCalledOnce(),
+      );
+      expect(returned).toBe(false);
+      release();
+      await execution;
+      expect(returned).toBe(true);
+    });
+
+    it('rejects enabled host hooks without disabling the parent policy', () => {
+      const hookSystem = {
+        getRegistry: () => ({ getAllHooks: () => [{ enabled: true }] }),
+      } as unknown as HookSystem;
+      vi.mocked(config.getHookSystem).mockReturnValue(hookSystem);
+      expect(agentTool.validateToolParams(params)).toContain(
+        'enabled host hooks',
+      );
+      expect(config.getHookSystem()).toBe(hookSystem);
+    });
+
+    it.each([false, true])(
+      'disposes a stalled foreground/background=%s runtime on its own cancellation',
+      async (background) => {
+        let finish: () => void = () => {};
+        vi.mocked(mockAgent.execute).mockReturnValue(
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+        );
+        vi.mocked(environment.dispose).mockImplementation(async () => {
+          finish();
+        });
+        const parentAbort = new AbortController();
+        const execution = (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation({ ...params, run_in_background: background })
+          .execute(parentAbort.signal);
+        await vi.waitFor(() =>
+          expect(mockAgent.execute).toHaveBeenCalledOnce(),
+        );
+        const registrations = vi.mocked(
+          config.getBackgroundTaskRegistry().register,
+        ).mock.calls;
+        const controller = registrations[0][0].abortController!;
+        if (background) {
+          await execution;
+          parentAbort.abort();
+          await Promise.resolve();
+          expect(environment.dispose).not.toHaveBeenCalled();
+        }
+        controller.abort();
+        await vi.waitFor(() =>
+          expect(environment.dispose).toHaveBeenCalledOnce(),
+        );
+        await execution;
+        await vi.runAllTimersAsync();
+      },
+    );
+
+    it('rejects session hooks that are absent from the global registry', () => {
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getRegistry: () => ({ getAllHooks: () => [] }),
+        getSessionHooksManager: () => ({ getAllSessionHooks: () => [{}] }),
+      } as unknown as HookSystem);
+      expect(agentTool.validateToolParams(params)).toContain(
+        'enabled host hooks',
+      );
+    });
+
+    it.each(['normal', 'cleanup-failure', 'setup-cleanup-failure'])(
+      'preserves isolated workspace data when finalizing %s',
+      async (mode) => {
+        vi.useRealTimers();
+        const repo = fs.realpathSync(
+          fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-container-worktree-')),
+        );
+        let childPath = '';
+        try {
+          execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+          execFileSync('git', ['config', 'user.name', 'Container Test'], {
+            cwd: repo,
+          });
+          execFileSync(
+            'git',
+            ['config', 'user.email', 'container@example.invalid'],
+            { cwd: repo },
+          );
+          execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+            cwd: repo,
+          });
+          fs.writeFileSync(path.join(repo, 'source.txt'), 'parent');
+          execFileSync('git', ['add', '.'], { cwd: repo });
+          execFileSync(
+            'git',
+            ['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'baseline'],
+            { cwd: repo },
+          );
+          for (const getter of [
+            'getProjectRoot',
+            'getTargetDir',
+            'getCwd',
+            'getWorkingDir',
+          ] as const) {
+            vi.mocked(config[getter]).mockReturnValue(repo);
+          }
+          config.getExecutionEnvironmentFactory = () => async (child) => {
+            childPath = child.getWorkingDir();
+            if (mode === 'setup-cleanup-failure')
+              throw new ExecutionCleanupError(
+                'startup container still running',
+              );
+            return environment;
+          };
+          vi.mocked(environment.dispose).mockImplementation(async () => {
+            if (mode === 'cleanup-failure')
+              throw new ExecutionCleanupError('container still running');
+            fs.writeFileSync(
+              path.join(childPath, 'result.txt'),
+              'last container write',
+            );
+          });
+          const result = await (agentTool as AgentToolWithProtectedMethods)
+            .createInvocation({ ...params, isolation: 'worktree' })
+            .execute();
+          expect(childPath).not.toBe(repo);
+          expect(fs.existsSync(childPath)).toBe(true);
+          expect(partToString(result.llmContent)).toContain(
+            `[worktree preserved: ${childPath}`,
+          );
+          if (mode === 'normal') {
+            expect(
+              fs.readFileSync(path.join(childPath, 'result.txt'), 'utf8'),
+            ).toBe('last container write');
+            expect(environment.dispose).toHaveBeenCalledOnce();
+          } else {
+            expect(partToString(result.llmContent)).toContain(
+              'Container cleanup failed',
+            );
+          }
+          expect(fs.existsSync(path.join(repo, 'result.txt'))).toBe(false);
+        } finally {
+          fs.rmSync(repo, { recursive: true, force: true });
+          vi.useFakeTimers();
+        }
+      },
+      20000,
+    );
+
+    it.each([AgentTerminateMode.CANCELLED, AgentTerminateMode.ERROR])(
+      'disposes on terminal mode %s',
+      async (mode) => {
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+        await (agentTool as AgentToolWithProtectedMethods)
+          .createInvocation(params)
+          .execute();
+        expect(environment.dispose).toHaveBeenCalledTimes(1);
+      },
+    );
   });
 
   describe('initialization', () => {

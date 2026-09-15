@@ -16,6 +16,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
@@ -71,6 +72,43 @@ function isReloadExcludedKey(key: string): boolean {
 
 const dotEnvSourcedKeys = new Set<string>();
 const settingsEnvSourcedKeys = new Set<string>();
+// Inherited provenance marks trust, not ownership of this process's reload scope.
+const inheritedDotEnvKeys = new Set<string>();
+const inheritedSettingsEnvKeys = new Set<string>();
+
+// Validate inherited metadata before loading files, then preserve it for child CLIs.
+const inheritedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+if (inheritedProvenance) {
+  const sources: unknown = JSON.parse(inheritedProvenance);
+  if (
+    !sources ||
+    typeof sources !== 'object' ||
+    !('dotEnv' in sources) ||
+    !('settingsEnv' in sources) ||
+    !Array.isArray(sources.dotEnv) ||
+    !Array.isArray(sources.settingsEnv) ||
+    !sources.dotEnv.every((key) => typeof key === 'string') ||
+    !sources.settingsEnv.every((key) => typeof key === 'string')
+  ) {
+    throw new Error('Invalid inherited environment provenance.');
+  }
+  for (const key of sources.dotEnv) inheritedDotEnvKeys.add(key);
+  for (const key of sources.settingsEnv) inheritedSettingsEnvKeys.add(key);
+  Object.assign(process.env, getRelaunchEnvProvenance());
+}
+
+export function getRelaunchEnvProvenance(): Record<string, string> {
+  return {
+    [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
+      dotEnv: [...new Set([...inheritedDotEnvKeys, ...dotEnvSourcedKeys])],
+      settingsEnv: [
+        ...new Set([...inheritedSettingsEnvKeys, ...settingsEnvSourcedKeys]),
+      ],
+    }),
+  };
+}
+
 const lastReloadSnapshot = new Map<string, string>();
 let lastReloadSnapshotSeeded = false;
 
@@ -165,6 +203,9 @@ export function resetEnvironmentTrackingForTesting(): void {
   resetLoaderKeyRejectionReportingForTesting();
   dotEnvSourcedKeys.clear();
   settingsEnvSourcedKeys.clear();
+  inheritedDotEnvKeys.clear();
+  inheritedSettingsEnvKeys.clear();
+  delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
   lastReloadSnapshotSeeded = false;
 }
@@ -188,7 +229,13 @@ export function resetEnvironmentTrackingForTesting(): void {
  * variable and not file-sourced.
  */
 export function isFileSourcedEnvKey(key: string): boolean {
-  if (dotEnvSourcedKeys.has(key) || settingsEnvSourcedKeys.has(key)) {
+  const sources = [
+    dotEnvSourcedKeys,
+    settingsEnvSourcedKeys,
+    inheritedDotEnvKeys,
+    inheritedSettingsEnvKeys,
+  ];
+  if (sources.some((keys) => keys.has(key))) {
     return true;
   }
   // Case-INSENSITIVELY on Windows, where env lookup is: a `.env` committed as
@@ -199,11 +246,10 @@ export function isFileSourcedEnvKey(key: string): boolean {
   // question rather than a bookkeeping one.
   if (process.platform !== 'win32') return false;
   const lower = key.toLowerCase();
-  for (const tracked of dotEnvSourcedKeys) {
-    if (tracked.toLowerCase() === lower) return true;
-  }
-  for (const tracked of settingsEnvSourcedKeys) {
-    if (tracked.toLowerCase() === lower) return true;
+  for (const keys of sources) {
+    for (const tracked of keys) {
+      if (tracked.toLowerCase() === lower) return true;
+    }
   }
   return false;
 }
@@ -650,6 +696,7 @@ export function loadEnvironment(
     );
   }
   lastReloadSnapshotSeeded = true;
+  Object.assign(process.env, getRelaunchEnvProvenance());
   publishPendingCompileCache();
 }
 
@@ -760,6 +807,8 @@ export function reloadEnvironment(
     for (const key of previouslyKnown) {
       if (!allNewKeys.has(key) && !isReloadExcludedKey(key)) {
         delete process.env[key];
+        inheritedDotEnvKeys.delete(key);
+        inheritedSettingsEnvKeys.delete(key);
         removedKeys.push(key);
       }
     }
@@ -783,13 +832,12 @@ export function reloadEnvironment(
     process.env[key] = value;
   }
 
-  // Update tracking sets and snapshot only when the .env file was readable.
-  // A transient read failure must not wipe provenance — the stale tracking
-  // state is needed so the next successful reload can still detect deletions.
+  // Frozen values and values retained after an I/O failure keep their provenance.
   if (!dotEnvReadFailed) {
-    dotEnvSourcedKeys.clear();
-    for (const key of newDotEnvKeys.keys()) {
-      dotEnvSourcedKeys.add(key);
+    for (const sources of [dotEnvSourcedKeys, settingsEnvSourcedKeys]) {
+      for (const key of sources) {
+        if (!isReloadExcludedKey(key)) sources.delete(key);
+      }
     }
     lastReloadSnapshot.clear();
     for (const [key, value] of newDotEnvKeys) {
@@ -799,12 +847,13 @@ export function reloadEnvironment(
       lastReloadSnapshot.set(key, value);
     }
   }
-  // settings.env is always readable (from settings.json, not a file),
-  // so its tracking set is always updated.
-  settingsEnvSourcedKeys.clear();
+  for (const key of newDotEnvKeys.keys()) {
+    dotEnvSourcedKeys.add(key);
+  }
   for (const key of newSettingsEnvKeys.keys()) {
     settingsEnvSourcedKeys.add(key);
   }
+  Object.assign(process.env, getRelaunchEnvProvenance());
 
   return {
     updatedKeys,
