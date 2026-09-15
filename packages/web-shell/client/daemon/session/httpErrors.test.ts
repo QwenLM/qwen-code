@@ -6,7 +6,37 @@
 
 import { describe, expect, it } from 'vitest';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus, isRecord } from './httpErrors';
+import {
+  extractHttpStatus,
+  isRecord,
+  isAcpChildCapacityError,
+} from './httpErrors';
+
+describe('child capacity classification', () => {
+  const code = 'acp_child_capacity_exhausted';
+  it.each([
+    { code },
+    { data: { errorKind: code } },
+    { data: { code } },
+    { code: 'standalone_creation_rolled_back', capacity: { code } },
+    { data: { code: 'standalone_creation_rolled_back', capacity: { code } } },
+  ])('recognizes a capacity cause in %j', (body) => {
+    expect(
+      isAcpChildCapacityError(new DaemonHttpError(503, body, 'capacity')),
+    ).toBe(true);
+  });
+  it.each([
+    { code: 'daemon_draining' },
+    { code: 'standalone_creation_rolled_back' },
+    undefined,
+    null,
+    [],
+  ])('does not classify unrelated 503s (%j)', (body) => {
+    expect(isAcpChildCapacityError(new DaemonHttpError(503, body, code))).toBe(
+      false,
+    );
+  });
+});
 
 describe('httpErrors', () => {
   it('extracts status from DaemonHttpError', () => {
