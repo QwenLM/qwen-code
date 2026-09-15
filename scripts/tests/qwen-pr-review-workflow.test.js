@@ -4680,10 +4680,11 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // and read it here. The guard no longer keys on the head at all, so the
     // wiring is gone rather than left as an untested chain whose silent
     // breakage would restore the fresh-head comparison. review-pr's only
-    // outputs are record-reviewed's two flags — no sha — and this job reads
+    // outputs are record-reviewed's three flags — no sha — and this job reads
     // none of them.
     expect(Object.keys(doc.jobs['review-pr'].outputs ?? {}).sort()).toEqual([
       'review_completed',
+      'salvaged',
       'unchanged_diff',
     ]);
     expect(JSON.stringify(doc.jobs['fallback-comment'])).not.toContain(
@@ -7439,6 +7440,9 @@ describe('qwen pr review unchanged-diff anchor', () => {
     expect(reviewPr.outputs.review_completed).toBe(
       '${{ steps.review.outputs.review_completed }}',
     );
+    expect(reviewPr.outputs.salvaged).toBe(
+      '${{ steps.review.outputs.salvaged }}',
+    );
     expect(reviewPr.outputs.unchanged_diff).toBe(
       '${{ steps.review.outputs.unchanged_diff }}',
     );
@@ -7474,7 +7478,8 @@ describe('qwen pr review unchanged-diff anchor', () => {
     // Whitespace-normalized: the gate is a YAML block scalar, so the line
     // breaks around `||` are formatting, not the contract.
     expect(anchorDoc.jobs['record-reviewed'].if.replace(/\s+/g, ' ')).toContain(
-      "needs.review-pr.outputs.review_completed == 'true' ||" +
+      "(needs.review-pr.outputs.review_completed == 'true' &&" +
+        " needs.review-pr.outputs.salvaged != 'true') ||" +
         " needs.review-pr.outputs.unchanged_diff == 'true'",
     );
     // Without this env entry EVENT_ACTION is unset in the step and the skip

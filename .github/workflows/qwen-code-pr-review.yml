@@ -505,6 +505,7 @@ jobs:
     # Read by record-reviewed (the unchanged-diff anchor).
     outputs:
       review_completed: '${{ steps.review.outputs.review_completed }}'
+      salvaged: '${{ steps.review.outputs.salvaged }}'
       unchanged_diff: '${{ steps.review.outputs.unchanged_diff }}'
     steps:
       # The runner worker dies in FinalizeJob with EACCES when it loses write
@@ -3102,9 +3103,10 @@ jobs:
           echo "review worktrees cleaned"
 
   # The anchor the unchanged-diff skip in review-pr's "Run review" looks
-  # for: a `qwen-review/reviewed` success status on a head whose diff was
-  # reviewed (or, on a skip, found identical to a reviewed one — stamping it
-  # too keeps the next merge's lookup one commit deep). A job of its own so
+  # for: a `qwen-review/reviewed` success status on a head whose diff received
+  # an uncapped review (or, on a skip, was identical to a reviewed one —
+  # stamping it too keeps the next merge's lookup one commit deep). A job of
+  # its own so
   # review-pr holds no statuses permission: its checkout persists the job's
   # GITHUB_TOKEN where the reviewed agent can read it. The sha is the
   # EVENT's head, never a review-pr output, so a hijacked agent can at most
@@ -3117,7 +3119,8 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       needs.review-pr.result == 'success' &&
-      (needs.review-pr.outputs.review_completed == 'true' ||
+      ((needs.review-pr.outputs.review_completed == 'true' &&
+        needs.review-pr.outputs.salvaged != 'true') ||
        needs.review-pr.outputs.unchanged_diff == 'true')
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
