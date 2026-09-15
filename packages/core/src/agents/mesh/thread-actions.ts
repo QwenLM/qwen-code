@@ -12,6 +12,11 @@ import {
 } from './mesh-store.js';
 import { parseMentions } from './mentions.js';
 import {
+  applyAggregateStatus,
+  finishRunInTransaction,
+} from './run-lifecycle.js';
+import { acknowledgeCloseObligations } from './thread-status.js';
+import {
   decideDispatch,
   resolveTargets,
   type BudgetLimits,
@@ -31,7 +36,21 @@ export interface PostMessageInput {
   from: string;
   text: string;
   originEventId?: string;
+  /**
+   * `system` for a structured trigger — an assignment, or a parent dependency
+   * report. Derived from `from` when absent. A system trigger still records the
+   * run or human action that caused it, so it is charged as unattended work
+   * without being suppressed as an ordinary self-authored post.
+   */
+  authorKind?: ThreadMessage['authorKind'];
+  /** The run that caused this post. Server-derived; never model-supplied. */
+  sourceRunId?: string;
+  /** What kind of trigger this was, e.g. `assignment`. */
+  triggerKind?: string;
 }
+
+/** Author id recorded for a post neither a person nor an agent wrote. */
+export const SYSTEM_AUTHOR_ID = 'system';
 
 export interface TargetOutcome {
   agentId?: string;
@@ -176,16 +195,20 @@ export async function postMessageInTransaction(
   const message: ThreadMessage = {
     id: generateMessageId(),
     sequence: current.nextMessageSequence,
-    authorKind: input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent',
+    authorKind:
+      input.authorKind ??
+      (input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent'),
     from: input.from,
     authorNameSnapshot:
-      input.from === HUMAN_AUTHOR_ID
-        ? HUMAN_AUTHOR_ID
+      input.from === HUMAN_AUTHOR_ID || input.from === SYSTEM_AUTHOR_ID
+        ? input.from
         : (agents.find((agent) => agent.id === input.from)?.name ?? input.from),
     text: input.text,
     mentions: parsed.ids,
     outcomes: [],
     at: now,
+    ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
+    ...(input.triggerKind ? { triggerKind: input.triggerKind } : {}),
     ...(input.originEventId ? { originEventId: input.originEventId } : {}),
   };
   const outcomes: TargetOutcome[] = parsed.unknown.map((agentName) => ({
@@ -298,6 +321,20 @@ export async function postMessageInTransaction(
       candidate.id === message.id ? storedMessage : candidate,
     ),
   };
+  // A post that actually books work says the thread has moved on, so an
+  // earlier failure or unclosed return stops pinning it to `blocked`. Round-2
+  // finding I2: acknowledgement used to be human-only, which left one launch
+  // failure blocking the thread even after another agent finished the job.
+  if (
+    dispatched.length > 0 ||
+    outcomes.some((o) => o.decision.kind === 'coalesce')
+  ) {
+    next = acknowledgeCloseObligations(next, storedMessage.sequence);
+  }
+  // The status is an aggregate over every run, never last-writer-wins, and it
+  // is recomputed here so an admission that books nothing cannot leave the
+  // thread sitting in `in_progress` with no live run and no explanation.
+  next = await applyAggregateStatus(transaction, next, now);
   const thread = await transaction.writeThread(next);
   return {
     thread,
@@ -346,34 +383,26 @@ export async function startRun(
   });
 }
 
+/**
+ * Records a run's terminal state.
+ *
+ * Delegates to the lifecycle module so a run has exactly one way to end and
+ * the thread's aggregate status is recomputed from the same place every time.
+ */
 export async function finishRun(
   projectRoot: string,
   threadId: string,
   runId: string,
-  outcome: { status: 'completed' | 'failed' | 'cancelled'; error?: string },
+  outcome: {
+    status: 'completed' | 'failed' | 'cancelled';
+    error?: string;
+    failureStage?: string;
+  },
   now = Date.now(),
 ): Promise<Thread> {
-  return withMeshStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(threadId);
-    if (!thread) throw new Error(`No thread with id "${threadId}".`);
-    return transaction.writeThread({
-      ...thread,
-      runs: thread.runs.map((run) =>
-        run.id === runId &&
-        (run.status === 'queued' ||
-          run.status === 'running' ||
-          run.status === 'finishing' ||
-          run.status === 'cancelling')
-          ? {
-              ...run,
-              status: outcome.status,
-              endedAt: now,
-              ...(outcome.error ? { error: outcome.error } : {}),
-            }
-          : run,
-      ),
-    });
-  });
+  return withMeshStoreTransaction(projectRoot, (transaction) =>
+    finishRunInTransaction(transaction, { threadId, runId, outcome, now }),
+  );
 }
 
 export async function upsertRunUsage(
