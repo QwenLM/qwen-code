@@ -343,6 +343,9 @@ export function navigateToDaemon(raw: string, token?: string): void {
     // shell out of the open session that a plain refresh keeps. The current URL
     // already names this target, and boot has already scrubbed any `?token=`
     // from it — so reloading is exactly the plain refresh this case means.
+    // Unless the credential cannot outlive it: with storage disabled the
+    // reloaded page would boot with no token at all, so stay on this one.
+    if (token !== undefined && !hasReloadSurvivableDaemonToken()) return;
     window.location.reload();
     return;
   }

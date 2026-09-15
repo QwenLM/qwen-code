@@ -260,6 +260,7 @@ describe('navigateToDaemon', () => {
         hostname: url.hostname,
         href: url.href,
         search: url.search,
+        hash: url.hash,
         assign,
         reload,
       },
@@ -347,6 +348,34 @@ describe('navigateToDaemon', () => {
     expect(assign).not.toHaveBeenCalled();
     // The persist half still ran, or the reload would boot the old credential.
     expect(mod.getDaemonToken('http://localhost:5173')).toBe('rotated-token');
+  });
+
+  // Boot scrubbed the fragment, so with storage disabled the in-memory cache
+  // is the only copy: a reload would come back unauthenticated.
+  it('stays on the page when a same-target token cannot survive a reload', async () => {
+    const { assign, reload } = setupPage(
+      'http://localhost:5173/app/session/abc',
+    );
+    const original = window.sessionStorage;
+    Object.defineProperty(window, 'sessionStorage', {
+      get() {
+        throw new Error('storage disabled');
+      },
+      configurable: true,
+    });
+    try {
+      const mod = await import('./daemon');
+      mod.navigateToDaemon('http://localhost:5173', 'rotated-token');
+      expect(reload).not.toHaveBeenCalled();
+      expect(assign).not.toHaveBeenCalled();
+      expect(mod.getDaemonToken('http://localhost:5173')).toBe('rotated-token');
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 
   // The gate also renders "Return to local workspaces" for an unresolvable
