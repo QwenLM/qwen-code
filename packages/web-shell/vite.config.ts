@@ -58,6 +58,12 @@ export const BRAND_ROUTE_PROXY = '^/brand/?$';
 // bridge hangs in `connecting`.
 export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 
+// Shared with vite.lib.config.ts so the app and lib builds can never drift
+// onto different syntax floors: esbuild miscompiles xterm's logical
+// assignments below ES2021 (#11643), and the lib build bundles the same
+// xterm for npm hosts.
+export const WEB_SHELL_BUILD_TARGET = 'es2021';
+
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react(), tailwindcss()],
@@ -88,6 +94,8 @@ export default defineConfig(({ command }) => ({
     dedupe: ['react', 'react-dom', '@qwen-code/sdk'],
   },
   build: {
+    // Avoid esbuild lowering xterm's logical assignments into invalid code.
+    target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
   },
@@ -96,6 +104,24 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     cors: false,
+    // Mirrors buildWebShellCsp() in packages/cli/src/serve/web-shell-static.ts;
+    // dev intentionally permits same-origin ancestors instead of denying all.
+    headers: {
+      'Content-Security-Policy': [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
+        "img-src 'self' data: blob:",
+        "media-src 'self' data:",
+        "connect-src 'self'",
+        "worker-src 'self' blob:",
+        "base-uri 'none'",
+        'frame-src http: https: blob:',
+        "frame-ancestors 'self'",
+      ].join('; '),
+      'Referrer-Policy': 'no-referrer',
+    },
     port: 5173,
     proxy: {
       '/health': daemonProxy,

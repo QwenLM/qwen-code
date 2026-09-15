@@ -250,7 +250,7 @@ async function main() {
       ['conversationsRuntimeMarker', 'utils/conversations-runtime-marker.ts'],
       ['subagentRuntime', 'subagent-runtime.ts'],
       ['storage', 'config/storage.ts'], ['atomicFileWrite', 'utils/atomicFileWrite.ts'],
-      ['debugLogger', 'utils/debugLogger.ts'],
+      ['debugLogger', 'utils/debugLogger.ts'], ['board', 'board.ts'],
     ]);
     export function resolve(specifier, context, nextResolve) {
       if (specifier === '@qwen-code/qwen-code-core') {

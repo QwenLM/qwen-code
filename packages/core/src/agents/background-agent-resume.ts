@@ -39,7 +39,8 @@ import {
   getInitialChatHistory,
 } from '../core/environmentContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
-import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import type { PermissionMode, StopHookOutput } from '../hooks/types.js';
+import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
@@ -156,22 +157,6 @@ interface RestorePausedEntryOptions {
   error?: string;
   resumeBlockedReason?: string;
   suppressRegisterCallback?: boolean;
-}
-
-function approvalModeToPermissionMode(mode?: string): PermissionMode {
-  switch (mode) {
-    case 'yolo':
-      return PermissionMode.Yolo;
-    case 'auto-edit':
-      return PermissionMode.AutoEdit;
-    case 'auto':
-      return PermissionMode.Auto;
-    case 'plan':
-      return PermissionMode.Plan;
-    case 'default':
-    default:
-      return PermissionMode.Default;
-  }
 }
 
 function normalizeApprovalMode(
@@ -1612,7 +1597,10 @@ export class BackgroundAgentResumeService {
     }
 
     if (subagentConfig.executor !== undefined) {
-      return this.resolveResumeTarget(subagentName, 'acp');
+      return this.resolveResumeTarget(
+        subagentName,
+        subagentConfig.executor.kind,
+      );
     }
     return {
       agentName: subagentConfig.name,

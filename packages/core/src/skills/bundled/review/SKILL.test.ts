@@ -457,6 +457,30 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('keeps focused navigation on workflow dispatch without reverse auditors', () => {
+    const body = coreBody();
+    const start = body.indexOf('**Automatic navigation profile:**');
+    expect(start).toBeGreaterThan(-1);
+    const focused = body.slice(start, body.indexOf('\n\n', start));
+    expect(focused).toContain('`emit-workflow`');
+    expect(focused).toContain('`scriptPath`');
+    expect(focused).toContain('ONE foreground `workflow` call');
+    expect(focused).toContain('single `docs-nav` reviewer');
+    expect(focused).toContain('Skip Step 5 entirely');
+    expect(focused).not.toContain('agent-prompt --roster');
+
+    const batch = body.slice(
+      body.indexOf('### Batch verification'),
+      body.indexOf('**Do not write the verifier'),
+    );
+    expect(batch).toContain('except for `reviewProfile: "docs-nav"`');
+    expect(batch).toContain('in the same generated workflow');
+    expect(batch).toContain('combine all successful manifests');
+    expect(batch).toContain(
+      'At medium or for `reviewProfile: "docs-nav"`, there is no reverse audit',
+    );
+  });
+
   it('makes every recorded follow-up command produce a manifest for the selected wave', () => {
     const body = coreBody();
     const commands = [...body.matchAll(/```bash\n([\s\S]*?)```/g)].flatMap(

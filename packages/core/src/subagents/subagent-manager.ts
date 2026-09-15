@@ -43,8 +43,10 @@ import type { Config, MCPServerConfig } from '../config/config.js';
 import { APPROVAL_MODES, deriveConfig } from '../config/config.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import {
   createRuntimeContentGeneratorView,
+  resolveAgentReasoningTier,
   type AuthOverrides,
 } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -66,7 +68,11 @@ import {
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
-import { ToolDisplayNamesMigration, ToolNames } from '../tools/tool-names.js';
+import {
+  resolveBuiltinToolName,
+  ToolDisplayNamesMigration,
+  ToolNames,
+} from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
   hasRebuiltToolRegistry,
@@ -468,14 +474,6 @@ export class SubagentManager {
     extensionName?: string,
     options?: { assertCanCommit?: () => void },
   ): Promise<void> {
-    // Check if it's a built-in agent first
-    if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
-      throw new SubagentError(
-        `Cannot delete built-in subagent "${name}"`,
-        SubagentErrorCode.INVALID_CONFIG,
-        name,
-      );
-    }
     if (level === 'extension') {
       throw new SubagentError(
         `Cannot delete subagent "${name}" in extension "${extensionName}", If needed, you can directly uninstall extension.`,
@@ -488,6 +486,7 @@ export class SubagentManager {
       ? [level]
       : ['project', 'user'];
     let deleted = false;
+    let deleteError: SubagentError | undefined;
 
     // Assert once before any deletion so a closed generation fails atomically
     // instead of unlinking some level files and then throwing mid-loop.
@@ -504,16 +503,26 @@ export class SubagentManager {
         try {
           await fs.unlink(config.filePath);
           deleted = true;
-        } catch (_error) {
-          // File might not exist or be accessible, continue
+        } catch (error) {
+          deleteError = new SubagentError(
+            `Failed to delete subagent file: ${error instanceof Error ? error.message : String(error)}`,
+            SubagentErrorCode.FILE_ERROR,
+            name,
+          );
         }
       }
     }
 
     if (!deleted) {
+      if (deleteError) throw deleteError;
+      const isBuiltin = BuiltinAgentRegistry.isBuiltinAgent(name);
       throw new SubagentError(
-        `Subagent "${name}" not found`,
-        SubagentErrorCode.NOT_FOUND,
+        isBuiltin
+          ? `Cannot delete built-in subagent "${name}"`
+          : `Subagent "${name}" not found`,
+        isBuiltin
+          ? SubagentErrorCode.INVALID_CONFIG
+          : SubagentErrorCode.NOT_FOUND,
         name,
       );
     }
@@ -792,8 +801,8 @@ export class SubagentManager {
       frontmatter['approvalMode'] = config.approvalMode;
     }
 
-    if (config.background) {
-      frontmatter['background'] = true;
+    if (config.background !== undefined) {
+      frontmatter['background'] = config.background;
     }
 
     // CC 2.1.168 declarative-agent fields (round-trip parity).
@@ -938,7 +947,10 @@ export class SubagentManager {
             config.name,
           );
         }
-        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
+        if (
+          (config.level === 'project' || config.level === 'builtin') &&
+          !runtimeContext.isTrustedFolder()
+        ) {
           throw new SubagentError(
             `Cannot start external agent "${config.name}" from an untrusted project.`,
             SubagentErrorCode.INVALID_CONFIG,
@@ -1068,15 +1080,17 @@ export class SubagentManager {
         ),
       };
 
-      // When the model selector specifies a different provider, build a
-      // dedicated ContentGenerator + view so the subagent talks to the
-      // right API without affecting the parent process. The view is
+      // When the model selector specifies a different provider, or the
+      // caller asked for a per-agent reasoning effort, build a dedicated
+      // ContentGenerator + view so the subagent talks to the right API with
+      // its own settings without affecting the parent process. The view is
       // applied via AsyncLocalStorage when the agent runs.
       const runtimeView = await this.buildRuntimeContentGeneratorView(
         config,
         runtimeContext,
         modelConfig.model,
         options?.runtimeAuthOverrides,
+        modelConfig.reasoningEffort,
       );
 
       const { context: subagentContext, cleanup } =
@@ -1302,6 +1316,10 @@ export class SubagentManager {
    * override is needed — including `inherit`, an unset `fast` selector, or
    * any selector that fails to resolve to a configured model.
    *
+   * A `reasoningEffort` always needs its own view, even on the parent's model:
+   * the tier is written onto the agent's copy of the config, and the session
+   * config the agent would otherwise share must never receive it.
+   *
    * FileReadCache isolation and tool-registry rebuilding are handled
    * separately in {@link buildSubagentContextOverride} — every subagent
    * (inherit or explicit) gets that, regardless of whether a runtime
@@ -1312,6 +1330,7 @@ export class SubagentManager {
     base: Config,
     fallbackModelId?: string,
     runtimeAuthOverrides?: AuthOverrides,
+    reasoningEffort?: ReasoningEffort,
   ): Promise<RuntimeContentGeneratorView | undefined> {
     const route = this.resolveModelRoute(
       config,
@@ -1319,7 +1338,22 @@ export class SubagentManager {
       runtimeAuthOverrides?.authType,
     );
     const modelId = route?.modelId ?? fallbackModelId;
-    if (!modelId) {
+    if (!modelId && reasoningEffort === undefined) {
+      return undefined;
+    }
+    // An effort-only request would otherwise share the session's generator.
+    // Give the agent its own only when the tier can land on the session's
+    // model: a tier it cannot take (toggle-only, thinking off) changes nothing,
+    // and a generator per dispatch would be pure cost.
+    if (
+      !modelId &&
+      reasoningEffort !== undefined &&
+      resolveAgentReasoningTier(
+        base,
+        base.getContentGeneratorConfig(),
+        reasoningEffort,
+      ) === undefined
+    ) {
       return undefined;
     }
 
@@ -1334,15 +1368,36 @@ export class SubagentManager {
           authType: authType as string,
         };
 
-    const view = await createRuntimeContentGeneratorView(
-      base,
-      base,
-      modelId,
-      authOverrides,
-    );
+    let view: RuntimeContentGeneratorView;
+    try {
+      view = await createRuntimeContentGeneratorView(
+        base,
+        base,
+        modelId,
+        authOverrides,
+        {
+          reasoningEffort,
+          // A tier alone is no reason to log in: a headless dispatch must
+          // never open an interactive device flow for it.
+          ...(modelId ? {} : { requireCachedCredentials: true }),
+        },
+      );
+    } catch (error) {
+      if (modelId) throw error;
+      // Effort-only: the agent still runs, on the session's generator and
+      // effort, rather than failing the dispatch over a cosmetic option.
+      debugLogger.warn(
+        `Subagent "${config.name}" could not get its own ContentGenerator for reasoningEffort=${reasoningEffort} (${error instanceof Error ? error.message : String(error)}); it runs on the session's generator and effort.`,
+      );
+      return undefined;
+    }
 
+    const landed = view.contentGeneratorConfig.reasoning;
     debugLogger.info(
-      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}`,
+      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}` +
+        (reasoningEffort !== undefined
+          ? `, reasoningEffort=${landed ? (landed.effort ?? 'none') : 'none'} (requested ${reasoningEffort})`
+          : ''),
     );
 
     return view;
@@ -1490,6 +1545,31 @@ export class SubagentManager {
       runConfig,
       toolConfig,
     };
+  }
+
+  /**
+   * The entries of a deny list that can deny nothing: not an `mcp__` pattern
+   * (those match by pattern at run time), not a built-in tool by tool name,
+   * display name or legacy alias (registered in this session or not), and not
+   * the name or display name of any registered tool. A deny that matches
+   * nothing silently leaves the agent the tool the caller meant to take away,
+   * so callers refuse these instead of forwarding them.
+   */
+  async findUnmatchedToolNames(tools: string[]): Promise<string[]> {
+    const candidates = tools.filter(
+      (name) =>
+        !name.startsWith('mcp__') && resolveBuiltinToolName(name) === undefined,
+    );
+    if (candidates.length === 0) return [];
+    const toolRegistry = this.config.getToolRegistry();
+    if (!toolRegistry) return candidates;
+    await toolRegistry.warmAll();
+    const registered = new Set<string>();
+    for (const tool of toolRegistry.getAllTools()) {
+      registered.add(tool.name);
+      if (tool.displayName) registered.add(tool.displayName);
+    }
+    return candidates.filter((name) => !registered.has(name));
   }
 
   /**
@@ -1995,7 +2075,11 @@ function parseSubagentContent(
       );
     }
     const background =
-      backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
+      backgroundRaw === 'true' || backgroundRaw === true
+        ? true
+        : backgroundRaw === 'false' || backgroundRaw === false
+          ? false
+          : undefined;
 
     // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
 
@@ -2170,7 +2254,7 @@ function parseSubagentContent(
     if ((hasExecutor || executorRaw !== undefined) && executor === undefined) {
       throw new SubagentError(
         `Agent file ${filePath} has an invalid executor block (expected ` +
-          `{ kind: 'acp', command: string, args?: string[] }). Refusing to load ` +
+          `{ kind: 'acp' | 'codex', command: string, args?: string[] }). Refusing to load ` +
           `the definition: dropping the block would silently run it in-process ` +
           `instead of in the external agent it asked for.`,
         SubagentErrorCode.INVALID_CONFIG,
@@ -2190,7 +2274,7 @@ function parseSubagentContent(
       runConfig: runConfig as Partial<RunConfig>,
       color,
       level,
-      ...(background ? { background } : {}),
+      ...(background !== undefined ? { background } : {}),
       ...(permissionMode !== undefined ? { permissionMode } : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(mcpServers !== undefined ? { mcpServers } : {}),

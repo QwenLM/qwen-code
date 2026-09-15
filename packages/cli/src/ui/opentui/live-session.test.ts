@@ -2015,7 +2015,7 @@ describe('livePromptEvents', () => {
       expect(events[outputIdx]).toEqual({
         type: 'tool-output',
         id: 't1',
-        delta: 'live output\n',
+        output: 'live output\n',
       });
       // Live output arrives before the tool-end settlement.
       const endIdx = events.findIndex((e) => e.type === 'tool-end');

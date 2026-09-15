@@ -12,6 +12,33 @@ Subagents are independent AI assistants that:
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
+## Claude Code and Codex subagents
+
+The built-in `claude-code` and `codex` agents delegate to separately installed native tools. Install and authenticate Claude Code with its `claude-agent-acp` adapter, or Codex with its `codex` executable, and make the executable available on `PATH`. These agents use their native model and authentication settings. Qwen Code does not fall back to its own model when the executable is missing.
+
+Both agents default to foreground execution; set `run_in_background: true` to receive a background completion notification. They require a trusted workspace and are unavailable in safe mode. Both executors support macOS/Linux (including WSL); native Windows launches are rejected before startup with platform guidance.
+
+Claude Code uses the ACP executor and supports continued input while its session is retained. Codex uses an ephemeral app-server thread for a single task and returns the final answer. Codex tasks cannot receive messages or resume; start a new task instead. Native tool progress, token counts, and cost are not reported for Codex. Native sessions cannot be restored after restarting Qwen Code.
+
+For a custom Codex agent, use the existing `executor` frontmatter:
+
+```markdown
+---
+name: codex-review
+description: Review code with Codex
+executor:
+  kind: codex
+  command: codex
+background: false
+---
+
+Review the changes and report verified defects.
+```
+
+Omitting `executor.args` starts `codex app-server --stdio`; supplied arguments replace that default. Use `kind: acp` and `command: claude-agent-acp` for a custom Claude Code agent. Qwen model overrides, tool lists, subagent hooks, `maxTurns`, fork history, teams, and workflows are not supported for external executors. Worktree launches use the existing Agent isolation lifecycle and run the native process in the selected worktree.
+
+Codex runs unattended. Without an agent override, default, plan, and auto sessions use a read-only sandbox; Qwen's AUTO classifier does not inspect native commands. Intermediate Qwen subagent modes do not grant native access during nested delegation. Explicitly select auto-edit in the session or Codex agent definition to allow workspace writes and unattended workspace commands, or yolo for full access. A session already in auto-edit or yolo takes precedence over a stricter agent definition. Other effective approval modes are rejected. Native requests for extra permission or user input are declined. A configured `runConfig.max_time_minutes` bounds execution. The executor waits for process cleanup on cancellation; the shared background cancellation notification can arrive earlier under its five-second fallback.
+
 ## Fork Subagent
 
 In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for a regular subagent's result inline.

@@ -151,6 +151,7 @@ export function reduceGoalControl(
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
       checkpointStalls: undefined,
+      lastCheckpointFailure: undefined,
       noProgressTurns: undefined,
       ...rearmedBudgets(current, transition.now, transition),
       lastReason: undefined,
@@ -228,6 +229,7 @@ export function reduceGoalControl(
       // a different one, so carrying it over would spend the new window's
       // allowance on the old window's failures.
       checkpointStalls: undefined,
+      lastCheckpointFailure: undefined,
       noProgressTurns: undefined,
       ...rearmedBudgets(current, transition.now, transition),
       lastReason: undefined,
@@ -694,6 +696,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'updatedAt',
       'evidenceCheckpoint',
       'checkpointStalls',
+      'lastCheckpointFailure',
       'noProgressTurns',
       'lastReason',
       'limitKind',
@@ -724,6 +727,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
     (value['checkpointStalls'] !== undefined &&
       !isNonNegativeInteger(value['checkpointStalls'])) ||
+    (value['lastCheckpointFailure'] !== undefined &&
+      (typeof value['lastCheckpointFailure'] !== 'string' ||
+        !value['lastCheckpointFailure'])) ||
     (value['noProgressTurns'] !== undefined &&
       !isNonNegativeInteger(value['noProgressTurns'])) ||
     (value['lastReason'] !== undefined &&
@@ -775,6 +781,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     ...(value['checkpointStalls']
       ? { checkpointStalls: value['checkpointStalls'] }
       : {}),
+    ...(value['lastCheckpointFailure'] === undefined
+      ? {}
+      : { lastCheckpointFailure: value['lastCheckpointFailure'] }),
     ...(value['noProgressTurns']
       ? { noProgressTurns: value['noProgressTurns'] }
       : {}),

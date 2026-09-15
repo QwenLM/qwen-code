@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import {
   MAX_IDENTITY_BYTES,
   type RepositoryContextProvider,
@@ -165,6 +166,52 @@ function run(
 }
 
 describe('repo-context providers and trust boundary', () => {
+  it.each([
+    { requiredAgents: [], effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'high', revoke: true },
+    { requiredAgents: ['test-matrix'] as const, effort: 'high', revoke: false },
+    { requiredAgents: ['6c'] as const, effort: 'medium', revoke: false },
+  ])(
+    'applies roster policy before revoking the profile: %j',
+    ({ requiredAgents, effort, revoke }) => {
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      mkdirSync(worktree);
+      const { planPath } = run(
+        root,
+        worktree,
+        {
+          files: [{ path: 'docs/_meta.ts' }],
+          reviewProfile: DOCS_NAV_PROFILE,
+          prNumber: '11426',
+          ownerRepo: 'QwenLM/qwen-code',
+          worktreePath: worktree,
+          effort,
+          srcDiffLines: 0,
+          diffLines: 13,
+        },
+        [
+          {
+            provide: () => ({
+              ...context(),
+              requiredAgents: [...requiredAgents],
+            }),
+          },
+        ],
+      );
+      expect(readJson(planPath)).toMatchObject({
+        repositoryContext: { provider: 'fake-provider' },
+      });
+      if (revoke)
+        expect(readJson(planPath)).not.toHaveProperty('reviewProfile');
+      else
+        expect(readJson(planPath)).toHaveProperty(
+          'reviewProfile',
+          DOCS_NAV_PROFILE,
+        );
+    },
+  );
+
   it('writes null and clears stale context when no provider matches', () => {
     const root = temp();
     const worktree = join(root, 'worktree');
@@ -954,7 +1001,7 @@ describe('repo-context providers and trust boundary', () => {
     );
   });
 
-  it('rejects plan/out aliases and preserves the plan on artifact failure', () => {
+  it('rejects plan/out aliases and preserves the plan on artifact failure', (ctx) => {
     const root = temp();
     const worktree = join(root, 'worktree');
     mkdirSync(worktree);
@@ -967,6 +1014,16 @@ describe('repo-context providers and trust boundary', () => {
 
     const alias = join(root, 'alias.json');
     linkSync(planPath, alias);
+    // On a volume whose ids exceed the safe-integer range (NTFS) the alias
+    // guard this asserts is INERT, not untestable: `isSameFile` stats without
+    // `bigint`, so the comparison degrades to `realpathSync.native`, which
+    // cannot resolve a hard link, and the plan would be overwritten through
+    // the alias. Tracked in #11848 rather than left as a bare skip.
+    const inode = statSync(planPath).ino;
+    if (!Number.isSafeInteger(inode) || inode <= 0) {
+      ctx.skip();
+      return;
+    }
     expect(() =>
       runRepoContext({ plan: planPath, worktree, out: alias }, [
         { provide: () => context() },

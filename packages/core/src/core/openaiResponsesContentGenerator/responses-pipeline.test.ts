@@ -13,7 +13,7 @@ import {
   beforeEach,
   afterEach,
 } from 'vitest';
-import type { GenerateContentParameters } from '@google/genai';
+import type { Content, GenerateContentParameters } from '@google/genai';
 import { FunctionCallingConfigMode, FinishReason } from '@google/genai';
 import { inspect } from 'node:util';
 import {
@@ -121,13 +121,22 @@ function gatedByteStream(): {
   };
 }
 
-function makeCliConfig(proxy?: string, sessionId = ''): Config {
+function makeCliConfig(
+  proxy?: string,
+  sessionId = '',
+  allowDynamicHeaderValues = false,
+): Config {
   // Config.getSessionId() is typed `string` and never returns undefined, so
   // the mock must not either -- the reachable "no usable session" state is
   // the empty string.
   return {
     getProxy: () => proxy,
     getSessionId: () => sessionId,
+    // connect() stamps its own User-Agent and resolves customHeaders
+    // placeholders per request; both read Config. The consent gate defaults
+    // to off, matching its production default.
+    getCliVersion: () => '9.9.9-test',
+    getOutboundAllowDynamicHeaderValues: () => allowDynamicHeaderValues,
   } as unknown as Config;
 }
 
@@ -226,6 +235,67 @@ describe('ResponsesPipeline', () => {
       [{ text: 'hi' }],
       [],
     ]);
+  });
+
+  it('logs only request metadata, never raw request-body bytes (issue #11667)', async () => {
+    // Synthetic markers that must never reach the debug log: a user prompt,
+    // a tool name, a replayed reasoning id, and its encrypted content. The
+    // pre-fix code logged `body.substring(0, 500)` — which serializes `model`
+    // first and then `input` — so all four would leak into the per-session
+    // debug file.
+    const promptMarker = 'PROMPT_SECRET_MARKER_7f3a';
+    const toolMarker = 'TOOL_SECRET_MARKER_9c1b';
+    const reasoningIdMarker = 'REASONING_ID_SECRET_2d4e';
+    const encryptedMarker = 'ENCRYPTED_CONTENT_SECRET_5b6f';
+
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const request: GenerateContentParameters = {
+      model: 'gpt-5',
+      contents: [
+        { role: 'user', parts: [{ text: `${promptMarker} hello` }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              thought: true,
+              thoughtSignature: JSON.stringify({
+                id: reasoningIdMarker,
+                encrypted_content: encryptedMarker,
+              }),
+            },
+          ],
+        },
+      ],
+      config: {
+        tools: [{ functionDeclarations: [{ name: toolMarker }] }],
+      },
+    };
+    for await (const _ of pipeline.executeStream(request, 'prompt-1')) {
+      // drain
+    }
+
+    const logged = debugMock.mock.calls
+      .flat()
+      .map((a) => String(a))
+      .join(' ');
+    // No raw content may leak into the debug log.
+    expect(logged).not.toContain(promptMarker);
+    expect(logged).not.toContain(toolMarker);
+    expect(logged).not.toContain(reasoningIdMarker);
+    expect(logged).not.toContain(encryptedMarker);
+    // …but the transport diagnostic must stay: method + redacted URL, byte
+    // length, and per-input-item-type counts.
+    expect(logged).toContain('POST https://api.openai.com/v1/responses');
+    expect(logged).toContain('bodyBytes=');
+    expect(logged).toContain('inputItems=');
+    expect(logged).toContain('message=1');
+    expect(logged).toContain('reasoning=1');
   });
 
   it('keys prompt_cache_key on the session so it stays stable across turns', async () => {
@@ -334,6 +404,45 @@ describe('ResponsesPipeline', () => {
   });
 
   describe('reasoning request shape', () => {
+    it.each([undefined, { effort: 'high' }])(
+      'applies default below an existing raw override %j',
+      async (raw) => {
+        mockResponse(
+          sseEvent('response.completed', { response: { status: 'completed' } }),
+        );
+        const config = makeCliConfig();
+        config.getResolvedModelConfig = vi.fn().mockReturnValue({
+          capabilities: {
+            reasoning: {
+              profile: 'openai-reasoning',
+              efforts: ['low', 'medium', 'high'],
+              defaultEffort: 'medium',
+            },
+          },
+        });
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig({
+            model: 'company-alias',
+            authType: 'openai-responses' as ContentGeneratorConfig['authType'],
+            ...(raw ? { extra_body: { reasoning: raw } } : {}),
+          }),
+          config,
+        );
+        for await (const _ of pipeline.executeStream(
+          { ...textRequest('hi'), model: 'company-alias' },
+          'p1',
+        )) {
+          // drain
+        }
+        const body = JSON.parse(
+          fetchMock.mock.calls[0]![1].body,
+        ) as ResponsesApiRequest;
+        expect(body.reasoning).toEqual(
+          raw ?? { effort: 'medium', summary: 'auto' },
+        );
+      },
+    );
+
     it('passes the effort straight through with no clamping, plus include + summary auto', async () => {
       mockResponse(
         sseEvent('response.completed', { response: { status: 'completed' } }),
@@ -1218,6 +1327,70 @@ describe('ResponsesPipeline', () => {
     }
   });
 
+  it('preserves structured gateway diagnostics past 500 characters and safe response headers', async () => {
+    const message = `${'x'.repeat(700)} resource missing; test-key`;
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          routify_response: {
+            padding: 'x'.repeat(700),
+            trace_id: 'trace-after-500',
+            request_id: 'body-request',
+            model_name: 'test-model',
+            ak_quota: { api_key: 'never-log-this-upstream-key' },
+            error_detail: {
+              error: {
+                message,
+                code: 'not_found',
+                type: 'upstream_error',
+                param: 'model',
+              },
+            },
+          },
+        }),
+        {
+          status: 404,
+          headers: {
+            'x-request-id': 'header-request',
+            'retry-after': '3',
+            'x-should-retry': 'true',
+            'set-cookie': 'secret-cookie',
+            authorization: 'Bearer response-secret',
+          },
+        },
+      ),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    const error = await pipeline
+      .connectStream(textRequest('hi'), 'p1')
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      status: 404,
+      requestId: 'header-request',
+      code: 'not_found',
+      type: 'upstream_error',
+      param: 'model',
+    });
+    const rendered = `${inspect(error)} ${JSON.stringify(error)}`;
+    expect(rendered).toContain('trace-after-500');
+    expect(rendered).toContain('resource missing');
+    for (const secret of [
+      'test-key',
+      'never-log-this-upstream-key',
+      'secret-cookie',
+      'response-secret',
+    ]) {
+      expect(rendered).not.toContain(secret);
+    }
+    const headers = (error as { headers: Headers }).headers;
+    expect(headers.get('retry-after')).toBe('3');
+    expect(headers.get('x-should-retry')).toBe('true');
+    expect(headers.has('authorization')).toBe(false);
+  });
+
   it('connectStream rejects on a connection-time HTTP error so retry sees it', async () => {
     // A 5xx at request time must reject the awaited promise (which
     // generateContentStream returns into retryWithBackoff) rather than
@@ -1420,6 +1593,117 @@ describe('ResponsesPipeline', () => {
     },
   );
 
+  // Issue #11936: this wire builds its request headers by hand in
+  // connect(), so it never entered any of the placeholder machinery the
+  // Chat / Anthropic / Gemini wires go through -- a customHeaders value of
+  // `${session_id}` reached the gateway verbatim (with the consent gate on
+  // AND off), no first-party session_id header was added for the allowlisted
+  // gateways, and no QwenCode User-Agent was stamped.
+  describe('outbound correlation headers', () => {
+    const SESSION_HEADER = 'x-opencode-session';
+
+    function mockCompletedResponse() {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+    }
+
+    function outboundHeaders(call = 0): Headers {
+      return new Headers(fetchMock.mock.calls[call]![1].headers);
+    }
+
+    it('stamps a QwenCode User-Agent', async () => {
+      mockCompletedResponse();
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get('user-agent')).toBe(
+        `QwenCode/9.9.9-test (${process.platform}; ${process.arch})`,
+      );
+    });
+
+    it('expands ${session_id} per request when the consent gate is on', async () => {
+      mockCompletedResponse();
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          customHeaders: { [SESSION_HEADER]: 'sess=${session_id}' },
+        }),
+        makeCliConfig(undefined, 'session-abc', true),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get(SESSION_HEADER)).toBe('sess=session-abc');
+    });
+
+    it('drops a placeholder-bearing header instead of sending the literal when the gate is off', async () => {
+      mockCompletedResponse();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          customHeaders: { [SESSION_HEADER]: '${session_id}' },
+        }),
+        makeCliConfig(undefined, 'session-abc', false),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get(SESSION_HEADER)).toBeNull();
+      warn.mockRestore();
+    });
+
+    it('re-expands ${session_id} when the session id rotates between requests', async () => {
+      // A Config whose session id changes under a live pipeline -- what /new
+      // and /resume do. Expansion has to happen per request, not be baked in
+      // once, or the documented rotation silently stops.
+      fetchMock.mockImplementation(async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: sseStream(
+          sseEvent('response.completed', { response: { status: 'completed' } }),
+        ),
+        text: async () => '',
+      }));
+      let sessionId = 'first-session';
+      const cliConfig = {
+        getProxy: () => undefined,
+        getSessionId: () => sessionId,
+        getCliVersion: () => '9.9.9-test',
+        getOutboundAllowDynamicHeaderValues: () => true,
+      } as unknown as Config;
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          customHeaders: { [SESSION_HEADER]: '${session_id}' },
+        }),
+        cliConfig,
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+      sessionId = 'second-session';
+      await pipeline.execute(textRequest('hi'), 'p2');
+
+      expect(outboundHeaders(0).get(SESSION_HEADER)).toBe('first-session');
+      expect(outboundHeaders(1).get(SESSION_HEADER)).toBe('second-session');
+    });
+
+    it('adds the first-party session_id header for an allowlisted gateway host', async () => {
+      mockCompletedResponse();
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ baseUrl: 'https://routify.alibaba-inc.com' }),
+        makeCliConfig(undefined, 'session-abc'),
+      );
+
+      await pipeline.execute(textRequest('hi'), 'p1');
+
+      expect(outboundHeaders().get('session_id')).toBe('session-abc');
+    });
+  });
+
   it('redacts credentials from the logged request URL', async () => {
     mockResponse(
       sseEvent('response.completed', { response: { status: 'completed' } }),
@@ -1435,7 +1719,8 @@ describe('ResponsesPipeline', () => {
 
     expect(debugMock).toHaveBeenCalledWith(
       'POST https://<redacted>@gateway.example/v1/responses',
-      expect.any(String),
+      expect.stringContaining('bodyBytes='),
+      expect.stringContaining('inputItems='),
     );
     expect(inspect(debugMock.mock.calls)).not.toContain('review-secret');
     expect(inspect(debugMock.mock.calls)).not.toContain('review-user');
@@ -2046,6 +2331,119 @@ describe('ResponsesPipeline', () => {
       expect(second.input).toEqual(retryInput);
       expect({ ...second, input: null }).toEqual({ ...first, input: null });
     }
+
+    const encryptedError = {
+      error: {
+        type: 'invalid_request_error',
+        code: 'invalid_encrypted_content',
+        message: 'The encrypted content could not be decrypted or parsed.',
+      },
+    };
+    const encryptedBodies = [
+      JSON.stringify(encryptedError),
+      'data: ' +
+        JSON.stringify({
+          routify_response: {
+            success: false,
+            status: 400,
+            error_detail: encryptedError,
+          },
+        }) +
+        '\n\n',
+    ];
+
+    it.each(encryptedBodies)(
+      'recovers once from rejected encrypted replay: %s',
+      async (body) => {
+        fetchMock.mockResolvedValueOnce(errorResponse(400, body));
+        fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+        const request = replayRequest();
+        const original = structuredClone(request);
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig(),
+          makeCliConfig(),
+        );
+        expect(await drain(pipeline, request)).toBeUndefined();
+        expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
+        expect(request).toEqual(original);
+      },
+    );
+
+    it('preserves tool call/result pairs when recovering encrypted replay', async () => {
+      fetchMock.mockResolvedValueOnce(errorResponse(400, encryptedBodies[0]!));
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const request = replayRequest();
+      request.contents = [
+        ...(request.contents as Content[]),
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'lookup',
+                args: { value: 1 },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                name: 'lookup',
+                response: { output: 'found' },
+              },
+            },
+          ],
+        },
+      ];
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(await drain(pipeline, request)).toBeUndefined();
+      const first = parsedCall(0);
+      const second = parsedCall(1);
+      expect(first.input.filter((i) => i.type === 'reasoning')).toHaveLength(3);
+      expect(second.input.filter((i) => i.type === 'reasoning')).toHaveLength(
+        0,
+      );
+      expect(second.input.slice(-2)).toEqual(first.input.slice(-2));
+      expect(second.input.slice(-2).map((i) => i.type)).toEqual([
+        'function_call',
+        'function_call_output',
+      ]);
+    });
+
+    it('surfaces the second encrypted rejection without looping', async () => {
+      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(await drain(pipeline, replayRequest())).toMatchObject({
+        status: 400,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry encrypted rejection without reasoning in the request', async () => {
+      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      expect(
+        await drain(pipeline, {
+          model: 'gpt-5',
+          contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+        }),
+      ).toMatchObject({ status: 400 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
 
     // ── RED behaviors ────────────────────────────────────────────────────
 

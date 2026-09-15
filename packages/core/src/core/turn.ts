@@ -149,6 +149,11 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   goalContext?: GoalTurnPermit;
+  /** Parent model tool call for a programmatically dispatched child call. */
+  parentCallId?: string;
+  source?: 'model' | 'code_mode';
+  /** Exact tools an exec call may dispatch for a restricted agent. */
+  codeModeAllowedToolNames?: readonly string[];
 }
 
 export type ToolExecutionStatus =
@@ -168,6 +173,13 @@ export interface ToolCallResponseInfo {
   persistedOutputFiles?: string[];
   modelOverride?: string;
   terminateTurn?: boolean;
+  /**
+   * Set only when the call was denied because it needed user approval and the
+   * session had no way to ask for it (non-interactive mode). Headless front
+   * ends use it to suggest an approval mode; every other denial, such as a
+   * hook block or a deny rule, reports its own reason instead.
+   */
+  approvalRequired?: true;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
   boundaryArtifact?: ToolResultBoundaryArtifact;

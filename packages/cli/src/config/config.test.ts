@@ -23,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
+  buildSkillSettingsListsProvider,
   isValidSessionId,
   loadCliConfig,
   parseArguments,
@@ -1260,6 +1261,40 @@ describe('loadCliConfig', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv);
     expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
+  it('wires the skill settings lists provider outside bare and safe mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({ skills: { enabled: ['pdf'] } }, argv);
+
+    expect(config.hasSkillSettingsListsProvider()).toBe(true);
+  });
+
+  it.each(['--bare', '--safe-mode'])(
+    'omits the skill settings lists provider in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+
+      const config = await loadCliConfig(
+        { skills: { enabled: ['pdf'] } },
+        argv,
+      );
+
+      expect(config.hasSkillSettingsListsProvider()).toBe(false);
+    },
+  );
+
+  it('maps the settings lists into normalized provider sets', () => {
+    const lists = buildSkillSettingsListsProvider({
+      skills: { enabled: [' A '], defaultDisabled: ['B'], disabled: ['C'] },
+    })();
+
+    expect([...lists.enabled]).toEqual(['a']);
+    expect([...lists.defaultDisabled]).toEqual(['b']);
+    expect([...lists.hardDisabled]).toEqual(['c']);
   });
 
   it('preserves explicit opt-out when --debug is used', async () => {
@@ -3038,6 +3073,58 @@ describe('loadCliConfig', () => {
       );
     });
 
+    it('lets WEB_SEARCH_TIMEOUT_MS override tools.webSearch.timeoutMs', async () => {
+      vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', '90000');
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 30000 } },
+      });
+      expect(config.getWebSearchSettings()?.timeoutMs).toBe(90000);
+    });
+
+    it('ignores an empty, non-numeric or non-positive WEB_SEARCH_TIMEOUT_MS', async () => {
+      for (const raw of ['', 'abc', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { timeoutMs: 30000 } },
+        });
+        expect(config.getWebSearchSettings()?.timeoutMs).toBe(30000);
+      }
+    });
+
+    it('passes a budget-only setting through without other web search keys', async () => {
+      // Core still treats this as the automatic path: only model or an
+      // env-declared backend make the configuration explicit.
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 45000 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ timeoutMs: 45000 });
+    });
+
+    it('lets WEB_SEARCH_MAX_PER_SESSION override tools.webSearch.maxPerSession', async () => {
+      vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', '50');
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()?.maxPerSession).toBe(50);
+    });
+
+    it('ignores an empty, non-numeric, fractional or non-positive WEB_SEARCH_MAX_PER_SESSION', async () => {
+      for (const raw of ['', 'abc', '1.5', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { maxPerSession: 10 } },
+        });
+        expect(config.getWebSearchSettings()?.maxPerSession).toBe(10);
+      }
+    });
+
+    it('passes a cap-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
     // Both modes must turn the tool off explicitly: leaving the settings
     // undefined would let the registry derive a backend from the provider.
     it('disables web search in safe mode', async () => {
@@ -3504,6 +3591,40 @@ describe('mergeExcludeTools', () => {
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getToolSearchThreshold()).toBe(10);
   });
+
+  it('should enable CodeModeOnly only when explicitly configured', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig({}, argv, undefined, []);
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(codeMode.getCodeModeOnly()).toBe(true);
+    expect(direct.getToolMode()).toBe('direct');
+    expect(codeMode.getToolMode()).toBe('code_mode_only');
+  });
+
+  it.each(['--safe-mode', '--bare'])(
+    'should disable CodeModeOnly in %s mode',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { codeModeOnly: true } },
+        argv,
+        undefined,
+        [],
+      );
+
+      expect(config.getCodeModeOnly()).toBe(false);
+    },
+  );
 
   it('should default tools.listDirectory.enabled to false', async () => {
     process.argv = ['node', 'script.js'];
@@ -5862,6 +5983,11 @@ describe('sandbox image resolution precedence', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     delete process.env['QWEN_SANDBOX_IMAGE'];
+    // These cases measure image precedence, not platform-dependent backend
+    // selection: on macOS the un-stubbed resolution picks sandbox-exec, an
+    // in-place backend that carries no image. Pin a container backend — the
+    // probe is answered by the spawnSync mock above (`docker version` → 0).
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
   });
 
   afterEach(() => {

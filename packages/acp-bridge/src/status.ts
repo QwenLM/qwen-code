@@ -220,10 +220,10 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
-   * Read a live session's `/goal` state. The active goal lives only in the
-   * child's in-memory store, so this is the sole authoritative source for the
-   * condition, its running turn count and the judge's last verdict. Params:
-   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   * Read a live session's `/goal` state from the child's Goal runtime. Params:
+   * `{ sessionId }`; result: `BridgeSessionGoal` — the runtime's
+   * `GoalSnapshotV2` plus `active`, a projection of it for clients that still
+   * read the older shape.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
   sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
@@ -582,6 +582,7 @@ export interface ServeWorkspaceProviderCurrent {
 }
 
 export interface ServeWorkspaceProviderModel {
+  configurationKey?: string;
   modelId: string;
   baseModelId: string;
   name: string;
@@ -622,6 +623,14 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  recovery?: {
+    kind:
+      | 'clean'
+      | 'interrupted_prompt'
+      | 'interrupted_turn'
+      | 'degraded_history';
+    canContinue: boolean;
+  };
   state: {
     models?: unknown;
     modes?: unknown;
@@ -686,10 +695,16 @@ export interface ServeSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    workflowStepId: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
-    source: 'project' | 'user';
+    /** `extension` definitions are named `<extension>:<workflow>`. */
+    source: 'project' | 'user' | 'extension';
   }>;
 }
 
@@ -706,7 +721,7 @@ export interface ServeSessionSavedWorkflowDetail {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   name: string;
-  source: 'project' | 'user';
+  source: 'project' | 'user' | 'extension';
   /** Absolute path of the `.js` file the definition was read from. */
   scriptPath: string;
   /** Full script source, `export const meta` included. */
@@ -856,6 +871,8 @@ export type ServeWorkflowDispatchStatus =
   | 'cached';
 
 export interface ServeWorkflowDispatchStatusEntry {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -920,7 +937,37 @@ export type ServeWorkflowEvent =
       error: string;
     });
 
+/**
+ * A workflow run's large-run flag: the first threshold it crossed. Mirrors
+ * core's `WorkflowSizeWarning`.
+ */
+export interface ServeWorkflowSizeWarning {
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduledAgents: number;
+  totalTokens: number;
+  projectedTokens: number;
+  agentCap: number;
+  tokenCap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  capFromGuideline: boolean;
+  at: number;
+}
+
+export interface ServeWorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
 export interface ServeSessionWorkflowTaskStatus {
+  sourceRef?: { id: string; revision: string };
+  workflowCalls?: ServeWorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */
@@ -950,6 +997,11 @@ export interface ServeSessionWorkflowTaskStatus {
    * created before respawns were counted; treat as 0.
    */
   agentsRespawned?: number;
+  /**
+   * Present once the run crossed a large-run threshold; absent while it stays
+   * within bounds and on snapshots created before the flag existed.
+   */
+  sizeWarning?: ServeWorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];

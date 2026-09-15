@@ -48,6 +48,7 @@ import {
 import type { LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { t } from '../../i18n/index.js';
+import { ICON } from '../constants.js';
 import {
   useProviderSetupFlow,
   type ProviderSetupFlow,
@@ -191,7 +192,7 @@ function RadioList({ items, cursor }: { items: RadioItem[]; cursor: number }) {
           >
             <box flexDirection="row">
               <text fg={selected ? C.accent : C.dim}>
-                {selected ? '● ' : '○ '}
+                {selected ? '› ' : '  '}
               </text>
               <text
                 fg={selected ? C.text : C.dim}
@@ -557,7 +558,9 @@ function ModelsStep({
                     {focused ? '› ' : '  '}
                   </text>
                   <text fg={focused ? C.accent : C.dim}>
-                    {isChecked ? '◉ ' : '○ '}
+                    {isChecked
+                      ? `${ICON.RADIO_FILLED} `
+                      : `${ICON.CIRCLE_EMPTY} `}
                   </text>
                   <text fg={focused ? C.text : C.dim}>{id}</text>
                 </box>
@@ -636,7 +639,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     event.preventDefault();
     flow.changeContextWindowSize(contextWindowSize + text);
   });
-  const checkmark = (v: boolean) => (v ? '◉' : '○');
+  const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
   const rowFg = (index: number) =>
     focusedConfigIndex === index ? C.green : undefined;
@@ -813,7 +816,13 @@ function AuthDialogFlow({
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
       const protocol = inputs.protocol ?? providerConfig.protocol;
       try {
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          settings.merged.modelProviders?.[
+            inputs.protocol ?? providerConfig.protocol
+          ],
+        );
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
@@ -823,15 +832,26 @@ function AuthDialogFlow({
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
+        if (!plan.modelSelection && !config.getAuthType()) {
+          setErrorMessage(
+            t(
+              'Service models saved. Configure a conversation model to start chatting.',
+            ),
+          );
+          return;
+        }
         notify?.(
-          t(
-            'Successfully configured {{provider}}. Use /model to switch models.',
-            {
-              provider: providerConfig.label,
-            },
-          ),
+          !plan.modelSelection
+            ? t('Service models saved.')
+            : t(
+                'Successfully configured {{provider}}. Use /model to switch models.',
+                {
+                  provider: providerConfig.label,
+                },
+              ),
         );
-        logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
+        if (plan.modelSelection)
+          logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
         onClose();
       } catch (error) {
         const msg = t('Failed to authenticate. Message: {{message}}', {

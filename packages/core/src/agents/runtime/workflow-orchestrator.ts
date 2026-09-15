@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  MAX_WORKFLOW_CALL_TRACES,
+  readWorkflowStepId,
+  type WorkflowCallTrace,
+} from '../workflow-correlation.js';
 import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
@@ -34,7 +39,11 @@ import {
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
 import { resolveStallMs, runStallResilient } from './workflow-stall.js';
-import { deriveAgentKey, deriveArgsSeed } from './workflow-journal.js';
+import {
+  DISPATCH_AFFECTING_AGENT_OPTS,
+  deriveAgentKey,
+  deriveArgsSeed,
+} from './workflow-journal.js';
 import type { WorkflowJournal, JournalReplay } from './workflow-journal.js';
 import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -51,7 +60,12 @@ import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
 } from './agent-events.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
+import {
+  normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
+} from '../../core/reasoning-effort.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -271,8 +285,11 @@ export function resolveSubagentMaxTimeMinutes(
  * and MonitorTool depends on AgentTool-owned notification callbacks that
  * workflow subagents do not register. Defense-in-depth alongside the workflow
  * system prompt's return-value contract.
+ *
+ * A per-call `agent({ disallowedTools })` is unioned on top of this floor and
+ * can only narrow the set further; nothing a script passes removes an entry.
  */
-const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
+export const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.ASK_USER_QUESTION,
   ToolNames.SEND_MESSAGE,
   ToolNames.MONITOR,
@@ -358,7 +375,8 @@ export interface WorkflowRunRequest {
    */
   runId?: string;
   /**
-   * P5: optional per-run token budget. When provided, `countedDispatch`
+   * P5: optional token budget — the turn's `+500k` target or an operator's
+   * per-run cap (see `workflow-budget.ts`). When provided, `countedDispatch`
    * checks `budget.remaining() > 0` BEFORE each `agent()` dispatch and
    * throws `WorkflowBudgetExceededError` if the cap is hit. Also
    * surfaced via `SandboxOptions.budget` so the script-side `budget`
@@ -438,8 +456,22 @@ export type WorkflowAgentDispatch = (
 export type WorkflowCountedDispatch = (
   prompt: string,
   opts: WorkflowAgentOpts,
-  dispatchId?: string,
+  workflowCallId?: string,
 ) => Promise<WorkflowAgentResult | null>;
+
+/**
+ * The per-run figures the registry mirrors: this run's own spend and the cap
+ * on this run alone, which differ from `spent()` / `total` when the budget is
+ * the whole turn's.
+ */
+function runBudgetFigures(
+  budget: WorkflowBudget,
+): [spent: number, total: number | null] {
+  return [
+    budget.runSpent ? budget.runSpent() : budget.spent(),
+    budget.runCap ? budget.runCap() : budget.total,
+  ];
+}
 
 function generateRunId(): string {
   return `wf_${randomBytes(8).toString('hex')}`;
@@ -745,14 +777,12 @@ async function runSingleDispatch(
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
   // override path or it would be silently dropped and the agent would run in
-  // the parent working tree.
-  if (
-    opts.agentType === undefined &&
-    opts.model === undefined &&
-    opts.isolation === undefined &&
-    opts.schema === undefined &&
-    opts.workingDir === undefined
-  ) {
+  // the parent working tree. The same holds for every option that changes
+  // what a dispatch does (`effort` needs the agent's own content-generator
+  // config, `disallowedTools` the override path's deny union), so the guard is
+  // driven by the one list the resume key also projects: an option added there
+  // cannot silently take this path.
+  if (DISPATCH_AFFECTING_AGENT_OPTS.every((key) => opts[key] === undefined)) {
     const subagent = await AgentHeadless.create(
       agentIdentity.name,
       config,
@@ -852,7 +882,48 @@ function reportTokens(
 }
 
 /**
- * Override path for `agent({ agentType, model, isolation })`. Resolves the
+ * `opts.effort` as its canonical tier, or `undefined` when omitted. The sandbox
+ * already normalizes it; this re-check covers a host caller that dispatches
+ * without going through the sandbox.
+ */
+function resolveDispatchEffort(raw: unknown): ReasoningEffort | undefined {
+  if (raw === undefined) return undefined;
+  const tier =
+    typeof raw === 'string' ? normalizeReasoningEffort(raw) : undefined;
+  if (tier === undefined) {
+    throw new Error(
+      `agent({effort}): unknown effort tier ${sanitizeForErrorMessage(
+        JSON.stringify(raw) ?? String(raw),
+      )}. Known tiers are: ${REASONING_EFFORT_TIERS.join(', ')}.`,
+    );
+  }
+  return tier;
+}
+
+/**
+ * `opts.disallowedTools` as a list (`[]` when omitted), with built-in display
+ * names mapped to tool names as the sandbox maps them. Same host-side re-check
+ * as {@link resolveDispatchEffort}.
+ */
+function resolveDispatchDenies(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (name) =>
+        typeof name !== 'string' || name.length === 0 || name !== name.trim(),
+    )
+  ) {
+    throw new Error(
+      "agent({disallowedTools}): must be an array of non-empty tool-name strings without surrounding whitespace, e.g. ['run_shell_command', 'write_file'].",
+    );
+  }
+  return (raw as string[]).map((name) => resolveBuiltinToolName(name) ?? name);
+}
+
+/**
+ * Override path for `agent({ agentType, model, effort, isolation,
+ * disallowedTools })`. Resolves the
  * requested agentType against `SubagentManager`, applies the workflow
  * disallowed-tool floor, threads `opts.model` into `SubagentConfig.model`
  * so provider routing in `buildRuntimeContentGeneratorView` sees the
@@ -872,7 +943,13 @@ function reportTokens(
  * (not via `toolConfigOverride`): augmenting before `convertToRuntimeConfig`
  * lets the manager's `transformToToolNames` normalize all entries together
  * (display name → tool name + MCP pattern preservation). A toolConfigOverride
- * would bypass that normalization and require us to duplicate it here.
+ * would bypass that normalization and require us to duplicate it here. A
+ * per-call `disallowedTools` joins the same union for the same reason.
+ *
+ * Why `effort` goes into `modelConfigOverrides.reasoningEffort`: the manager
+ * builds this agent its own content generator from a copy of the session
+ * config and writes the tier onto that copy, limited to the tiers `/effort`
+ * offers for the agent's model, so the session's own tier is never touched.
  *
  * Why the worktree-rebound Config is passed as `runtimeContext` (not
  * `toolConfigOverride`): `SubagentManager` derives its subagent context from
@@ -916,6 +993,9 @@ async function runOverridePath(
       "agent({isolation:'remote'}) is not available in this build.",
     );
   }
+
+  const effort = resolveDispatchEffort(opts.effort);
+  const requestedDenies = resolveDispatchDenies(opts.disallowedTools);
 
   const subagentMgr = config.getSubagentManager();
   let baseConfig: SubagentConfig;
@@ -1006,9 +1086,43 @@ async function runOverridePath(
       new Set([
         ...(baseConfig.disallowedTools ?? []),
         ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
+        ...requestedDenies,
       ]),
     ),
   };
+
+  // A deny that matches no tool denies nothing: the agent would keep the tool
+  // the script meant to take away while the script believes it narrowed it.
+  // Refuse such entries before anything is provisioned. MCP patterns, built-in
+  // tools not registered in this session and registered tools all pass.
+  if (requestedDenies.length > 0) {
+    const unmatched = await subagentMgr.findUnmatchedToolNames(requestedDenies);
+    if (unmatched.length > 0) {
+      throw new Error(
+        `agent({disallowedTools}): ${sanitizeForErrorMessage(
+          unmatched.map((name) => JSON.stringify(name)).join(', '),
+        )} ${unmatched.length === 1 ? 'matches' : 'match'} no tool. Use a tool name (run_shell_command, write_file, edit), a display name (Shell, WriteFile, Edit), or an MCP pattern (mcp__<server>, mcp__<server>__*, mcp__<server>__<tool>).`,
+      );
+    }
+  }
+
+  // A schema agent answers only through structured_output. Denying that tool,
+  // from this call or from the agent type's own definition, leaves it no way
+  // to deliver the one result the script accepts, and the run would spend the
+  // dispatch before failing as if the agent had ignored the contract. Refuse
+  // before anything is provisioned. Built-in names resolve statically, so the
+  // display name is caught whether or not the tool is registered here.
+  if (
+    opts.schema !== undefined &&
+    [...(baseConfig.disallowedTools ?? []), ...requestedDenies].some(
+      (name) =>
+        (resolveBuiltinToolName(name) ?? name) === ToolNames.STRUCTURED_OUTPUT,
+    )
+  ) {
+    throw new Error(
+      'agent({schema, disallowedTools}): schema mode needs the structured_output tool, but disallowedTools deny it (from this call or from the agent type).',
+    );
+  }
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
@@ -1160,6 +1274,9 @@ async function runOverridePath(
           max_turns: resolveSubagentMaxTurns(),
           max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
+        ...(effort !== undefined
+          ? { modelConfigOverrides: { reasoningEffort: effort } }
+          : {}),
         eventEmitter,
         taskName: String(ctx.get('task_prompt')),
         subagentId: workflowAgentId,
@@ -1738,6 +1855,7 @@ export class WorkflowOrchestrator {
       prompt: string,
       opts: WorkflowAgentOpts,
       cached = false,
+      workflowCallId?: string,
     ): string => {
       const id = `dispatch-${(dispatchTraceCount += 1)}`;
       const store = dependencyContext.getStore();
@@ -1746,6 +1864,8 @@ export class WorkflowOrchestrator {
       try {
         emitter?.dispatchQueued?.({
           id,
+          ...(opts.stepId !== undefined ? { stepId: opts.stepId } : {}),
+          ...(workflowCallId ? { workflowCallId } : {}),
           ...(typeof opts.label === 'string' ? { label: opts.label } : {}),
           prompt,
           dependsOn,
@@ -1777,7 +1897,13 @@ export class WorkflowOrchestrator {
       current: undefined,
     };
 
-    const countedDispatch: WorkflowCountedDispatch = (prompt, opts) => {
+    const countedDispatch: WorkflowCountedDispatch = (
+      prompt,
+      opts,
+      workflowCallId,
+    ) => {
+      const stepId = readWorkflowStepId(opts.stepId);
+      if (stepId !== undefined) opts = { ...opts, stepId };
       // Must run before deriveAgentKey below: hash.update() throws an
       // opaque ERR_INVALID_ARG_TYPE for a non-string prompt, preempting
       // the dispatch's boundary error on the journaled path.
@@ -1816,7 +1942,12 @@ export class WorkflowOrchestrator {
             }
             const label =
               typeof opts.label === 'string' ? opts.label : undefined;
-            const dispatchId = issueDispatchTrace(prompt, opts, true);
+            const dispatchId = issueDispatchTrace(
+              prompt,
+              opts,
+              true,
+              workflowCallId,
+            );
             try {
               emitter?.agentDispatched?.(label);
             } catch (e) {
@@ -1929,7 +2060,12 @@ export class WorkflowOrchestrator {
       // settles (success or thrown) — defensive try/catch on both so a
       // subscriber error never propagates into the script.
       const label = typeof opts.label === 'string' ? opts.label : undefined;
-      const dispatchId = issueDispatchTrace(prompt, opts);
+      const dispatchId = issueDispatchTrace(
+        prompt,
+        opts,
+        false,
+        workflowCallId,
+      );
       try {
         emitter?.agentDispatched?.(label);
       } catch (e) {
@@ -2029,7 +2165,7 @@ export class WorkflowOrchestrator {
             // for the registry to mirror.
             if (budget) {
               try {
-                emitter?.budgetUpdated?.(budget.spent(), budget.total);
+                emitter?.budgetUpdated?.(...runBudgetFigures(budget));
               } catch (e) {
                 debugLogger.warn('emitter.budgetUpdated threw:', e);
               }
@@ -2050,7 +2186,7 @@ export class WorkflowOrchestrator {
             //      next success.
             if (budget) {
               try {
-                emitter?.budgetUpdated?.(budget.spent(), budget.total);
+                emitter?.budgetUpdated?.(...runBudgetFigures(budget));
               } catch (e) {
                 debugLogger.warn('emitter.budgetUpdated threw:', e);
               }
@@ -2129,35 +2265,80 @@ export class WorkflowOrchestrator {
     // spend roll into the same registry entry). Crucially the nested sandbox
     // is created WITHOUT a `workflow` impl — that throws on a second-level
     // `workflow()` call, enforcing the single-level nesting limit.
+    let workflowCallCount = 0;
+    const recordCall = (call: WorkflowCallTrace): void => {
+      try {
+        emitter?.workflowCallUpdated?.({ ...call });
+      } catch (error) {
+        debugLogger.warn('emitter.workflowCallUpdated threw:', error);
+      }
+    };
     const resolveSavedWorkflow = req.resolveSavedWorkflow;
     const workflowImpl = resolveSavedWorkflow
       ? async (
           nameOrRef: string | { scriptPath: string },
           nestedArgs: unknown,
+          stepId?: string,
         ): Promise<unknown> => {
-          const resolved = await resolveSavedWorkflow(nameOrRef);
-          const nestedSandbox = createWorkflowSandbox({
-            args: nestedArgs,
-            runId,
-            dispatch: countedDispatch,
-            parallel: parallelImpl,
-            pipeline: pipelineImpl,
-            abortOnTimeout: req.abortOnTimeout,
-            emitter,
-            budget,
-            scheduler,
-            // No `workflow` — single-level nesting limit.
-          });
+          const call: WorkflowCallTrace = {
+            id: `workflow-call-${++workflowCallCount}`,
+            ...(stepId !== undefined
+              ? { stepId: readWorkflowStepId(stepId) }
+              : {}),
+            ...(typeof nameOrRef === 'string'
+              ? { workflowName: nameOrRef }
+              : {}),
+            status: 'running',
+            startedAt: Date.now(),
+          };
+          const recorded = workflowCallCount <= MAX_WORKFLOW_CALL_TRACES;
+          if (recorded) recordCall(call);
+          else if (workflowCallCount === MAX_WORKFLOW_CALL_TRACES + 1) {
+            try {
+              emitter?.workflowCallsTruncated?.();
+            } catch (error) {
+              debugLogger.warn('emitter.workflowCallsTruncated threw:', error);
+            }
+          }
+          let nestedSandbox: WorkflowSandbox | undefined;
           try {
-            // sandbox.run() throws raw (no WorkflowExecutionError wrap); the
-            // rejection crosses back to the parent script's `await workflow()`
-            // so the parent can try/catch it like any other async failure.
-            return await nestedSandbox.run(resolved.script);
+            const resolved = await resolveSavedWorkflow(nameOrRef);
+            if (resolved.name) call.workflowName = resolved.name;
+            nestedSandbox = createWorkflowSandbox({
+              args: nestedArgs,
+              runId,
+              // Each sandbox closes over its own call, including parallel and cached dispatches.
+              dispatch: (prompt, opts) =>
+                countedDispatch(prompt, opts, call.id),
+              parallel: parallelImpl,
+              pipeline: pipelineImpl,
+              abortOnTimeout: req.abortOnTimeout,
+              emitter,
+              budget,
+              scheduler,
+              // No workflow implementation: preserve single-level nesting.
+            });
+            const result = await nestedSandbox.run(resolved.script);
+            call.status = signal?.aborted ? 'cancelled' : 'completed';
+            return result;
+          } catch (error) {
+            call.status = signal?.aborted ? 'cancelled' : 'failed';
+            try {
+              const message =
+                typeof error === 'string'
+                  ? error
+                  : error && typeof error === 'object'
+                    ? Object.getOwnPropertyDescriptor(error, 'message')?.value
+                    : undefined;
+              if (typeof message === 'string') call.error = message;
+            } catch {
+              // Observing an error must not replace the original rejection.
+            }
+            throw error;
           } finally {
-            // The shared emitter already publishes nested logs live. Merge
-            // them into the parent buffer without re-emitting so the final
-            // outcome retains the same lines exactly once.
-            for (const line of nestedSandbox.getLogs()) {
+            call.endedAt = Date.now();
+            if (recorded) recordCall(call);
+            for (const line of nestedSandbox?.getLogs() ?? []) {
               parentSandboxRef.current?.appendLog(line);
             }
           }

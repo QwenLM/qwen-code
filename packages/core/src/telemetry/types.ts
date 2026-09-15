@@ -178,6 +178,8 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
   call_id?: string;
+  parent_call_id?: string;
+  source?: 'model' | 'code_mode';
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
@@ -199,6 +201,9 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.call_id = call.request.callId;
+    if (call.request.parentCallId)
+      this.parent_call_id = call.request.parentCallId;
+    if (call.request.source) this.source = call.request.source;
     this.function_name = call.request.name;
     // structured_output args ARE the user's final structured payload (the
     // command's actual answer, already emitted in stdout `result` /
@@ -1520,6 +1525,42 @@ export class WorkflowRunEvent implements BaseTelemetryEvent {
     this.phase_count = params.phase_count;
     this.tokens_spent = params.tokens_spent;
     this.duration_ms = params.duration_ms;
+  }
+}
+
+/** A running workflow crossed its large-run threshold (at most once per run). */
+export class WorkflowSizeWarningEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.workflow_size_warning';
+  'event.timestamp': string;
+  /** The threshold crossed first. */
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduled_agents: number;
+  total_tokens: number;
+  projected_tokens: number;
+  agent_cap: number;
+  token_cap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  cap_from_guideline: boolean;
+
+  constructor(warning: {
+    axis: 'agents' | 'tokens';
+    scheduledAgents: number;
+    totalTokens: number;
+    projectedTokens: number;
+    agentCap: number;
+    tokenCap: number;
+    capFromGuideline: boolean;
+  }) {
+    this['event.name'] = 'qwen-code.workflow_size_warning';
+    this['event.timestamp'] = new Date().toISOString();
+    this.axis = warning.axis;
+    this.scheduled_agents = warning.scheduledAgents;
+    this.total_tokens = warning.totalTokens;
+    this.projected_tokens = warning.projectedTokens;
+    this.agent_cap = warning.agentCap;
+    this.token_cap = warning.tokenCap;
+    this.cap_from_guideline = warning.capFromGuideline;
   }
 }
 

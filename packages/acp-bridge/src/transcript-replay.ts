@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
 import type {
   SessionUpdate,
   ToolCallContent,
@@ -519,7 +520,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     let ordinal = 0;
     let activeSegmentLane: string | undefined;
     let activeSegmentId: string | undefined;
+    const backgroundTurn = parseBackgroundNotificationTurn(
+      record.subtype === 'background_task_completed'
+        ? undefined
+        : (record as unknown as Record<string, unknown>)['backgroundTurn'],
+    );
     const emit = (update: SessionUpdate): TranscriptReplayEmission => {
+      if (backgroundTurn)
+        update = { ...update, _meta: { ...update._meta, backgroundTurn } };
       const emissionOrdinal = ordinal++;
       const lane = transcriptSegmentLane(update);
       if (lane && (lane !== activeSegmentLane || !activeSegmentId)) {
@@ -971,7 +979,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       const usage = usageFromTaskExecution(resultDisplay);
       if (Object.keys(usage).length > 0) {
         this.addUsage(usage);
-        yield emit(createTranscriptUsageUpdate(usage, meta));
+        yield emit(
+          createTranscriptUsageUpdate(usage, {
+            ...meta,
+            extra: { ...meta.extra, parentToolCallId: callId },
+          }),
+        );
       }
     }
   }
@@ -981,6 +994,57 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'turn_result') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
+      const startedAt = finiteNumber(payload?.['startedAt']);
+      const promptId = payload?.['promptId'];
+      if (
+        payload?.['state'] !== 'cancelled' ||
+        cancelledAt === undefined ||
+        typeof promptId !== 'string' ||
+        !promptId ||
+        (payload['startedAt'] !== undefined && startedAt === undefined)
+      )
+        return;
+      const elapsedMs = Math.max(0, cancelledAt - (startedAt ?? cancelledAt));
+      if (!Number.isFinite(elapsedMs)) return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: '',
+          ...meta,
+          extra: {
+            qwenDiscreteMessage: true,
+            promptCancelled: { promptId, cancelledAt, elapsedMs },
+          },
+        }),
+      );
+      return;
+    }
+    if (record.subtype === 'background_task_completed') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (!payload || typeof payload['displayText'] !== 'string') return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: payload['displayText'],
+          ...meta,
+          extra: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            ...(isObjectRecord(payload['backgroundTask'])
+              ? { backgroundTask: payload['backgroundTask'] }
+              : {}),
+          },
+        }),
+      );
+      return;
+    }
     if (record.subtype === 'agent_session_ready') {
       const payload = isObjectRecord(record.systemPayload)
         ? record.systemPayload

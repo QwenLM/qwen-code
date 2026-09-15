@@ -8,6 +8,7 @@ import type {
   DaemonAuthDeviceFlowSdkErrorKind,
   DaemonAuthProviderId,
   DaemonEvent,
+  DaemonBackgroundTurn,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
   DaemonSkillToggleMutation,
@@ -95,6 +96,7 @@ export interface DaemonUiEventBase {
   segmentId?: string;
   /** Admitted prompt identifier for events belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   originatorClientId?: string;
@@ -483,6 +485,8 @@ export interface DaemonUiStateResyncRequiredEvent extends DaemonUiEventBase {
  */
 export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
   type: 'prompt.cancelled';
+  /** Execution time before explicit cancellation, excluding cleanup. */
+  elapsedMs?: number;
   /**
    * Why the turn was cancelled. Absent for a user-initiated cancel;
    * `'forward_failed'` when the daemon synthesized the cancel because the
@@ -962,6 +966,7 @@ export interface DaemonTranscriptBlockBase {
   segmentId?: string;
   /** Admitted prompt identifier for content belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   /**
@@ -1106,6 +1111,7 @@ export interface DaemonPromptCancelledTranscriptBlock
   extends DaemonTranscriptBlockBase {
   kind: 'prompt_cancelled';
   reason?: string;
+  elapsedMs?: number;
 }
 
 export type DaemonTranscriptBlock =

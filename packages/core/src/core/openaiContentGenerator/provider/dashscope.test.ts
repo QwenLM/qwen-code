@@ -736,6 +736,217 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       temperature: 0.7,
     };
 
+    // DashScope is an aggregating gateway. `metadata` is a platform-private
+    // tracing object that only its own inference path understands; forwarded to a
+    // third-party vendor backend that types `metadata` as a string it fails to
+    // deserialize and the request comes back as a flat 400, which made those
+    // models unusable through Qwen Code entirely.
+    it.each([['qwen-max'], ['qwen3.8-max'], ['coder-model']] as const)(
+      'ships metadata for the qwen-family model %s',
+      (model) => {
+        const result = provider.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it.each([
+      ['ZHIPU/GLM-5.3-Flash'],
+      ['deepseek-v4-pro'],
+      ['moonshot/kimi-k3'],
+    ] as const)('omits metadata for the non-qwen model %s', (model) => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+      // The gate is metadata-only: everything else the provider ships is untouched.
+      expect(result['messages']).toBeDefined();
+      expect(result['preserve_thinking']).toBe(true);
+    });
+
+    it.each([['ZHIPU/GLM-5.3-Flash'], ['glm-5.2']] as const)(
+      'sends metadata for the non-qwen model %s when enableRequestMetadata is true',
+      (model) => {
+        // The client cannot tell a forwarded request from one DashScope serves
+        // itself, so an operator whose first-party non-qwen sessions still need
+        // sessionId/promptId correlation can force the field back on.
+        const generator = new DashScopeOpenAICompatibleProvider(
+          { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+          mockCliConfig,
+        );
+
+        const result = generator.buildRequest(
+          { ...baseRequest, model },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['metadata']).toEqual({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt-id',
+        });
+      },
+    );
+
+    it('omits metadata even for a qwen model when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    // buildRequest has a second, separate return for vision models with its own
+    // metadata spread. The gate tests above only exercise the non-vision return, so
+    // a regression at the vision call site would ship `metadata` for a non-qwen
+    // vision model while every test above stayed green.
+    it('ships metadata on the vision path for a qwen-family vision model', () => {
+      const result = provider.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it('omits metadata on the vision path when enableRequestMetadata is false', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      // Still the vision branch, so the gate is what changed and not the route.
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('gates the vision path on the request model, not the configured model', () => {
+      // resolveWireModel falls back to the configured model when the request
+      // model is missing. A non-qwen configured model with a qwen vision request
+      // model is the one input where the two disagree, so it pins which one the
+      // vision call site hands the gate.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, model: 'ZHIPU/GLM-5.3-Flash' },
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-vl-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['vl_high_resolution_images']).toBe(true);
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    // A side-model generator is built with its own per-model config but shares
+    // the session Config, so the gate reads only the provider's own value. The
+    // session's value must neither override a per-model opt-out nor fill in a
+    // value the cross-provider agent config deliberately cleared.
+    it('prefers the provider config enableRequestMetadata over the session value', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: false },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('honours a provider config enableRequestMetadata when the session sets none', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: true },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({}),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
+    it('ignores the session enableRequestMetadata when the provider config has none', () => {
+      // buildAgentContentGeneratorConfig clears every generation field for a
+      // cross-provider agent, so undefined here is deliberate and the ambient
+      // session value must not fill it in for a vendor-forwarded model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: true }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'ZHIPU/GLM-5.3-Flash' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toBeUndefined();
+    });
+
+    it('ignores a session false when the provider config has none', () => {
+      // Same isolation in the other direction: a session opt-out must not
+      // strip tracing from a cross-provider agent running a first-party model.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, enableRequestMetadata: undefined },
+        {
+          ...mockCliConfig,
+          getContentGeneratorConfig: () => ({ enableRequestMetadata: false }),
+        } as unknown as Config,
+      );
+
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'qwen-max' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['metadata']).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
+    });
+
     it.each([
       ['gpt-5.4', 'high', 'high'],
       ['gpt-5.4', 'max', 'xhigh'],
@@ -2613,6 +2824,175 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         .content as OpenAI.Chat.ChatCompletionContentPart[];
       // Empty content array should remain empty
       expect(content).toEqual([]);
+    });
+  });
+
+  describe('reattach boundary cache control (issue #11627)', () => {
+    const reattachImageBlock = {
+      type: 'image_url' as const,
+      image_url: { url: 'data:image/png;base64,AAAA' },
+    };
+
+    it('places the conversation breakpoint before reattached parts appended to the last user message', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(content).toHaveLength(3);
+      // Breakpoint lands on the stable text block, not the reattach marker/image.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'Stable user text',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('walks back to the previous message when the whole last message is reattach', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'user', content: 'Stable user text' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The last message is entirely reattach content: it must not be marked.
+      const lastContent = result.messages[2]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      expect(lastContent?.[0]).not.toHaveProperty('cache_control');
+      expect(lastContent?.[1]).not.toHaveProperty('cache_control');
+      // The breakpoint moves onto the previous stable message instead.
+      expect(result.messages[1]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'Stable user text',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('keeps the last-block anchor when no reattach boundary is supplied', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Stable user text' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Unchanged behavior: last block keeps the breakpoint.
+      expect(content?.[1]).toMatchObject({
+        type: 'image_url',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+    });
+
+    it('skips an empty-string tool result when walking back to a stable block', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      // The empty tool result stays a bare string — not rewritten into a
+      // fabricated zero-length text part carrying cache_control.
+      expect(result.messages[1]?.content).toBe('');
+      // The breakpoint degrades to the system message (system-only caching).
+      expect(result.messages[0]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'System prompt',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('walks the anchor back past a current-turn inline image to stable text', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-max',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'look at this screenshot' },
+              reattachImageBlock,
+              { type: 'text' as const, text: 'Recent images reattached' },
+              reattachImageBlock,
+            ],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id', 2);
+
+      const content = result.messages[1]?.content as
+        | OpenAI.Chat.ChatCompletionContentPart[]
+        | undefined;
+      // Breakpoint lands on the prompt text, not the inline image the next
+      // turn textualizes.
+      expect(content?.[0]).toMatchObject({
+        type: 'text',
+        text: 'look at this screenshot',
+        cache_control: { type: 'ephemeral' },
+      });
+      expect(content?.[1]).not.toHaveProperty('cache_control');
     });
   });
 

@@ -217,6 +217,12 @@ export type {
   WebSearchToolParams,
   WebSearchSettings,
 } from './tools/web-search.js';
+export {
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
+} from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 // Exported for the cross-package contract test in packages/cli (see the
 // function's own doc comment) — the daemon's file-read route must resolve the
@@ -243,6 +249,11 @@ export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
+export {
+  deleteArtifactSnapshot,
+  readArtifactSnapshot,
+  retainArtifactSnapshot,
+} from './tools/artifact/artifact-snapshots.js';
 export {
   RecordArtifactTool,
   isRecordableDerivedChild,
@@ -472,6 +483,7 @@ export * from './services/backgroundShellRegistry.js';
 export * from './agents/background-notification-queue.js';
 export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
+export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export {
   listSavedWorkflows,
@@ -480,15 +492,26 @@ export {
   validateWorkflowName,
   getSavedWorkflowDirs,
   WORKFLOW_NAME_PATTERN,
+  EXTENSION_WORKFLOW_NAME_PATTERN,
+  qualifyExtensionWorkflowName,
+  parseExtensionWorkflowName,
   type SavedWorkflowEntry,
+  type SavedWorkflowScope,
   type SavedWorkflowSource,
   type ResolvedSavedWorkflow,
   type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
 export {
+  loadExtensionWorkflows,
+  MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
+  type ExtensionWorkflowDefinition,
+} from './agents/runtime/workflow-extension.js';
+export {
   extractAndStripMeta,
   type WorkflowMeta,
 } from './agents/runtime/workflow-sandbox.js';
+export * from './agents/runtime/workflow-size.js';
+export * from './agents/runtime/workflow-script-shape.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
@@ -548,9 +571,9 @@ export * from './lsp/configHash.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
 export * from './lsp/LspResponseNormalizer.js';
-export * from './lsp/LspServerManager.js';
+export * from './lsp/lsp-server-manager.js';
 export * from './lsp/NativeLspClient.js';
-export * from './lsp/NativeLspService.js';
+export * from './lsp/native-lsp-service.js';
 export * from './lsp/types.js';
 
 // ============================================================================
@@ -598,6 +621,7 @@ export {
   logSpeculation,
   logWorkflowKeyword,
   logWorkflowRun,
+  logWorkflowSizeWarning,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -615,6 +639,7 @@ export {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
 
 // ============================================================================
@@ -697,6 +722,7 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
+export * from './utils/background-turn-context.js';
 export * from './tools/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
@@ -718,6 +744,7 @@ export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';
 export * from './utils/secure-browser-launcher.js';
+export { initParser as initShellAstParser } from './utils/shellAstParser.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
 export * from './utils/symlink.js';
@@ -757,6 +784,21 @@ export { MessageBus } from './confirmation-bus/message-bus.js';
 
 export { makeFakeConfig } from './test-utils/config.js';
 export * from './test-utils/index.js';
+export {
+  extractCodeModeImageContent,
+  getToolCallRuntime,
+  runWithoutToolCallRuntime,
+  runWithToolCallRuntime,
+  type CodeModeImageContent,
+  type CodeModeToolResult,
+  type ToolCallRuntimeContext,
+} from './code-mode/tool-call-runtime.js';
+export {
+  getToolExposure,
+  isCodeModeToolCallAllowed,
+  ToolMode,
+  type ToolExposure,
+} from './tools/code-mode.js';
 
 // ============================================================================
 // Hooks
@@ -770,6 +812,12 @@ export {
   hookEventSupportsMatcher,
 } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export { buildHooksListing } from './hooks/hooks-listing.js';
+export type {
+  HooksListing,
+  HooksListingOrigin,
+  HooksListingRow,
+} from './hooks/hooks-listing.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   STOP_HOOK_BLOCK_CAP_ENV,
@@ -777,7 +825,7 @@ export {
   resolveStopHookBlockingCap,
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
-export { type StopFailureErrorType } from './hooks/types.js';
+export type { StopFailureErrorType } from './hooks/types.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,

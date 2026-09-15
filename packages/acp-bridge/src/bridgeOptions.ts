@@ -229,6 +229,8 @@ export interface BridgeTelemetry {
  * strictly-required field. See per-field JSDoc for caller contract.
  */
 export interface BridgeOptions {
+  /** Captured owner runtime for saved webpage bytes and references. */
+  artifactSnapshotRuntimeBaseDir?: string;
   /**
    * Runtime-owned directory for persistent session attachment bytes. Daemon
    * callers provide a workspace-scoped directory under the Qwen runtime temp

@@ -42,10 +42,12 @@ const KNOWN_AGENT_OPTS = [
   'phase',
   'schema',
   'model',
+  'effort',
   'isolation',
   'agentType',
   'stallMs',
   'workingDir',
+  'disallowedTools',
 ];
 
 async function runScript(
@@ -358,5 +360,25 @@ describe('the generated review batch script', () => {
     const generated = script.slice(0, script.length - FAN_OUT_BODY.length);
     expect(generated).not.toContain('parallel(');
     expect(generated).not.toContain('agent(');
+  });
+});
+
+// The harness mirrors the runtime allowlist, so it has to accept what the
+// runtime accepts: otherwise the first generated script to use one of these
+// options fails here while production runs it.
+describe('the review harness option mirror', () => {
+  it('accepts the effort and disallowedTools options the runtime accepts', async () => {
+    const script = [
+      'export const meta = {',
+      "  name: 'probe',",
+      '};',
+      "await agent('p', { effort: 'low', disallowedTools: ['write_file'] });",
+      "return 'ok';",
+    ].join('\n');
+    const { result, dispatched } = await runScript(script, async () => 'done');
+    expect(result).toBe('ok');
+    expect(dispatched).toEqual([
+      { prompt: 'p', opts: { effort: 'low', disallowedTools: ['write_file'] } },
+    ]);
   });
 });
