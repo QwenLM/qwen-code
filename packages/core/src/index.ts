@@ -491,11 +491,20 @@ export {
   validateWorkflowName,
   getSavedWorkflowDirs,
   WORKFLOW_NAME_PATTERN,
+  EXTENSION_WORKFLOW_NAME_PATTERN,
+  qualifyExtensionWorkflowName,
+  parseExtensionWorkflowName,
   type SavedWorkflowEntry,
+  type SavedWorkflowScope,
   type SavedWorkflowSource,
   type ResolvedSavedWorkflow,
   type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
+export {
+  loadExtensionWorkflows,
+  MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
+  type ExtensionWorkflowDefinition,
+} from './agents/runtime/workflow-extension.js';
 export {
   extractAndStripMeta,
   type WorkflowMeta,

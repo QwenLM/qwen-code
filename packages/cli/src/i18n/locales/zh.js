@@ -143,6 +143,7 @@ export default {
   'from {{marketplace}}': '来自 {{marketplace}}',
   installed: '已安装',
   '{{count}} Agents': '{{count}} 个智能体',
+  '{{count}} Workflows': '{{count}} 个工作流',
   '{{count}} Commands': '{{count}} 个命令',
   '{{count}} MCP': '{{count}} 个 MCP',
   '{{count}} Skills': '{{count}} 个技能',
@@ -895,6 +896,8 @@ export default {
   'This extension will install the following skills:': '此扩展将安装以下技能：',
   'This extension will install the following subagents:':
     '此扩展将安装以下子智能体：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此扩展将安装以下工作流（可启动子智能体的 JavaScript 脚本）：',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
@@ -966,6 +969,7 @@ export default {
   'Context files:': '上下文文件：',
   'Skills:': '技能：',
   'Agents:': '智能体：',
+  'Workflows:': '工作流：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '链接扩展安装失败。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -2565,6 +2569,8 @@ export default {
   '{{count}} skills': '{{count}} 个技能',
   '{{count}} agent': '{{count}} 个代理',
   '{{count}} agents': '{{count}} 个代理',
+  '{{count}} workflow': '{{count}} 个工作流',
+  '{{count}} workflows': '{{count}} 个工作流',
   '{{count}} hook': '{{count}} 个钩子',
   '{{count}} hooks': '{{count}} 个钩子',
   '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',

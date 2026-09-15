@@ -12861,6 +12861,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         source: 'user',
         scriptPath: '/home/test/.qwen/workflows/release-check.js',
       },
+      {
+        name: 'gcp:audit',
+        source: 'extension',
+        scriptPath: '/home/test/.qwen/extensions/gcp/workflows/audit.js',
+        extensionName: 'gcp',
+        description: 'Audits the project',
+      },
     ]);
 
     const agentPromise = runAcpAgent(
@@ -12935,6 +12942,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
         { name: 'release-check', source: 'user' },
+        { name: 'gcp:audit', source: 'extension' },
       ],
     });
     expect(tasks).toEqual({

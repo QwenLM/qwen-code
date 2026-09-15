@@ -556,6 +556,8 @@ export default {
     'Diese Erweiterung wird folgende Fähigkeiten installieren:',
   'This extension will install the following subagents:':
     'Diese Erweiterung wird folgende Unteragenten installieren:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Diese Erweiterung wird folgende Workflows installieren (JavaScript-Skripte, die Unteragenten starten können):',
   'Installation cancelled for "{{name}}".':
     'Installation von "{{name}}" abgebrochen.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -2134,6 +2136,7 @@ export default {
 
   // === Same-as-English optimization ===
   'Agents:': 'Agenten:',
+  'Workflows:': 'Workflows:',
   Prompt: 'Eingabe',
   'Prompts:': 'Eingaben:',
   'Resources:': 'Ressourcen:',
@@ -2253,6 +2256,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
