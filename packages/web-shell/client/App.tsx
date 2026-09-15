@@ -11785,7 +11785,6 @@ export function App({
       // which a plain scoped settings write wouldn't do.
       const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
       const command = `/language ui ${nextLanguage}${scopeFlag}`;
-      handleLanguageChange(nextLanguage);
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
         await Promise.all([
@@ -11798,15 +11797,29 @@ export function App({
         sessionHasActivePromptRef.current ||
         isGoalGateBlocked()
       ) {
-        handleLanguageChange(previousLanguage);
         blockCommand();
         return;
       }
+      // Switch optimistically, but keep the host on the observe-only channel
+      // until the daemon accepts the change: onLanguageChange persists the
+      // value as the host's own opinion, and a refused or failed pick must
+      // never be persisted. With no host opinion the rolled-back value is
+      // settings-derived, so persisting it would shadow every later
+      // settings.json edit (#11955).
+      setSelectedLanguage(nextLanguage);
+      onLanguageResolvedRef.current?.(nextLanguage);
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
-        .then(refreshSettings)
+        .then(() => {
+          if (!owner.current.isCurrent()) return;
+          // Confirmed by the daemon: the choice now becomes the host's own
+          // opinion (persisted, wins over settings on later loads).
+          handleLanguageChange(nextLanguage);
+          return refreshSettings();
+        })
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
-          handleLanguageChange(previousLanguage);
+          setSelectedLanguage(previousLanguage);
+          onLanguageResolvedRef.current?.(previousLanguage);
           reportError(error, 'Failed to sync /language command');
         });
     },
