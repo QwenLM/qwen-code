@@ -343,6 +343,24 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(
       isHardcodedProjectEnvExclusion('qwen_serve_cdp_tunnel_over_ws'),
     ).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_PROXY_COMMAND')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_proxy_command')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_NET')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_net')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_IMAGE')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_image')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('XDG_CACHE_HOME')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('xdg_cache_home')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TMPDIR')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('tmpdir')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TMP')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TEMP')).toBe(true);
   });
 
   // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded

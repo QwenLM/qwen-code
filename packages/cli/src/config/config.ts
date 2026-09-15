@@ -92,6 +92,7 @@ import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
+import { sandboxCommand } from '../commands/sandbox.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -872,7 +873,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register update command
-    .command(updateCommand);
+    .command(updateCommand)
+    // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
+    .command(sandboxCommand);
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -905,7 +908,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
-      result._[0] === 'update')
+      result._[0] === 'update' ||
+      result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
