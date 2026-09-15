@@ -11470,7 +11470,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         assertFreshSessionsAvailable();
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
-        if (restoreBranch) {
+        if (restoreBranch || req.persistOnly) {
           if (
             byId.size +
               inFlightSpawns.size +
@@ -11480,6 +11480,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ) {
             throw new SessionLimitExceededError(maxSessions);
           }
+        }
+        if (restoreBranch) {
           admission = reserveFreshSession({
             operation: 'branch',
             workspaceCwd: boundWorkspace,

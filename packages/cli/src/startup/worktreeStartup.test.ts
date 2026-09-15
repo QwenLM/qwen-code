@@ -467,7 +467,7 @@ describe('persistStartupWorktreeSidecar', () => {
   }
 
   it.each(['missing', 'foreign-host'] as const)(
-    'adopts an unverifiable %s owner when re-attaching',
+    'refuses an unverifiable %s owner when re-attaching',
     async (statusKind) => {
       tempRepo = await makeTempRepo();
       process.chdir(tempRepo);
@@ -499,16 +499,63 @@ describe('persistStartupWorktreeSidecar', () => {
         );
       }
 
-      await persistStartupWorktreeSidecar(
-        makeConfig(setup.context.worktreePath, 'new-session'),
-        { ...setup.context, wasReattached: true },
-      );
+      const config = makeConfig(setup.context.worktreePath, 'new-session');
+      await expect(
+        persistStartupWorktreeSidecar(config, {
+          ...setup.context,
+          wasReattached: true,
+        }),
+      ).rejects.toMatchObject({
+        name: WorktreeOwnershipConflictError.name,
+        ownerSessionId: 'old-session',
+      });
 
       expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
-        'new-session',
+        'old-session',
       );
+      await expect(
+        readWorktreeSession(
+          config.getSessionService().getWorktreeSessionPath('new-session'),
+        ),
+      ).resolves.toBeNull();
     },
   );
+
+  it('does not write a sidecar when re-attachment marker transfer fails', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('failed-transfer');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    const markerPath = path.join(setup.context.worktreePath, '.qwen-session');
+    await fs.writeFile(markerPath, 'old-session ', 'utf8');
+    await writeRuntimeStatus(
+      new Storage(setup.context.worktreePath).getRuntimeStatusPath(
+        'old-session',
+      ),
+      {
+        sessionId: 'old-session',
+        workDir: setup.context.worktreePath,
+        pid: 2147483647,
+      },
+    );
+    const config = makeConfig(setup.context.worktreePath, 'new-session');
+
+    await expect(
+      persistStartupWorktreeSidecar(config, {
+        ...setup.context,
+        wasReattached: true,
+      }),
+    ).rejects.toThrow('Worktree marker is invalid');
+
+    await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe('old-session ');
+    await expect(
+      readWorktreeSession(
+        config.getSessionService().getWorktreeSessionPath('new-session'),
+      ),
+    ).resolves.toBeNull();
+  });
 
   it('adopts a stale marker when re-attaching to an inactive owner', async () => {
     tempRepo = await makeTempRepo();

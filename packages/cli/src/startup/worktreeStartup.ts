@@ -43,8 +43,15 @@ import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktre
 const debugLogger = createDebugLogger('WORKTREE_STARTUP');
 
 export class WorktreeOwnershipConflictError extends Error {
-  constructor(readonly ownerSessionId: string) {
-    super(`Worktree is owned by active session ${ownerSessionId}`);
+  constructor(
+    readonly ownerSessionId: string,
+    reason: 'active' | 'unverifiable' = 'active',
+  ) {
+    super(
+      reason === 'active'
+        ? `Worktree is owned by active session ${ownerSessionId}`
+        : `Worktree ownership cannot be verified for session ${ownerSessionId}`,
+    );
     this.name = 'WorktreeOwnershipConflictError';
   }
 }
@@ -450,8 +457,9 @@ export async function persistStartupWorktreeSidecar(
           throw new WorktreeOwnershipConflictError(observedOwner);
         }
         if (ownerLiveness === 'unknown') {
-          debugLogger.warn(
-            `persistStartupWorktreeSidecar: owner runtime ${observedOwner} is unverifiable; adopting the reattached worktree`,
+          throw new WorktreeOwnershipConflictError(
+            observedOwner,
+            'unverifiable',
           );
         }
         await replaceWorktreeSessionMarker(
@@ -466,6 +474,7 @@ export async function persistStartupWorktreeSidecar(
     if (error instanceof WorktreeSessionMarkerOwnerChangedError) {
       throw new WorktreeOwnershipConflictError(observedOwner ?? '(unknown)');
     }
+    let markerAlreadyOwned = false;
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       const currentOwner = await readWorktreeSessionMarker(
         context.worktreePath,
@@ -473,7 +482,9 @@ export async function persistStartupWorktreeSidecar(
       if (currentOwner !== null && currentOwner !== sessionId) {
         throw new WorktreeOwnershipConflictError(currentOwner);
       }
+      markerAlreadyOwned = currentOwner === sessionId;
     }
+    if (context.wasReattached && !markerAlreadyOwned) throw error;
     debugLogger.warn(
       `persistStartupWorktreeSidecar: marker update failed; persisting the sidecar without changing ownership: ${error}`,
     );

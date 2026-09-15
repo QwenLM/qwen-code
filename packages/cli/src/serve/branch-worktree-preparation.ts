@@ -13,14 +13,16 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   GitWorktreeService,
-  gitEnv,
   WORKTREE_SESSION_FILE,
-  clearWorktreeSessionDurable,
-  readWorktreeSession,
   readWorktreeSessionMarker,
   worktreeBranchForSlug,
-  type SessionService,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import {
+  clearWorktreeSessionDurable,
+  readWorktreeSession,
+} from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import type { BridgeSessionExecutionSnapshot } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { getHeadCommit } from './server/git-branch-ops.js';

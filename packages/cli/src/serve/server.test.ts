@@ -26029,11 +26029,14 @@ describe('createServeApp', () => {
           new Storage(repo, runtimeDir).getProjectDir(),
           'chats',
         );
+        const sidecarPath = path.join(
+          chatsDir,
+          `${res.body.sessionId}.worktree.json`,
+        );
+        expect(existsSync(sidecarPath)).toBe(true);
         expect(
-          existsSync(
-            path.join(chatsDir, `${res.body.sessionId}.worktree.json`),
-          ),
-        ).toBe(true);
+          JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
+        ).toMatchObject({ workspaceCwd: repo });
         expect(
           existsSync(
             path.join(chatsDir, `.branch-worktree-${res.body.sessionId}.json`),
@@ -26132,6 +26135,12 @@ describe('createServeApp', () => {
           }),
         status: 404,
         code: 'session_not_found',
+      },
+      {
+        name: 'session capacity is full',
+        error: () => new SessionLimitExceededError(1),
+        status: 503,
+        code: 'session_limit_exceeded',
       },
     ])(
       'cleans a prepared worktree when the $name at dispatch',

@@ -105,6 +105,7 @@ import {
   SessionArchivedError,
   SessionConflictError,
   SessionBusyError,
+  SessionLimitExceededError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -5606,6 +5607,7 @@ export function registerSessionRoutes(
                   worktreePath: worktree.path,
                   worktreeBranch: worktree.branch,
                   originalCwd: base.repoTop,
+                  workspaceCwd: runtime.workspaceCwd,
                   originalBranch: base.branch,
                   originalHeadCommit: base.headCommit,
                 });
@@ -5688,6 +5690,7 @@ export function registerSessionRoutes(
                   error instanceof BridgeChannelQuarantinedError ||
                   error instanceof InvalidClientIdError ||
                   error instanceof SessionBusyError ||
+                  error instanceof SessionLimitExceededError ||
                   error instanceof SessionNotFoundError ||
                   errorKind === 'branch_point_invalid' ||
                   errorKind === 'session_not_found' ||

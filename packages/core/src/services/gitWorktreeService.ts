@@ -393,23 +393,11 @@ export async function replaceWorktreeSessionMarker(
   expectedOwner: string,
   sessionId: string,
 ): Promise<void> {
-  try {
-    await transferWorktreeSessionMarkerOwner(
-      worktreePath,
-      expectedOwner,
-      sessionId,
-    );
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.message ===
-        'Worktree marker owner does not match the expectation' ||
-        error.message === 'Worktree marker changed during ownership transfer')
-    ) {
-      throw new WorktreeSessionMarkerOwnerChangedError();
-    }
-    throw error;
-  }
+  await transferWorktreeSessionMarkerOwner(
+    worktreePath,
+    expectedOwner,
+    sessionId,
+  );
 }
 
 /**
@@ -560,13 +548,13 @@ export async function transferWorktreeSessionMarkerOwner(
   }
   if (opening.state === 'missing') {
     if (expectedOwner !== null) {
-      throw new Error('Worktree marker owner does not match the expectation');
+      throw new WorktreeSessionMarkerOwnerChangedError();
     }
     await createWorktreeSessionMarkerExclusive(worktreePath, newOwner);
     return;
   }
   if (opening.sessionId !== expectedOwner) {
-    throw new Error('Worktree marker owner does not match the expectation');
+    throw new WorktreeSessionMarkerOwnerChangedError();
   }
   const euid = process.geteuid?.();
   if (euid !== undefined && opening.uid !== null && opening.uid !== euid) {
@@ -585,7 +573,7 @@ export async function transferWorktreeSessionMarkerOwner(
         current.ino !== opening.ino ||
         current.uid !== opening.uid
       ) {
-        throw new Error('Worktree marker changed during ownership transfer');
+        throw new WorktreeSessionMarkerOwnerChangedError();
       }
     },
   });

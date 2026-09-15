@@ -556,7 +556,7 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
-  it('rejects and clears a sidecar when the marker has another owner', async () => {
+  it('rejects and preserves a sidecar when the marker has another owner', async () => {
     const liveCwd = path.join(tmpDir, 'repo');
     const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'reowned');
     await fs.mkdir(liveWorktree, { recursive: true });
@@ -580,8 +580,41 @@ describe('restoreWorktreeContext', () => {
     );
 
     expect(result).toEqual({ contextMessage: null, session: null });
-    expect(await readWorktreeSession(filePath)).toBeNull();
+    expect(await readWorktreeSession(filePath)).toEqual(live);
   });
+
+  it.each(['missing', 'invalid'] as const)(
+    'rejects and preserves a sidecar when the marker is %s',
+    async (markerState) => {
+      const liveCwd = path.join(tmpDir, `repo-${markerState}`);
+      const liveWorktree = path.join(
+        liveCwd,
+        '.qwen',
+        'worktrees',
+        markerState,
+      );
+      await fs.mkdir(liveWorktree, { recursive: true });
+      const live: WorktreeSession = {
+        ...sample,
+        slug: markerState,
+        originalCwd: liveCwd,
+        worktreePath: liveWorktree,
+      };
+      await writeWorktreeSession(filePath, live);
+      if (markerState === 'invalid') {
+        await fs.mkdir(path.join(liveWorktree, '.qwen-session'));
+      }
+
+      const result = await restoreWorktreeContext(
+        filePath,
+        undefined,
+        'session-owner',
+      );
+
+      expect(result).toEqual({ contextMessage: null, session: null });
+      expect(await readWorktreeSession(filePath)).toEqual(live);
+    },
+  );
 
   it('refuses to restore a live worktree whose sidecar names a replacement session', async () => {
     // A worktree reset moves ownership of the checkout to the replacement

@@ -13,7 +13,7 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import { readWorktreeSessionMarker } from './gitWorktreeService.js';
+import { readWorktreeSessionMarkerStrict } from './gitWorktreeService.js';
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
 const WORKTREE_SESSION_SIDECAR_MAX_BYTES = 64 * 1024;
@@ -737,19 +737,20 @@ export async function restoreWorktreeContext(
   }
 
   if (expectedSessionId !== undefined) {
-    const markerOwner = await readWorktreeSessionMarker(session.worktreePath);
-    if (markerOwner !== expectedSessionId) {
+    const marker = await readWorktreeSessionMarkerStrict(session.worktreePath);
+    if (marker.state !== 'valid' || marker.sessionId !== expectedSessionId) {
+      const markerOwner =
+        marker.state === 'valid'
+          ? marker.sessionId
+          : marker.state === 'missing'
+            ? '(missing)'
+            : `(invalid: ${marker.reason})`;
       onWarn?.(
         new Error(
-          `Worktree marker owner ${markerOwner ?? '(missing)'} does not match ` +
-            `session ${expectedSessionId}; clearing stale sidecar.`,
+          `Worktree marker owner ${markerOwner} does not match session ` +
+            `${expectedSessionId}; refusing restore and preserving sidecar.`,
         ),
       );
-      try {
-        await clearWorktreeSession(sidecarPath);
-      } catch (error) {
-        onWarn?.(error);
-      }
       return { contextMessage: null, session: null };
     }
   }

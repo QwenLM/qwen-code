@@ -18858,6 +18858,32 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects a persisted worktree branch before dispatch at the session cap', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxSessions: 1,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(source.sessionId, {
+          targetSessionId,
+          persistOnly: true,
+        }),
+      ).rejects.toMatchObject({
+        name: 'SessionLimitExceededError',
+        limit: 1,
+      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
     it('rejects a persisted branch whose returned target id changed', async () => {
       const targetSessionId = '11111111-1111-4111-8111-111111111111';
       const handle = makeChannel({

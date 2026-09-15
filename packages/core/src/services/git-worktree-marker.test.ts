@@ -34,6 +34,29 @@ afterEach(async () => {
 });
 
 describe('strict worktree session markers', () => {
+  it.each([
+    'GIT_ASKPASS',
+    'SSH_ASKPASS',
+    'GIT_SSH',
+    'GIT_SSH_COMMAND',
+    'GIT_EXEC_PATH',
+    'GIT_TEMPLATE_DIR',
+    'GIT_EXTERNAL_DIFF',
+    'GIT_PROXY_COMMAND',
+    'PREFIX',
+  ])('sanitizes %s before a real simple-git call', async (key) => {
+    const previous = process.env[key];
+    process.env[key] = '/definitely/not/a/git-helper';
+    try {
+      await expect(
+        new GitWorktreeService(repo).getRepoTopLevel(),
+      ).resolves.toBe(await fs.realpath(repo));
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  });
+
   it('creates once and refuses to overwrite an existing owner', async () => {
     await createWorktreeSessionMarker(repo, 'session-a');
 
@@ -94,8 +117,10 @@ describe('strict worktree session markers', () => {
     execFileSync('git', ['init', '-q'], { cwd: decoy });
     const previousGitDir = process.env['GIT_DIR'];
     const previousGitWorkTree = process.env['GIT_WORK_TREE'];
+    const previousGitAskpass = process.env['GIT_ASKPASS'];
     process.env['GIT_DIR'] = path.join(decoy, '.git');
     process.env['GIT_WORK_TREE'] = decoy;
+    process.env['GIT_ASKPASS'] = '/definitely/not/an/askpass';
     try {
       await createWorktreeSessionMarker(repo, 'session-a');
     } finally {
@@ -105,6 +130,11 @@ describe('strict worktree session markers', () => {
         delete process.env['GIT_WORK_TREE'];
       } else {
         process.env['GIT_WORK_TREE'] = previousGitWorkTree;
+      }
+      if (previousGitAskpass === undefined) {
+        delete process.env['GIT_ASKPASS'];
+      } else {
+        process.env['GIT_ASKPASS'] = previousGitAskpass;
       }
     }
 

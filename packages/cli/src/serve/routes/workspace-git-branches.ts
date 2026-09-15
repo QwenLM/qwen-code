@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import * as path from 'node:path';
 import {
   fetchGitBranches,
   findGitRoot,
@@ -36,9 +37,17 @@ const GIT_ERROR_MESSAGE_MAX = 512;
 // `.git/index.lock`) that must never reach the client.
 function redactGitPaths(detail: string, cwd: string): string {
   const gitRoot = findGitRoot(cwd);
-  let message = detail.split(cwd).join('<workspace>');
-  if (gitRoot && gitRoot !== cwd) {
-    message = message.split(gitRoot).join('<workspace>');
+  const roots = new Set([cwd, ...(gitRoot ? [gitRoot] : [])]);
+  const managedWorktreeSegment = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
+  const managedWorktreeOffset = path
+    .resolve(cwd)
+    .indexOf(managedWorktreeSegment);
+  if (managedWorktreeOffset > 0) {
+    roots.add(path.resolve(cwd).slice(0, managedWorktreeOffset));
+  }
+  let message = detail;
+  for (const root of [...roots].sort((a, b) => b.length - a.length)) {
+    message = message.split(root).join('<workspace>');
   }
   return message;
 }
