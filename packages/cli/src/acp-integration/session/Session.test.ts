@@ -68,8 +68,18 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
-import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import {
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+} from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { EventBus } from '@qwen-code/acp-bridge/eventBus';
+import {
+  BridgeClient,
+  type BridgeClientSessionEntry,
+} from '@qwen-code/acp-bridge/bridgeClient';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../live/live-speak-to-user.js';
 import {
@@ -1853,6 +1863,22 @@ describe('Session', () => {
     });
   });
 
+  const makeWorkflowApproval = (approvalId: string): core.WorkflowApproval => ({
+    approvalId,
+    subagentId: `agent-${approvalId}`,
+    callId: `call-${approvalId}`,
+    name: 'run_shell_command',
+    description: 'Run command',
+    confirmationDetails: {
+      type: 'exec',
+      title: 'Run command',
+      command: 'echo safe',
+      rootCommand: 'echo',
+      hideAlwaysAllow: true,
+    },
+    at: 1,
+  });
+
   it('bridges workflow approvals through ACP permission requests', async () => {
     mockToolRegistry.getTool.mockReturnValue({
       displayName: 'Shell',
@@ -1951,31 +1977,15 @@ describe('Session', () => {
       );
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
       .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = callback(
       { runId: 'wf_concurrent' } as core.WorkflowTask,
-      makeApproval('wfap_first'),
+      makeWorkflowApproval('wfap_first'),
       { command: 'echo first' },
       new AbortController().signal,
     );
     const second = callback(
       { runId: 'wf_concurrent' } as core.WorkflowTask,
-      makeApproval('wfap_second'),
+      makeWorkflowApproval('wfap_second'),
       { command: 'echo second' },
       new AbortController().signal,
     );
@@ -2014,23 +2024,26 @@ describe('Session', () => {
     );
   });
 
-  it('serializes permissions across sessions sharing one ACP connection', async () => {
-    let resolveFirst:
+  it('does not serialize permissions across sessions sharing one ACP connection', async () => {
+    let settleFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    let settleSecond:
       | ((response: RequestPermissionResponse) => void)
       | undefined;
     vi.mocked(mockClient.requestPermission)
       .mockImplementationOnce(
         () =>
           new Promise<RequestPermissionResponse>((resolve) => {
-            resolveFirst = resolve;
+            settleFirst = resolve;
           }),
       )
-      .mockResolvedValueOnce({
-        outcome: {
-          outcome: 'selected',
-          optionId: core.ToolConfirmationOutcome.ProceedOnce,
-        },
-      });
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            settleSecond = resolve;
+          }),
+      );
     const secondWorkflowRunRegistry = {
       ...mockWorkflowRunRegistry,
       setApprovalRequestCallback: vi.fn(),
@@ -2052,55 +2065,65 @@ describe('Session', () => {
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
     const secondCallback = secondWorkflowRunRegistry.setApprovalRequestCallback
       .mock.calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
-    const makeApproval = (): core.WorkflowApproval => ({
-      approvalId: 'wfap_1',
-      subagentId: 'agent-1',
-      callId: 'call-1',
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = firstCallback(
       { runId: 'wf_first' } as core.WorkflowTask,
-      makeApproval(),
+      makeWorkflowApproval('wfap_first'),
       { command: 'echo first' },
       new AbortController().signal,
     );
     const second = secondCallback(
       { runId: 'wf_second' } as core.WorkflowTask,
-      makeApproval(),
+      makeWorkflowApproval('wfap_second'),
       { command: 'echo second' },
       new AbortController().signal,
     );
 
+    // Neither request is answered and neither signal aborts, which is the
+    // shape of an idle session nobody is watching: a sibling session sharing
+    // the connection must still reach the client.
     await vi.waitFor(() => {
-      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
     });
-    resolveFirst?.({
-      outcome: {
-        outcome: 'selected',
-        optionId: core.ToolConfirmationOutcome.ProceedOnce,
-      },
-    });
-    await Promise.all([first, second]);
-
-    expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
     expect(
       vi
         .mocked(mockClient.requestPermission)
         .mock.calls.map(([request]) => request.toolCall.toolCallId),
     ).toEqual([
-      'workflow:test-session-id:wf_first:wfap_1',
-      'workflow:second-session-id:wf_second:wfap_1',
+      'workflow:test-session-id:wf_first:wfap_first',
+      'workflow:second-session-id:wf_second:wfap_second',
     ]);
+
+    settleFirst?.({ outcome: { outcome: 'cancelled' } });
+    settleSecond?.({ outcome: { outcome: 'cancelled' } });
+    await Promise.allSettled([first, second]);
+
+    // The send half above only shows where the request went. Each session must
+    // also settle its own approval against its own registry.
+    expect(mockWorkflowRunRegistry.resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_first',
+      'wfap_first',
+      core.ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+    expect(
+      secondWorkflowRunRegistry.resolvePendingApproval,
+    ).toHaveBeenCalledWith(
+      'wf_second',
+      'wfap_second',
+      core.ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+    expect(
+      mockWorkflowRunRegistry.resolvePendingApproval.mock.calls.map(
+        ([runId]) => runId,
+      ),
+    ).toEqual(['wf_first']);
+    expect(
+      secondWorkflowRunRegistry.resolvePendingApproval.mock.calls.map(
+        ([runId]) => runId,
+      ),
+    ).toEqual(['wf_second']);
+
     secondSession.dispose();
   });
 
@@ -2124,25 +2147,9 @@ describe('Session', () => {
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
       .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
     const firstAbort = new AbortController();
-    const makeApproval = (approvalId: string): core.WorkflowApproval => ({
-      approvalId,
-      subagentId: `agent-${approvalId}`,
-      callId: `call-${approvalId}`,
-      name: 'run_shell_command',
-      description: 'Run command',
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command',
-        command: 'echo safe',
-        rootCommand: 'echo',
-        hideAlwaysAllow: true,
-      },
-      at: 1,
-    });
-
     const first = callback(
       { runId: 'wf_abort_queue' } as core.WorkflowTask,
-      makeApproval('wfap_aborted'),
+      makeWorkflowApproval('wfap_aborted'),
       { command: 'echo first' },
       firstAbort.signal,
     );
@@ -2151,7 +2158,7 @@ describe('Session', () => {
     });
     const second = callback(
       { runId: 'wf_abort_queue' } as core.WorkflowTask,
-      makeApproval('wfap_after_abort'),
+      makeWorkflowApproval('wfap_after_abort'),
       { command: 'echo second' },
       new AbortController().signal,
     );
@@ -2166,6 +2173,71 @@ describe('Session', () => {
     await second;
     // Settle the orphaned RPC so no dangling promises remain.
     settleFirstTransport?.({ outcome: { outcome: 'cancelled' } });
+  });
+
+  it('drops a queued permission request that was abandoned before the head settled', async () => {
+    let settleFirst:
+      | ((response: RequestPermissionResponse) => void)
+      | undefined;
+    vi.mocked(mockClient.requestPermission)
+      .mockImplementationOnce(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            settleFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+    const first = callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_head'),
+      { command: 'echo first' },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    });
+    const queuedAbort = new AbortController();
+    const queued = callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_queued'),
+      { command: 'echo second' },
+      queuedAbort.signal,
+    );
+    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+
+    queuedAbort.abort();
+    await queued;
+    settleFirst?.({ outcome: { outcome: 'cancelled' } });
+    await first;
+    // The head releasing must not resurrect the abandoned request. Published
+    // after its caller is gone, it would sit on the host as a prompt nobody
+    // can answer and no longer cancels.
+    expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+    expect(
+      vi
+        .mocked(mockWorkflowRunRegistry.resolvePendingApproval)
+        .mock.calls.map(([, approvalId]) => approvalId),
+    ).toEqual(['wfap_queued', 'wfap_head']);
+
+    // Dropping it must not wedge the session queue either.
+    await callback(
+      { runId: 'wf_queued_abort' } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_after'),
+      { command: 'echo third' },
+      new AbortController().signal,
+    );
+    expect(mockClient.requestPermission).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(mockClient.requestPermission).mock.calls[1]?.[0].toolCall
+        .toolCallId,
+    ).toBe('workflow:test-session-id:wf_queued_abort:wfap_after');
   });
 
   it('fails a workflow approval closed when the ACP request times out', async () => {
@@ -10886,6 +10958,898 @@ describe('Session', () => {
       expect(messageBus.request).not.toHaveBeenCalled();
     });
 
+    describe('per_task channel output', () => {
+      afterEach(async () => {
+        session.dispose();
+        await vi.waitFor(() => {
+          expect(
+            (session as unknown as { channelTaskCaptures: Set<unknown> })
+              .channelTaskCaptures.size,
+          ).toBe(0);
+        });
+      });
+      const workChainId = 'test-session-id########1';
+      const taskPrompt: PromptRequest = {
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task',
+        },
+      };
+      const textStream = (text: string) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text }] } }],
+            },
+          },
+        ]);
+      const emitNotification = (
+        kind: 'agent' | 'shell' | 'monitor' | 'workflow',
+        taskId: string,
+        chainId = workChainId,
+        status: 'completed' | 'cancelled' = 'completed',
+      ) => {
+        const registry = {
+          agent: mockBackgroundTaskRegistry,
+          shell: mockBackgroundShellRegistry,
+          monitor: mockMonitorRegistry,
+          workflow: mockWorkflowRunRegistry,
+        }[kind];
+        const callback =
+          'setCompletionCallback' in registry
+            ? registry.setCompletionCallback.mock.calls[0][0]
+            : registry.setNotificationCallback.mock.calls[0][0];
+        const idField = {
+          agent: 'agentId',
+          shell: 'shellId',
+          monitor: 'monitorId',
+          workflow: 'runId',
+        }[kind];
+        callback('done', '<task-notification />', {
+          [idField]: taskId,
+          status,
+          todoWorkChainId: chainId,
+        });
+      };
+      const expectMainReleased = async () => {
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(
+            (session as unknown as { pendingPromptCompletion: unknown })
+              .pendingPromptCompletion,
+          ).toBeNull();
+        });
+      };
+
+      it('honors cancellation for a locally handled command without a work chain', async () => {
+        const cancellation = new AbortController();
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          cancellation.abort();
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'Already compressed.',
+          };
+        });
+
+        const result = await session.prompt(
+          {
+            ...taskPrompt,
+            prompt: [{ type: 'text', text: '/compress' }],
+          },
+          undefined,
+          cancellation.signal,
+        );
+
+        expect(result.stopReason).toBe('cancelled');
+        expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+        expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+      });
+
+      it('does not wait for unowned work after a locally handled command', async () => {
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([
+          { id: 'unowned-agent', status: 'running', isBackgrounded: true },
+        ]);
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'info',
+          content: 'Already compressed.',
+        });
+        let result: Awaited<ReturnType<Session['prompt']>> | undefined;
+        const resultPromise = session
+          .prompt({
+            ...taskPrompt,
+            prompt: [{ type: 'text', text: '/compress' }],
+          })
+          .then((value) => {
+            result = value;
+          });
+        try {
+          await vi.waitFor(() => expect(result).toBeDefined());
+          expect(result?.stopReason).toBe('end_turn');
+          expect(result?._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+          expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+        } finally {
+          session.dispose();
+          await resultPromise;
+        }
+      });
+
+      it.each([
+        ['agent', 'running'],
+        ['agent', 'paused'],
+        ['agent', 'cancelled'],
+        ['shell', 'running'],
+        ['monitor', 'running'],
+        ['workflow', 'running'],
+        ['workflow', 'pausing'],
+        ['workflow', 'paused'],
+      ] as const)(
+        'waits for a related %s in %s state and its notification response without locking the drain',
+        async (kind, status) => {
+          const task = {
+            id: 'background-1',
+            description: 'Background task',
+            todoWorkChainId: workChainId,
+            status: status as string,
+            isBackgrounded: true,
+            notified: false,
+          };
+          const list = {
+            agent: mockBackgroundTaskRegistry.getAll,
+            shell: mockBackgroundShellRegistry.getAll,
+            monitor: mockMonitorRegistry.getAll,
+            workflow: mockWorkflowRunRegistry.list,
+          }[kind];
+          list.mockReturnValue([task]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(textStream('Main result'))
+            .mockResolvedValueOnce(textStream('Background final'));
+          let settled = false;
+          const resultPromise = session.prompt(taskPrompt).then((result) => {
+            settled = true;
+            return result;
+          });
+          await expectMainReleased();
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          expect(settled).toBe(false);
+
+          const terminalStatus =
+            status === 'cancelled' ? 'cancelled' : 'completed';
+          task.status = terminalStatus;
+          task.notified = true;
+          emitNotification(kind, task.id, workChainId, terminalStatus);
+          await vi.waitFor(() => expect(settled).toBe(true));
+          const result = await resultPromise;
+
+          expect(result).toMatchObject({
+            stopReason: 'end_turn',
+            _meta: { [CHANNEL_TASK_RESULT_META_KEY]: 'Background final' },
+          });
+          const response = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.find(
+              ([params]) =>
+                params.update.sessionUpdate === 'agent_message_chunk' &&
+                params.update.content.type === 'text' &&
+                params.update.content.text === 'Background final',
+            );
+          expect(response?.[0].update._meta).toMatchObject({
+            source: 'background_notification_response',
+            [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+          });
+        },
+      );
+
+      it('waits for the last related notification after its queue and registry drain', async () => {
+        const task = {
+          id: 'agent-last',
+          description: 'Last task',
+          status: 'running',
+          todoWorkChainId: workChainId,
+          isBackgrounded: true,
+          notified: false,
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockImplementationOnce(async () => {
+            await gate;
+            return textStream('Last background result');
+          });
+        let result: Awaited<ReturnType<Session['prompt']>> | undefined;
+        const resultPromise = session.prompt(taskPrompt).then((value) => {
+          result = value;
+        });
+        try {
+          await expectMainReleased();
+          task.status = 'completed';
+          task.notified = true;
+          emitNotification('agent', task.id);
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          const internals = session as unknown as {
+            notificationQueue: unknown[];
+            channelTaskCaptures: Set<unknown>;
+          };
+          expect(internals.notificationQueue).toHaveLength(0);
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          expect(result).toBeUndefined();
+          expect(internals.channelTaskCaptures.size).toBe(1);
+          release();
+          await resultPromise;
+          expect(result?._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+            'Last background result',
+          );
+        } finally {
+          release();
+          session.dispose();
+          await resultPromise;
+        }
+      });
+
+      it('returns max_tokens without waiting for related background work', async () => {
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([
+          {
+            id: 'agent-running',
+            status: 'running',
+            isBackgrounded: true,
+            todoWorkChainId: workChainId,
+          },
+        ]);
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockLlmClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 101,
+          newTokenCount: 101,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        let result: Awaited<ReturnType<Session['prompt']>> | undefined;
+        const resultPromise = session.prompt(taskPrompt).then((value) => {
+          result = value;
+        });
+        try {
+          await vi.waitFor(() => expect(result).toBeDefined());
+          expect(result?.stopReason).toBe('max_tokens');
+          expect(result?._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+          expect(
+            (session as unknown as { channelTaskCaptures: Set<unknown> })
+              .channelTaskCaptures.size,
+          ).toBe(0);
+        } finally {
+          session.dispose();
+          await resultPromise;
+        }
+      });
+
+      it('preserves a per_task result across a temporary close gate', async () => {
+        const task = {
+          id: 'agent-1',
+          description: 'Related background task',
+          status: 'running',
+          isBackgrounded: true,
+          notified: false,
+          todoWorkChainId: workChainId,
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockResolvedValueOnce(textStream('Background final'));
+        let settled = false;
+        const resultPromise = session.prompt(taskPrompt).then((result) => {
+          settled = true;
+          return result;
+        });
+        await expectMainReleased();
+        const releaseGate = session.beginClose();
+        try {
+          let drained = false;
+          const drain = session.waitForActiveTurnsToSettle().then(() => {
+            drained = true;
+          });
+          await vi.waitFor(() => expect(drained).toBe(true));
+          await drain;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          expect(settled).toBe(false);
+          task.status = 'completed';
+          task.notified = true;
+          emitNotification('agent', task.id);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          releaseGate();
+          expect(await resultPromise).toMatchObject({
+            stopReason: 'end_turn',
+            _meta: { [CHANNEL_TASK_RESULT_META_KEY]: 'Background final' },
+          });
+        } finally {
+          releaseGate();
+          session.dispose();
+          await resultPromise;
+        }
+      });
+
+      it('keeps history mutations busy while a per_task result is pending', async () => {
+        const task = {
+          id: 'agent-1',
+          status: 'running',
+          isBackgrounded: true,
+          notified: false,
+          todoWorkChainId: workChainId,
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(textStream('Main result'));
+        const resultPromise = session.prompt(taskPrompt);
+        try {
+          await expectMainReleased();
+          expect(session.isTurnIdle()).toBe(false);
+          expect(() => session.beginHistoryMutation()).toThrow(
+            'Session is busy processing a turn',
+          );
+          expect(() => session.rewindToTurn(0)).toThrow(
+            'Cannot rewind while a prompt is running',
+          );
+          expect(() => session.restoreHistory([])).toThrow(
+            'Cannot restore history while a prompt is running',
+          );
+          task.status = 'completed';
+          task.notified = true;
+          await resultPromise;
+          expect(session.isTurnIdle()).toBe(true);
+          session.beginHistoryMutation()();
+        } finally {
+          session.dispose();
+          await resultPromise;
+        }
+      });
+
+      it('waits for an in-flight notification and keeps only its latest non-empty response', async () => {
+        const task = {
+          id: 'agent-1',
+          description: 'Background task',
+          todoWorkChainId: workChainId,
+          status: 'running',
+          isBackgrounded: true,
+          notified: false,
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+        let finishLast!: () => void;
+        const last = new Promise<void>((resolve) => {
+          finishLast = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockResolvedValueOnce(textStream('Earlier callback result'))
+          .mockImplementationOnce(async () => {
+            await last;
+            return textStream('Final callback result');
+          })
+          .mockResolvedValueOnce(textStream('  '));
+        let settled = false;
+        const resultPromise = session.prompt(taskPrompt).then((result) => {
+          settled = true;
+          return result;
+        });
+        await expectMainReleased();
+        task.status = 'completed';
+        task.notified = true;
+        emitNotification('agent', 'agent-1');
+        emitNotification('agent', 'agent-2');
+        emitNotification('agent', 'agent-3');
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        });
+        expect(settled).toBe(false);
+        finishLast();
+        const result = await resultPromise;
+        expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+          'Final callback result',
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+      });
+
+      it('keeps waiting when a notification creates another related background task', async () => {
+        const first = {
+          id: 'agent-1',
+          description: 'Background task',
+          todoWorkChainId: workChainId,
+          status: 'running',
+          isBackgrounded: true,
+          notified: false,
+        };
+        const nested = { ...first, id: 'agent-2' };
+        const tasks = [first];
+        mockBackgroundTaskRegistry.getAll.mockImplementation(() => tasks);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockImplementationOnce(async () => {
+            tasks.push(nested);
+            return textStream('Spawned follow-up work');
+          })
+          .mockResolvedValueOnce(textStream('Nested final'));
+        let settled = false;
+        const resultPromise = session.prompt(taskPrompt).then((result) => {
+          settled = true;
+          return result;
+        });
+        await expectMainReleased();
+        first.status = 'completed';
+        first.notified = true;
+        emitNotification('agent', first.id);
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+        expect(settled).toBe(false);
+        nested.status = 'completed';
+        nested.notified = true;
+        emitNotification('agent', nested.id);
+        expect(
+          (await resultPromise)._meta?.[CHANNEL_TASK_RESULT_META_KEY],
+        ).toBe('Nested final');
+      });
+
+      it.each(['agent', 'shell'] as const)(
+        'follows real %s registry completion through the notification drain',
+        async (kind) => {
+          session.dispose();
+          const directory = fsSync.mkdtempSync(
+            path.join(os.tmpdir(), 'qwen-channel-task-'),
+          );
+          const agents = new core.BackgroundTaskRegistry();
+          const shells = new core.BackgroundShellRegistry();
+          vi.mocked(mockConfig.getBackgroundTaskRegistry).mockReturnValue(
+            agents,
+          );
+          vi.mocked(mockConfig.getBackgroundShellRegistry).mockReturnValue(
+            shells,
+          );
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+          let registered!: core.AgentTask | core.ShellTask;
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementationOnce(async () => {
+              const common = {
+                status: 'running' as const,
+                startTime: Date.now(),
+                abortController: new AbortController(),
+                todoWorkChainId: workChainId,
+              };
+              registered =
+                kind === 'agent'
+                  ? agents.register({
+                      ...common,
+                      agentId: 'actual-agent',
+                      description: 'Actual background agent',
+                      isBackgrounded: true,
+                      outputFile: path.join(directory, 'agent.jsonl'),
+                    })
+                  : shells.register({
+                      ...common,
+                      shellId: 'actual-shell',
+                      command: 'already-running-test-command',
+                      cwd: directory,
+                      outputPath: path.join(directory, 'shell.output'),
+                    });
+              return textStream('Main final');
+            })
+            .mockResolvedValueOnce(textStream('Actual callback final'));
+          const resultPromise = session.prompt(taskPrompt);
+          try {
+            await expectMainReleased();
+            expect(registered.notified).toBe(false);
+            if (kind === 'agent') agents.complete('actual-agent', 'done');
+            else shells.complete('actual-shell', 0, Date.now());
+            expect(registered.status).toBe('completed');
+            expect(registered.notified).toBe(true);
+            const result = await resultPromise;
+            expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+              'Actual callback final',
+            );
+            expect(
+              mockChatRecordingService.recordNotification,
+            ).toHaveBeenCalled();
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          } finally {
+            session.dispose();
+            await resultPromise;
+            fsSync.rmSync(directory, { recursive: true, force: true });
+          }
+        },
+      );
+
+      it('keeps overlapping user prompts associated with their own task chains', async () => {
+        const first = {
+          id: 'agent-1',
+          description: 'First task',
+          todoWorkChainId: workChainId,
+          status: 'running',
+          isBackgrounded: true,
+          notified: false,
+        };
+        const second = {
+          ...first,
+          id: 'agent-2',
+          todoWorkChainId: 'test-session-id########2',
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([first, second]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('First main'))
+          .mockResolvedValueOnce(textStream('Second main'))
+          .mockResolvedValueOnce(textStream('First task final'))
+          .mockResolvedValueOnce(textStream('Second task final'));
+        const firstResult = session.prompt(taskPrompt);
+        await expectMainReleased();
+        let secondSettled = false;
+        const secondResult = session.prompt(taskPrompt).then((result) => {
+          secondSettled = true;
+          return result;
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(
+            (session as unknown as { pendingPromptCompletion: unknown })
+              .pendingPromptCompletion,
+          ).toBeNull();
+        });
+        first.status = 'completed';
+        first.notified = true;
+        emitNotification('agent', first.id);
+        expect((await firstResult)._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+          'First task final',
+        );
+        expect(secondSettled).toBe(false);
+        second.status = 'completed';
+        second.notified = true;
+        emitNotification('agent', second.id, second.todoWorkChainId);
+        expect((await secondResult)._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+          'Second task final',
+        );
+      });
+
+      it('does not return a captured background result after cancellation', async () => {
+        const first = {
+          id: 'agent-1',
+          description: 'First task',
+          todoWorkChainId: workChainId,
+          status: 'running',
+          isBackgrounded: true,
+          notified: false,
+        };
+        const second = { ...first, id: 'agent-2' };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([first, second]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockResolvedValueOnce(textStream('Earlier background result'))
+          .mockResolvedValueOnce(textStream('Late background result'));
+        const cancellation = new AbortController();
+        const resultPromise = session.prompt(
+          taskPrompt,
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'cancelled-task',
+          },
+          cancellation.signal,
+        );
+        await expectMainReleased();
+        first.status = 'completed';
+        first.notified = true;
+        emitNotification('agent', first.id);
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                content: { type: 'text', text: 'Earlier background result' },
+                _meta: expect.objectContaining({
+                  [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+                }),
+              }),
+            }),
+          );
+        });
+        let releaseFlush!: () => void;
+        mockChatRecordingService.flush.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseFlush = resolve;
+            }),
+        );
+        try {
+          cancellation.abort();
+          await vi.waitFor(() => expect(releaseFlush).toBeDefined());
+          expect(
+            (session as unknown as { channelTaskCaptures: Set<unknown> })
+              .channelTaskCaptures.size,
+          ).toBe(1);
+          second.status = 'completed';
+          second.notified = true;
+          emitNotification('agent', second.id);
+          await vi.waitFor(() => {
+            const response = vi
+              .mocked(mockClient.sessionUpdate)
+              .mock.calls.map(([params]) => params.update)
+              .find(
+                (update) =>
+                  update.sessionUpdate === 'agent_message_chunk' &&
+                  update.content.type === 'text' &&
+                  update.content.text === 'Late background result',
+              );
+            expect(response).toBeDefined();
+            expect(
+              response?._meta?.[CHANNEL_TASK_OUTPUT_META_KEY],
+            ).toBeUndefined();
+          });
+          releaseFlush();
+          const result = await resultPromise;
+          expect(result.stopReason).toBe('cancelled');
+          expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+        } finally {
+          releaseFlush?.();
+          session.dispose();
+          await resultPromise;
+        }
+      });
+
+      it('defers unrelated notification text until the per_task result settles', async () => {
+        const task = {
+          id: 'related-agent',
+          status: 'running',
+          isBackgrounded: true,
+          notified: false,
+          todoWorkChainId: workChainId,
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockResolvedValueOnce(textStream('Unrelated background result'));
+        const resultPromise = session.prompt(taskPrompt);
+        try {
+          await expectMainReleased();
+          emitNotification('agent', 'unrelated-agent', 'another-chain');
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          task.status = 'completed';
+          task.notified = true;
+          const result = await resultPromise;
+          await vi.waitFor(() => {
+            const response = vi
+              .mocked(mockClient.sessionUpdate)
+              .mock.calls.map(([params]) => params.update)
+              .find(
+                (update) =>
+                  update.sessionUpdate === 'agent_message_chunk' &&
+                  update.content.type === 'text' &&
+                  update.content.text === 'Unrelated background result',
+              );
+            expect(response).toBeDefined();
+            expect(
+              response?._meta?.[CHANNEL_TASK_OUTPUT_META_KEY],
+            ).toBeUndefined();
+          });
+          expect(result.stopReason).toBe('end_turn');
+          expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+        } finally {
+          session.dispose();
+          await resultPromise;
+        }
+      });
+
+      it('does not wait for unrelated or unowned work and keeps the main result fallback', async () => {
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([
+          {
+            id: 'old-agent',
+            status: 'running',
+            isBackgrounded: true,
+            todoWorkChainId: 'previous-user-task',
+          },
+          { id: 'unowned-agent', status: 'running', isBackgrounded: true },
+        ]);
+        mockMonitorRegistry.getAll.mockReturnValue([
+          { id: 'unowned-monitor', status: 'running' },
+        ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(textStream('Main final'));
+        const result = await session.prompt(taskPrompt);
+        expect(result.stopReason).toBe('end_turn');
+        expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+      });
+
+      it.each(['none', 'complete', 'empty'] as const)(
+        'preserves partial task output with a %s successor response',
+        async (successor) => {
+          const first = {
+            id: 'agent-1',
+            description: 'Related background task',
+            status: 'running',
+            isBackgrounded: true,
+            notified: false,
+            todoWorkChainId: workChainId,
+          };
+          const second = { ...first, id: 'agent-2' };
+          mockBackgroundTaskRegistry.getAll.mockReturnValue([first, second]);
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: {},
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockResolvedValue({
+                llmContent: 'file contents',
+                returnDisplay: 'file contents',
+              }),
+            }),
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(textStream('Main result'))
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      { content: { parts: [{ text: 'Partial result' }] } },
+                    ],
+                    functionCalls: [
+                      { id: 'read-1', name: 'read_file', args: {} },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockRejectedValueOnce(
+              new Error('Background follow-up unavailable'),
+            )
+            .mockResolvedValueOnce(
+              textStream(successor === 'complete' ? 'Complete result' : '  '),
+            );
+          const resultPromise = session.prompt(taskPrompt);
+          const backgroundResponses = () =>
+            vi
+              .mocked(mockClient.sessionUpdate)
+              .mock.calls.map(([params]) => params.update)
+              .filter(
+                (update) =>
+                  update._meta?.['source'] ===
+                  'background_notification_response',
+              );
+          try {
+            await expectMainReleased();
+            first.status = 'completed';
+            first.notified = true;
+            emitNotification('agent', first.id);
+            await vi.waitFor(() =>
+              expect(backgroundResponses()).toContainEqual(
+                expect.objectContaining({
+                  _meta: expect.objectContaining({
+                    backgroundTask: expect.objectContaining({
+                      taskId: first.id,
+                      turnComplete: true,
+                      partial: true,
+                    }),
+                  }),
+                }),
+              ),
+            );
+            second.status = 'completed';
+            second.notified = true;
+            if (successor !== 'none') emitNotification('agent', second.id);
+            const result = await resultPromise;
+            expect(result.stopReason).toBe('end_turn');
+            expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+              successor === 'complete' ? 'Complete result' : 'Partial result',
+            );
+            expect(result._meta?.['qwen.channel.taskResultPartial']).toBe(
+              successor !== 'complete',
+            );
+            if (successor !== 'none') {
+              const terminalTurns = backgroundResponses().flatMap((update) => {
+                const context = update._meta?.['backgroundTask'] as {
+                  turnId: string;
+                  turnComplete: boolean;
+                };
+                return context.turnComplete ? [context.turnId] : [];
+              });
+              expect(new Set(terminalTurns).size).toBe(2);
+            }
+          } finally {
+            session.dispose();
+            await resultPromise;
+          }
+        },
+      );
+
+      it.each(['per_turn', 'per_response'])(
+        'does not wait in %s mode',
+        async (outputMode) => {
+          mockBackgroundTaskRegistry.getAll.mockReturnValue([
+            {
+              id: 'agent-1',
+              status: 'running',
+              isBackgrounded: true,
+              todoWorkChainId: workChainId,
+            },
+          ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(textStream('Main final'));
+          const result = await session.prompt({
+            ...taskPrompt,
+            _meta: {
+              ...taskPrompt._meta,
+              [CHANNEL_OUTPUT_MODE_META_KEY]: outputMode,
+            },
+          });
+          expect(result.stopReason).toBe('end_turn');
+          expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+        },
+      );
+
+      it.each(['admission', 'session-cancel', 'dispose'])(
+        'releases a per_task wait on %s without returning a stale success result',
+        async (cancelMode) => {
+          mockBackgroundTaskRegistry.getAll.mockReturnValue([
+            {
+              id: 'agent-1',
+              status: 'running',
+              isBackgrounded: true,
+              todoWorkChainId: workChainId,
+            },
+          ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(textStream('Main final'));
+          const cancellation = new AbortController();
+          const resultPromise = session.prompt(
+            taskPrompt,
+            undefined,
+            cancellation.signal,
+          );
+          await expectMainReleased();
+          if (cancelMode === 'admission') cancellation.abort();
+          else if (cancelMode === 'dispose') session.dispose();
+          else await session.cancelPendingPrompt();
+          const result = await resultPromise;
+          expect(result.stopReason).toBe('cancelled');
+          expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+          expect(
+            (
+              session as unknown as {
+                channelTaskCaptures: Set<unknown>;
+              }
+            ).channelTaskCaptures.size,
+          ).toBe(0);
+        },
+      );
+    });
+
     describe('background execution lifecycle', () => {
       const completedText = (text: string) =>
         createStreamWithChunks([
@@ -11727,7 +12691,7 @@ describe('Session', () => {
       );
     });
 
-    it('marks only the final response segment of a background notification turn complete', async () => {
+    it('emits one terminal marker after all background notification response segments', async () => {
       mockToolRegistry.getTool.mockReturnValue({
         name: 'read_file',
         kind: core.Kind.Read,
@@ -11827,6 +12791,7 @@ describe('Session', () => {
         /^test-session-id########notification[\w-]+$/,
       );
       expect(responseTurnIds[1]).toBe(responseTurnIds[0]);
+      expect(responseTurnIds[2]).toBe(responseTurnIds[0]);
       expect(responses).toEqual([
         expect.objectContaining({
           update: expect.objectContaining({
@@ -11854,7 +12819,10 @@ describe('Session', () => {
           update: expect.objectContaining({
             content: { type: 'text', text: '' },
             _meta: expect.objectContaining({
-              backgroundTask: expect.objectContaining({ turnComplete: true }),
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                turnComplete: true,
+              }),
             }),
           }),
         }),
@@ -12109,13 +13077,11 @@ describe('Session', () => {
       expect(
         interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
       ).toBeLessThan(flushTurn.mock.invocationCallOrder.at(-1)!);
-      // Finality follows all continuation checks; its own flush clears the
-      // marker metadata before the next execution can begin.
+      // The terminal marker must be followed by a flush and pending-rewrite
+      // drain before end_turn so its metadata cannot leak into the next turn.
       expect(
         interceptUpdate.mock.invocationCallOrder[terminalUpdateIndex],
-      ).toBeGreaterThan(
-        waitForPendingRewrites.mock.invocationCallOrder.at(-1)!,
-      );
+      ).toBeLessThan(waitForPendingRewrites.mock.invocationCallOrder.at(-1)!);
       expect(flushTurn.mock.invocationCallOrder.at(-1)).toBeLessThan(
         (mockClient.extNotification as ReturnType<typeof vi.fn>).mock
           .invocationCallOrder[endTurnCallIndex]!,
@@ -41549,12 +42515,20 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
     }
 
-    async function runGuardPrompt() {
+    async function runGuardPrompt(perTask = false) {
       lastGuardPromptId = `test-session-id########guard-${++guardPromptCounter}`;
       return session.prompt(
         {
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: 'finish everything' }],
+          ...(perTask
+            ? {
+                _meta: {
+                  [CHANNEL_PROMPT_META_KEY]: true,
+                  [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task',
+                },
+              }
+            : {}),
         },
         {
           version: 1,
@@ -41615,6 +42589,54 @@ describe('Session', () => {
           ? { ...next, messages: [], items: [] }
           : next;
       });
+    }
+
+    function bindDaemonGuardBridge(promptId: string) {
+      const entry: Pick<
+        BridgeClientSessionEntry,
+        | 'sessionId'
+        | 'promptActive'
+        | 'activePromptId'
+        | 'pendingPromptList'
+        | 'midTurnMessageQueue'
+        | 'settledMidTurnMessageIds'
+        | 'events'
+        | 'backgroundTurn'
+      > = {
+        sessionId: 'test-session-id',
+        promptActive: true,
+        activePromptId: promptId,
+        pendingPromptList: [
+          {
+            promptId,
+            queuedAt: Date.now(),
+            text: 'finish the task',
+            state: 'running',
+            abortController: new AbortController(),
+          },
+        ],
+        midTurnMessageQueue: [],
+        settledMidTurnMessageIds: [],
+        events: new EventBus(),
+      };
+      const client = new BridgeClient(
+        () => entry as BridgeClientSessionEntry,
+        () => undefined,
+        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        0,
+        Infinity,
+      );
+      vi.mocked(mockClient.extMethod).mockImplementation((method, params) =>
+        method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD ||
+        method === 'craft/drainMidTurnQueue' ||
+        method === '_qwencode/start_turn'
+          ? client.extMethod(method, params)
+          : Promise.resolve({}),
+      );
+      vi.mocked(mockClient.extNotification).mockImplementation(
+        (method, params) => client.extNotification(method, params),
+      );
+      return entry;
     }
 
     it('disables the guard and warns when todo_write is disabled', async () => {
@@ -43006,69 +44028,76 @@ describe('Session', () => {
       releaseClose();
     });
 
-    it('consumes a queued-prompt release that arrives before the claim response', async () => {
-      rebuildSessionWithGuard();
-      installPendingTodoTool();
-      queuePendingTodoThenNaturalStops();
-      let claimStarted!: () => void;
-      const claimStartedPromise = new Promise<void>((resolve) => {
-        claimStarted = resolve;
-      });
-      let resolveClaim!: (value: {
-        claimed: false;
-        hasQueuedPrompt: true;
-      }) => void;
-      mockGuardBridge(
-        async () => ({ messages: [], hasQueuedPrompt: false }),
-        () =>
-          new Promise<{ claimed: false; hasQueuedPrompt: true }>((resolve) => {
-            resolveClaim = resolve;
-            claimStarted();
-          }),
-      );
+    it.each([false, true])(
+      'consumes a queued-prompt release before the claim response with per_task=%s',
+      async (perTask) => {
+        rebuildSessionWithGuard();
+        installPendingTodoTool();
+        queuePendingTodoThenNaturalStops();
+        let claimStarted!: () => void;
+        const claimStartedPromise = new Promise<void>((resolve) => {
+          claimStarted = resolve;
+        });
+        let resolveClaim!: (value: {
+          claimed: false;
+          hasQueuedPrompt: true;
+        }) => void;
+        mockGuardBridge(
+          async () => ({ messages: [], hasQueuedPrompt: false }),
+          () =>
+            new Promise<{ claimed: false; hasQueuedPrompt: true }>(
+              (resolve) => {
+                resolveClaim = resolve;
+                claimStarted();
+              },
+            ),
+        );
 
-      const prompt = runGuardPrompt();
-      await claimStartedPromise;
-      const callback =
-        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
-          -1,
-        )?.[0] as (
-          displayText: string,
-          modelText: string,
-          meta: { agentId: string; status: string },
-        ) => void;
-      callback('background done', '<after-early-release />', {
-        agentId: 'after-early-release',
-        status: 'completed',
-      });
-      resolveClaim({ claimed: false, hasQueuedPrompt: true });
-      expect(
-        session.releaseTodoStopGuardQueuedPromptWait(lastGuardPromptId),
-      ).toBe(true);
-      await prompt;
+        const prompt = runGuardPrompt(perTask);
+        await claimStartedPromise;
+        const callback =
+          mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+            -1,
+          )?.[0] as (
+            displayText: string,
+            modelText: string,
+            meta: { agentId: string; status: string },
+          ) => void;
+        callback('background done', '<after-early-release />', {
+          agentId: 'after-early-release',
+          status: 'completed',
+        });
+        resolveClaim({ claimed: false, hasQueuedPrompt: true });
+        expect(
+          session.releaseTodoStopGuardQueuedPromptWait(lastGuardPromptId),
+        ).toBe(true);
+        expect((await prompt).stopReason).toBe('end_turn');
 
-      await vi.waitFor(() => {
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
-      });
-      const internals = session as unknown as {
-        todoStopGuardQueuedPromptPriority: boolean;
-        todoStopGuardQueuedPromptOwnerPromptId?: string;
-        todoStopGuardClaimOwnerCounts: Map<string, number>;
-        todoStopGuardReleasedDuringClaim: Set<string>;
-      };
-      expect(internals.todoStopGuardQueuedPromptPriority).toBe(false);
-      expect(internals.todoStopGuardQueuedPromptOwnerPromptId).toBeUndefined();
-      expect(internals.todoStopGuardClaimOwnerCounts.size).toBe(0);
-      expect(internals.todoStopGuardReleasedDuringClaim.size).toBe(0);
-      expect(
-        session.releaseTodoStopGuardQueuedPromptWait(lastGuardPromptId),
-      ).toBe(false);
-      const notificationCall = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[2]?.[1] as { message: Part[] };
-      expect(textParts(notificationCall.message).join('\n')).toContain(
-        '<after-early-release />',
-      );
-    });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        });
+        const internals = session as unknown as {
+          todoStopGuardQueuedPromptPriority: boolean;
+          todoStopGuardQueuedPromptOwnerPromptId?: string;
+          todoStopGuardClaimOwnerCounts: Map<string, number>;
+          todoStopGuardReleasedDuringClaim: Set<string>;
+        };
+        expect(internals.todoStopGuardQueuedPromptPriority).toBe(false);
+        expect(
+          internals.todoStopGuardQueuedPromptOwnerPromptId,
+        ).toBeUndefined();
+        expect(internals.todoStopGuardClaimOwnerCounts.size).toBe(0);
+        expect(internals.todoStopGuardReleasedDuringClaim.size).toBe(0);
+        expect(
+          session.releaseTodoStopGuardQueuedPromptWait(lastGuardPromptId),
+        ).toBe(false);
+        const notificationCall = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[2]?.[1] as { message: Part[] };
+        expect(textParts(notificationCall.message).join('\n')).toContain(
+          '<after-early-release />',
+        );
+      },
+    );
 
     it('does not reopen queue admission after a continuation claim', async () => {
       rebuildSessionWithGuard();
@@ -47618,6 +48647,792 @@ describe('Session', () => {
       );
     });
 
+    it('does not wait for a same-chain notification withheld by Guard lineage', async () => {
+      rebuildSessionWithGuard();
+      const monitor = {
+        id: 'owned-monitor',
+        description: 'Monitor outliving its owner',
+        status: 'running',
+        ownerAgentId: 'monitor-owner',
+        todoWorkChainId: 'test-session-id########1',
+      };
+      const execute = installPendingTodoTool();
+      execute.mockImplementation(async () => {
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([
+          {
+            id: monitor.ownerAgentId,
+            status: 'completed',
+            isBackgrounded: false,
+            notified: true,
+          },
+        ]);
+        mockMonitorRegistry.getAll.mockReturnValue([monitor]);
+        return {
+          llmContent: JSON.stringify(pendingTodos),
+          returnDisplay: {
+            type: 'todo_list',
+            todos: pendingTodos,
+            changes: {},
+          },
+        };
+      });
+      queuePendingTodoThenNaturalStops();
+      const internals = session as unknown as {
+        pendingPromptCompletion: unknown;
+        todoStopGuard: { blocksUnrelatedAutomaticTurns: boolean };
+        notificationQueue: Array<{
+          todoWorkChainId?: string;
+          continuesTodoStopGuardWorkChain: boolean;
+        }>;
+      };
+      let settled = false;
+      const resultPromise = runGuardPrompt(true).then((result) => {
+        settled = true;
+        return result;
+      });
+      try {
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(internals.pendingPromptCompletion).toBeNull();
+        });
+        expect(internals.todoStopGuard.blocksUnrelatedAutomaticTurns).toBe(
+          true,
+        );
+        // A monitor can outlive the terminal agent registry entry that owns it.
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([]);
+        monitor.status = 'completed';
+        mockMonitorRegistry.setNotificationCallback.mock.calls.at(-1)?.[0](
+          'done',
+          '<task-notification />',
+          {
+            monitorId: monitor.id,
+            ownerAgentId: monitor.ownerAgentId,
+            status: 'completed',
+            todoWorkChainId: monitor.todoWorkChainId,
+          },
+        );
+        expect(internals.notificationQueue).toEqual([
+          expect.objectContaining({
+            todoWorkChainId: monitor.todoWorkChainId,
+            continuesTodoStopGuardWorkChain: false,
+          }),
+        ]);
+        await vi.waitFor(() => expect(settled).toBe(true));
+        expect(await resultPromise).toMatchObject({ stopReason: 'end_turn' });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(internals.notificationQueue).toHaveLength(1);
+      } finally {
+        session.dispose();
+        await resultPromise;
+      }
+    });
+
+    it('drains related per_task output before admitting an unrelated queue head', async () => {
+      const daemonPromptId = 'waiting-channel-with-unrelated-head';
+      const daemon = bindDaemonGuardBridge(daemonPromptId);
+      const task = {
+        id: 'related-task',
+        description: 'Related task',
+        status: 'running',
+        isBackgrounded: true,
+        notified: false,
+        todoWorkChainId: 'test-session-id########1',
+      };
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+      const textStream = (text: string) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: { candidates: [{ content: { parts: [{ text }] } }] },
+          },
+        ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(textStream('Main result'))
+        .mockResolvedValueOnce(textStream('Related result'))
+        .mockResolvedValueOnce(textStream('Unrelated result'));
+      const resultPromise = session
+        .prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'start' }],
+            _meta: {
+              [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task',
+            },
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: daemonPromptId,
+          },
+        )
+        .finally(() => {
+          daemon.promptActive = false;
+          daemon.activePromptId = undefined;
+          daemon.pendingPromptList.length = 0;
+        });
+      try {
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(
+            (session as unknown as { pendingPromptCompletion: unknown })
+              .pendingPromptCompletion,
+          ).toBeNull();
+        });
+        const notify =
+          mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+            -1,
+          )![0];
+        notify('unrelated done', '<unrelated-result />', {
+          agentId: 'unrelated-task',
+          status: 'completed',
+          todoWorkChainId: 'another-chain',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          '_qwencode/start_turn',
+          expect.anything(),
+        );
+        task.status = 'completed';
+        task.notified = true;
+        notify('related done', '<related-result />', {
+          agentId: task.id,
+          status: 'completed',
+          todoWorkChainId: task.todoWorkChainId,
+        });
+        const result = await resultPromise;
+        expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+          'Related result',
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3),
+        );
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          '_qwencode/start_turn',
+          expect.objectContaining({ taskId: 'unrelated-task' }),
+        );
+        const responses = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([params]) => params.update)
+          .filter(
+            (update) =>
+              update._meta?.['source'] === 'background_notification_response',
+          );
+        expect(responses).toContainEqual(
+          expect.objectContaining({
+            content: { type: 'text', text: 'Related result' },
+            _meta: expect.objectContaining({
+              [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+            }),
+          }),
+        );
+        await vi.waitFor(() => {
+          const unrelated = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .find(
+              (update) =>
+                update.sessionUpdate === 'agent_message_chunk' &&
+                update.content.type === 'text' &&
+                update.content.text === 'Unrelated result',
+            );
+          expect(unrelated?._meta?.['backgroundTurn']).toMatchObject({
+            taskId: 'unrelated-task',
+          });
+          expect(
+            unrelated?._meta?.[CHANNEL_TASK_OUTPUT_META_KEY],
+          ).toBeUndefined();
+        });
+      } finally {
+        session.dispose();
+        await resultPromise;
+      }
+    });
+
+    it('readmits a notification independently when its per_task owner cancels during admission', async () => {
+      const daemonPromptId = 'cancelled-before-background-admission';
+      const daemon = bindDaemonGuardBridge(daemonPromptId);
+      const task = {
+        id: 'admission-task',
+        description: 'Related task',
+        status: 'running',
+        isBackgrounded: true,
+        notified: false,
+        todoWorkChainId: 'test-session-id########1',
+      };
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                { content: { parts: [{ text: 'Background result' }] } },
+              ],
+            },
+          },
+        ]),
+      );
+      const cancellation = new AbortController();
+      const resultPromise = session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start' }],
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task',
+          },
+        },
+        { version: 1, sessionId: 'test-session-id', promptId: daemonPromptId },
+        cancellation.signal,
+      );
+      let releaseAdmission!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseAdmission = resolve;
+      });
+      let admissionStarted = false;
+      try {
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(
+            (session as unknown as { pendingPromptCompletion: unknown })
+              .pendingPromptCompletion,
+          ).toBeNull();
+        });
+        mockConfig.assertCanStartTurn = vi
+          .fn()
+          .mockResolvedValueOnce(undefined)
+          .mockImplementationOnce(async () => {
+            admissionStarted = true;
+            await gate;
+          })
+          .mockResolvedValue(undefined);
+        task.status = 'completed';
+        task.notified = true;
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0]('done', '<task-notification />', {
+          agentId: task.id,
+          status: 'completed',
+          todoWorkChainId: task.todoWorkChainId,
+        });
+        await vi.waitFor(() => expect(admissionStarted).toBe(true));
+        cancellation.abort();
+        expect((await resultPromise).stopReason).toBe('cancelled');
+        daemon.promptActive = false;
+        daemon.activePromptId = undefined;
+        daemon.pendingPromptList.length = 0;
+        releaseAdmission();
+        await vi.waitFor(() =>
+          expect(
+            (session as unknown as { notificationAdmissionDeferred: boolean })
+              .notificationAdmissionDeferred,
+          ).toBe(true),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(session.getBackgroundTurn()).toBeUndefined();
+        await vi.waitFor(
+          () =>
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              expect.objectContaining({
+                source: 'background_notification',
+                turnId: expect.any(String),
+              }),
+            ),
+          { timeout: 2500 },
+        );
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          '_qwencode/start_turn',
+          expect.objectContaining({ taskId: task.id }),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        const response = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([params]) => params.update)
+          .find(
+            (update) =>
+              update._meta?.['source'] === 'background_notification_response',
+          );
+        expect(response?._meta?.[CHANNEL_TASK_OUTPUT_META_KEY]).toBeUndefined();
+        expect(response?._meta?.['backgroundTurn']).toMatchObject({
+          taskId: task.id,
+        });
+      } finally {
+        releaseAdmission();
+        session.dispose();
+        await resultPromise;
+      }
+    });
+
+    it.each(['foreground', 'background'] as const)(
+      'cancels the per_task wait when the %s Guard yields to a queued prompt',
+      async (yieldPhase) => {
+        rebuildSessionWithGuard();
+        session.dispose();
+        const agents = new core.BackgroundTaskRegistry();
+        vi.mocked(mockConfig.getBackgroundTaskRegistry).mockReturnValue(agents);
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        installPendingTodoTool();
+        queuePendingTodoThenNaturalStops();
+        if (yieldPhase === 'background') {
+          const notificationStream = mockChat.sendMessageStream;
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockImplementation(notificationStream);
+        }
+        const daemonPromptId = 'waiting-channel-prompt';
+        const daemon = bindDaemonGuardBridge(daemonPromptId);
+        daemon.pendingPromptList.push({
+          promptId: 'queued-web-prompt',
+          state: 'queued',
+          queuedAt: Date.now(),
+          text: 'next user request',
+          abortController: new AbortController(),
+        });
+        const task = agents.register({
+          agentId: 'queued-guard-background',
+          description: 'Related background task',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: path.join(os.tmpdir(), `${randomUUID()}.jsonl`),
+          todoWorkChainId: 'test-session-id########1',
+        });
+        let settled = false;
+        const resultPromise = session
+          .prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'finish the task' }],
+              _meta: {
+                [CHANNEL_PROMPT_META_KEY]: true,
+                [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task',
+              },
+            },
+            {
+              version: 1,
+              sessionId: 'test-session-id',
+              promptId: daemonPromptId,
+            },
+          )
+          .then((result) => {
+            settled = true;
+            return result;
+          });
+        try {
+          await vi.waitFor(() => {
+            expect(mockChat.sendMessageStream).toHaveBeenCalled();
+            expect(
+              (session as unknown as { pendingPromptCompletion: unknown })
+                .pendingPromptCompletion,
+            ).toBeNull();
+          });
+          agents.complete(task.id, 'background completed');
+          await vi.waitFor(() => expect(settled).toBe(true));
+          const result = await resultPromise;
+          expect(result.stopReason).toBe('cancelled');
+          expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+          expect(task.status).toBe('completed');
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+            { sessionId: 'test-session-id', promptId: daemonPromptId },
+          );
+
+          daemon.pendingPromptList.shift();
+          daemon.pendingPromptList[0].state = 'running';
+          daemon.activePromptId = 'queued-web-prompt';
+          await expect(
+            session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'next user request' }],
+              },
+              {
+                version: 1,
+                sessionId: 'test-session-id',
+                promptId: 'queued-web-prompt',
+              },
+            ),
+          ).resolves.toMatchObject({ stopReason: 'end_turn' });
+        } finally {
+          session.dispose();
+          await resultPromise;
+        }
+      },
+    );
+
+    it.each(['unrelated', 'cancelled', 'cancelled-before-claim'] as const)(
+      'keeps background Guard ownership isolated for a %s per_task capture',
+      async (boundary) => {
+        rebuildSessionWithGuard();
+        installPendingTodoTool();
+        queuePendingTodoThenNaturalStops();
+        const notificationStream = mockChat.sendMessageStream;
+        let releaseNotification!: () => void;
+        const notificationGate = new Promise<void>((resolve) => {
+          releaseNotification = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockImplementationOnce(
+            async (...args: Parameters<typeof notificationStream>) => {
+              if (boundary === 'cancelled-before-claim') await notificationGate;
+              return notificationStream(...args);
+            },
+          )
+          .mockImplementation(notificationStream);
+        const daemonPromptId = 'guard-owner-boundary';
+        bindDaemonGuardBridge(daemonPromptId);
+        const callDaemon = vi
+          .mocked(mockClient.extMethod)
+          .getMockImplementation()!;
+        const claimParams: unknown[] = [];
+        let releaseFlush: (() => void) | undefined;
+        let releaseClaim!: () => void;
+        const claimGate = new Promise<void>((resolve) => {
+          releaseClaim = resolve;
+        });
+        vi.mocked(mockClient.extMethod).mockImplementation(
+          async (method, params) => {
+            const result = await callDaemon(method, params);
+            if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+              claimParams.push(params);
+              await claimGate;
+            }
+            return result;
+          },
+        );
+        const task = {
+          id: 'guard-owned-task',
+          description: 'Related background task',
+          status: 'running',
+          isBackgrounded: true,
+          todoWorkChainId: 'test-session-id########1',
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+        const cancellation = new AbortController();
+        let settled = false;
+        const resultPromise = session
+          .prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'finish the task' }],
+              _meta: {
+                [CHANNEL_PROMPT_META_KEY]: true,
+                [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task',
+              },
+            },
+            {
+              version: 1,
+              sessionId: 'test-session-id',
+              promptId: daemonPromptId,
+            },
+            cancellation.signal,
+          )
+          .then((result) => {
+            settled = true;
+            return result;
+          });
+        try {
+          await vi.waitFor(() => {
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+            expect(
+              (session as unknown as { pendingPromptCompletion: unknown })
+                .pendingPromptCompletion,
+            ).toBeNull();
+          });
+          if (boundary !== 'unrelated') task.status = 'completed';
+          mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+            -1,
+          )?.[0]('done', '<task-notification />', {
+            agentId: boundary === 'unrelated' ? 'another-task' : task.id,
+            status: 'completed',
+            todoWorkChainId:
+              boundary === 'unrelated' ? 'another-chain' : task.todoWorkChainId,
+          });
+          if (boundary === 'unrelated') {
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+              '_qwencode/start_turn',
+              expect.anything(),
+            );
+            expect(claimParams).toEqual([]);
+            expect(settled).toBe(false);
+            cancellation.abort();
+            expect((await resultPromise).stopReason).toBe('cancelled');
+            return;
+          }
+          if (boundary === 'cancelled-before-claim') {
+            await vi.waitFor(() =>
+              expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+            );
+            mockChatRecordingService.flush.mockImplementationOnce(
+              () =>
+                new Promise<void>((resolve) => {
+                  releaseFlush = resolve;
+                }),
+            );
+            cancellation.abort();
+            await vi.waitFor(() => expect(releaseFlush).toBeDefined());
+            expect(
+              (session as unknown as { channelTaskCaptures: Set<unknown> })
+                .channelTaskCaptures.size,
+            ).toBe(1);
+            releaseNotification();
+          }
+          await vi.waitFor(() => expect(claimParams.length).toBeGreaterThan(0));
+          expect(claimParams[0]).toEqual({
+            sessionId: 'test-session-id',
+            ...(boundary === 'cancelled' ? { promptId: daemonPromptId } : {}),
+          });
+          if (boundary === 'cancelled') cancellation.abort();
+          releaseClaim();
+          await vi.waitFor(() => {
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              {
+                sessionId: 'test-session-id',
+                reason: 'end_turn',
+                source: 'background_notification',
+              },
+            );
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          if (boundary === 'cancelled-before-claim') {
+            expect(claimParams).toEqual([{ sessionId: 'test-session-id' }]);
+          }
+          releaseFlush?.();
+          const result = await resultPromise;
+          expect(result.stopReason).toBe('cancelled');
+          expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+        } finally {
+          releaseNotification();
+          releaseFlush?.();
+          releaseClaim();
+          session.dispose();
+          await resultPromise;
+        }
+      },
+    );
+
+    it.each([undefined, 'per_task'] as const)(
+      'routes background notification Guard continuations with one final boundary in %s mode',
+      async (outputMode) => {
+        rebuildSessionWithGuard();
+        const daemonPromptId = 'guard-channel-prompt';
+        const daemon = bindDaemonGuardBridge(daemonPromptId);
+        const completedTodos = pendingTodos.map((todo) => ({
+          ...todo,
+          status: 'completed' as const,
+        }));
+        const execute = installPendingTodoTool();
+        const todoResult = (
+          todos: typeof pendingTodos | typeof completedTodos,
+        ) => ({
+          llmContent: JSON.stringify(todos),
+          returnDisplay: { type: 'todo_list', todos, changes: {} },
+        });
+        const toolContexts: unknown[] = [];
+        execute.mockImplementation(async () => {
+          toolContexts.push(core.getInvocationContext());
+          return todoResult(
+            toolContexts.length === 1 ? pendingTodos : completedTodos,
+          );
+        });
+        const textStream = (...texts: string[]) =>
+          createStreamWithChunks(
+            texts.map((text) => ({
+              type: core.StreamEventType.CHUNK,
+              value: { candidates: [{ content: { parts: [{ text }] } }] },
+            })),
+          );
+        const largeResultPrefix = 'B'.repeat(
+          core.TURN_RESULT_TEXT_MAX_CHARS + 1,
+        );
+        const finalResponse = `${largeResultPrefix}Result B after Guard continuation`;
+        const todoStream = (
+          id: string,
+          todos: typeof pendingTodos | typeof completedTodos,
+        ) =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id, name: core.ToolNames.TODO_WRITE, args: { todos } },
+                ],
+              },
+            },
+          ]);
+        const workChainId = 'test-session-id########1';
+        const task = {
+          id: 'guard-background',
+          description: 'Related background task',
+          isBackgrounded: true,
+          status: 'running',
+          notified: false,
+          todoWorkChainId: workChainId,
+        };
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockResolvedValueOnce(todoStream('notification-todo', pendingTodos))
+          .mockResolvedValueOnce(
+            textStream('Result A before Guard continuation'),
+          )
+          .mockResolvedValueOnce(
+            todoStream('guard-completes-todo', completedTodos),
+          )
+          .mockResolvedValueOnce(
+            textStream(largeResultPrefix, 'Result B after Guard continuation'),
+          )
+          .mockResolvedValue(createEmptyStream());
+        const resultPromise = session
+          .prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'finish the task' }],
+              _meta: {
+                [CHANNEL_PROMPT_META_KEY]: true,
+                ...(outputMode
+                  ? { [CHANNEL_OUTPUT_MODE_META_KEY]: outputMode }
+                  : {}),
+              },
+            },
+            {
+              version: 1,
+              sessionId: 'test-session-id',
+              promptId: daemonPromptId,
+            },
+          )
+          .finally(() => {
+            daemon.promptActive = false;
+            daemon.activePromptId = undefined;
+            daemon.pendingPromptList.length = 0;
+          });
+        try {
+          await vi.waitFor(() => {
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+            expect(
+              (session as unknown as { pendingPromptCompletion: unknown })
+                .pendingPromptCompletion,
+            ).toBeNull();
+          });
+          task.status = 'completed';
+          task.notified = true;
+          const callback =
+            mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+              -1,
+            )?.[0];
+          callback('background done', '<task-notification />', {
+            agentId: task.id,
+            status: 'completed',
+            todoWorkChainId: workChainId,
+          });
+          await vi.waitFor(() => {
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              {
+                sessionId: 'test-session-id',
+                reason: 'end_turn',
+                source: 'background_notification',
+                ...(!outputMode ? { turnId: expect.any(String) } : {}),
+              },
+            );
+          });
+          const result = await resultPromise;
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(5);
+          expect(toolContexts).toEqual([undefined, undefined]);
+          const backgroundStart = vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.find(([method]) => method === '_qwencode/start_turn');
+          expect(Boolean(backgroundStart)).toBe(!outputMode);
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+            {
+              sessionId: 'test-session-id',
+              promptId: outputMode
+                ? daemonPromptId
+                : backgroundStart?.[1]['turnId'],
+            },
+          );
+          expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBe(
+            outputMode ? finalResponse : undefined,
+          );
+          const backgroundResponses = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update)
+            .filter(
+              (update) =>
+                update._meta?.['source'] === 'background_notification_response',
+            );
+          expect(backgroundResponses).toEqual([
+            expect.objectContaining({
+              content: {
+                type: 'text',
+                text: 'Result A before Guard continuation',
+              },
+              _meta: expect.objectContaining({
+                backgroundTask: expect.objectContaining({
+                  turnComplete: false,
+                }),
+              }),
+            }),
+            expect.objectContaining({
+              content: {
+                type: 'text',
+                text: finalResponse,
+              },
+              _meta: expect.objectContaining({
+                backgroundTask: expect.objectContaining({
+                  turnComplete: false,
+                }),
+              }),
+            }),
+            expect.objectContaining({
+              content: { type: 'text', text: '' },
+              _meta: expect.objectContaining({
+                backgroundTask: expect.objectContaining({ turnComplete: true }),
+              }),
+            }),
+          ]);
+          expect(
+            backgroundResponses.map(
+              (update) => update._meta?.[CHANNEL_TASK_OUTPUT_META_KEY],
+            ),
+          ).toEqual(
+            outputMode ? [true, true, true] : [undefined, undefined, undefined],
+          );
+          expect(
+            vi.mocked(mockClient.sessionUpdate).mock.calls.some(([params]) => {
+              const update = params.update;
+              return (
+                update.sessionUpdate === 'agent_message_chunk' &&
+                update.content.type === 'text' &&
+                update.content.text === finalResponse &&
+                update._meta?.['source'] !== 'background_notification_response'
+              );
+            }),
+          ).toBe(false);
+        } finally {
+          session.dispose();
+          await resultPromise;
+        }
+      },
+    );
+
     it('automatic guard claims its actual background execution owner', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
@@ -48011,6 +49826,11 @@ describe('Session', () => {
             {
               type: core.StreamEventType.CHUNK,
               value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Partial guarded finding.' }] },
+                  },
+                ],
                 functionCalls: [
                   {
                     id: 'notification-loop-1',
@@ -48083,6 +49903,30 @@ describe('Session', () => {
           },
         );
       });
+      const responses = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([params]) => params.update)
+        .filter(
+          (update) =>
+            update._meta?.['source'] === 'background_notification_response',
+        );
+      expect(responses).toEqual([
+        expect.objectContaining({
+          content: { type: 'text', text: 'Partial guarded finding.' },
+          _meta: expect.objectContaining({
+            backgroundTask: expect.objectContaining({ turnComplete: false }),
+          }),
+        }),
+        expect.objectContaining({
+          content: { type: 'text', text: '' },
+          _meta: expect.objectContaining({
+            backgroundTask: expect.objectContaining({
+              turnComplete: true,
+              partial: true,
+            }),
+          }),
+        }),
+      ]);
     });
 
     it('suspends an armed guard when a cron stream aborts', async () => {
