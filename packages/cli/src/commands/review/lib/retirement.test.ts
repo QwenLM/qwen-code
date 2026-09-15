@@ -376,6 +376,62 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r4.converged).toBe(false);
   });
 
+  it('a PARTIAL merge — one sibling merged, one return dropped — still refuses the narrowing (#10136 R26-1)', () => {
+    // `unmerged`'s byte comparison detects a TOTAL merge skip; a partial
+    // one always changes the bytes, so the tripwire stays false. The
+    // witness reads the list the dry launch was built from: chunk 14's
+    // round-2 yield filed `**File:** src/pay.ts:42`, the round-3 launch's
+    // list carries chunk 13's filing but NOT that line, so the merge
+    // between them dropped chunk 14's return — and the narrowing is
+    // refused. Refusal only, never a grant: a misread keeps the chunk hot.
+    const YIELD_PAY =
+      'Found one gap the prior rounds missed.\n\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Anchor:** const a = 1\n' +
+      '- **Issue:** double charge\n' +
+      '- **Severity:** Critical\n';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk', 'feed00'), DRY);
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'feed00'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk', 'feed01'),
+      YIELD,
+    );
+    transcript(
+      record(2, 14, 'chunk 14 round 2 territory walk', 'feed01'),
+      YIELD_PAY,
+    );
+    // The list round 3 was built from: chunk 13's filing merged, chunk
+    // 14's dropped — the partial merge.
+    writeFindingsFile(plan, 'reverse-audit--round-3--feed02', YIELD);
+    transcript(record(3, 13, 'chunk 13 round 3 territory walk', 'feed02'), DRY);
+    transcript(record(3, 14, 'chunk 14 round 3 territory walk', 'feed02'), DRY);
+
+    const r4 = scheduleReverseAuditRound(plan, [13, 14], 4, process.env, diff, {
+      deltaChunkIds: new Set([13]),
+    });
+    expect(r4.narrowed).toEqual([]);
+    expect(r4.due).toEqual([13, 14]);
+    expect(r4.converged).toBe(false);
+    // The control from the witness: the same history with the round-3 list
+    // carrying BOTH filings narrows chunk 14 exactly as before — the
+    // witness refuses only on evidence of the drop.
+    writeFindingsFile(
+      plan,
+      'reverse-audit--round-3--feed02',
+      `${YIELD}${YIELD_PAY}`,
+    );
+    const r4b = scheduleReverseAuditRound(
+      plan,
+      [13, 14],
+      4,
+      process.env,
+      diff,
+      { deltaChunkIds: new Set([13]) },
+    );
+    expect(r4b.due).toEqual([13]);
+    expect(r4b.narrowed).toEqual([{ chunkId: 14, dryRound: 3 }]);
+  });
+
   it('a non-delta chunk with NO audit history stays in the wave (#10136)', () => {
     // The `latest !== undefined` arm alone keeps such a chunk hot: no
     // receipt at all is not a dry receipt. Chunk 17 has no record in

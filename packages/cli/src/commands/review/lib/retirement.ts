@@ -99,6 +99,12 @@ interface Classification {
   outcome: AuditOutcome;
   /** Defined exactly when `outcome` is `unknown`. */
   failure: CertificationFailure | null;
+  /**
+   * Defined exactly when `outcome` is `yielded`: the first filed finding's
+   * file — the entry a later launch's findings list must carry to prove
+   * the merge between them ran (#10136 R26-1's partial-merge witness).
+   */
+  filedFile?: string;
 }
 
 /** A retired chunk skipped this round, with the receipts that earned it. */
@@ -598,7 +604,7 @@ function classifyReturn(
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
       if (findingsList.includes(`**File:** ${file}`)) continue;
-      return { outcome: 'yielded', failure: null };
+      return { outcome: 'yielded', failure: null, filedFile: file };
     }
   }
   // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
@@ -1030,6 +1036,8 @@ export function scheduleReverseAuditRound(
     session: string;
     returnedAt: number;
     yielded: boolean;
+    /** The finding a yielded lost launch filed — the witness's subject. */
+    filedFile?: string;
   }> = [];
   for (const [t, keys] of named) {
     for (const n of keys) {
@@ -1065,13 +1073,15 @@ export function scheduleReverseAuditRound(
       } catch {
         // No list on disk: every file line reads as a filing.
       }
+      const lostClassification = classifyReturn(t, [], list, true);
       lostLaunches.push({
         chunk: n.chunk,
         round: n.round,
         digest: n.digest,
         session: t.recordedSession,
         returnedAt: t.mtimeMs,
-        yielded: classifyReturn(t, [], list, true).outcome === 'yielded',
+        yielded: lostClassification.outcome === 'yielded',
+        filedFile: lostClassification.filedFile,
       });
     }
   }
@@ -1189,6 +1199,11 @@ export function scheduleReverseAuditRound(
          * outcome of its own, and the round was still scheduled for it.
          */
         memberOutcomes: AuditOutcome[];
+        /**
+         * The filed files of this round's yielded members — the lines a
+         * later launch's list must carry (#10136 R26-1).
+         */
+        filedFiles: Set<string>;
       }
     >
   >();
@@ -1209,6 +1224,7 @@ export function scheduleReverseAuditRound(
         builtAt: Infinity,
         heldReturnedAt: -Infinity,
         memberOutcomes: [],
+        filedFiles: new Set<string>(),
       };
       byRound.set(r, entry);
     }
@@ -1218,6 +1234,9 @@ export function scheduleReverseAuditRound(
     const entry = entryFor(rec.chunkId, rec.round);
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
+    for (const c of classificationsByRecord[i]) {
+      if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
+    }
     if (classificationsByRecord[i].length === 0) {
       // A record with no certifying transcript and no yield: nothing proves
       // it dry, and the round was scheduled for it — an uncertified member,
@@ -1260,6 +1279,7 @@ export function scheduleReverseAuditRound(
     if (lost.yielded) entry.outcomes.push('yielded');
     else entry.failures.push('launch not paired with the record of its block');
     entry.memberOutcomes.push(lost.yielded ? 'yielded' : 'unknown');
+    if (lost.filedFile !== undefined) entry.filedFiles.add(lost.filedFile);
     entry.digests.add(lost.digest);
     entry.heldSessions.add(lost.session);
     entry.heldReturnedAt = Math.max(entry.heldReturnedAt, lost.returnedAt);
@@ -1282,6 +1302,7 @@ export function scheduleReverseAuditRound(
         builtAt: entry.builtAt,
         heldReturnedAt: entry.heldReturnedAt,
         memberOutcomes: entry.memberOutcomes,
+        filedFiles: [...entry.filedFiles],
       }))
       .sort((a, b) => a.round - b.round);
     // The posture narrowing, ruled before retirement so a non-delta chunk
@@ -1361,7 +1382,58 @@ export function scheduleReverseAuditRound(
         const lateReturn = audits.some(
           (a) => launchOf(a.round) < launch && a.heldReturnedAt > launchBuiltAt,
         );
-        if (launchDry && !unmerged && !acrossResume && !lateReturn) {
+        // The partial-merge witness (#10136 R26-1) — refusal only, never a
+        // grant. `unmerged`'s byte comparison detects a TOTAL merge skip; a
+        // partial one (the live orchestrator merged some of a round's
+        // returns and dropped one) always changes the bytes, so the
+        // tripwire stays false and the narrowing would be granted over a
+        // finding that never reached any list. The merge is a prose
+        // instruction to the model (SKILL.md Step 5), not a mechanism, so
+        // prove it on the one artifact the merge wrote: the findings file
+        // the dry launch was built from. For each earlier round with a
+        // yielded member, the list a member of this launch was built from
+        // — read from the file the CLI filed under that launch's own round
+        // and digest, the same call the lost-launch path makes, never a
+        // pointer a delivered text could steer — must carry the yield's
+        // filed `**File:**` line (the membership test `classifyReturn`
+        // already applies). A misreading can only refuse, which is the
+        // direction this module states for itself; a file absent from disk
+        // is no evidence either way, so the check skips it and today's
+        // rules stand.
+        const launchLists: string[] = [];
+        for (const m of members) {
+          for (const d of m.digests) {
+            try {
+              launchLists.push(
+                readFileSync(
+                  findingsFilePath(
+                    planPath,
+                    `reverse-audit--round-${m.round}--${d}`,
+                  ),
+                  'utf8',
+                ),
+              );
+            } catch {
+              // Not on disk: no evidence either way.
+            }
+          }
+        }
+        const partialMerge =
+          launchLists.length > 0 &&
+          audits.some(
+            (a) =>
+              launchOf(a.round) < launch &&
+              a.filedFiles.some((f) =>
+                launchLists.some((l) => !l.includes(`**File:** ${f}`)),
+              ),
+          );
+        if (
+          launchDry &&
+          !unmerged &&
+          !acrossResume &&
+          !lateReturn &&
+          !partialMerge
+        ) {
           narrowed.push({ chunkId, dryRound: latest.round });
           continue;
         }
