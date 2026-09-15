@@ -10506,7 +10506,7 @@ exit 1
     // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-autofix');
     expect(buildCliJob).toContain(ecsRunsOn);
     for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
       const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';

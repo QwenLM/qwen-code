@@ -661,7 +661,7 @@ jobs:
     # Secret-bearing and executes agent-driven code, but the agent runs inside
     # the docker sandbox image and only ever writes a new branch as the
     # Full rationale → qwen-autofix.md#af-008
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-autofix"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 180
     # route.issue_number is only set for forced dispatches; label events carry
     # the issue in the payload, and scan-and-pick runs (cron, unforced
@@ -870,9 +870,8 @@ jobs:
               exit 1
               ;;
           esac
-          # The label routing pins ecs-agent. Existing relabelled hosts retain
-          # ecs-qwen names while future dedicated hosts may use ecs-agent, so
-          # accept both names and reject any other mis-labelled registration.
+          # The ecs-autofix label changes routing, not runner names.
+          # Keep the existing registration-name allowlist.
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
             case "${RUNNER_NAME}" in
               ecs-qwen-*|ecs-agent-*) ;;
@@ -2199,7 +2198,7 @@ jobs:
           fi
 
           # Reclaim hard-killed scan dirs on this persistent ecs-qwen pool;
-          # the agent jobs' sweep now runs on a separate ecs-agent pool.
+          # the agent jobs' sweep now runs on the ecs-autofix pool.
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # Pre-clean before create, mirroring the heavy jobs: run_id is
           # public and sequential, and mkdir -p alone would succeed over a
@@ -3674,7 +3673,7 @@ jobs:
     # Full rationale → qwen-autofix.md#af-038
     # 345 holds both shapes under the 25m reserve: unarmed 130+60+70+60,
     # armed 190+60 with the repair chain skipped (af-156).
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-autofix"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 345
     permissions:
       contents: 'read'
@@ -3957,9 +3956,8 @@ jobs:
               exit 1
               ;;
           esac
-          # The label routing pins ecs-agent. Existing relabelled hosts retain
-          # ecs-qwen names while future dedicated hosts may use ecs-agent, so
-          # accept both names and reject any other mis-labelled registration.
+          # The ecs-autofix label changes routing, not runner names.
+          # Keep the existing registration-name allowlist.
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
             case "${RUNNER_NAME}" in
               ecs-qwen-*|ecs-agent-*) ;;
