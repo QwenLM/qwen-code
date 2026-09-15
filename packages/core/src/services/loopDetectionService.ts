@@ -145,9 +145,9 @@ const ALTERNATING_PATTERN_CYCLES = 3;
 // Not gated by skipLoopDetection, but configurable via the
 // `model.maxToolCallsPerTurn` setting (values <= 0 disable the cap) and
 // suppressed by an explicit in-session disable. A "turn" for cap purposes
-// is one model turn plus its ToolResult continuations; a blocking Stop-hook
-// continuation (e.g. a /goal iteration) starts a fresh budget via
-// loopDetector.reset() in client.ts, so the cap bounds each iteration
+// is one model turn plus its ToolResult continuations. Blocking Stop-hook
+// continuations and runtime-scheduled Goal turns each start a fresh budget via
+// loopDetector.reset() in client.ts, so the cap bounds each turn
 // rather than an entire goal chain.
 //
 // This default is a *soft* cap: once the turn exceeds it, the cap only halts

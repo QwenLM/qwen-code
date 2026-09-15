@@ -181,6 +181,25 @@ describe('context usage counter reconciliation', () => {
 });
 
 describe('getConnectionAfterSessionClear', () => {
+  it('uses the current provider mode for mid-turn admission', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi.fn(async () => ({ accepted: true })),
+    };
+    let mode: 'full' | 'summary' = 'summary';
+    const { actions } = createActionsHarness({
+      session,
+      getEventDetailMode: () => mode,
+    });
+    await actions.enqueueMidTurnMessage('one');
+    mode = 'full';
+    await actions.enqueueMidTurnMessage('two', { messageId: 'two' });
+    expect(session.enqueueMidTurnMessage.mock.calls).toEqual([
+      ['one', { eventDetailMode: 'summary' }],
+      ['two', { messageId: 'two', eventDetailMode: 'full' }],
+    ]);
+  });
+
   it.each(['sendPrompt', 'submitPrompt'] as const)(
     'preserves declared text before host and attachment expansion through %s',
     async (method) => {
@@ -199,6 +218,30 @@ describe('getConnectionAfterSessionClear', () => {
       );
       if (method === 'sendPrompt') await actions.cancel();
       await pending;
+    },
+  );
+
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'uses the current provider detail mode through %s',
+    async (method) => {
+      const session = createMockSession('session-a');
+      let mode: 'full' | 'summary' = 'full';
+      const { actions } = createActionsHarness({
+        session,
+        getEventDetailMode: () => mode,
+      });
+      for (const nextMode of ['full', 'summary'] as const) {
+        mode = nextMode;
+        session.submitPrompt.mockClear();
+        const pending = actions[method]('Review this');
+        await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+        expect(session.submitPrompt).toHaveBeenCalledWith(
+          expect.objectContaining({ eventDetailMode: mode }),
+          ...(method === 'sendPrompt' ? [expect.any(AbortSignal)] : []),
+        );
+        if (method === 'sendPrompt') await actions.cancel();
+        await pending;
+      }
     },
   );
 
@@ -3721,6 +3764,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         {
@@ -3761,6 +3805,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [{ type: 'text', text: '/help' }],
     });
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
@@ -3794,6 +3839,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [{ type: 'text', text: '/summarize' }],
     });
   });
@@ -3950,6 +3996,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).toHaveBeenCalledOnce();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text },
         {
@@ -4209,6 +4256,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: '/price-sheet update these prices' },
         {
@@ -4259,6 +4307,7 @@ describe('createDaemonSessionActions', () => {
       );
       expect(session.submitPrompt).toHaveBeenCalledWith(
         {
+          eventDetailMode: 'full',
           prompt: shouldUpload
             ? [
                 { type: 'text', text: '/price-sheet update' },
@@ -4306,6 +4355,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -4367,6 +4417,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -4423,6 +4474,7 @@ describe('createDaemonSessionActions', () => {
     });
 
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -4461,6 +4513,7 @@ describe('createDaemonSessionActions', () => {
     });
 
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -4501,6 +4554,7 @@ describe('createDaemonSessionActions', () => {
     // matching the legacy shape).
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         { type: 'image', data: 'AQID' },
@@ -4561,6 +4615,7 @@ describe('createDaemonSessionActions', () => {
     });
 
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         { type: 'image', data: 'AQID', mimeType: 'image/png' },
@@ -4957,6 +5012,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         {
@@ -5312,6 +5368,7 @@ describe('createDaemonSessionActions', () => {
     // messageId-keyed idempotency and the reconciliation rings never match
     // if this hop drops the option.
     expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
+      eventDetailMode: 'full',
       messageId: 'stable-id',
     });
   });
@@ -5815,6 +5872,7 @@ function createActionsHarness(
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
     getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
+    getEventDetailMode?: () => 'full' | 'summary';
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -5887,6 +5945,7 @@ function createActionsHarness(
     getDefaultSessionContext:
       opts.getDefaultSessionContext ?? (() => undefined),
     getConnection: () => connection,
+    getEventDetailMode: opts.getEventDetailMode ?? (() => 'full'),
     hasSessionActivePrompt: opts.hasSessionActivePrompt ?? (() => false),
     resetCurrentSessionActivePrompt: vi.fn(),
     restartEventStream: opts.restartEventStream ?? vi.fn(),
