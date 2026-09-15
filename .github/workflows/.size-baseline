@@ -30,6 +30,7 @@
 11394 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
+1343 mobile-shell.yml
 7642 main-ci-failure-issue.yml
 1686 npm-cache.yml
 2489 pnpm-worktree-smoke.yml

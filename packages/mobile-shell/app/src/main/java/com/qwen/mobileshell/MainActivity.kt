@@ -127,6 +127,7 @@ class MainActivity : AppCompatActivity() {
             override fun handleOnBackPressed() {
                 val view = webView
                 if (view != null && view.canGoBack()) {
+                    if (view.parent == null) setContentView(view)
                     view.goBack()
                 } else {
                     isEnabled = false
