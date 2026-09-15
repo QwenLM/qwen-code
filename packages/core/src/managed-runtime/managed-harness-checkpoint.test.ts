@@ -344,7 +344,7 @@ describe('harness checkpoint v1', () => {
         checkpointId: 'ckpt-4',
         coveredSequence: 3,
       }),
-    ).toEqual({ status: 'blocked', reason: 'identity_mismatch' });
+    ).toMatchObject({ status: 'blocked', reason: 'identity_mismatch' });
   });
 
   it('clears in-flight groups when preparing the next-turn-ready checkpoint', () => {

@@ -1174,6 +1174,14 @@ export function encodeHarnessCheckpointV1(
   return Buffer.from(JSON.stringify(checkpoint), 'utf8');
 }
 
+function formatHarnessIdentity(input: {
+  readonly sessionKey: ManagedSessionKey;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+}): string {
+  return `${input.checkpointId}@${input.coveredSequence} ${input.sessionKey.tenantId}/${input.sessionKey.workspaceId}/${input.sessionKey.sessionId}`;
+}
+
 export function authorizeParsedHarnessCheckpoint(
   checkpoint: HarnessCheckpointV1,
   expected: {
@@ -1191,7 +1199,17 @@ export function authorizeParsedHarnessCheckpoint(
     checkpoint.identity.coveredSequence !== expected.coveredSequence ||
     checkpoint.identity.engine !== 'managed'
   ) {
-    return { status: 'blocked', reason: 'identity_mismatch' };
+    return {
+      status: 'blocked',
+      reason: 'identity_mismatch',
+      message: `checkpoint ${formatHarnessIdentity(checkpoint.identity)} does not match ${formatHarnessIdentity(
+        {
+          sessionKey: expected.sessionKey,
+          checkpointId: expected.checkpointId,
+          coveredSequence: expected.coveredSequence,
+        },
+      )}`,
+    };
   }
   return { status: 'runnable', checkpoint };
 }

@@ -79,6 +79,7 @@ export interface BridgeFreshSessionAdmissionContext {
   readonly workspaceCwd: string;
   readonly sessionId?: string;
   readonly sourceSessionId?: string;
+  readonly sourceType?: string;
 }
 
 export interface BridgeFreshSessionReservation {

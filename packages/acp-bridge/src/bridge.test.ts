@@ -30475,6 +30475,44 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not count managed-gateway Tool Runtime sessions toward maxSessions', async () => {
+      let n = 0;
+      const factory: ChannelFactory = async () =>
+        makeChannel({ sessionIdPrefix: `s${n++}` }).channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxSessions: 1,
+        sessionScope: 'thread',
+      });
+
+      try {
+        const user = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(user.attached).toBe(false);
+        expect(bridge.sessionCount).toBe(1);
+
+        const runtime = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sourceType: 'managed-gateway',
+          sourceId: user.sessionId,
+        });
+        expect(runtime.attached).toBe(false);
+        expect(runtime.sourceType).toBe('managed-gateway');
+        expect(bridge.sessionCount).toBe(2);
+        expect(bridge.userFacingSessionCount).toBe(1);
+
+        await expect(
+          bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ).rejects.toMatchObject({
+          name: 'SessionLimitExceededError',
+          limit: 1,
+        });
+        expect(bridge.sessionCount).toBe(2);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
     it('attach to an existing session under single scope is NOT counted toward the cap', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = makeBridge({

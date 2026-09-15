@@ -12223,6 +12223,7 @@ export class Session implements SessionContext {
     const drainManagedInvocation = async () => {
       if (managedInvocation) {
         if (
+          managedRuntimeWaitCommitted &&
           !abortSignal.aborted &&
           this.config.shouldRetainManagedRuntimeInvocation?.(
             managedInvocation.toolUseId,

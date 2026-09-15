@@ -5,8 +5,16 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import http from 'node:http';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -21,6 +29,7 @@ import { resetTrustedFoldersForTesting } from '../config/trustedFolders.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import { createWorkspaceFileSystemFactory } from './fs/index.js';
+import { resolveManagedRuntimeWorkerLauncher } from './managed-runtime-worker-launcher.js';
 import { getServeAppLifecycle } from './serve-app-lifecycle.js';
 import { createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
@@ -50,6 +59,8 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
 
 const PORT = 18765;
 const ASSISTANT_TEXT = 'ordinary-managed-pong';
+const SHELL_OUTPUT_FILE = 'ordinary-managed-pong.txt';
+const SHELL_COMMAND = `echo ${ASSISTANT_TEXT} > ${SHELL_OUTPUT_FILE}`;
 const timeoutMs = isSlowTestHost() ? 180_000 : 120_000;
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
@@ -61,10 +72,18 @@ describe('ordinary REST session Managed owner', () => {
   let modelServer: http.Server | undefined;
   let modelBaseUrl = 'http://127.0.0.1:9/v1';
   let modelHold: Promise<void> | undefined;
+  let modelReply: 'text' | 'shell-then-text' = 'text';
+  let modelRequests: Array<{
+    tools: number;
+    roles: string[];
+    stream: boolean;
+  }>;
 
   beforeEach(async () => {
     spawnHarness.blockLegacySpawn = false;
     modelHold = undefined;
+    modelReply = 'text';
+    modelRequests = [];
     root = await mkdtemp(path.join(os.tmpdir(), 'ordinary-managed-session-'));
     const workspaceDir = path.join(root, 'workspace');
     const homeDir = path.join(root, 'home');
@@ -86,6 +105,19 @@ describe('ordinary REST session Managed owner', () => {
     vi.stubEnv('OPENAI_API_KEY', 'test-ordinary-managed-key');
     vi.stubEnv('OPENAI_MODEL', 'qwen3-coder-plus');
     vi.stubEnv('QWEN_TELEMETRY_ENABLED', '0');
+    const { cliEntry } = resolveManagedRuntimeWorkerLauncher();
+    vi.stubEnv('QWEN_CLI_ENTRY', cliEntry);
+    if (cliEntry.endsWith('.ts')) {
+      const tsx = createRequire(import.meta.url).resolve('tsx/esm');
+      const nodeOptions = process.env['NODE_OPTIONS'] ?? '';
+      const flag = `--import ${tsx}`;
+      if (!nodeOptions.includes(tsx)) {
+        vi.stubEnv(
+          'NODE_OPTIONS',
+          [nodeOptions, flag].filter((part) => part.length > 0).join(' '),
+        );
+      }
+    }
     resetHomeEnvBootstrapForTesting();
     resetEnvironmentTrackingForTesting();
     resetTrustedFoldersForTesting();
@@ -147,15 +179,44 @@ describe('ordinary REST session Managed owner', () => {
         void (async () => {
           if (modelHold) await modelHold;
           if (aborted || res.destroyed) return;
-          let body: { stream?: boolean; model?: string } = {};
+          let body: {
+            stream?: boolean;
+            model?: string;
+            messages?: Array<{ role?: string }>;
+            tools?: unknown[];
+          } = {};
           try {
-            body = JSON.parse(raw) as { stream?: boolean; model?: string };
+            body = JSON.parse(raw) as {
+              stream?: boolean;
+              model?: string;
+              messages?: Array<{ role?: string }>;
+              tools?: unknown[];
+            };
           } catch {
             res.writeHead(400).end('bad json');
             return;
           }
+          const toolFollowUp = (body.messages ?? []).some(
+            (message) => message.role === 'tool' || message.role === 'function',
+          );
+          modelRequests.push({
+            tools: Array.isArray(body.tools) ? body.tools.length : 0,
+            roles: (body.messages ?? []).map((message) => message.role ?? ''),
+            stream: body.stream === true,
+          });
           writeChatCompletion(res, body.model ?? 'qwen3-coder-plus', {
             stream: body.stream === true,
+            ...(modelReply === 'shell-then-text' &&
+            !toolFollowUp &&
+            Array.isArray(body.tools) &&
+            body.tools.length > 0
+              ? {
+                  toolCall: {
+                    name: 'run_shell_command',
+                    args: { command: SHELL_COMMAND },
+                  },
+                }
+              : {}),
           });
         })();
       });
@@ -243,6 +304,58 @@ describe('ordinary REST session Managed owner', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     throw new Error(`turn ${promptId} did not settle`);
+  }
+
+  async function waitForPermissionRequest(
+    sessionId: string,
+    promptId: string,
+  ): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const res = await request(app!)
+        .get(`/session/${sessionId}/status`)
+        .set('Host', host());
+      const body = res.body as {
+        isWaitingForPermission?: boolean;
+        pendingInteractions?: Array<{ requestId?: string; kind?: string }>;
+      };
+      const requestId = body.pendingInteractions?.find(
+        (item) => item.kind === 'permission',
+      )?.requestId;
+      if (
+        res.status === 200 &&
+        body.isWaitingForPermission === true &&
+        typeof requestId === 'string'
+      ) {
+        return requestId;
+      }
+      const turn = await request(app!)
+        .get(`/session/${sessionId}/turns/${promptId}`)
+        .set('Host', host());
+      const turnBody = turn.body as { state?: string };
+      if (
+        turn.status === 200 &&
+        turnBody.state &&
+        turnBody.state !== 'running' &&
+        turnBody.state !== 'queued'
+      ) {
+        let wrote = false;
+        try {
+          await readFile(path.join(workspace, SHELL_OUTPUT_FILE), 'utf8');
+          wrote = true;
+        } catch {
+          wrote = false;
+        }
+        const transcript = await request(app!)
+          .get(`/session/${sessionId}/transcript`)
+          .set('Host', host());
+        throw new Error(
+          `turn settled before permission wrote=${wrote} modelRequests=${JSON.stringify(modelRequests)} turn=${JSON.stringify(turn.body)} transcript=${JSON.stringify(transcript.body).slice(0, 4000)}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`permission request for ${sessionId} did not arrive`);
   }
 
   function collectSseUntil(
@@ -343,6 +456,48 @@ describe('ordinary REST session Managed owner', () => {
       status: 'verified',
       engine: 'managed',
       recorded: true,
+      sessionId,
+    });
+  });
+
+  it('runs an ordinary Managed permission dialog then executes the approved tool', async () => {
+    modelReply = 'shell-then-text';
+    await startModelServer();
+    await writeSettings();
+    app = bootApp();
+    const sessionId = await createManagedSession();
+
+    const admitted = await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Host', host())
+      .send({
+        prompt: [
+          {
+            type: 'text',
+            text: `run ${SHELL_COMMAND}`,
+          },
+        ],
+      });
+    expect(admitted.status).toBe(202);
+    const promptId = admitted.body.promptId as string;
+
+    const requestId = await waitForPermissionRequest(sessionId, promptId);
+    const vote = await request(app)
+      .post(`/session/${sessionId}/permission/${requestId}`)
+      .set('Host', host())
+      .send({ outcome: { outcome: 'selected', optionId: 'proceed_once' } });
+    expect(vote.status).toBe(200);
+
+    const turn = await waitForTurn(sessionId, promptId);
+    expect(turn.state).toBe('completed');
+    await expect(
+      readFile(path.join(workspace, SHELL_OUTPUT_FILE), 'utf8'),
+    ).resolves.toContain(ASSISTANT_TEXT);
+    await expect(
+      sessionService().readExecutionEngine(sessionId),
+    ).resolves.toMatchObject({
+      status: 'verified',
+      engine: 'managed',
       sessionId,
     });
   });
@@ -792,10 +947,30 @@ describe('ordinary REST session Managed owner', () => {
 function writeChatCompletion(
   res: http.ServerResponse,
   model: string,
-  opts: { stream: boolean },
+  opts: {
+    stream: boolean;
+    toolCall?: { name: string; args: Record<string, unknown> };
+  },
 ): void {
   const id = `chatcmpl-${randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
+  const toolCalls = opts.toolCall
+    ? [
+        {
+          id: `call_${randomUUID()}`,
+          type: 'function',
+          function: {
+            name: opts.toolCall.name,
+            arguments: JSON.stringify(opts.toolCall.args),
+          },
+        },
+      ]
+    : undefined;
+  const usage = {
+    prompt_tokens: 8,
+    completion_tokens: 4,
+    total_tokens: 12,
+  };
   if (!opts.stream) {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(
@@ -807,15 +982,15 @@ function writeChatCompletion(
         choices: [
           {
             index: 0,
-            message: { role: 'assistant', content: ASSISTANT_TEXT },
-            finish_reason: 'stop',
+            message: {
+              role: 'assistant',
+              content: toolCalls ? null : ASSISTANT_TEXT,
+              ...(toolCalls ? { tool_calls: toolCalls } : {}),
+            },
+            finish_reason: toolCalls ? 'tool_calls' : 'stop',
           },
         ],
-        usage: {
-          prompt_tokens: 8,
-          completion_tokens: 4,
-          total_tokens: 12,
-        },
+        usage,
       }),
     );
     return;
@@ -836,18 +1011,58 @@ function writeChatCompletion(
       model,
       choices: [{ index: 0, delta, finish_reason: finishReason }],
     })}\n\n`;
-  res.write(chunk({ role: 'assistant', content: '' }));
-  res.write(chunk({ content: ASSISTANT_TEXT }));
-  res.write(
-    `data: ${JSON.stringify({
-      id,
-      object: 'chat.completion.chunk',
-      created,
-      model,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
-    })}\n\n`,
-  );
+  if (toolCalls) {
+    const toolCall = toolCalls[0]!;
+    res.write(chunk({ role: 'assistant' }));
+    res.write(
+      chunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: toolCall.id,
+            type: toolCall.type,
+            function: {
+              name: toolCall.function.name,
+              arguments: '',
+            },
+          },
+        ],
+      }),
+    );
+    res.write(
+      chunk({
+        tool_calls: [
+          {
+            index: 0,
+            function: { arguments: toolCall.function.arguments },
+          },
+        ],
+      }),
+    );
+    res.write(
+      `data: ${JSON.stringify({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+        usage,
+      })}\n\n`,
+    );
+  } else {
+    res.write(chunk({ role: 'assistant', content: '' }));
+    res.write(chunk({ content: ASSISTANT_TEXT }));
+    res.write(
+      `data: ${JSON.stringify({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage,
+      })}\n\n`,
+    );
+  }
   res.write('data: [DONE]\n\n');
   res.end();
 }

@@ -14,6 +14,7 @@ import {
 
 interface SessionCountSource {
   readonly sessionCount: number;
+  readonly userFacingSessionCount?: number;
 }
 
 export interface TotalSessionAdmissionOptions {
@@ -57,6 +58,11 @@ export function createTotalSessionAdmissionController({
     ): BridgeFreshSessionReservation {
       if (drainingWorkspaces.has(context.workspaceCwd)) {
         throw new WorkspaceDrainingError(context.workspaceCwd);
+      }
+      if (context.sourceType === 'managed-gateway') {
+        return {
+          release() {},
+        };
       }
       if (limit !== Number.POSITIVE_INFINITY) {
         if (getLiveCount(getBridges()) + inFlight >= limit) {
@@ -117,5 +123,9 @@ export function createTotalSessionAdmissionController({
 }
 
 function getLiveCount(bridges: readonly SessionCountSource[]): number {
-  return bridges.reduce((sum, bridge) => sum + bridge.sessionCount, 0);
+  return bridges.reduce(
+    (sum, bridge) =>
+      sum + (bridge.userFacingSessionCount ?? bridge.sessionCount),
+    0,
+  );
 }

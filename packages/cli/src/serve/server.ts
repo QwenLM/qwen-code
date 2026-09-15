@@ -9,7 +9,11 @@ import express from 'express';
 import type { Application } from 'express';
 import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import {
+  PRIVATE_MANAGED_TOOL_RUNTIME_ENV,
+  PRIVATE_MANAGED_TOOL_RUNTIME_VALUE,
+  SERVE_CONTROL_EXT_METHODS,
+} from '@qwen-code/acp-bridge/status';
 import {
   hashDaemonWorkspace,
   readCronTasks,
@@ -1262,6 +1266,9 @@ export function createServeApp(
       fileSystem: createBridgeFileSystemAdapter(fsFactory, {
         allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
       }),
+      childEnvOverrides: {
+        [PRIVATE_MANAGED_TOOL_RUNTIME_ENV]: PRIVATE_MANAGED_TOOL_RUNTIME_VALUE,
+      },
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,

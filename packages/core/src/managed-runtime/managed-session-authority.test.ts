@@ -1907,6 +1907,47 @@ describe('managed session checkpoints', () => {
     await harness.close();
   });
 
+  it('aligns stale v1 coverage to the assigned checkpoint identity', async () => {
+    const harness = await openWithResources(await createFixture());
+    await harness.authority.submitInput(
+      inputCommand(harness.fixture),
+      inputRequest,
+    );
+    await activate(harness, 3);
+    const committed = await harness.authority.commitCheckpoint(
+      inputCommand(harness.fixture, {
+        operation: 'commitCheckpoint',
+        commandId: 'cmd-ckpt-stale-coverage',
+      }),
+      {
+        state: initialV1State(harness.fixture, {
+          checkpointId: 'ckpt-99',
+          coveredSequence: 0,
+          previousCheckpointId: 'ckpt-1',
+        }),
+        boundary: null,
+      },
+      HOLDS,
+    );
+    expect(committed.checkpoint.checkpointId).toBe('ckpt-4');
+    expect(committed.checkpoint.coveredSequence).toBe(3);
+    expect(committed.checkpoint.previousCheckpointId).toBeNull();
+    const parsed = parseHarnessCheckpointV1(
+      (await harness.authority.readCheckpointState())!,
+    );
+    expect(parsed.identity.checkpointId).toBe('ckpt-4');
+    expect(parsed.identity.coveredSequence).toBe(3);
+    expect(parsed.identity.previousCheckpointId).toBeNull();
+    expect(parsed.resume.throughSequence).toBe(3);
+    await expect(
+      harness.authority.harnessRunAuthorization(),
+    ).resolves.toMatchObject({
+      status: 'runnable',
+      checkpoint: parsed,
+    });
+    await harness.close();
+  });
+
   it('blocks a v1 checkpoint whose sessionKey does not match', async () => {
     const harness = await openWithResources(await createFixture());
     await harness.authority.submitInput(
@@ -1931,7 +1972,9 @@ describe('managed session checkpoints', () => {
       HOLDS,
     );
     expect(harness.authority.restoreBasis()).toBe('checkpoint');
-    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+    await expect(
+      harness.authority.harnessRunAuthorization(),
+    ).resolves.toMatchObject({
       status: 'blocked',
       reason: 'identity_mismatch',
     });

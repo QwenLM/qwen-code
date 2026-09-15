@@ -153,6 +153,7 @@ import {
 } from './workspacePaths.js';
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  isManagedGatewaySessionSourceType,
   isReservedStandaloneSessionSourceType,
   isScheduledTaskRunSource,
   parseSessionSource,
@@ -4483,6 +4484,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // context; running either twice for the same id at the same time can
   // duplicate history frames or race two entries into `byId`.
   const inFlightRestores = new Map<string, InFlightRestore>();
+  const quotaExemptReservations = new Set<symbol>();
+  const beginQuotaExemptReservation = (): (() => void) => {
+    const token = Symbol();
+    quotaExemptReservations.add(token);
+    return () => {
+      quotaExemptReservations.delete(token);
+    };
+  };
+  const userFacingLiveCount = (): number => {
+    let count = 0;
+    for (const entry of byId.values()) {
+      if (!isManagedGatewaySessionSourceType(entry.sourceType)) count++;
+    }
+    return count;
+  };
+  const userFacingQuotaOccupied = (): number =>
+    Math.max(
+      0,
+      userFacingLiveCount() +
+        inFlightSpawns.size +
+        inFlightRestores.size +
+        abandonedNewSessionSettlements.size -
+        quotaExemptReservations.size,
+    );
+  const assertSessionQuotaAvailable = (sourceType?: string): void => {
+    if (isManagedGatewaySessionSourceType(sourceType)) return;
+    if (userFacingQuotaOccupied() >= maxSessions) {
+      throw new SessionLimitExceededError(maxSessions);
+    }
+  };
 
   // Sessions whose worktree ownership is being transferred to a replacement
   // session (worktree reset). While an id is present, every writer that could
@@ -8526,15 +8557,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
 
     assertFreshSessionsAvailable();
-    if (
-      byId.size +
-        inFlightSpawns.size +
-        inFlightRestores.size +
-        abandonedNewSessionSettlements.size >=
-      maxSessions
-    ) {
-      throw new SessionLimitExceededError(maxSessions);
-    }
+    assertSessionQuotaAvailable(source.sourceType);
 
     const restoreEvents = createSessionEventBus(req.sessionId);
     let registeredEntry: SessionEntry | undefined;
@@ -8550,6 +8573,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           operation: action,
           workspaceCwd: workspaceKey,
           sessionId: req.sessionId,
+          ...(source.sourceType ? { sourceType: source.sourceType } : {}),
         });
     let admissionReleased = false;
     const releaseAdmissionOnce = () => {
@@ -9345,6 +9369,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       },
     );
 
+    const releaseQuotaExempt = isManagedGatewaySessionSourceType(
+      source.sourceType,
+    )
+      ? beginQuotaExemptReservation()
+      : undefined;
     inFlightRestores.set(req.sessionId, {
       action,
       historyReplay,
@@ -9357,6 +9386,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       coalesceState,
     });
     void settlementPromise.finally(() => {
+      releaseQuotaExempt?.();
       const current = inFlightRestores.get(req.sessionId);
       if (current?.settlementPromise === settlementPromise) {
         inFlightRestores.delete(req.sessionId);
@@ -9787,6 +9817,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     get sessionCount() {
       return byId.size;
+    },
+
+    get userFacingSessionCount() {
+      return userFacingLiveCount();
     },
 
     get pendingPromptTotal() {
@@ -10267,20 +10301,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
       }
-      // Cap check: count both registered sessions and in-flight spawns
-      // (a fresh-spawn race that's about to register hasn't hit
+      // Cap check: count both registered user-facing sessions and in-flight
+      // spawns (a fresh-spawn race that's about to register hasn't hit
       // `byId` yet but should still count toward the limit). Attaches
       // returned above bypass this — only NEW children are gated.
+      // Tool Runtime `managed-gateway` sessions are internal workers and
+      // do not occupy the user-facing maxSessions budget.
       assertFreshSessionsAvailable();
-      if (
-        byId.size +
-          inFlightSpawns.size +
-          inFlightRestores.size +
-          abandonedNewSessionSettlements.size >=
-        maxSessions
-      ) {
-        throw new SessionLimitExceededError(maxSessions);
-      }
+      assertSessionQuotaAvailable(source.sourceType);
 
       const requestedSessionRegistrationOwner =
         req.sessionId !== undefined ? Symbol(req.sessionId) : undefined;
@@ -10322,6 +10350,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           operation: 'spawn',
           workspaceCwd: workspaceKey,
           ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
+          ...(source.sourceType ? { sourceType: source.sourceType } : {}),
         });
       } catch (error) {
         releaseRequestedSessionRegistration();
@@ -10384,6 +10413,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         effectiveScope === 'single'
           ? workspaceKey
           : `${workspaceKey}#${randomUUID()}`;
+      const releaseQuotaExempt = isManagedGatewaySessionSourceType(
+        source.sourceType,
+      )
+        ? beginQuotaExemptReservation()
+        : undefined;
       inFlightSpawns.set(tracker, promise);
       try {
         return await promise;
@@ -10399,9 +10433,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               releaseRequestedSessionRegistration();
             },
           );
+          void abandonedSettlement.finally(() => releaseQuotaExempt?.());
         } else {
           releaseAdmissionOnce();
           releaseRequestedSessionRegistration();
+          releaseQuotaExempt?.();
         }
         // Always clear the in-flight slot whether the spawn resolved
         // or rejected — leaving a rejected promise behind would
@@ -11542,19 +11578,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         assertFreshSessionsAvailable(channelInfoForEntry(entry)?.slot);
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
         if (restoreBranch) {
-          if (
-            byId.size +
-              inFlightSpawns.size +
-              inFlightRestores.size +
-              abandonedNewSessionSettlements.size >=
-            maxSessions
-          ) {
-            throw new SessionLimitExceededError(maxSessions);
-          }
+          assertSessionQuotaAvailable(source.sourceType);
           admission = reserveFreshSession({
             operation: 'branch',
             workspaceCwd: boundWorkspace,
             sourceSessionId: sessionId,
+            ...(source.sourceType ? { sourceType: source.sourceType } : {}),
           });
         }
         let admissionReleased = false;

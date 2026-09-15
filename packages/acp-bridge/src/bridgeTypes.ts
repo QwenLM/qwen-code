@@ -2584,6 +2584,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   readonly sessionCount: number;
 
   /**
+   * User-facing live sessions. Internal Tool Runtime (`managed-gateway`)
+   * workers are omitted so they do not occupy `maxSessions`.
+   */
+  readonly userFacingSessionCount: number;
+
+  /**
    * Whether an ACP channel is currently live (spawned and not dying).
    * Distinct from `sessionCount > 0`: a channel can be live with zero
    * attached sessions during the cold-spawn window, and conversely a

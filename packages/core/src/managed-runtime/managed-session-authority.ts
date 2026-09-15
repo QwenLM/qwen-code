@@ -10,6 +10,7 @@ import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import {
   authorizeParsedHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
   HARNESS_MODEL_START_PHASES,
   tryParseHarnessCheckpointV1,
   type HarnessCheckpointV1,
@@ -859,10 +860,32 @@ export class LocalManagedSessionAuthority {
       );
     }
     return this.runSerial(async () => {
-      const stateRef = await store.publish('managed-checkpoint', request.state);
       const previous = this.checkpoint;
       const checkpointId = `ckpt-${this.committed + 1}`;
       const covered = this.committed;
+      const previousCheckpointId = previous?.checkpointId ?? null;
+      const parsed = tryParseHarnessCheckpointV1(request.state);
+      const state =
+        parsed.ok &&
+        (parsed.checkpoint.identity.checkpointId !== checkpointId ||
+          parsed.checkpoint.identity.coveredSequence !== covered ||
+          parsed.checkpoint.identity.previousCheckpointId !==
+            previousCheckpointId)
+          ? encodeHarnessCheckpointV1({
+              ...parsed.checkpoint,
+              identity: {
+                ...parsed.checkpoint.identity,
+                checkpointId,
+                coveredSequence: covered,
+                previousCheckpointId,
+              },
+              resume: {
+                ...parsed.checkpoint.resume,
+                throughSequence: covered,
+              },
+            })
+          : request.state;
+      const stateRef = await store.publish('managed-checkpoint', state);
       const receipt = await this.commit(
         command,
         [
@@ -882,7 +905,7 @@ export class LocalManagedSessionAuthority {
             payload: {
               checkpointId,
               coveredSequence: covered,
-              previousCheckpointId: previous?.checkpointId ?? null,
+              previousCheckpointId,
               stateRef,
               boundary: request.boundary,
             },

@@ -4485,9 +4485,7 @@ async function runQwenServeImpl(
     externalToolGuardHandler,
   );
   const childEnvOverrides: Record<string, string | undefined> = {
-    [PRIVATE_MANAGED_TOOL_RUNTIME_ENV]: deps.ownedManagedRuntime
-      ? PRIVATE_MANAGED_TOOL_RUNTIME_VALUE
-      : undefined,
+    [PRIVATE_MANAGED_TOOL_RUNTIME_ENV]: PRIVATE_MANAGED_TOOL_RUNTIME_VALUE,
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
         ? String(opts.mcpClientBudget)
