@@ -51,7 +51,8 @@ import {
 } from '../../agents/runtime/workflow-orchestrator.js';
 import {
   MAX_TOKENS_PER_WORKFLOW_ENV,
-  resolveMaxTokensPerWorkflow,
+  WorkflowBudgetImpl,
+  type WorkflowBudgetSource,
 } from '../../agents/runtime/workflow-budget.js';
 import {
   WorkflowRunner,
@@ -357,7 +358,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     const banner = resolveUsageBanner(
       this.config,
       this.config.getWorkflowRunRegistry?.(),
-      resolveMaxTokensPerWorkflow(),
+      WorkflowBudgetImpl.fromConfig(this.config),
     );
 
     const isInlineScript =
@@ -455,7 +456,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       const usageBanner = resolveUsageBanner(
         this.config,
         handle.registry,
-        handle.budget.total,
+        handle.budget,
       );
       return {
         workflowRunId: handle.runId,
@@ -477,7 +478,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       const usageBanner = resolveUsageBanner(
         this.config,
         handle.registry,
-        handle.budget.total,
+        handle.budget,
       );
 
       // FIX-7 (UP-C2): unwrap the script result so the run's own bookkeeping
@@ -512,11 +513,19 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // tokens whenever ANY usage is reported OR a cap is set, not
         // only when spend > 0. A capped-but-zero-spend run still wants
         // the cap visible so the user sees the gate engaged.
-        ...(handle.budget.spent() > 0 || handle.budget.total !== null
+        // Per run, like `/workflows`; a turn target adds the turn's figures
+        // beside them rather than in place of them.
+        ...(handle.budget.runSpent() > 0 || handle.budget.total !== null
           ? {
               tokens: {
-                spent: handle.budget.spent(),
-                total: handle.budget.total,
+                spent: handle.budget.runSpent(),
+                total: handle.budget.runCap(),
+                ...(handle.budget.source === 'directive'
+                  ? {
+                      turnSpent: handle.budget.spent(),
+                      turnTotal: handle.budget.total,
+                    }
+                  : {}),
               },
             }
           : {}),
@@ -676,11 +685,20 @@ function buildRunTrailer(
         ` · ${countByStatus('completed')} completed · ${countByStatus('cached')} cached · ${failedCount} failed · ${countByStatus('cancelled')} cancelled`,
     );
   }
-  const spent = handle.budget.spent();
+  // What this run's agents spent, always; under a turn target, also where
+  // the whole turn stands against it — the number the next dispatch in this
+  // turn will be gated on.
+  const budget = handle.budget;
+  const runSpent = budget.runSpent();
   lines.push(
-    handle.budget.total === null
-      ? `tokens: ${spent} spent (no cap)`
-      : `tokens: ${spent} / ${handle.budget.total} spent`,
+    budget.source === 'directive' && budget.total !== null
+      ? `tokens: ${runSpent} spent by this run · ${budget.spent()} / ${budget.total} this turn` +
+          (budget.directiveText
+            ? ` (${sanitizeLine(budget.directiveText)} directive)`
+            : '')
+      : budget.total === null
+        ? `tokens: ${runSpent} spent (no cap)`
+        : `tokens: ${runSpent} / ${budget.total} spent`,
   );
   // Which agents came back empty and why. A script that reads `null` for a
   // failed agent may well return a perfectly well-formed result built from
@@ -842,12 +860,12 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
 function resolveUsageBanner(
   config: Config,
   registry: { shouldShowUsageWarning(): boolean } | undefined,
-  budgetTotal: number | null,
+  budget: UsageBannerBudget,
 ): string {
   if (!registry) return '';
   if (config.getSkipWorkflowUsageWarning?.()) return '';
   if (!registry.shouldShowUsageWarning()) return '';
-  return buildUsageBanner(budgetTotal);
+  return buildUsageBanner(budget);
 }
 
 /** Characters of script source shown in the approval dialog. */
@@ -1053,32 +1071,52 @@ function buildConfirmationPrompt(
   return lines.join('\n');
 }
 
+/** What the usage banner needs to know about the budget a run will get. */
+interface UsageBannerBudget {
+  readonly total: number | null;
+  readonly source?: WorkflowBudgetSource;
+  readonly directiveText?: string;
+}
+
 /**
- * P5 T7: build the one-time usage-warning banner. Two shapes:
- * (a) `total === null` — explain the uncapped state and the env knob;
- * (b) `total !== null` — confirm the cap is in effect.
+ * P5 T7: build the one-time usage-warning banner. Three shapes:
+ * (a) `total === null` — explain the uncapped state and both ways to cap it;
+ * (b) a turn directive — confirm the turn's target and what it stops;
+ * (c) an env cap — confirm the per-run cap is in effect.
  *
- * Both shapes mention `skipWorkflowUsageWarning` so the user knows how
+ * Every shape mentions `skipWorkflowUsageWarning` so the user knows how
  * to suppress further banners. The banner ends with two newlines so it
  * separates cleanly from the fenced JSON code block that follows in
  * `returnDisplay`.
  */
-function buildUsageBanner(total: number | null): string {
+function buildUsageBanner(budget: UsageBannerBudget): string {
   // Banner says "soft cap" rather than "hard ceiling" because the gate
   // is checked at dispatch ENTRY — concurrent fan-out can overshoot by
   // up to (concurrency_window - 1) × per_dispatch_tokens before the
   // first overshoot is caught. See workflow-budget.ts threat-model
   // doc for the precise overshoot bound.
-  if (total === null) {
+  if (budget.total === null) {
     return (
-      `> Workflows have no per-run token cap. Set ` +
-      `\`${MAX_TOKENS_PER_WORKFLOW_ENV}=<n>\` (env) for a soft cap. ` +
+      `> Workflows have no per-run token cap. Put a \`+500k\`-style target ` +
+      `in your message to cap a turn, or set ` +
+      `\`${MAX_TOKENS_PER_WORKFLOW_ENV}=<n>\` (env) for a per-run soft cap. ` +
+      `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
+      `in settings.\n\n`
+    );
+  }
+  if (budget.source === 'directive') {
+    return (
+      `> This turn's output-token target is ${budget.total}` +
+      (budget.directiveText
+        ? ` (set by \`${budget.directiveText}\` in your message)`
+        : '') +
+      `; workflow agent() calls stop once the turn's spend reaches it. ` +
       `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
       `in settings.\n\n`
     );
   }
   return (
-    `> Workflow token cap is ${total} (per ` +
+    `> Workflow token cap is ${budget.total} (per ` +
     `\`${MAX_TOKENS_PER_WORKFLOW_ENV}\`). ` +
     `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
     `in settings.\n\n`
@@ -1189,7 +1227,7 @@ Reach for one to be comprehensive (cover every part of the work in parallel), to
  */
 const WORKFLOW_TOOL_RUNTIME = `**Runtime**
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope), plus active extensions' \`<extension>:<name>\`; \`scriptPath\` additionally accepts an active extension's workflow file or a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree); any other path is refused. Default \`max(2, min(16, availableParallelism()-2))\` agents in flight per run, which follows CPU affinity and container CPU limits (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope), plus active extensions' \`<extension>:<name>\`; \`scriptPath\` additionally accepts an active extension's workflow file or a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree); any other path is refused. Default \`max(2, min(16, availableParallelism()-2))\` agents in flight per run, which follows CPU affinity and container CPU limits (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. \`budget.total\` is the turn's output-token target when the user's message sets one with a \`+500k\`-style directive, and \`budget.spent()\` then counts every output token this turn, the main loop included. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
 
 /**
  * Replaces the authoring reference when the model can load it on its own.
