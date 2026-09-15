@@ -11212,7 +11212,11 @@ export class Session implements SessionContext {
 
   async #emitBackgroundNotificationEndTurn(
     reason: PromptResponse['stopReason'],
-    turnId: string,
+    // Omitted by the record-only path, which displays a terminal notification
+    // without running a model turn. There is no background turn to close, so
+    // the bridge settles it as a bare `background_notification_turn_complete`;
+    // a turnId would name no live turn and be dropped.
+    turnId?: string,
   ): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/end_turn', {
