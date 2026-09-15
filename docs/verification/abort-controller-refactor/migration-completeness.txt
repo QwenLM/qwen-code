@@ -16,8 +16,6 @@ packages/core/src/tools/shell.ts:2772:    const entryAc = new AbortController();
 packages/core/src/tools/monitor.ts:306:    const entryAc = new AbortController();
 packages/core/src/core/client.ts:1199:          const controller = new AbortController();
 packages/core/src/memory/manager.ts:936:    const abortController = new AbortController();
-packages/core/src/goals/goalHook.ts:70:  const judgeController = new AbortController();
-packages/core/src/goals/goalHook.ts:169:    const signal = context?.signal ?? new AbortController().signal;
 packages/core/src/agents/arena/ArenaManager.ts:305:    this.masterAbortController = new AbortController();
 packages/core/src/agents/arena/ArenaManager.ts:817:        abortController: new AbortController(),
 packages/core/src/agents/background-agent-resume.ts:421:          abortController: new AbortController(),
