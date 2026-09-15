@@ -104,6 +104,22 @@ describe('ChannelOutputTurn', () => {
     expect(turn.finish('completed')).toBeUndefined();
   });
 
+  it.each(['per_task', 'per_turn', 'per_response'] as const)(
+    'does not replace retained output with an empty input boundary in %s',
+    (mode) => {
+      const turn = new ChannelOutputTurn(mode);
+      expect(turn.close(' \n', 'input_requested')).toEqual({ kind: 'skip' });
+      turn.close('Analysis', 'response_boundary');
+      expect(turn.close(' \n', 'input_requested')).toEqual(
+        mode === 'per_response'
+          ? { kind: 'skip' }
+          : { kind: 'complete', text: 'Analysis', rotate: true },
+      );
+      expect(turn.close(' \n', 'input_requested')).toEqual({ kind: 'skip' });
+      expect(turn.finish('completed')).toBeUndefined();
+    },
+  );
+
   it('does not share state between turns', () => {
     const first = new ChannelOutputTurn('per_turn');
     const second = new ChannelOutputTurn('per_turn');

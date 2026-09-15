@@ -509,8 +509,9 @@ describe('turn-scoped output modes', () => {
   function createOutputChannel(
     outputMode: string,
     overrides: Record<string, unknown> = {},
+    options: Record<string, unknown> = {},
   ) {
-    const channel = createChannel({ outputMode, ...overrides });
+    const channel = createChannel({ outputMode, ...overrides }, options);
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
       chatId: 'cidGroup==',
@@ -561,7 +562,7 @@ describe('turn-scoped output modes', () => {
           content:
             (kind === 'agent'
               ? ''
-              : `## ✅ ${{ shell: 'Shell', monitor: 'Monitor', workflow: 'Workflow' }[kind]} · 后台任务\n\n`) +
+              : `## ✅ ${{ shell: 'Shell', monitor: 'Monitor', workflow: 'Workflow' }[kind]} · Background task\n\n`) +
             'Historical notices processed. HANDOFF_READY.',
           flowStatus: 3,
           stop_action: 'false',
@@ -577,28 +578,31 @@ describe('turn-scoped output modes', () => {
   it.each([
     ['shell', 'failed', '## ❌ Shell · Worker\n\nTask output'],
     ['workflow', 'stopped', '## ⏹️ Workflow · Worker\n\nTask output'],
-    ['agent', 'completed', '✅ 后台任务已完成'],
-    ['agent', 'failed', '❌ 后台任务失败'],
-    ['agent', 'stopped', '⏹️ 后台任务已停止'],
+    ['agent', 'completed', '✅ Background task completed'],
+    ['agent', 'failed', '❌ Background task failed'],
+    ['agent', 'stopped', '⏹️ Background task stopped'],
   ] as const)(
     'preserves the %s %s result header',
     async (kind, status, expected) => {
       const { channel, create } = createOutputChannel('per_turn');
       if (kind === 'agent') {
         vi.useFakeTimers();
-        await channel.dispatchBackgroundResponse(
-          'session-1',
-          'Earlier output',
-          {
-            taskId: 'task-1',
-            kind,
-            status: 'running',
-            turnComplete: false,
-          },
-        );
-        await vi.advanceTimersByTimeAsync(10 * 60_000);
-        create.mockClear();
-        vi.useRealTimers();
+        try {
+          await channel.dispatchBackgroundResponse(
+            'session-1',
+            'Earlier output',
+            {
+              taskId: 'task-1',
+              kind,
+              status: 'running',
+              turnComplete: false,
+            },
+          );
+          await vi.advanceTimersByTimeAsync(10 * 60_000);
+          create.mockClear();
+        } finally {
+          vi.useRealTimers();
+        }
       }
       await channel.dispatchBackgroundResponse(
         'session-1',
@@ -648,12 +652,191 @@ describe('turn-scoped output modes', () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
-  it.each(['card', 'disabled'] as const)(
-    'labels a token-limited main reply partial with %s delivery',
-    async (delivery) => {
-      const { channel, update } = createOutputChannel('per_turn', {
-        interactiveCards: { enabled: delivery === 'card' },
+  it('uses the synchronous source label when draining an unresolved delivery', async () => {
+    const { channel, create } = createOutputChannel('per_turn');
+    const resolution = deferredPromise<
+      { target: SessionTarget; sourceLabel?: string } | undefined
+    >();
+    const internals = channel as unknown as {
+      getBackgroundResponseSourceLabel(sessionId: string): string | undefined;
+      resolveBackgroundResponseDelivery(
+        sessionId: string,
+      ): Promise<{ target: SessionTarget; sourceLabel?: string } | undefined>;
+    };
+    const label = vi
+      .spyOn(internals, 'getBackgroundResponseSourceLabel')
+      .mockReturnValue('Named session');
+    vi.spyOn(internals, 'resolveBackgroundResponseDelivery').mockReturnValue(
+      resolution.promise,
+    );
+    const pending = channel.dispatchBackgroundResponse(
+      'session-1',
+      'Buffered result',
+      {
+        taskId: 'task-1',
+        kind: 'agent',
+        status: 'running',
+        turnComplete: false,
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    channel.disconnect();
+    await channel.waitForDisconnect();
+    expect(label).toHaveBeenCalledWith('session-1');
+    expect(create).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'Named session\n\n(partial)\n\nBuffered result',
+        }),
+      }),
+    );
+    resolution.resolve(undefined);
+    await pending;
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('drains interrupted background output when the bridge disconnects', async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel, create } = createOutputChannel('per_turn');
+      await channel.dispatchBackgroundResponse('session-1', 'Buffered result', {
+        taskId: 'task-1',
+        kind: 'agent',
+        status: 'running',
+        turnComplete: false,
       });
+      channel.onBridgeDisconnected();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(create).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '(partial)\n\nBuffered result',
+            statusLine: 'Partial',
+          }),
+        }),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(create).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([true, false])(
+    'preserves the previous reply at a whitespace input boundary with cards=%s',
+    async (cardsEnabled) => {
+      const { channel, update } = createOutputChannel('per_turn', {
+        interactiveCards: { enabled: cardsEnabled },
+      });
+      const presenter = (
+        channel as unknown as {
+          interactionPresenter: DingtalkInteractionPresenter;
+        }
+      ).interactionPresenter;
+      const context: ChannelOutputSegmentContext = {
+        channelName: 'test-dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-dingtalk',
+          chatId: 'cidGroup==',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      };
+      presenter.registerRun('run-1', 'owner-1', context.target, 'session-1');
+      const send = vi
+        .spyOn(
+          channel as unknown as {
+            sendReply(...args: unknown[]): Promise<void>;
+          },
+          'sendReply',
+        )
+        .mockResolvedValue(undefined);
+      getChunkHook(channel)('cidGroup==', 'Analysis', 'session-1', context);
+      await getOutputSegmentEndHook(channel)(
+        'cidGroup==',
+        'session-1',
+        context,
+        'response_boundary',
+      );
+      const whitespace = { ...context, segmentId: 'segment-2' };
+      getChunkHook(channel)('cidGroup==', ' \n', 'session-1', whitespace);
+      await getOutputSegmentEndHook(channel)(
+        'cidGroup==',
+        'session-1',
+        whitespace,
+        'input_requested',
+      );
+      presenter.terminalizeRun('run-1', 'completed');
+      await new Promise((resolve) => setImmediate(resolve));
+      if (cardsEnabled) {
+        expect(update).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            cardParamMap: expect.objectContaining({
+              content: 'Analysis',
+              flowStatus: 3,
+            }),
+          }),
+        );
+        expect(send).not.toHaveBeenCalled();
+      } else {
+        expect(send).toHaveBeenCalledExactlyOnceWith(
+          'cidGroup==',
+          'Analysis',
+          undefined,
+          undefined,
+        );
+      }
+    },
+  );
+
+  it.each([
+    [undefined, '## ✅ Shell · Background task'],
+    ['en', '## ✅ Shell · Background task'],
+    ['zh-TW', '## ✅ Shell · Background task'],
+    ['zh-CN', '## ✅ Shell · 后台任务'],
+  ])(
+    'localizes background copy with language %s',
+    async (displayLanguage, heading) => {
+      const { channel, create } = createOutputChannel(
+        'per_turn',
+        {},
+        { displayLanguage },
+      );
+      await channel.dispatchBackgroundResponse('session-1', 'Result', {
+        taskId: 'task-1',
+        kind: 'shell',
+        status: 'completed',
+        turnComplete: true,
+      });
+      expect(create.mock.calls[0]![0].cardParamMap.content).toBe(
+        `${heading}\n\nResult`,
+      );
+    },
+  );
+
+  it.each(
+    [undefined, 'zh-CN', 'zh-TW'].flatMap((displayLanguage) =>
+      ['card', 'disabled'].flatMap((delivery) => [
+        { delivery, displayLanguage, retained: false },
+        { delivery, displayLanguage, retained: true },
+      ]),
+    ),
+  )(
+    'labels a token-limited main reply partial with $delivery delivery, $displayLanguage and retained=$retained',
+    async ({ delivery, displayLanguage, retained }) => {
+      const { channel, update } = createOutputChannel(
+        'per_turn',
+        {
+          interactiveCards: { enabled: delivery === 'card' },
+        },
+        { displayLanguage },
+      );
+      const expectedText = `${displayLanguage === 'zh-CN' ? '（部分）' : '(partial)'}\n\nAnswer prefix`;
       const presenter = (
         channel as unknown as {
           interactionPresenter: DingtalkInteractionPresenter;
@@ -688,18 +871,32 @@ describe('turn-scoped output modes', () => {
         'session-1',
         segment,
       );
+      const final = retained ? { ...segment, segmentId: 'segment-2' } : segment;
+      if (retained) {
+        await getOutputSegmentEndHook(channel)(
+          'cidGroup==',
+          'session-1',
+          segment,
+          'response_boundary',
+        );
+        getChunkHook(channel)('cidGroup==', ' \n', 'session-1', final);
+      }
       await getCompleteHook(channel)(
         'cidGroup==',
-        'Answer prefix',
+        retained ? ' \n' : 'Answer prefix',
         'session-1',
-        segment,
+        final,
       );
       if (delivery === 'card') {
         expect(update).toHaveBeenLastCalledWith(
           expect.objectContaining({
             cardParamMap: expect.objectContaining({
-              content: '（部分）\n\nAnswer prefix',
-              statusLine: expect.stringMatching(/^Partial · \d+s$/),
+              content: expectedText,
+              statusLine: expect.stringMatching(
+                displayLanguage === 'zh-CN'
+                  ? /^部分结果 · \d+s$/
+                  : /^Partial · \d+s$/,
+              ),
               flowStatus: 3,
             }),
           }),
@@ -708,7 +905,7 @@ describe('turn-scoped output modes', () => {
       } else {
         expect(send).toHaveBeenCalledExactlyOnceWith(
           'cidGroup==',
-          '（部分）\n\nAnswer prefix',
+          expectedText,
           undefined,
           undefined,
         );
@@ -1003,7 +1200,7 @@ describe('turn-scoped output modes', () => {
               sessionId: string,
               sourceLabel?: string,
               prepared?: boolean,
-              strict?: boolean,
+              failOnHttpError?: boolean,
             ): Promise<void>;
           },
           'deliverBackgroundReply',
@@ -9484,7 +9681,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(pushProactive).toHaveBeenCalledTimes(2);
     expect(pushProactive.mock.calls[1]![1]).toContain('Fresh result.');
     expect(pushProactive.mock.calls[1]![1]).not.toContain('First result.');
-    expect(pushProactive.mock.calls[1]![1]).not.toContain('（部分）');
+    expect(pushProactive.mock.calls[1]![1]).not.toContain('(partial)');
     expect(
       (
         channel as unknown as {
@@ -9751,9 +9948,15 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(4);
-      expect(pushProactive.mock.calls[1]![1]).toBe('（部分）\n\nFirst result.');
-      expect(pushProactive.mock.calls[2]![1]).toBe('（部分）\n\nThird result.');
-      expect(pushProactive.mock.calls[3]![1]).toBe('✅ 后台任务已完成');
+      expect(pushProactive.mock.calls[1]![1]).toBe(
+        '(partial)\n\nFirst result.',
+      );
+      expect(pushProactive.mock.calls[2]![1]).toBe(
+        '(partial)\n\nThird result.',
+      );
+      expect(pushProactive.mock.calls[3]![1]).toBe(
+        '✅ Background task completed',
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -9805,8 +10008,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledTimes(2));
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '（部分）\n\nWorking.',
-        '✅ 后台任务已完成',
+        '(partial)\n\nWorking.',
+        '✅ Background task completed',
       ]);
     } finally {
       vi.useRealTimers();
@@ -9861,7 +10064,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
       expect(sendProactiveChunk).toHaveBeenCalledTimes(2);
-      expect(sendProactiveChunk.mock.calls[0]![2]).toBe('（部分）\n\nWorking.');
+      expect(sendProactiveChunk.mock.calls[0]![2]).toBe(
+        '(partial)\n\nWorking.',
+      );
       expect(sendProactiveChunk.mock.calls[1]![2]).toBe('Working.');
     } finally {
       vi.useRealTimers();
@@ -10023,9 +10228,11 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledTimes(3));
       expect(pushProactive.mock.calls[0]![1]).toContain('First result.');
       expect(pushProactive.mock.calls[0]![1]).not.toContain('Late result.');
-      expect(pushProactive.mock.calls[1]![1]).toContain('（部分）');
+      expect(pushProactive.mock.calls[1]![1]).toContain('(partial)');
       expect(pushProactive.mock.calls[1]![1]).toContain('Late result.');
-      expect(pushProactive.mock.calls[2]![1]).toBe('✅ 后台任务已完成');
+      expect(pushProactive.mock.calls[2]![1]).toBe(
+        '✅ Background task completed',
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -10133,12 +10340,12 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
       'Final B.',
-      '（部分）\n\nStopped.',
+      '(partial)\n\nStopped.',
       'Final A.',
     ]);
   });
 
-  it('uses the terminal status for an aggregated turn', async () => {
+  it('preserves the buffered Agent text when its empty terminal arrives', async () => {
     const channel = createChannel({
       outputMode: 'per_turn',
       interactiveCards: undefined,
@@ -10172,7 +10379,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     });
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).not.toContain('Agent ·');
+    expect(pushProactive.mock.calls[0]![1]).toBe('Working.');
   });
 
   it('flushes a partial aggregation after the bounded wait', async () => {
@@ -10207,7 +10414,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
 
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
+      expect(pushProactive.mock.calls[0]![1]).toContain('(partial)');
       expect(pushProactive.mock.calls[0]![1]).toContain('First result.');
     } finally {
       vi.useRealTimers();
@@ -10859,7 +11066,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         label: 'Worker three',
       });
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '（部分）\n\nTurn one result.',
+        '(partial)\n\nTurn one result.',
         'Turn three result.',
       ]);
     } finally {
@@ -11556,7 +11763,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         expect(pending.size).toBe(0);
         await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledOnce());
         expect(pushProactive.mock.calls[0]![1]).toBe(
-          '（部分）\n\nLost result.',
+          '(partial)\n\nLost result.',
         );
       } finally {
         vi.useRealTimers();
@@ -11621,7 +11828,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await dispatch;
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toBe('（部分）\n\nLost result.');
+    expect(pushProactive.mock.calls[0]![1]).toBe('(partial)\n\nLost result.');
   });
 
   it('refreshes a failed in-flight flush before retrying it', async () => {
@@ -11673,7 +11880,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       await boundedFlush;
       await vi.advanceTimersByTimeAsync(30 * 1000);
 
-      expect(sendProactiveChunk.mock.calls[0]![2]).toBe('（部分）\n\nWorking.');
+      expect(sendProactiveChunk.mock.calls[0]![2]).toBe(
+        '(partial)\n\nWorking.',
+      );
       expect(sendProactiveChunk.mock.calls[1]![2]).toBe('Working.');
     } finally {
       vi.useRealTimers();
@@ -11741,7 +11950,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toBe('（部分）\n\nFinal result.');
+      expect(pushProactive.mock.calls[0]![1]).toBe(
+        '(partial)\n\nFinal result.',
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -11778,7 +11989,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
+      expect(pushProactive.mock.calls[0]![1]).toContain('(partial)');
 
       await channel.dispatchBackgroundResponse('session-1', 'Final result.', {
         taskId: 'agent-1',
@@ -11789,9 +12000,11 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(3);
-      expect(pushProactive.mock.calls[1]![1]).toContain('（部分）');
+      expect(pushProactive.mock.calls[1]![1]).toContain('(partial)');
       expect(pushProactive.mock.calls[1]![1]).toContain('Final result.');
-      expect(pushProactive.mock.calls[2]![1]).toBe('✅ 后台任务已完成');
+      expect(pushProactive.mock.calls[2]![1]).toBe(
+        '✅ Background task completed',
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -11828,7 +12041,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
       expect(pushProactive).toHaveBeenCalledOnce();
-      expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
+      expect(pushProactive.mock.calls[0]![1]).toContain('(partial)');
 
       await channel.dispatchBackgroundResponse('session-1', '', {
         taskId: 'agent-1',
@@ -11839,7 +12052,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(2);
-      expect(pushProactive.mock.calls[1]![1]).toBe('✅ 后台任务已完成');
+      expect(pushProactive.mock.calls[1]![1]).toBe(
+        '✅ Background task completed',
+      );
       expect(
         (
           channel as unknown as {
@@ -11905,8 +12120,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive.mock.calls.map((call) => call[1])).toEqual([
-        '（部分）\n\nWorking.',
-        '✅ 后台任务已完成',
+        '(partial)\n\nWorking.',
+        '✅ Background task completed',
       ]);
     } finally {
       vi.useRealTimers();
@@ -11990,18 +12205,32 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it.each(['（部分）', 'Review session'])(
-    'refreshes a DM retry while preserving source %s and sent files',
-    async (sourceLabel) => {
+  it.each([
+    {
+      sourceLabel: '（部分）',
+      displayLanguage: 'zh-CN',
+      partialLabel: '（部分）',
+    },
+    {
+      sourceLabel: 'Review session',
+      displayLanguage: 'en',
+      partialLabel: '(partial)',
+    },
+  ])(
+    'refreshes a DM retry while preserving source $sourceLabel and sent files',
+    async ({ sourceLabel, displayLanguage, partialLabel }) => {
       vi.useFakeTimers();
       const file = createTempFile();
       try {
-        const channel = createChannel({
-          cwd: file.dir,
-          outputMode: 'per_turn',
-          interactiveCards: undefined,
-          atSender: true,
-        });
+        const channel = createChannel(
+          {
+            cwd: file.dir,
+            outputMode: 'per_turn',
+            interactiveCards: undefined,
+            atSender: true,
+          },
+          { displayLanguage },
+        );
         seedWebhook(channel, 'dm-cid');
         const target: SessionTarget = {
           channelName: 'test-dingtalk',
@@ -12086,7 +12315,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
         expect(fileSends).toBe(1);
         expect(markdownTexts).toEqual([
-          `@staff-1\n\n${sourceLabel}\n\n（部分）\n\n\nWorking.`,
+          `@staff-1\n\n${sourceLabel}\n\n${partialLabel}\n\n\nWorking.`,
           `@staff-1\n\n${sourceLabel}\n\n\nWorking.`,
         ]);
       } finally {
@@ -12102,6 +12331,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       const channel = createChannel({
         outputMode: 'per_turn',
         interactiveCards: undefined,
+        atSender: true,
       });
       seedWebhook(channel, 'dm-cid');
       seedSessionTarget(channel, 'session-1', {
@@ -12111,15 +12341,23 @@ describe('DingtalkChannel outbound file delivery', () => {
         isGroup: false,
       });
       const markdownTexts: string[] = [];
+      const mentions: unknown[] = [];
+      (
+        channel as unknown as { sessionMentionTargets: Map<string, string> }
+      ).sessionMentionTargets.set('session-1', 'staff-1');
       let calls = 0;
       vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
         const body = JSON.parse(String((init as RequestInit).body)) as {
           markdown: { text: string };
+          at?: { atUserIds: string[] };
         };
         markdownTexts.push(body.markdown.text);
+        mentions.push(body.at);
         calls++;
         if (calls === 2) {
-          return Promise.reject(new TypeError('fetch failed'));
+          return Promise.resolve(
+            new Response('temporary failure', { status: 500 }),
+          );
         }
         return Promise.resolve(new Response('{}'));
       });
@@ -12144,10 +12382,62 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(markdownTexts.filter((text) => text === secondChunk)).toHaveLength(
         2,
       );
+      expect(firstChunk).toMatch(/^@staff-1\n\n/);
+      expect(mentions).toEqual([
+        { atUserIds: ['staff-1'] },
+        undefined,
+        undefined,
+      ]);
     } finally {
       vi.useRealTimers();
     }
   });
+
+  it.each(
+    [false, true].flatMap((isGroup) => [
+      { isGroup, statuses: [403], expected: 1 },
+      { isGroup, statuses: [500, 403], expected: 2 },
+      { isGroup, statuses: [429, 200], expected: 2 },
+      { isGroup, statuses: [408, 200], expected: 2 },
+    ]),
+  )(
+    'classifies HTTP $statuses for background isGroup=$isGroup',
+    async ({ isGroup, statuses, expected }) => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel({
+          outputMode: 'per_turn',
+          interactiveCards: { enabled: false },
+        });
+        seedWebhook(channel, 'cid-1');
+        seedSessionTarget(channel, 'session-1', {
+          channelName: 'test-dingtalk',
+          senderId: 'user-1',
+          chatId: 'cid-1',
+          isGroup,
+        });
+        let sends = 0;
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+          if (String(input).includes('/gettoken?'))
+            return new Response(
+              JSON.stringify({ access_token: 'mock-token', expires_in: 7200 }),
+            );
+          const status = statuses[Math.min(sends++, statuses.length - 1)];
+          return new Response('{}', { status });
+        });
+        await channel.dispatchBackgroundResponse('session-1', 'Result', {
+          taskId: 'task-1',
+          kind: 'agent',
+          status: 'completed',
+          turnComplete: true,
+        });
+        await vi.advanceTimersByTimeAsync(2 * 30_000);
+        expect(sends).toBe(expected);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it.each([
     {
@@ -12292,7 +12582,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     await Promise.resolve();
 
     expect(pushProactive).toHaveBeenCalledOnce();
-    expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
+    expect(pushProactive.mock.calls[0]![1]).toContain('(partial)');
     expect(pushProactive.mock.calls[0]![1]).toContain('Segment one.');
   });
 
@@ -12367,7 +12657,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect.objectContaining({ chatId: 'cidTwo==' }),
     );
     expect(pushProactive.mock.calls[1]![1]).toContain('Second session.');
-    expect(pushProactive.mock.calls[1]![1]).not.toContain('（部分）');
+    expect(pushProactive.mock.calls[1]![1]).not.toContain('(partial)');
   });
 
   it('uses the reply fallback when draining a DM aggregation', async () => {
@@ -12415,7 +12705,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(pushProactive).not.toHaveBeenCalled();
     expect(deliverBackgroundReply).toHaveBeenCalledWith(
       'dm-user-1',
-      expect.stringContaining('（部分）'),
+      expect.stringContaining('(partial)'),
       'session-1',
       undefined,
       true,
@@ -12455,7 +12745,7 @@ describe('DingtalkChannel outbound file delivery', () => {
     ).onSessionRetiring('session-1');
 
     await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledOnce());
-    expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
+    expect(pushProactive.mock.calls[0]![1]).toContain('(partial)');
     expect(pushProactive.mock.calls[0]![1]).toContain('Segment one.');
   });
 
@@ -12489,7 +12779,7 @@ describe('DingtalkChannel outbound file delivery', () => {
 
     await vi.waitFor(() => expect(pushProactive).toHaveBeenCalledOnce());
     expect(pushProactive.mock.calls[0]![1]).toContain('Segment one.');
-    expect(pushProactive.mock.calls[0]![1]).toContain('（部分）');
+    expect(pushProactive.mock.calls[0]![1]).toContain('(partial)');
   });
 
   it('retries an aggregation whose delivery failed instead of losing it', async () => {
@@ -12743,7 +13033,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       // Content the give-up branch dropped is still missing from the chat, so
       // the tail card must not present itself as the whole turn.
       expect(pushProactive.mock.calls.slice(3)).toSatisfy((calls) =>
-        calls.every((call) => call[1].includes('（部分）')),
+        calls.every((call) => call[1].includes('(partial)')),
       );
       await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
       expect(pushProactive).toHaveBeenCalledTimes(5);
@@ -12841,7 +13131,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
 
       expect(pushProactive).toHaveBeenCalledTimes(4);
-      expect(pushProactive.mock.calls[3]![1]).toBe('（部分）\n\nTail.');
+      expect(pushProactive.mock.calls[3]![1]).toBe('(partial)\n\nTail.');
     } finally {
       vi.useRealTimers();
     }
@@ -13565,7 +13855,7 @@ describe('DingtalkChannel proactive send', () => {
 
       const sends = sendCalls();
       expect(sends).toHaveLength(4);
-      expect(msgParamOf(sends[3]!).text).toBe('✅ 后台任务已完成');
+      expect(msgParamOf(sends[3]!).text).toBe('✅ Background task completed');
     } finally {
       vi.useRealTimers();
     }

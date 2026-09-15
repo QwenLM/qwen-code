@@ -37,11 +37,8 @@ export class ChannelOutputTurn {
       this.lastOutput = undefined;
       return { kind: reason };
     }
-    if (
-      !text.trim() &&
-      (reason === 'response_boundary' || reason === 'completed')
-    ) {
-      if (reason !== 'completed' || !this.latestOnly) {
+    if (!text.trim()) {
+      if (reason === 'response_boundary' || !this.latestOnly) {
         return { kind: 'skip' };
       }
       text = this.lastOutput ?? '';

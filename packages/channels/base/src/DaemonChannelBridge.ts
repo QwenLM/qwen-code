@@ -1059,6 +1059,7 @@ export class DaemonChannelBridge
         );
         break;
       case 'turn_complete':
+        if (isRecord(event.data) && event.data['backgroundTurn']) break;
         this.resolveTurnBarrier(session.sessionId);
         break;
       case 'turn_error':

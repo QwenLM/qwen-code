@@ -109,6 +109,7 @@ const SHARED_ACCESS_FIELD_KEYS = new Set([
   'dmPolicy',
 ]);
 const SHARED_SESSION_FIELD_KEYS = new Set([
+  'outputMode',
   'sessionScope',
   'multiSession',
   'instructions',

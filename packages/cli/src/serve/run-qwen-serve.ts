@@ -470,6 +470,8 @@ type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type ServeWorkspaceSkillStatus =
+  import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
   loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
   parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
@@ -5359,6 +5361,46 @@ async function runQwenServeImpl(
         workspaceTrusted: trusted,
       });
     };
+    const resolveSkillToggleIdentities = async (
+      workspace: string,
+      skillNames: readonly string[],
+    ) => {
+      let skills: ServeWorkspaceSkillStatus[] | undefined;
+      try {
+        const workspaceRuntime =
+          workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
+        const status =
+          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus({
+            route: 'skill settings persistence',
+            workspaceCwd: workspace,
+          });
+        if (status?.initialized) skills = status.skills;
+      } catch {
+        // Preserve the legacy name heuristic when the catalog is unavailable.
+      }
+      const skillsByName = new Map(
+        skills?.map((skill) => [skill.name.trim().toLowerCase(), skill]),
+      );
+      return skillNames.map((skillName) => {
+        const skill = skillsByName.get(skillName.trim().toLowerCase());
+        if (!skill) {
+          const prefixEnd = skillName.indexOf(':');
+          return {
+            name: skillName,
+            ...(prefixEnd > 0
+              ? { authoredName: skillName.slice(prefixEnd + 1) }
+              : {}),
+          };
+        }
+        if (skill.level !== 'extension' || !skill.extensionName) {
+          return { name: skillName };
+        }
+        return {
+          name: skillName,
+          authoredName: skillName.slice(skill.extensionName.length + 1),
+        };
+      });
+    };
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -5412,7 +5454,11 @@ async function runQwenServeImpl(
         // locks such rows, and a route that persists anyway reports an
         // enable the merged config still denies.
         if (enabled) {
-          const block = skillToggleBlockForName(fresh, skillName);
+          const [skillIdentity] = await resolveSkillToggleIdentities(
+            workspace,
+            [skillName],
+          );
+          const block = skillToggleBlockForName(fresh, skillIdentity);
           if (block) {
             return { changed: false, disabled: workspaceDisabled, block };
           }
@@ -5483,40 +5529,53 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'enabled',
         );
+        const skillIdentities = enabled
+          ? await resolveSkillToggleIdentities(workspace, skillNames)
+          : skillNames.map((name) => ({ name }));
         let next = { disabled: initialDisabled, enabled: initialEnabled };
-        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
+        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
+          skillNames.map((skillName) => ({ skillName, changed: false }));
+        let pending = skillNames.map((_, index) => index);
 
-        for (const skillName of skillNames) {
-          // Same refusal as the single toggle. The block is read off the
-          // file, so an earlier grant in this batch that already lifted a
-          // workspace entry off the lists about to be written clears it.
-          if (enabled) {
-            const block = skillToggleBlockForName(fresh, skillName);
-            if (
-              block &&
-              !(
-                block.scope === 'Workspace' &&
-                block.list === 'disabled' &&
-                !next.disabled.some(
-                  (name) => name.trim().toLowerCase() === block.entry,
+        for (let pass = 0; pass < skillNames.length; pass += 1) {
+          const refused: number[] = [];
+          let listChanged = false;
+          for (const index of pending) {
+            const skillName = skillNames[index];
+            if (enabled) {
+              const block = skillToggleBlockForName(
+                fresh,
+                skillIdentities[index],
+              );
+              if (
+                block &&
+                !(
+                  block.scope === 'Workspace' &&
+                  block.list === 'disabled' &&
+                  !next.disabled.some(
+                    (name) => name.trim().toLowerCase() === block.entry,
+                  )
                 )
-              )
-            ) {
-              outcomes.push({ skillName, changed: false });
-              continue;
+              ) {
+                refused.push(index);
+                continue;
+              }
             }
+            const updated = updateWorkspaceSkillSettingLists(
+              next,
+              skillName,
+              enabled,
+            );
+            const changed =
+              JSON.stringify(updated.disabled) !==
+                JSON.stringify(next.disabled) ||
+              JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
+            next = updated;
+            outcomes[index] = { skillName, changed };
+            listChanged ||= changed;
           }
-          const updated = updateWorkspaceSkillSettingLists(
-            next,
-            skillName,
-            enabled,
-          );
-          const changed =
-            JSON.stringify(updated.disabled) !==
-              JSON.stringify(next.disabled) ||
-            JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
-          next = updated;
-          outcomes.push({ skillName, changed });
+          pending = refused;
+          if (pending.length === 0 || !listChanged) break;
         }
 
         const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =

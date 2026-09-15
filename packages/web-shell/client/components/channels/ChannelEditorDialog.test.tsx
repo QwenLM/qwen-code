@@ -363,6 +363,9 @@ describe('ChannelEditorDialog', () => {
     await renderDialog({ descriptor, instance: INSTANCE, onSave });
 
     expect(fieldByLabel('Output Mode')?.textContent).toBe('Per turn (default)');
+    expect(sectionHeadingOf(fieldByLabel('Output Mode'))).toBe(
+      'Conversation management',
+    );
     await selectOption('Output Mode', 'Per task');
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',
@@ -381,6 +384,7 @@ describe('ChannelEditorDialog', () => {
       language: 'zh-CN',
     });
     expect(fieldByLabel('输出模式')?.textContent).toBe('按轮（默认）');
+    expect(sectionHeadingOf(fieldByLabel('输出模式'))).toBe('会话管理');
     expect(document.body.textContent).toContain('默认按轮输出：主回复独立结束');
     await selectOption('输出模式', '按任务');
     expect(fieldByLabel('输出模式')?.textContent).toBe('按任务');

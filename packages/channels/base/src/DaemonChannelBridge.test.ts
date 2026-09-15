@@ -2025,6 +2025,56 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('does not release the main turn barrier for a background terminal', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let resolvePrompt!: () => void;
+    session.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = () => resolve({ stopReason: 'end_turn' });
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    let finished = false;
+    const prompt = bridge.prompt('session-1', 'work').then((result) => {
+      finished = true;
+      return result;
+    });
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    events.push({
+      v: 1,
+      type: 'turn_complete',
+      data: {
+        promptId: 'background-1',
+        backgroundTurn: { turnId: 'background-1' },
+      },
+    });
+    await drainMicrotasks();
+    resolvePrompt();
+    await drainMicrotasks();
+    expect(finished).toBe(false);
+    events.push({
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'answer' },
+        },
+      },
+    });
+    events.push(turnCompleteEvent());
+    await expect(prompt).resolves.toBe('answer');
+    events.close();
+    bridge.stop();
+  });
+
   it('resolves the turn barrier when a session is cancelled during prompt drain', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -4276,6 +4326,82 @@ describe('DaemonChannelBridge', () => {
     ).resolves.toBe('');
     events.close();
     bridge.stop();
+  });
+
+  it('keeps a newer task claim while a cancelled prompt finishes unwinding', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let finishFirst!: (result: { stopReason: string }) => void;
+    let finishSecond!: (result: { stopReason: string }) => void;
+    session.prompt
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishSecond = resolve;
+          }),
+      );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    const claims = (bridge as unknown as { taskOutputs: Map<string, unknown> })
+      .taskOutputs;
+    const first = bridge.prompt('session-1', 'first', {
+      outputMode: 'per_task',
+    });
+    const firstCancelled = expect(first).rejects.toBeInstanceOf(
+      ChannelPromptCancelledError,
+    );
+    let second: Promise<string> | undefined;
+    try {
+      await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(1));
+      await bridge.cancelSession('session-1');
+      second = bridge.prompt('session-1', 'second', { outputMode: 'per_task' });
+      await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(2));
+      finishFirst({ stopReason: 'cancelled' });
+      await firstCancelled;
+      // Arrive after the old finally: an unconditional delete loses this reply.
+      events.push({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Second task result' },
+            _meta: {
+              qwenDiscreteMessage: true,
+              source: 'background_notification_response',
+              [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+              backgroundTask: {
+                taskId: 'second-task',
+                turnId: 'second-turn',
+                turnComplete: true,
+              },
+            },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      finishSecond({ stopReason: 'end_turn' });
+      await expect(second).resolves.toBe('Second task result');
+      expect(claims.has('session-1')).toBe(false);
+    } finally {
+      finishFirst?.({ stopReason: 'cancelled' });
+      finishSecond?.({ stopReason: 'end_turn' });
+      await firstCancelled;
+      await second?.catch(() => undefined);
+      events.close();
+      bridge.stop();
+    }
   });
 
   it('forwards a distinct user-facing prompt text in daemon metadata', async () => {

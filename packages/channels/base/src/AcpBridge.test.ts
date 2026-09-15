@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import {
+  RequestError,
+  type RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
@@ -95,7 +98,10 @@ vi.mock('node:stream', () => ({
   Writable: { toWeb: vi.fn(() => ({})) },
 }));
 
-vi.mock('@agentclientprotocol/sdk', () => ({
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
+  RequestError: (
+    await importOriginal<typeof import('@agentclientprotocol/sdk')>()
+  ).RequestError,
   PROTOCOL_VERSION: 1,
   ndJsonStream: vi.fn(() => ({})),
   ClientSideConnection: vi.fn().mockImplementation((createClient) => {
@@ -318,6 +324,21 @@ describe('AcpBridge', () => {
       payload: { jsonrpc: '2.0', id: 0, result: {} },
     });
   });
+
+  it.each(['_qwencode/start_turn', '_probe/unknown'])(
+    'preserves method-not-found for %s',
+    async (method) => {
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      }) as unknown as TestableAcpBridge;
+      const error = await bridge
+        .handleExtMethod(method, { sessionId: 's-1' })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(RequestError);
+      expect(error).toMatchObject({ code: -32601 });
+    },
+  );
 
   it('handles mid-turn queue drain requests from the ACP child', async () => {
     const bridge = new AcpBridge({
@@ -814,6 +835,24 @@ describe('AcpBridge', () => {
     await expect(
       bridge.prompt('s-1', 'question', { outputMode: 'per_task' }),
     ).rejects.toBeInstanceOf(ChannelPromptCancelledError);
+  });
+
+  it('preserves streamed text on remote cancellation in the default mode', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Partial main result');
+        return { stopReason: 'cancelled' };
+      }),
+    };
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Partial main result',
+    );
   });
 
   it('forwards the user-facing prompt projection to the daemon', async () => {

@@ -50,6 +50,7 @@ import {
 import {
   DingtalkCardRequestError,
   DingtalkInteractiveCardClient,
+  isRetryableDingtalkStatus,
 } from './interactive-card-client.js';
 import {
   parseDingtalkCardActorId,
@@ -63,6 +64,8 @@ import { StatusCardController } from './status-card-controller.js';
 import {
   isChinesePresentationLanguage,
   lifecyclePresentationPhase,
+  markPartialOutput,
+  partialOutputLabel,
   presentationPhaseLabel,
   type DingtalkPresentationPhase,
 } from './presentation-phase.js';
@@ -951,11 +954,16 @@ class ProactiveTextDeliveryError extends Error {
 }
 
 class ReplyTextDeliveryError extends Error {
+  readonly retryable?: boolean;
+
   constructor(
     readonly plan: ReplyTextDelivery,
     cause: unknown,
   ) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
+    if (cause instanceof DingtalkCardRequestError) {
+      this.retryable = cause.retryable;
+    }
   }
 }
 
@@ -1051,6 +1059,7 @@ export class DingtalkChannel extends ChannelBase {
       isRetryableError: (error) =>
         !(
           (error instanceof ProactiveTextDeliveryError ||
+            error instanceof ReplyTextDeliveryError ||
             error instanceof DingtalkCardRequestError) &&
           error.retryable === false
         ),
@@ -1754,8 +1763,9 @@ export class DingtalkChannel extends ChannelBase {
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
         if (failOnHttpError) {
-          throw new Error(
+          throw new DingtalkCardRequestError(
             `DingTalk reply send failed: HTTP ${resp.status} ${detail}`,
+            isRetryableDingtalkStatus(resp.status),
           );
         }
       } else if (failOnHttpError) {
@@ -2053,8 +2063,9 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
         );
-        throw new Error(
+        throw new DingtalkCardRequestError(
           `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
+          isRetryableDingtalkStatus(resp.status),
         );
       }
       if (target.isGroup === true) {
@@ -2582,6 +2593,7 @@ export class DingtalkChannel extends ChannelBase {
    * the sessions on a fresh bridge.
    */
   override onBridgeDisconnected(): void {
+    void this.backgroundOutputCoordinator.drain();
     for (const [sessionId, keys] of this.sessionReactionKeys) {
       this.sessionReactionKeys.delete(sessionId);
       for (const { messageId, chatId } of keys.values()) {
@@ -2916,6 +2928,8 @@ export class DingtalkChannel extends ChannelBase {
   private formatBackgroundOutputHeader(
     delivery: BackgroundOutputPacket,
   ): string {
+    const chinese = isChinesePresentationLanguage(this.displayLanguage);
+    const partialLabel = partialOutputLabel(this.displayLanguage);
     const icon =
       delivery.status === 'completed'
         ? '✅'
@@ -2923,14 +2937,22 @@ export class DingtalkChannel extends ChannelBase {
           ? '❌'
           : '⏹️';
     if (delivery.kind === 'agent') {
-      if (delivery.text) return delivery.partial ? '（部分）' : '';
+      if (delivery.text) return delivery.partial ? partialLabel : '';
       const status =
         delivery.status === 'completed'
-          ? '已完成'
+          ? chinese
+            ? '已完成'
+            : 'completed'
           : delivery.status === 'failed'
-            ? '失败'
-            : '已停止';
-      return `${icon} 后台任务${status}`;
+            ? chinese
+              ? '失败'
+              : 'failed'
+            : chinese
+              ? '已停止'
+              : 'stopped';
+      return chinese
+        ? `${icon} 后台任务${status}`
+        : `${icon} Background task ${status}`;
     }
     const label = this.formatBackgroundTaskLabel(delivery.label);
     const kind = {
@@ -2938,7 +2960,7 @@ export class DingtalkChannel extends ChannelBase {
       monitor: 'Monitor',
       workflow: 'Workflow',
     }[delivery.kind];
-    return `## ${icon} ${kind} · ${label}${delivery.partial ? '（部分）' : ''}`;
+    return `## ${icon} ${kind} · ${label}${delivery.partial ? `${chinese ? '' : ' '}${partialLabel}` : ''}`;
   }
 
   private formatBackgroundTaskLabel(label?: string): string {
@@ -2946,7 +2968,12 @@ export class DingtalkChannel extends ChannelBase {
       ?.replace(/\p{Cc}+/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    return escapeDingTalkMarkdown(normalized || '后台任务');
+    return escapeDingTalkMarkdown(
+      normalized ||
+        (isChinesePresentationLanguage(this.displayLanguage)
+          ? '后台任务'
+          : 'Background task'),
+    );
   }
 
   private prepareBackgroundOutput(
@@ -3076,14 +3103,7 @@ export class DingtalkChannel extends ChannelBase {
       ? this.fileProjectors.get(segment.runId)?.projector
       : undefined;
     if (segment) this.fileProjectors.delete(segment.runId);
-    let outgoingText = await this.prepareReplyOutput(chatId, text, streamed);
-    if (
-      segment?.partial &&
-      outgoingText.trim() &&
-      !outgoingText.startsWith('（部分）')
-    ) {
-      outgoingText = `（部分）\n\n${outgoingText}`;
-    }
+    const outgoingText = await this.prepareReplyOutput(chatId, text, streamed);
     if (segment && this.interactionPresenter) {
       if (
         await this.interactionPresenter.closeOutput(
@@ -3098,7 +3118,9 @@ export class DingtalkChannel extends ChannelBase {
     }
     await this.sendResponseMessage(
       chatId,
-      outgoingText,
+      segment?.partial
+        ? markPartialOutput(outgoingText, this.displayLanguage)
+        : outgoingText,
       sessionId,
       segment?.sourceLabel,
       true,

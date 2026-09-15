@@ -14,7 +14,10 @@ import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import type { PermissionCardController } from './permission-card-controller.js';
 import type { DingtalkPresentationPhase } from './presentation-phase.js';
-import { isChinesePresentationLanguage } from './presentation-phase.js';
+import {
+  isChinesePresentationLanguage,
+  markPartialOutput,
+} from './presentation-phase.js';
 import {
   CONTENT_LIMIT,
   TRUNCATION_MARKER,
@@ -258,9 +261,7 @@ export class DingtalkInteractionPresenter {
           )
         : decision.text;
       const partial = segment?.partial ?? presentation.context.partial;
-      if (partial && output.trim() && !output.startsWith('（部分）')) {
-        output = `（部分）\n\n${output}`;
-      }
+      if (partial) output = markPartialOutput(output, this.options.language);
       const completed =
         statusCards !== undefined &&
         (await statusCards.complete(

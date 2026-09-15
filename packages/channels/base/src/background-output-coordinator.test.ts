@@ -174,14 +174,23 @@ describe('BackgroundOutputCoordinator', () => {
 
   it('keeps separate task and turn results separate', async () => {
     const { coordinator, packets } = fixture();
-    for (const [taskId, turnId] of [
+    const turns = [
       ['task-1', 'turn-1'],
       ['task-2', 'turn-1'],
       ['task-1', 'turn-2'],
-    ]) {
+    ];
+    for (const [taskId, turnId] of turns) {
       await coordinator.dispatch(
         'session-1',
         taskId + '/' + turnId,
+        context({ taskId, turnId }),
+      );
+    }
+    expect(packets).toEqual([]);
+    for (const [taskId, turnId] of turns) {
+      await coordinator.dispatch(
+        'session-1',
+        '',
         context({ taskId, turnId, status: 'completed', turnComplete: true }),
       );
     }
@@ -190,6 +199,7 @@ describe('BackgroundOutputCoordinator', () => {
       'task-2/turn-1',
       'task-1/turn-2',
     ]);
+    expectIdle(coordinator);
   });
 
   it('parks an empty terminal marker while the target is resolving', async () => {
@@ -492,6 +502,122 @@ describe('BackgroundOutputCoordinator', () => {
     expect(options.log).toHaveBeenCalledExactlyOnceWith(
       'background response target unresolved after 3 attempts; 1 buffered segment(s) discarded\n',
     );
+    expect(packets).toEqual([]);
+    expectIdle(coordinator);
+  });
+
+  it('retains resolution loss when an outstanding resolver recovers the active turn', async () => {
+    const late = deferred<BackgroundOutputTarget>();
+    const latest = deferred<BackgroundOutputTarget>();
+    const resolveDelivery = vi
+      .fn<BackgroundOutputCoordinatorOptions['resolveDelivery']>()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(late.promise)
+      .mockResolvedValue(undefined);
+    const { coordinator, packets, target, options } = fixture({
+      resolveDelivery,
+    });
+    await coordinator.dispatch('session-1', 'Discarded first', context());
+    const recovering = coordinator.dispatch(
+      'session-1',
+      'Discarded second',
+      context(),
+    );
+    await vi.advanceTimersByTimeAsync(90 * 1000);
+    expect(resolveDelivery).toHaveBeenCalledTimes(4);
+    expect(options.log).toHaveBeenCalledWith(
+      'background response target unresolved after 3 attempts; 2 buffered segment(s) discarded\n',
+    );
+    resolveDelivery.mockReturnValueOnce(latest.promise);
+    const recovered = coordinator.dispatch(
+      'session-1',
+      'Recovered tail',
+      context(),
+    );
+    await coordinator.dispatch(
+      'session-1',
+      '',
+      context({ status: 'completed', turnComplete: true }),
+    );
+    late.resolve({ target });
+    await recovering;
+    expect(packets).toEqual([]);
+    latest.resolve({ target });
+    await recovered;
+    expect(packets).toEqual([
+      expect.objectContaining({
+        text: 'Recovered tail',
+        partial: true,
+        turnComplete: true,
+      }),
+    ]);
+    expectIdle(coordinator);
+  });
+
+  it('does not inherit a completed resolution loss when the same key starts a fresh turn', async () => {
+    const late = deferred<BackgroundOutputTarget>();
+    const resolveDelivery = vi
+      .fn<BackgroundOutputCoordinatorOptions['resolveDelivery']>()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(late.promise)
+      .mockResolvedValue(undefined);
+    const { coordinator, packets, target } = fixture({ resolveDelivery });
+    await coordinator.dispatch('session-1', 'Discarded first', context());
+    const earlier = coordinator.dispatch(
+      'session-1',
+      'Discarded second',
+      context(),
+    );
+    await coordinator.dispatch(
+      'session-1',
+      '',
+      context({ turnComplete: true }),
+    );
+    await vi.advanceTimersByTimeAsync(90 * 1000);
+    expect(resolveDelivery).toHaveBeenCalledTimes(4);
+    resolveDelivery.mockResolvedValue({ target });
+    await coordinator.dispatch('session-1', 'Fresh result', context());
+    late.resolve({ target });
+    await earlier;
+    expect(packets).toEqual([]);
+    await coordinator.dispatch(
+      'session-1',
+      '',
+      context({ status: 'completed', turnComplete: true }),
+    );
+    expect(packets).toEqual([
+      expect.objectContaining({
+        text: 'Fresh result',
+        partial: false,
+        turnComplete: true,
+      }),
+    ]);
+    expectIdle(coordinator);
+  });
+
+  it('does not reopen a completed discarded turn when its last resolver succeeds', async () => {
+    const late = deferred<BackgroundOutputTarget>();
+    const resolveDelivery = vi
+      .fn<BackgroundOutputCoordinatorOptions['resolveDelivery']>()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(late.promise)
+      .mockResolvedValue(undefined);
+    const { coordinator, packets, target } = fixture({ resolveDelivery });
+    await coordinator.dispatch('session-1', 'Discarded first', context());
+    const earlier = coordinator.dispatch(
+      'session-1',
+      'Discarded second',
+      context(),
+    );
+    await coordinator.dispatch(
+      'session-1',
+      '',
+      context({ turnComplete: true }),
+    );
+    await vi.advanceTimersByTimeAsync(90 * 1000);
+    expect(resolveDelivery).toHaveBeenCalledTimes(4);
+    late.resolve({ target });
+    await earlier;
     expect(packets).toEqual([]);
     expectIdle(coordinator);
   });

@@ -1443,6 +1443,7 @@ export abstract class ChannelBase {
         filePath: join(options.stateDir, 'named-sessions.json'),
         router: this.router,
         isBusy: (sessionId) => this.isNamedSessionBusy(sessionId),
+        onSessionRetiring: (sessionId) => this.onSessionRetiring(sessionId),
       });
     }
 
@@ -2809,9 +2810,13 @@ export abstract class ChannelBase {
         if (
           !cancelSucceeded ||
           active.deliveryStarted ||
-          (turnEnded && !active.cancelled)
+          (turnEnded && !active.cancelled && !active.cancellationEmitted)
         ) {
           return false;
+        }
+        if (turnEnded) {
+          this.emitTaskCancellation(active, sessionId, reason);
+          return true;
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
@@ -4006,7 +4011,6 @@ export abstract class ChannelBase {
           const result = await namedSessions.close(owner, parts[0]!);
           if (closing) {
             this.cancelBtw(closing.sessionId);
-            this.onSessionRetiring(closing.sessionId);
           }
           await this.sendThreadMessage(
             envelope.chatId,
@@ -4131,7 +4135,9 @@ export abstract class ChannelBase {
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
-          if (id !== retiringSessionId) this.onSessionRetiring(id);
+          if (!this.namedSessions && id !== retiringSessionId) {
+            this.onSessionRetiring(id);
+          }
           this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +

@@ -289,6 +289,7 @@ export class BackgroundOutputCoordinator {
         }
         if (
           parked.retiring ||
+          parked.turnEnded === true ||
           this.pendingBackgroundResponseTerminals.get(key) !== parked
         ) {
           await this.flushDetachedBackgroundResponse(
