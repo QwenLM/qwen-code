@@ -13,7 +13,7 @@ import {
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
-import { extensionComponentsSummary } from '../../../../services/extensionComponentsSummary.js';
+import { extensionComponentsSummary } from '../../../../services/extension-components-summary.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 
 export type PluginDetailAction =
