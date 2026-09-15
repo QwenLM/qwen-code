@@ -88,3 +88,7 @@ In an interactive terminal or a Web Shell turn with an attached client, the mode
 Turn it off with `goals.modelProposed: "disabled"` in your user settings. Because the setting decides whether the model may ask you to start an autonomous loop, it is honored only from user and system scope; a workspace `.qwen/settings.json` value is ignored with a warning.
 
 The skill is instructed to be read-only, and only its non-mutating tools are auto-approved (`get_goal`, `read_file`, `glob`, `grep_search`). `ask_user_question` is deliberately not auto-approved, so its question dialog is shown before the skill drafts from your answers. Like other bundled skills, a project or personal skill named `goal-draft` overrides it, and `skills.disabled` can turn it off. See [Skills](./skills.md) for how bundled skills are discovered.
+
+## Telemetry
+
+When [telemetry](../../developers/development/telemetry.md) is enabled, each Goal state change — set, replace, edit, pause, resume, clear, verifier rejection, and every stop — is recorded as a `qwen-code.goal_state` event with the Goal's turn count, token spend, budgets, and active time. The objective text and stop reasons are never recorded. A resumed session does not record its recovered Goal again.

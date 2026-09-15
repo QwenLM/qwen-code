@@ -726,6 +726,19 @@ export type GoalStateCause =
   | 'clear'
   | 'migrated';
 
+/**
+ * What a runtime broadcast carries beyond the snapshot and its cause.
+ *
+ * `restore()` republishes recovered state with the cause of the record it was
+ * recovered from, so a subscriber that counts transitions cannot otherwise
+ * tell that broadcast from the live one that first produced it, and would
+ * count the same `create` or `usage_limited` again on every resume.
+ */
+export interface GoalBroadcastMeta {
+  /** True only on the broadcast that republishes restored state. */
+  replayed: boolean;
+}
+
 export interface GoalStateRecordPayloadV2 {
   v: typeof GOAL_STATE_VERSION;
   cause: GoalStateCause;

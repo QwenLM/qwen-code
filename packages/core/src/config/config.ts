@@ -160,6 +160,8 @@ import {
   logStartSession,
   logSessionEnd,
   logRipgrepFallback,
+  logGoalState,
+  goalStateEventFromSnapshot,
   RipgrepFallbackEvent,
   StartSessionEvent,
   type TelemetryTarget,
@@ -9692,6 +9694,16 @@ export class Config {
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
+    });
+    // Every committed transition reaches telemetry from here, the one place
+    // that holds both the runtime and the Config its loggers need. Subscribed
+    // before the restore below starts, so the broadcast that republishes a
+    // resumed session's Goal is seen and skipped rather than missed and then
+    // mistaken for the next live transition.
+    runtime.subscribe((snapshot, cause, meta) => {
+      if (meta?.replayed) return;
+      const event = goalStateEventFromSnapshot(snapshot, cause);
+      if (event) logGoalState(this, event);
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

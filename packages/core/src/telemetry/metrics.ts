@@ -9,7 +9,10 @@ import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
+import type { GoalLimitKind, GoalStatus } from '../goals/goal-protocol.js';
 import type {
+  GoalStateEvent,
+  GoalStateEventCause,
   ModelSlashCommandEvent,
   MemoryRecallDeliveryPhase,
   MemoryRecallDeliveryPoint,
@@ -34,6 +37,19 @@ const CONTENT_RETRY_FAILURE_COUNT = `${SERVICE_NAME}.chat.content_retry_failure.
 const API_RETRY_COUNT = `${SERVICE_NAME}.api.retry.count`;
 const MODEL_SLASH_COMMAND_CALL_COUNT = `${SERVICE_NAME}.slash_command.model.call_count`;
 export const SUBAGENT_EXECUTION_COUNT = `${SERVICE_NAME}.subagent.execution.count`;
+
+// Goal Metrics
+const GOAL_TRANSITION_COUNT = `${SERVICE_NAME}.goal.transition.count`;
+const GOAL_TOKENS_USED = `${SERVICE_NAME}.goal.tokens_used`;
+const GOAL_TURN_COUNT = `${SERVICE_NAME}.goal.turn_count`;
+
+/** The Goal stops a user reads as the end of a run. */
+type GoalOutcomeCause = Extract<
+  GoalStateEventCause,
+  'complete' | 'blocked' | 'usage_limited'
+>;
+const GOAL_OUTCOME_CAUSES: ReadonlySet<GoalStateEventCause> =
+  new Set<GoalOutcomeCause>(['complete', 'blocked', 'usage_limited']);
 
 // Arena Metrics
 const ARENA_SESSION_COUNT = `${SERVICE_NAME}.arena.session.count`;
@@ -225,6 +241,17 @@ const COUNTER_DEFINITIONS = {
       tokens_after: number;
     },
   },
+  [GOAL_TRANSITION_COUNT]: {
+    description:
+      'Counts Goal state transitions, tagged by cause, resulting status, and limit kind.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (goalTransitionCounter = c),
+    attributes: {} as {
+      cause: GoalStateEventCause;
+      status?: GoalStatus;
+      limit_kind?: GoalLimitKind;
+    },
+  },
 } as const;
 
 const HISTOGRAM_DEFINITIONS = {
@@ -244,6 +271,28 @@ const HISTOGRAM_DEFINITIONS = {
     assign: (h: Histogram) => (apiRequestLatencyHistogram = h),
     attributes: {} as {
       model: string;
+    },
+  },
+  [GOAL_TOKENS_USED]: {
+    description:
+      'Tokens a Goal had spent when it completed, was blocked, or reached a usage limit.',
+    unit: '{token}',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (goalTokensUsedHistogram = h),
+    attributes: {} as {
+      cause: GoalOutcomeCause;
+      limit_kind?: GoalLimitKind;
+    },
+  },
+  [GOAL_TURN_COUNT]: {
+    description:
+      'Turns a Goal had finished when it completed, was blocked, or reached a usage limit.',
+    unit: '{turn}',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (goalTurnCountHistogram = h),
+    attributes: {} as {
+      cause: GoalOutcomeCause;
+      limit_kind?: GoalLimitKind;
     },
   },
 } as const;
@@ -433,6 +482,9 @@ let contentRetryCounter: Counter | undefined;
 let contentRetryFailureCounter: Counter | undefined;
 let apiRetryCounter: Counter | undefined;
 let subagentExecutionCounter: Counter | undefined;
+let goalTransitionCounter: Counter | undefined;
+let goalTokensUsedHistogram: Histogram | undefined;
+let goalTurnCountHistogram: Histogram | undefined;
 let modelSlashCommandCallCounter: Counter | undefined;
 
 // Performance Monitoring Metrics
@@ -619,6 +671,37 @@ export function initializeMetrics(config: TelemetryRuntimeConfig): void {
   initializePerformanceMonitoring(config);
 
   isMetricsInitialized = true;
+}
+
+/**
+ * Counts a Goal transition and, on the three outcomes a user reads as the end
+ * of a run, records what the Goal had spent getting there.
+ *
+ * The Goal id and revision stay on the log record: every Goal is a new value,
+ * the same unbounded time-series fan-out the opt-in `session.id` guards
+ * against.
+ */
+export function recordGoalStateMetrics(
+  config: Config,
+  event: GoalStateEvent,
+): void {
+  if (!goalTransitionCounter || !isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  const limitKind = event.limit_kind ? { limit_kind: event.limit_kind } : {};
+  goalTransitionCounter.add(1, {
+    ...common,
+    cause: event.cause,
+    ...(event.status ? { status: event.status } : {}),
+    ...limitKind,
+  });
+  if (!GOAL_OUTCOME_CAUSES.has(event.cause)) return;
+  const outcome = { ...common, cause: event.cause, ...limitKind };
+  if (event.tokens_used !== undefined) {
+    goalTokensUsedHistogram?.record(event.tokens_used, outcome);
+  }
+  if (event.turn_count !== undefined) {
+    goalTurnCountHistogram?.record(event.turn_count, outcome);
+  }
 }
 
 export function recordChatCompressionMetrics(

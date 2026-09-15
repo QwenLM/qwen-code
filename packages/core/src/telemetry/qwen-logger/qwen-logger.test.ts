@@ -28,6 +28,7 @@ import {
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
   SubagentExecutionEvent,
+  makeGoalStateEvent,
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -454,6 +455,40 @@ describe('QwenLogger', () => {
           }),
         }),
       );
+    });
+
+    it('journals a Goal transition without its Goal id or absent figures', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'blocked',
+          goal_id: 'g-1',
+          revision: 4,
+          status: 'blocked',
+          turn_count: 7,
+          tokens_used: 9_000,
+        }),
+      );
+
+      const rumEvent = enqueueSpy.mock.calls[0]![0];
+      expect(rumEvent).toMatchObject({
+        event_type: 'action',
+        type: 'goal',
+        name: 'goal_state',
+        properties: {
+          cause: 'blocked',
+          revision: 4,
+          status: 'blocked',
+          turn_count: 7,
+          tokens_used: 9_000,
+        },
+      });
+      const keys = Object.keys(rumEvent.properties ?? {});
+      expect(keys).not.toContain('goal_id');
+      expect(keys).not.toContain('limit_kind');
+      expect(keys).not.toContain('token_budget');
     });
 
     it('logs protocol tag sanitization without model content', () => {

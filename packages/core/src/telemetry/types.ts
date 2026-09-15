@@ -25,6 +25,11 @@ import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
 import type { ToolErrorType } from '../tools/tool-error.js';
+import type {
+  GoalLimitKind,
+  GoalStateCause,
+  GoalStatus,
+} from '../goals/goal-protocol.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -1104,6 +1109,68 @@ export class SubagentExecutionEvent implements BaseTelemetryEvent {
   }
 }
 
+/**
+ * The Goal state causes a {@link GoalStateEvent} reports: the user's controls
+ * and the stops a user acts on. Per-turn `turn_finished` and `checkpoint`, the
+ * one-off `migrated`, and `verifier_accept` (always followed by the `complete`
+ * or `blocked` it accepted) are left out.
+ */
+export const GOAL_STATE_EVENT_CAUSES = [
+  'create',
+  'replace',
+  'edit',
+  'pause',
+  'resume',
+  'clear',
+  'complete',
+  'blocked',
+  'usage_limited',
+  'verifier_reject',
+] as const satisfies readonly GoalStateCause[];
+
+export type GoalStateEventCause = (typeof GOAL_STATE_EVENT_CAUSES)[number];
+
+/**
+ * A committed Goal state transition.
+ *
+ * Numbers and enums only. The objective, the stop reason and the checkpoint
+ * failure are free text a user or a model wrote, and `telemetry.logPrompts`
+ * defaults to on, so none of them is carried under any setting; the objective
+ * contributes its length.
+ */
+export interface GoalStateEvent extends BaseTelemetryEvent {
+  'event.name': 'goal_state';
+  cause: GoalStateEventCause;
+  goal_id: string;
+  revision: number;
+  /** Absent on `clear`, which leaves no Goal to describe. */
+  status?: GoalStatus;
+  limit_kind?: GoalLimitKind;
+  turn_count?: number;
+  tokens_used?: number;
+  token_budget?: number;
+  turn_budget?: number;
+  active_time_ms?: number;
+  active_time_budget_ms?: number;
+  /** Code points in the objective. */
+  objective_length?: number;
+}
+
+export function makeGoalStateEvent(
+  fields: Omit<GoalStateEvent, CommonFields>,
+): GoalStateEvent {
+  // Absent stays absent: a key holding `undefined` would still reach the log
+  // record's attributes and the analytics sink as an empty field.
+  const present = Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined),
+  ) as Omit<GoalStateEvent, CommonFields>;
+  return {
+    ...present,
+    'event.name': 'goal_state',
+    'event.timestamp': new Date().toISOString(),
+  };
+}
+
 export class AuthEvent implements BaseTelemetryEvent {
   'event.name': 'auth';
   'event.timestamp': string;
@@ -1252,6 +1319,7 @@ export type TelemetryEvent =
   | ContentRetryFailureEvent
   | ApiRetryEvent
   | SubagentExecutionEvent
+  | GoalStateEvent
   | ExtensionEnableEvent
   | ExtensionInstallEvent
   | ExtensionUninstallEvent

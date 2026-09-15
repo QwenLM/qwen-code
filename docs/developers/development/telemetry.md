@@ -716,6 +716,11 @@ The following events are logged:
 - `qwen-code.subagent_execution`: Subagent lifecycle event.
   - **Attributes**: `subagent_name` (string), `status` ("started", "completed", "failed", "cancelled"), `terminate_reason` (optional), `result` (optional), `execution_summary` (optional)
 
+#### Goal Events
+
+- `qwen-code.goal_state`: A committed Goal state transition. Emitted for `create`, `replace`, `edit`, `pause`, `resume`, `clear`, `complete`, `blocked`, `usage_limited`, and `verifier_reject`. Per-turn `turn_finished` and `checkpoint` are not reported, and neither is the state a resumed session recovers from its transcript. The objective, the stop reason, and checkpoint failure text are never included, whatever `telemetry.logPrompts` is set to.
+  - **Attributes**: `cause` (string), `goal_id` (string), `revision` (int), `status` ("active", "paused", "blocked", "usage_limited", "complete"; absent on `clear`), `limit_kind` ("evidence_catalog", "checkpoint_request", "token_budget", "turn_budget", "time_budget"; optional), `turn_count` (int, optional), `tokens_used` (int, optional), `token_budget` (int, optional), `turn_budget` (int, optional), `active_time_ms` (int, optional), `active_time_budget_ms` (int, optional), `objective_length` (int, optional; code points)
+
 #### Arena Events
 
 - `qwen-code.arena_session_started`: Arena session begins.
@@ -815,6 +820,17 @@ Metrics are numerical measurements of behavior over time. Metric names use the `
 - `qwen-code.chat.content_retry_failure.count` (Counter, Int): All content retries exhausted.
 
 - `qwen-code.chat.invalid_chunk.count` (Counter, Int): Invalid chunks from stream.
+
+#### Goal Metrics
+
+- `qwen-code.goal.transition.count` (Counter, Int): Goal state transitions, one per `qwen-code.goal_state` event.
+  - **Attributes**: `cause`, `status` (optional), `limit_kind` (optional)
+
+- `qwen-code.goal.tokens_used` (Histogram, `{token}`): Tokens a Goal had spent when it completed, was blocked, or reached a usage limit.
+  - **Attributes**: `cause` ("complete", "blocked", "usage_limited"), `limit_kind` (optional)
+
+- `qwen-code.goal.turn_count` (Histogram, `{turn}`): Turns a Goal had finished at the same three outcomes.
+  - **Attributes**: `cause` ("complete", "blocked", "usage_limited"), `limit_kind` (optional)
 
 #### Arena Metrics
 

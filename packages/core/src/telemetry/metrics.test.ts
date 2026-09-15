@@ -20,6 +20,7 @@ import {
   ApiRequestPhase,
 } from './metrics.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import type { GoalStateEvent } from './types.js';
 
 const mockCounterAddFn: Mock<
   (value: number, attributes?: Attributes, context?: Context) => void
@@ -85,6 +86,7 @@ describe('Telemetry Metrics', () => {
   let recordBaselineComparisonModule: typeof import('./metrics.js').recordBaselineComparison;
   let recordChannelMemoryRecallMetricsModule: typeof import('./metrics.js').recordChannelMemoryRecallMetrics;
   let recordMemoryRecallDeliveryMetricsModule: typeof import('./metrics.js').recordMemoryRecallDeliveryMetrics;
+  let recordGoalStateMetricsModule: typeof import('./metrics.js').recordGoalStateMetrics;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -121,6 +123,7 @@ describe('Telemetry Metrics', () => {
       metricsJsModule.recordChannelMemoryRecallMetrics;
     recordMemoryRecallDeliveryMetricsModule =
       metricsJsModule.recordMemoryRecallDeliveryMetrics;
+    recordGoalStateMetricsModule = metricsJsModule.recordGoalStateMetrics;
 
     const otelApiModule = await import('@opentelemetry/api');
 
@@ -203,6 +206,100 @@ describe('Telemetry Metrics', () => {
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         tokens_after: 100,
         tokens_before: 200,
+      });
+    });
+  });
+
+  describe('recordGoalStateMetrics', () => {
+    const goalEvent = (fields: Partial<GoalStateEvent>): GoalStateEvent => ({
+      'event.name': 'goal_state',
+      'event.timestamp': '2025-01-01T00:00:00.000Z',
+      cause: 'create',
+      goal_id: 'g-1',
+      revision: 1,
+      ...fields,
+    });
+
+    it('records nothing before metrics are initialized', () => {
+      recordGoalStateMetricsModule(
+        makeFakeConfig({}),
+        goalEvent({ cause: 'complete', tokens_used: 10, turn_count: 1 }),
+      );
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('registers the Goal counter and histograms', () => {
+      initializeMetricsModule(makeFakeConfig({}));
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.goal.transition.count',
+        expect.anything(),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.goal.tokens_used',
+        expect.objectContaining({ unit: '{token}' }),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.goal.turn_count',
+        expect.objectContaining({ unit: '{turn}' }),
+      );
+    });
+
+    it('counts a transition by its bounded attributes only', () => {
+      // The Goal id and revision are per-Goal values; on a metric they would
+      // open a new time series for every Goal.
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordGoalStateMetricsModule(
+        config,
+        goalEvent({
+          cause: 'pause',
+          status: 'paused',
+          turn_count: 3,
+          tokens_used: 500,
+        }),
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        cause: 'pause',
+        status: 'paused',
+      });
+      // A pause is not an outcome, so nothing is recorded as spend.
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('records spend and turns on an outcome', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordGoalStateMetricsModule(
+        config,
+        goalEvent({
+          cause: 'usage_limited',
+          status: 'usage_limited',
+          limit_kind: 'time_budget',
+          turn_count: 12,
+          tokens_used: 45_000,
+        }),
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        cause: 'usage_limited',
+        status: 'usage_limited',
+        limit_kind: 'time_budget',
+      });
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(45_000, {
+        cause: 'usage_limited',
+        limit_kind: 'time_budget',
+      });
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(12, {
+        cause: 'usage_limited',
+        limit_kind: 'time_budget',
       });
     });
   });
