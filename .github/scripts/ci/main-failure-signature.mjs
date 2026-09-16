@@ -20,6 +20,10 @@ export const TEST_MARKER_PREFIX = 'qwen-main-ci-failure-test:';
 /** Pre-dedupe marker, still used for runs whose failing tests are unknown. */
 export const LEGACY_MARKER_PREFIX = 'qwen-main-ci-failure:';
 export const SIGNATURE_MARKER_PREFIX = 'qwen-main-ci-failure-sig:';
+/** Marks the machine-written runner-fleet body, so a later per-commit run of
+ * the OTHER failure class on the same commit re-renders the prose instead of
+ * echoing it — the issue's labels follow the current run's class. */
+export const FLEET_BODY_MARKER = 'qwen-main-ci-failure-fleet';
 export const OCCURRENCE_MARKER = '<!-- qwen-main-ci-failure-occurrences -->';
 export const MAX_OCCURRENCES = 10;
 
@@ -104,10 +108,10 @@ export function parseFailedJobs(tsv) {
 }
 
 /**
- * Parse the failed-job metadata projection (`[{name, steps}]`) the workflow
- * writes alongside the TSV: how many steps each failed job executed in total.
- * Anything unreadable degrades to no entries — an unknown step count must
- * never read as zero.
+ * Parse the job metadata projection (`[{name, runner_name?, steps}]`) the
+ * workflow writes alongside the TSV: how many repository steps each job that
+ * did not pass executed, and the runner it sat on. Anything unreadable
+ * degrades to no entries — an unknown step count must never read as zero.
  */
 export function parseFailedJobsMeta(jsonText) {
   let parsed;
@@ -125,16 +129,23 @@ export function parseFailedJobsMeta(jsonText) {
         Number.isInteger(entry.steps) &&
         entry.steps >= 0,
     )
-    .map((entry) => ({ name: entry.name, steps: entry.steps }));
+    .map((entry) => ({
+      name: entry.name,
+      steps: entry.steps,
+      ...(typeof entry.runner_name === 'string' && entry.runner_name !== ''
+        ? { runner_name: entry.runner_name }
+        : {}),
+    }));
 }
 
 /**
- * The never-started class: the run failed and every failed job executed zero
- * steps, so no code — not even checkout — ran anywhere (observed 2026-09-16,
- * E2E run 35051269368: the sandbox:docker leg sat on a pool runner for
- * exactly 600s and failed without a single step). No commit can cause that,
- * so the per-commit issue it would file hands the autofix agent nothing it
- * can act on; the workflow re-runs the failed jobs once instead, and only a
+ * The never-started class: the run failed and every job that did not pass —
+ * failure or cancelled alike — executed zero repository steps, so the failed
+ * lanes ran no code, not even checkout (observed 2026-09-16, E2E run
+ * 35051269368: the sandbox:docker leg sat on a pool runner for exactly 600s
+ * and failed without a single step). No commit can cause that, so the
+ * per-commit issue it would file hands the autofix agent nothing it can act
+ * on; the workflow re-runs the failed jobs once instead, and only a
  * recurrence on the re-run reaches the issue path.
  */
 export function isNeverStartedRun(failedJobsMeta) {
@@ -186,12 +197,29 @@ export function analyzeLogs(
     }
   }
 
+  const neverStarted = isNeverStartedRun(failedJobsMeta);
+  // The host a dead lane sat on is the escalation datum the fleet issue
+  // exists to hand a human; attach it only on the never-started class so the
+  // autofix-routed body stays unchanged.
+  const runners = new Map(
+    failedJobsMeta
+      .filter((entry) => entry.runner_name)
+      .map((entry) => [entry.name, entry.runner_name]),
+  );
+  const jobs = neverStarted
+    ? failedJobs.map((job) =>
+        runners.has(job.name)
+          ? { ...job, runner_name: runners.get(job.name) }
+          : job,
+      )
+    : failedJobs;
+
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
   return {
     workflow: workflowName,
     tests,
-    failedJobs,
-    neverStarted: isNeverStartedRun(failedJobsMeta),
+    failedJobs: jobs,
+    neverStarted,
     signature: tests.length
       ? failureSignature(
           workflowName,
@@ -251,9 +279,10 @@ function splitOccurrenceBlock(body) {
 
 function failedJobLines(failedJobs) {
   return failedJobs.map((job) => {
-    if (!job.steps.length) return `  - \`${job.name}\``;
+    const runner = job.runner_name ? ` on \`${job.runner_name}\`` : '';
+    if (!job.steps.length) return `  - \`${job.name}\`${runner}`;
     const steps = job.steps.map((step) => `\`${step}\``).join(', ');
-    return `  - \`${job.name}\` — failed in ${job.steps.length === 1 ? 'step' : 'steps'} ${steps}`;
+    return `  - \`${job.name}\`${runner} — failed in ${job.steps.length === 1 ? 'step' : 'steps'} ${steps}`;
   });
 }
 
@@ -271,10 +300,11 @@ function renderPerCommitBody({ analysis, occurrence }) {
   if (analysis.neverStarted) {
     return [
       `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
+      `<!-- ${FLEET_BODY_MARKER} -->`,
       '',
       'A main-branch CI run failed on `main` with no step of any failed job',
       'executed — the runner accepted each job and died before its first',
-      'step — and one automatic re-run did not clear it. No commit can have',
+      'step — and no automatic re-run cleared it. No commit can have',
       'caused this, so the issue is tracked per commit as a runner-fleet',
       'failure.',
       '',
@@ -331,7 +361,10 @@ function cappedTestLines(tests) {
 /**
  * Build the issue body: the create path when `existingBody` is empty, otherwise
  * a merge that keeps the existing prose (an agent's or a human's notes live
- * there) and only refreshes the machine-owned trailer.
+ * there) and only refreshes the machine-owned trailer. One exception: on the
+ * per-commit path an existing body of the OTHER failure class is re-rendered,
+ * because the issue's labels follow the current run's class and the two must
+ * not disagree.
  */
 export function renderIssueBody({
   analysis,
@@ -340,11 +373,21 @@ export function renderIssueBody({
   existingBody = '',
 }) {
   if (!analysis.tests.length) {
-    // Nothing to merge into: the per-commit path opens one issue per commit and
-    // an existing body means the same commit was already filed.
-    return existingBody.trim()
-      ? existingBody
-      : renderPerCommitBody({ analysis, occurrence });
+    // The per-commit marker keys on the commit alone and every watched
+    // workflow runs on the same main commit, so an existing body can belong
+    // to the OTHER failure class of this commit. The route labels follow the
+    // class of THIS analysis, so the prose must too: echoing a stale fleet
+    // body would pitch the agent under a stand-down notice, and echoing a
+    // stale autofix pitch would hide a fleet failure. Only a same-class body
+    // is kept verbatim — that is where an agent's or a human's notes live.
+    if (
+      existingBody.trim() &&
+      existingBody.includes(FLEET_BODY_MARKER) ===
+        Boolean(analysis.neverStarted)
+    ) {
+      return existingBody;
+    }
+    return renderPerCommitBody({ analysis, occurrence });
   }
 
   // Search only ever uses the first MAX_SEARCH_MARKERS markers, so the body

@@ -87,14 +87,19 @@ jobs:
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
-          # Every failed job's executed-step count, feeding the helper's
-          # never-started classification: a failed job with zero steps never
-          # ran a line of repository code, so no commit can be its cause.
+          # The never-started projection, over every job that did not pass —
+          # not only `failure` conclusions: a leg cancelled at its timeout DID
+          # execute repository code, and dropping it here would read a real
+          # regression as a fleet failure. The count covers repository steps
+          # only — GitHub's array also carries the runner-internal 'Set up
+          # job'/'Complete job' entries and skipped ones — so a runner that
+          # died during setup still reads as zero. runner_name rides along so
+          # the fleet issue can name the dead host.
           # `-s` slurps the pages `--paginate` writes into one document before
           # projecting: per-document the file would hold N concatenated arrays
           # and the helper's JSON.parse would throw, silently reading every
           # run with more than 100 jobs as not never-started.
-          jq -c -s '[.[].jobs[] | select(.conclusion == "failure") | {name: .name, steps: ((.steps // []) | length)}]' \
+          jq -c -s '[.[].jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | {name: .name, runner_name: .runner_name, steps: ([.steps[]? | select(.name != "Set up job" and .name != "Complete job" and .conclusion != "skipped")] | length)}]' \
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs-meta.json" || true
 
@@ -187,18 +192,25 @@ jobs:
             echo "${delim}"
           } >> "${GITHUB_OUTPUT}"
 
-  # A failed job that executed zero steps never ran any repository code: a
-  # runner accepted the assignment and died before the first step (observed
-  # 2026-09-16 on E2E run 35051269368, whose sandbox:docker leg sat on a pool
-  # runner for exactly 600s and failed without a single step). No commit can
-  # cause that, so the per-commit issue it would file hands the autofix agent
-  # an unactionable flake — re-run the failed jobs once instead. A flake is
-  # absorbed: the re-run passes and no issue ever existed. A recurrence on
-  # attempt 2 files per commit as a fleet failure kept off the autofix route,
-  # so a persistent outage costs one human-read issue per merge rather than
-  # one agent round per merge. A non-failure attempt 2 — cancelled, timed
-  # out, stale — files nothing: analyze's failure-only gate skips it, so the
-  # re-run step's annotation is the record of the suppressed filing.
+  # A failed job that executed zero repository steps never ran any
+  # repository code: a runner accepted the assignment and died before its
+  # first step (observed 2026-09-16 on E2E run 35051269368, whose
+  # sandbox:docker leg sat on a pool runner for exactly 600s and failed
+  # without a single step). No commit can cause that, so the per-commit issue
+  # it would file hands the autofix agent an unactionable flake — re-run the
+  # failed jobs once instead. A flake is absorbed: the re-run passes and no
+  # issue ever existed. A recurrence on attempt 2 files per commit as a fleet
+  # failure kept off the autofix route, so a persistent outage costs one
+  # human-read issue per merge rather than one agent round per merge. A
+  # non-failure attempt 2 — cancelled, timed out, stale — files nothing:
+  # analyze's failure-only gate skips it, so the re-run step's annotation is
+  # the record of the suppressed filing. The re-run itself is skipped when a
+  # newer main run of the same workflow already exists: the attempt would
+  # re-enter the watched workflow's concurrency group as the newest pending
+  # entry, and GitHub keeps at most one pending run per group (e2e.yml) — it
+  # would cancel that newer run, whose `cancelled` conclusion analyze's
+  # failure-only gate never sees, dropping main's newest tree with no record
+  # at all.
   rerun_never_started:
     name: 'Re-run jobs that never started'
     needs: 'analyze'
@@ -209,14 +221,36 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: 'write'
+    outputs:
+      superseded: '${{ steps.rerun.outputs.superseded }}'
     steps:
       - name: 'Re-run the failed jobs once'
+        id: 'rerun'
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
+          WORKFLOW_ID: '${{ github.event.workflow_run.workflow_id }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          WORKFLOW_RUN_CREATED_AT: '${{ github.event.workflow_run.created_at }}'
         run: |-
+          # Supersession first: when a newer run of the same workflow already
+          # exists on main, this commit no longer decides anything and the
+          # re-run's only effect would be cancelling that newer run out of
+          # the concurrency group's single pending slot. file_issue's gate
+          # reads the superseded output and files the fleet failure instead.
+          superseded="$(
+            gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&per_page=10" \
+              | jq --arg id "${WORKFLOW_RUN_ID}" --arg created "${WORKFLOW_RUN_CREATED_AT}" \
+                '[.workflow_runs[] | select((.id | tostring) != $id and .created_at > $created)] | length'
+          )"
+          if [[ "${superseded}" != "0" ]]; then
+            echo 'superseded=true' >> "${GITHUB_OUTPUT}"
+            message="Not re-running ${WORKFLOW_RUN_URL}: a newer main run of the same workflow supersedes this commit, so the re-run would only displace it — the fleet failure files its issue instead"
+            echo "::notice::${message}"
+            echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
           # This job is the one decision in the workflow that suppresses a
           # filing, so it announces itself: once the re-run absorbs the flake,
@@ -236,11 +270,14 @@ jobs:
     # Skip filing only when the one bounded re-run actually started. A skipped
     # rerun job (an ordinary failure with steps, or an attempt-2+ recurrence)
     # and a failed one (the re-run request itself errored) both fall through
-    # to filing, where the body and route follow never_started.
+    # to filing, where the body and route follow never_started — as does a
+    # re-run skipped because a newer main run supersedes this commit (the
+    # superseded output): the fleet failure is filed rather than displacing
+    # the newer run.
     # always() is load-bearing: without a status check function Actions
     # implicitly prepends success(), and a skipped rerun_never_started is not
     # a success, so the condition below would never be evaluated.
-    if: "${{ always() && needs.analyze.result == 'success' && needs.rerun_never_started.result != 'success' }}"
+    if: "${{ always() && needs.analyze.result == 'success' && (needs.rerun_never_started.result != 'success' || needs.rerun_never_started.outputs.superseded == 'true') }}"
     # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
     # and the pool being the REASON CI broke would queue the report behind
     # the very failure it documents.
@@ -261,13 +298,27 @@ jobs:
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
+          AUTOFIX_SKIP_LABEL: 'autofix/skip'
         run: |-
           apply_autofix_route() {
-            # A run whose failed jobs all executed zero steps ran no
-            # repository code, so there is no repair for the agent to make:
-            # the issue records the fleet failure for a human instead.
+            # A run whose failed jobs all executed zero repository steps ran
+            # no repository code, so there is no repair for the agent to
+            # make: the issue records the fleet failure for a human instead.
             if [[ "${NEVER_STARTED}" == 'true' ]]; then
               echo "Leaving the issue off the autofix route: no failed job executed a step."
+              # A human must still FIND the fleet issue — an unlabelled,
+              # bot-authored issue is skipped by every routing automation.
+              # autofix/skip keeps the agent's scan (-label:autofix/skip) off
+              # it, and a same-commit issue an ordinary failure already
+              # routed comes back off that route: body and labels are decided
+              # from the same flag.
+              gh issue edit "$1" \
+                --repo "${REPO}" \
+                --add-label "${BUG_LABEL},${AUTOFIX_SKIP_LABEL}"
+              gh issue edit "$1" \
+                --repo "${REPO}" \
+                --remove-label "${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
+                --remove-assignee "${AUTOFIX_BOT}"
               return 0
             fi
             gh issue edit "$1" \

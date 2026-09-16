@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -142,12 +145,17 @@ describe('main CI failure issue workflow', () => {
     );
     // The never-started classification rides the same single fetch: the meta
     // projection is the only writer of the file --jobs-meta hands to analyze.
+    // The population is every job that did not pass — a leg cancelled at its
+    // timeout DID execute repository code, and a `failure`-only filter would
+    // read a real regression as a fleet failure — and the count covers
+    // repository steps only, so a runner that died during setup still reads
+    // as zero. runner_name rides along so the fleet issue can name the host.
     // `-s` is load-bearing: --paginate writes one JSON document per page, and
     // projecting per document would leave N concatenated arrays that the
     // helper's JSON.parse rejects, silently reading every run with more than
     // 100 jobs as not never-started.
     expect(download).toContain(
-      'jq -c -s \'[.[].jobs[] | select(.conclusion == "failure") | {name: .name, steps: ((.steps // []) | length)}]\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs-meta.json" || true',
+      'jq -c -s \'[.[].jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | {name: .name, runner_name: .runner_name, steps: ([.steps[]? | select(.name != "Set up job" and .name != "Complete job" and .conclusion != "skipped")] | length)}]\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs-meta.json" || true',
     );
     // `--jobs` has to ride the `analyze` invocation: `plan` never reads
     // `options.jobs`, so moving the flag there drops the section silently. The
@@ -163,6 +171,126 @@ describe('main CI failure issue workflow', () => {
       '--jobs-meta "${RUNNER_TEMP}/failed-jobs-meta.json"',
     );
   });
+
+  // The meta projection above is pinned as a literal; here it is EXECUTED
+  // against recorded payload shapes, end to end into the helper's analyze —
+  // the literal cannot see the classifier's two halves disagreeing, only
+  // this replay can. jq runs only where the platform provides it (this file
+  // is not win32-excluded), so the capability guard mirrors
+  // build-and-publish-image-workflow.test.js's replayable gate.
+  const jqReplayable =
+    process.platform !== 'win32' && spawnSync('jq', ['--version']).status === 0;
+
+  it.skipIf(!jqReplayable)(
+    'classifies the recorded fleet, timeout and setup-death shapes end to end',
+    () => {
+      const download = String(
+        jobs.analyze.steps.find(
+          (step) => step.name === 'Download failed job logs',
+        ).run,
+      );
+      const logical = download.replace(/\\\n\s*/g, ' ');
+      const metaCommand = logical
+        .split('\n')
+        .find((line) => line.includes('failed-jobs-meta.json'));
+      const projection = metaCommand?.match(/jq -c -s '([^']+)'/)?.[1];
+      expect(projection).toBeTruthy();
+
+      const helper = '.github/scripts/ci/main-failure-signature.mjs';
+      const analyze = (jobsPayload) => {
+        const dir = mkdtempSync(join(tmpdir(), 'main-ci-failure-meta-'));
+        const jobsJson = join(dir, 'run-jobs.json');
+        const metaPath = join(dir, 'failed-jobs-meta.json');
+        writeFileSync(jobsJson, JSON.stringify(jobsPayload));
+        const jq = spawnSync('jq', ['-c', '-s', projection, jobsJson], {
+          encoding: 'utf8',
+        });
+        expect(jq.status).toBe(0);
+        writeFileSync(metaPath, jq.stdout);
+        const analyzeRun = spawnSync(
+          process.execPath,
+          [
+            helper,
+            'analyze',
+            '--workflow',
+            'E2E Tests',
+            '--jobs-meta',
+            metaPath,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(analyzeRun.status).toBe(0);
+        return JSON.parse(analyzeRun.stdout);
+      };
+
+      // The motivating incident (run 35051269368): one queue-starved leg,
+      // one successful sibling — the never-started class, host carried.
+      const neverStarted = analyze({
+        jobs: [
+          {
+            name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+            conclusion: 'failure',
+            runner_name: 'ecs-qwen-hk4-30',
+            steps: [],
+          },
+          {
+            name: 'E2E Test (Linux) - sandbox:none - shard 1/1',
+            conclusion: 'success',
+            runner_name: 'ecs-qwen-hk5-21',
+            steps: [{ name: 'Checkout', conclusion: 'success' }],
+          },
+        ],
+      });
+      expect(neverStarted.neverStarted).toBe(true);
+
+      // A leg cancelled at its timeout DID run repository code (the shape of
+      // run 34030617765's Test leg): the run is NOT the never-started class.
+      const timedOut = analyze({
+        jobs: [
+          {
+            name: 'Lint & Static (ubuntu-latest, Node 22.x)',
+            conclusion: 'failure',
+            runner_name: 'ecs-qwen-hk4-2',
+            steps: [],
+          },
+          {
+            name: 'Test (ubuntu-latest, Node 22.x)',
+            conclusion: 'cancelled',
+            runner_name: 'ecs-qwen-hk3-32',
+            steps: [
+              { name: 'Set up job', conclusion: 'success' },
+              { name: 'Checkout', conclusion: 'success' },
+              {
+                name: 'Run tests and generate reports',
+                conclusion: 'cancelled',
+              },
+              { name: 'Upload coverage', conclusion: 'skipped' },
+              { name: 'Complete job', conclusion: 'success' },
+            ],
+          },
+        ],
+      });
+      expect(timedOut.neverStarted).toBe(false);
+
+      // A runner that died during setup ran no repository code either: the
+      // runner-internal entries must not count against the class.
+      const setupDeath = analyze({
+        jobs: [
+          {
+            name: 'Build for E2E',
+            conclusion: 'failure',
+            runner_name: 'ecs-qwen-hk4-9',
+            steps: [
+              { name: 'Set up job', conclusion: 'failure' },
+              { name: 'Checkout', conclusion: 'skipped' },
+              { name: 'Complete job', conclusion: 'success' },
+            ],
+          },
+        ],
+      });
+      expect(setupDeath.neverStarted).toBe(true);
+    },
+  );
 
   it('re-runs a never-started run once instead of filing an issue for it', () => {
     // A failed job with zero executed steps ran no repository code at all —
@@ -221,6 +349,34 @@ describe('main CI failure issue workflow', () => {
     expect(String(rerun.steps[0].run)).toContain('::notice::');
     expect(String(rerun.steps[0].run)).toContain('GITHUB_STEP_SUMMARY');
 
+    // A re-run re-enters the watched workflow's concurrency group as the
+    // newest pending entry, and GitHub keeps at most one pending run per
+    // group (e2e.yml): the attempt would cancel a NEWER main run waiting
+    // there, and that run's `cancelled` conclusion never reaches analyze's
+    // failure gate — main's newest tree would drop with no record anywhere.
+    // The supersession check is pinned ordered BEFORE the POST: deleting the
+    // check, its `exit 0`, or moving it below the POST must red this test.
+    const rerunRun = String(rerun.steps[0].run);
+    expect(rerun.steps[0].env.WORKFLOW_ID).toBe(
+      '${{ github.event.workflow_run.workflow_id }}',
+    );
+    expect(rerun.steps[0].env.WORKFLOW_RUN_CREATED_AT).toBe(
+      '${{ github.event.workflow_run.created_at }}',
+    );
+    expect(rerunRun).toContain(
+      'gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&per_page=10"',
+    );
+    expect(rerunRun).toContain('superseded=true');
+    expect(rerunRun).toMatch(
+      /if \[\[ "\$\{superseded\}" != "0" \]\]; then[\s\S]*?exit 0\n[\s\S]*?fi\n[\s\S]*?gh api -X POST/,
+    );
+    // A skipped-as-superseded re-run must still file the fleet issue (the
+    // failure is real; only the re-run would be harmful), so the skip rides
+    // an output file_issue's gate admits.
+    expect(rerun.outputs.superseded).toBe(
+      '${{ steps.rerun.outputs.superseded }}',
+    );
+
     // file_issue files unless the re-run actually started: a skipped rerun
     // job (ordinary failure with steps) and a failed one (the API call
     // errored) both fall through to the normal issue path.
@@ -246,9 +402,38 @@ describe('main CI failure issue workflow', () => {
     expect(jobs.file_issue.steps[0].env.NEVER_STARTED).toBe(
       '${{ needs.analyze.outputs.never_started }}',
     );
-    expect(String(jobs.file_issue.steps[0].run)).toContain(
-      'if [[ "${NEVER_STARTED}" == \'true\' ]]; then',
+    expect(String(jobs.file_issue.if)).toContain(
+      "needs.rerun_never_started.outputs.superseded == 'true'",
     );
+    const routeRun = String(jobs.file_issue.steps[0].run);
+    expect(routeRun).toContain('if [[ "${NEVER_STARTED}" == \'true\' ]]; then');
+    // The guard must actually short-circuit the route, not just name its
+    // condition: the block — echo, label correction, `return 0` — sits
+    // BEFORE the route's edit call, so deleting `return 0` or moving the
+    // guard below the route call reds this pin.
+    expect(routeRun).toMatch(
+      /if \[\[ "\$\{NEVER_STARTED\}" == 'true' \]\]; then[\s\S]*?return 0[\s\S]*?\n\s+fi\n[\s\S]*?gh issue edit "\$1"/,
+    );
+    // ...and the fleet issue is not left unreachable: it keeps human-facing
+    // labels (type/bug, plus autofix/skip — which the agent's scan excludes
+    // via -label:autofix/skip, so the state is explicit and queryable),
+    // while a same-commit issue an ordinary failure already routed is taken
+    // back OFF the route. The remove is what makes body and labels agree on
+    // that path; the add alone would leave the agent dispatched onto a
+    // stand-down notice.
+    expect(jobs.file_issue.steps[0].env.AUTOFIX_SKIP_LABEL).toBe(
+      'autofix/skip',
+    );
+    const guard = routeRun.match(
+      /if \[\[ "\$\{NEVER_STARTED\}" == 'true' \]\]; then(?<block>[\s\S]*?)\n\s+fi/,
+    )?.groups?.block;
+    expect(guard).toBeDefined();
+    expect(guard).toContain('--add-label "${BUG_LABEL},${AUTOFIX_SKIP_LABEL}"');
+    expect(guard).toContain(
+      '--remove-label "${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(guard).toContain('--remove-assignee "${AUTOFIX_BOT}"');
+    expect(guard).not.toContain('--add-label "${AUTOFIX_APPROVED_LABEL}"');
   });
 
   it('re-reads an existing issue so recorded recurrences survive the update', () => {

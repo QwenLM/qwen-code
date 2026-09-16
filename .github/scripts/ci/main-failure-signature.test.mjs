@@ -710,9 +710,10 @@ test('no failed-job metadata at all is not the never-started class', () => {
 });
 
 test('a filed never-started run reads as a fleet failure, off the autofix route', () => {
-  // By the time a never-started run files, its one automatic re-run already
-  // happened (or the re-run request itself failed), so the issue must not
-  // pitch the autofix agent a repair no commit can make.
+  // The body is rendered before the re-run's outcome is known, and it is
+  // filed on every path — recurrence after a real re-run, a re-run request
+  // that itself failed, a re-run skipped as superseded, a human's re-run —
+  // so it must not claim a completed automatic re-run on any of them.
   const analysis = analyzeLogs(
     'E2E Tests',
     [],
@@ -726,7 +727,8 @@ test('a filed never-started run reads as a fleet failure, off the autofix route'
     body.startsWith(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`),
   );
   assert.ok(body.includes('runner-fleet'));
-  assert.ok(body.includes('one automatic re-run did not clear it'));
+  assert.ok(body.includes('no automatic re-run cleared it'));
+  assert.ok(!body.includes('one automatic re-run'));
   assert.ok(!body.includes('labeled for autofix'));
 });
 
@@ -734,13 +736,135 @@ test('a run whose failed jobs executed steps keeps the autofix pitch', () => {
   const analysis = analyzeLogs(
     'E2E Tests',
     [],
-    [],
-    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 19 }],
+    [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        steps: ['Run E2E tests'],
+      },
+    ],
+    [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        steps: 19,
+        runner_name: 'ecs-qwen-hk4-30',
+      },
+    ],
   );
   const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
 
   assert.ok(body.includes('labeled for autofix'));
   assert.ok(!body.includes('runner-fleet'));
+  // The host is the fleet branch's escalation datum; it must not leak into
+  // the body pitched at the agent.
+  assert.ok(!body.includes('ecs-qwen-hk4-30'));
+});
+
+test('the fleet body names the never-started jobs, their hosts and the run', () => {
+  // Production feeds the fleet branch a non-empty failedJobs (the TSV
+  // projection emits the bare job name for a job with no steps) and a meta
+  // carrying the runner: the job, the host it died on and the run context
+  // are the whole diagnostic content of the one issue a human gets.
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: [] }],
+    [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        steps: 0,
+        runner_name: 'ecs-qwen-hk4-30',
+      },
+    ],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+
+  assert.ok(body.includes('- Failed jobs:'));
+  assert.ok(
+    body.includes(
+      '  - `E2E Test (Linux) - sandbox:docker - shard 1/1` on `ecs-qwen-hk4-30`',
+    ),
+  );
+  assert.ok(body.includes(`- Run: ${OCCURRENCE.runUrl}`));
+  assert.ok(body.includes(`- Run ID: ${OCCURRENCE.runId}`));
+  assert.ok(body.includes(`- Commit: ${OCCURRENCE.sha}`));
+});
+
+test('an existing fleet body is re-rendered when this run is ordinary', () => {
+  // The per-commit dedupe key is the sha alone and every watched workflow
+  // runs on the same main commit, so an ordinary failure can find the fleet
+  // issue a never-started run filed first. The body and the route both
+  // follow THIS run's class: echoing the fleet prose while the route labels
+  // the issue would dispatch the agent onto a stand-down notice.
+  const fleetBody = renderIssueBody({
+    analysis: analyzeLogs(
+      'E2E Tests',
+      [],
+      [],
+      [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+    ),
+    occurrence: OCCURRENCE,
+  });
+  const analysis = analyzeLogs(
+    'Qwen Code CI',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const body = renderIssueBody({
+    analysis,
+    occurrence: OCCURRENCE,
+    existingBody: fleetBody,
+  });
+
+  assert.ok(body.includes('labeled for autofix'));
+  assert.ok(!body.includes('runner-fleet'));
+  assert.ok(body.includes('`Test (windows-latest, Node 22.x)`'));
+});
+
+test('an existing ordinary body is re-rendered when this run never started', () => {
+  // The mirror: an ordinary failure filed and routed first, then a
+  // never-started run on the same commit finds it. The fleet failure must
+  // replace the autofix pitch or it leaves no trace anywhere.
+  const ordinaryBody = renderIssueBody({
+    analysis: analyzeLogs(
+      'Qwen Code CI',
+      ['npm error code ERESOLVE'],
+      [WINDOWS_JOB],
+    ),
+    occurrence: OCCURRENCE,
+  });
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [],
+    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+  );
+  const body = renderIssueBody({
+    analysis,
+    occurrence: OCCURRENCE,
+    existingBody: ordinaryBody,
+  });
+
+  assert.ok(body.includes('runner-fleet'));
+  assert.ok(!body.includes('labeled for autofix'));
+});
+
+test('parseFailedJobsMeta carries the runner name when the projection has it', () => {
+  assert.deepEqual(
+    parseFailedJobsMeta(
+      JSON.stringify([
+        { name: 'a', steps: 0, runner_name: 'ecs-qwen-hk4-30' },
+        { name: 'b', steps: 7, runner_name: '' },
+        { name: 'c', steps: 7, runner_name: null },
+        { name: 'd', steps: 7 },
+      ]),
+    ),
+    [
+      { name: 'a', steps: 0, runner_name: 'ecs-qwen-hk4-30' },
+      { name: 'b', steps: 7 },
+      { name: 'c', steps: 7 },
+      { name: 'd', steps: 7 },
+    ],
+  );
 });
 
 test('parseFailedJobsMeta keeps only well-formed entries', () => {
@@ -840,6 +964,49 @@ test('runCli plan renders the named job into the filed body', () => {
   );
 
   assert.ok(planned.body.includes('`Test (windows-latest, Node 22.x)`'));
+  assert.deepEqual(planned.searchMarkers, [
+    `${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha}`,
+  ]);
+});
+
+test('runCli plan carries a never-started analysis into the fleet body', () => {
+  // The route flag and the filed prose leave the analyze job by two
+  // different files — never_started is jq'd from analysis.json into
+  // GITHUB_OUTPUT, the body is re-rendered by a second `plan` invocation —
+  // so pin the class across the plan boundary itself. No --existing: an
+  // existing body is a deliberate passthrough on this path.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-plan-fleet-'));
+  const analysisPath = join(dir, 'analysis.json');
+  writeFileSync(
+    analysisPath,
+    JSON.stringify(
+      analyzeLogs(
+        'E2E Tests',
+        [],
+        [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: [] }],
+        [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+      ),
+    ),
+  );
+
+  const planned = JSON.parse(
+    captureStdout([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--sha',
+      OCCURRENCE.sha,
+      '--run-url',
+      OCCURRENCE.runUrl,
+      '--run-id',
+      OCCURRENCE.runId,
+      '--at',
+      OCCURRENCE.at,
+    ]),
+  );
+
+  assert.ok(planned.body.includes('runner-fleet'));
+  assert.ok(!planned.body.includes('labeled for autofix'));
   assert.deepEqual(planned.searchMarkers, [
     `${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha}`,
   ]);
