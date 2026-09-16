@@ -555,6 +555,7 @@ describe('Session', () => {
     beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
@@ -806,6 +807,7 @@ describe('Session', () => {
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       finishManagedAutoMemoryRecall: vi.fn(),
+      captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };
     mockMemoryManager = {
@@ -2940,6 +2942,12 @@ describe('Session', () => {
         expect.any(AbortSignal),
       );
       expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.captureCacheSafeParams.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        mockMemoryManager.scheduleExtract.mock.invocationCallOrder[0]!,
+      );
       expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
         projectRoot: '/repo',
         sessionId: 'test-session-id',

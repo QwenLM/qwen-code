@@ -8758,6 +8758,7 @@ export class Session implements SessionContext {
     ) {
       return;
     }
+    this.config.getLlmClient().captureCacheSafeParams();
     const memoryManager = this.config.getMemoryManager();
     const history = this.#getCurrentChat().getHistoryShallow();
     void memoryManager

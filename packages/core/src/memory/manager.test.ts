@@ -127,6 +127,29 @@ describe('MemoryManager', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     });
 
+    it('does not emit an unhandled rejection when the caller handles a failed extraction', async () => {
+      const failure = new Error('extract failed');
+      const unhandled = vi.fn();
+      vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(failure);
+      process.on('unhandledRejection', unhandled);
+
+      try {
+        const mgr = new MemoryManager();
+        await expect(
+          mgr.scheduleExtract({
+            projectRoot,
+            sessionId: 'sess',
+            history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          }),
+        ).rejects.toBe(failure);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
     it('runs extract and records a completed task', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
         touchedTopics: ['user'],
