@@ -1356,6 +1356,26 @@ export class LlmClient {
   }
 
   /** @internal */
+  captureCacheSafeParams(): void {
+    try {
+      const chat = this.getChat();
+      const historyForCache = this.getHistoryTailShallow(40, true);
+      const cachedHistory = slimCompactionInput(
+        historyForCache,
+        this.config.getEffectiveInputModalities(),
+      ).slimmedHistory;
+      saveCacheSafeParams(
+        chat.getGenerationConfig(),
+        cachedHistory,
+        this.config.getModel(),
+        this.config.getSessionId(),
+      );
+    } catch {
+      // Best-effort — don't block the main flow
+    }
+  }
+
+  /** @internal */
   consumeManagedAutoMemoryRecall(
     deliveryPoint: 'initial' | 'tool_result',
   ): Promise<RelevantAutoMemoryPromptResult | null> {
@@ -4836,26 +4856,7 @@ export class LlmClient {
         // Save cache-safe params here — before any early return — so that
         // background readers calling getCacheSafeParams(sessionId) can see the
         // current turn's history regardless of which path exits below.
-        try {
-          const chat = this.getChat();
-          const maxHistoryForCache = 40;
-          const historyForCache = this.getHistoryTailShallow(
-            maxHistoryForCache,
-            true,
-          );
-          const cachedHistory = slimCompactionInput(
-            historyForCache,
-            this.config.getEffectiveInputModalities(),
-          ).slimmedHistory;
-          saveCacheSafeParams(
-            chat.getGenerationConfig(),
-            cachedHistory,
-            this.config.getModel(),
-            this.config.getSessionId(),
-          );
-        } catch {
-          // Best-effort — don't block the main flow
-        }
+        this.captureCacheSafeParams();
 
         if (this.config.getSkipNextSpeakerCheck()) {
           if (!isGoalRuntimeTurn) {
