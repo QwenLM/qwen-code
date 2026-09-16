@@ -106,11 +106,14 @@ describe('e2e workflow', () => {
       );
       expect(e2eRunScript).toContain('flock --wait 1800 8');
       expect(e2eRunScript).toContain(
-        'exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"',
+        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh)"',
+      );
+      expect(e2eRunScript).toContain(
+        'exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"',
       );
       expect(e2eRunScript).toContain('flock --shared --wait 1800 9');
       expect(e2eRunScript).toContain(
-        'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
+        'exec 7>"${ci_lock_dir}/docker-sandbox-build.lock"',
       );
       expect(e2eRunScript).toContain('flock --wait 1800 7');
       expect(e2eRunScript).toContain(
@@ -344,6 +347,59 @@ describe('e2e workflow', () => {
       );
       expect(names.indexOf('Restore workspace ownership')).toBeLessThan(
         names.indexOf('Prune dangling docker images'),
+      );
+    });
+  });
+
+  describe('docker lock dir fallback', () => {
+    // Run 35069321648 (#12006) repeated the #11990 failure — both
+    // lock-opening steps died in under a second — with the heal step
+    // already in place: its chown chain needs passwordless sudo, which the
+    // pool runner does not have, so it warned and gave up. The lock
+    // directory resolution must therefore not depend on healing: both call
+    // sites resolve through a helper that falls back to a job-private dir
+    // when the shared one is unwritable. Bash witnesses the behavior in
+    // resolve-ci-lock-dir.test.js.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const prune = steps.find(
+      (step) => step.name === 'Prune dangling docker images',
+    );
+
+    it('resolves the lock dir through the shared helper on both call sites', () => {
+      expect(existsSync('.github/scripts/resolve-ci-lock-dir.sh')).toBe(true);
+      expect(e2eRunScript).toContain(
+        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh)"',
+      );
+      expect(prune.run).toContain(
+        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh)"',
+      );
+      // Both sites open the daemon lock through the resolved dir, so one
+      // contract change cannot drift them onto different files.
+      expect(e2eRunScript).toContain(
+        'exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"',
+      );
+      expect(prune.run).toContain(
+        'exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"',
+      );
+    });
+
+    it('resolves the lock dir before any descriptor is opened', () => {
+      const resolveIndex = e2eRunScript.indexOf(
+        'bash .github/scripts/resolve-ci-lock-dir.sh',
+      );
+      expect(resolveIndex).toBeGreaterThanOrEqual(0);
+      expect(resolveIndex).toBeLessThan(
+        e2eRunScript.indexOf(
+          'exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"',
+        ),
+      );
+      expect(resolveIndex).toBeLessThan(
+        e2eRunScript.indexOf(
+          'exec 7>"${ci_lock_dir}/docker-sandbox-build.lock"',
+        ),
+      );
+      expect(prune.run.indexOf('resolve-ci-lock-dir.sh')).toBeLessThan(
+        prune.run.indexOf('exec 9>'),
       );
     });
   });
