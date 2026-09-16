@@ -713,6 +713,9 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    // Self-hosted CI runners export QWEN_RUNTIME_DIR; it outranks
+    // Storage.setRuntimeBaseDir, breaking the runtime-pinning assertions.
+    vi.stubEnv('QWEN_RUNTIME_DIR', '');
     originalProcessGuardMode =
       process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
     process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] = 'shadow';
@@ -1112,6 +1115,7 @@ describe('Session', () => {
     } else {
       process.env['QWEN_CODE_SERVE'] = originalServeStamp;
     }
+    vi.unstubAllEnvs();
     // Reset global runtime base dir state to prevent state leakage between tests
     core.Storage.setRuntimeBaseDir(null);
     // Clear session reference to allow garbage collection
