@@ -77,6 +77,13 @@ vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
   PROTOCOL_VERSION: '1.0.0',
 }));
 
+vi.mock('./acp-output.js', () => ({
+  createAcpOutput: () => ({
+    stream: new WritableStream<Uint8Array>(),
+    close: () => Promise.resolve(),
+  }),
+}));
+
 vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
   ndJsonStream: vi.fn().mockReturnValue({}),
 }));

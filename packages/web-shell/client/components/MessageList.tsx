@@ -549,7 +549,17 @@ export function attachTurnOutputs(
     ) {
       return;
     }
-    result.push({
+    // The card closes the turn's own content, so it belongs above a local recap
+    // that trails the turn rather than after it. Status rows are not turn
+    // content, and the walk stops at the turn's own last row, so the card can
+    // never land inside the turn.
+    let insertAt = result.length;
+    for (let index = result.length - 1; index >= 0; index -= 1) {
+      const item = result[index];
+      if (item.type !== 'message' || item.message.role !== 'system') break;
+      if (item.message.source === 'recap') insertAt = index;
+    }
+    result.splice(insertAt, 0, {
       type: 'turn_outputs',
       key: turnId,
       turnId,
@@ -5639,6 +5649,7 @@ export const MessageList = memo(
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
+              onTurnOutputOpen={onTurnOutputOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
                 onEditUserMessage && userMessageEditTarget

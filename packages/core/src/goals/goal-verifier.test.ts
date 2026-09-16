@@ -90,6 +90,19 @@ describe('parseGoalVerifierText', () => {
 });
 
 describe('createGoalVerifier', () => {
+  it('returns the side query usage alongside the decision', async () => {
+    const { config, generateText } = configFor('');
+    generateText.mockResolvedValue({
+      text: '{"decision":"accept","reason":"grounded"}',
+      usage: { totalTokenCount: 42 },
+    });
+    await expect(createGoalVerifier(config)(input())).resolves.toEqual({
+      decision: 'accept',
+      reason: 'grounded',
+      usage: { totalTokenCount: 42 },
+    });
+  });
+
   it('uses a tool-free deterministic side query with bounded fields', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
