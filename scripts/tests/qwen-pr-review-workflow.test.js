@@ -6486,10 +6486,14 @@ describe('review supersede salvage (#10110)', () => {
       expect(far.raw).toContain('Superseded early:');
       expect(far.raw).not.toContain('FAIL ');
       // The committed witness for the stub's kill-record wait (see the
-      // stub): the planted mv delays ONLY the */killed rename —
-      // write_signal's mv argv is -f <tmp> <target>, so $3 matches —
-      // landing SUPERSEDE_FILE 4s ahead of the record, the exact window
-      // between the watcher's two writes. Production pins
+      // stub): the planted mv delays ONLY the */killed rename — matched
+      // on the last argv word, so a `--` hardening of write_signal's mv
+      // cannot shift the match onto the temp path — landing
+      // SUPERSEDE_FILE 4s ahead of the record, the exact window between
+      // the watcher's two writes. The plant's marker file is asserted
+      // below: a replay that pins QWEN_CI_REAL_MV past the PATH lookup
+      // bypasses the plant, and without the marker that bypass would
+      // leave this arm witnessing nothing. Production pins
       // QWEN_CI_REAL_MV to the real utility before the PATH prepend, so
       // the plant is a replay affordance in the same class as
       // forgedDateShim(), not a production-plausible state. The wait
@@ -6501,7 +6505,7 @@ describe('review supersede salvage (#10110)', () => {
       const delayed = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
         proxyPlants: {
-          mv: '#!/bin/bash\ncase "$3" in */killed) /bin/sleep 4 ;; esac\nexec /bin/mv "$@"\n',
+          mv: `#!/bin/bash\nfor a; do dst=$a; done\ncase "$dst" in */killed) : > '${join(dir, 'mv-plant-fired')}'; /bin/sleep 4 ;; esac\nexec /bin/mv "$@"\n`,
         },
         extraEnv: {
           SUPERSEDE_FILE: join(dir, 'superseded-delayed'),
@@ -6514,6 +6518,7 @@ describe('review supersede salvage (#10110)', () => {
           STUB_TIMELINE: `head-x head-a ${now}`,
         },
       });
+      expect(existsSync(join(dir, 'mv-plant-fired'))).toBe(true);
       expect(delayed.attempts).toBe(1);
       expect(delayed.timedOut).toBe(false);
       expect(delayed.status).toBe(0);
