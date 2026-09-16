@@ -966,6 +966,134 @@ describe('ndJsonStream', () => {
     valuesSpy.mockRestore();
   });
 
+  it('drops an oversized available_commands_update notification and keeps the stream open', async () => {
+    const availableSkillDetails = Object.fromEntries(
+      Array.from({ length: 10_001 }, (_, index) => [
+        `skill-${index}`,
+        index === 0 ? 'do-not-log-skill-body' : index,
+      ]),
+    );
+    const oversized = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails },
+        },
+      },
+    } satisfies AnyMessage;
+    const later = message('after-oversized', { ok: true });
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTransportError = vi.fn();
+    const onMessageReceived = vi.fn();
+    const validateInboundMessage = vi.fn((_message: AnyMessage) => true);
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([
+        encoder.encode(
+          `${JSON.stringify(oversized)}\n${JSON.stringify(later)}\n`,
+        ),
+      ]),
+      { onTransportError, onMessageReceived },
+      limits({ maxFrameBytes: 512_000, maxQueuedBytes: 512_000 }),
+      validateInboundMessage,
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([later]);
+    expect(onTransportError).not.toHaveBeenCalled();
+    expect(onMessageReceived).toHaveBeenCalledOnce();
+    expect(validateInboundMessage).toHaveBeenCalledTimes(1);
+    expect(validateInboundMessage.mock.calls[0]?.[0]).toEqual(later);
+    expect(stderr).toHaveBeenCalledWith(
+      'Dropped oversized JSON-RPC notification:',
+      {
+        errorKind: 'ndjson_oversized_notification',
+        method: 'session/update',
+        bytes: expect.any(Number),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        payloadOmitted: true,
+      },
+    );
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(
+      'do-not-log-skill-body',
+    );
+    stderr.mockRestore();
+  });
+
+  it('does not abort the ACP connection after dropping an oversized notification', async () => {
+    const oversized = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: {
+            availableSkillDetails: Object.fromEntries(
+              Array.from({ length: 10_001 }, (_, index) => [
+                `skill-${index}`,
+                index,
+              ]),
+            ),
+          },
+        },
+      },
+    } satisfies AnyMessage;
+    const later = message('after-oversized', { ok: true });
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTransportError = vi.fn();
+    const notifications = vi.fn();
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      { onTransportError },
+      limits({ maxFrameBytes: 512_000, maxQueuedBytes: 512_000 }),
+    );
+    const connection = new ClientSideConnection(
+      () =>
+        ({
+          extNotification: async (method: string, params: unknown) => {
+            notifications(method, params);
+          },
+        }) as never,
+      stream,
+    );
+
+    inputController.enqueue(encoder.encode(`${JSON.stringify(oversized)}\n`));
+    inputController.enqueue(encoder.encode(`${JSON.stringify(later)}\n`));
+
+    await vi.waitFor(() =>
+      expect(notifications).toHaveBeenCalledWith('after-oversized', {
+        ok: true,
+      }),
+    );
+    expect(notifications).toHaveBeenCalledTimes(1);
+    expect(onTransportError).not.toHaveBeenCalled();
+    expect(connection.signal.aborted).toBe(false);
+    expect(stderr).toHaveBeenCalledWith(
+      'Dropped oversized JSON-RPC notification:',
+      expect.objectContaining({
+        errorKind: 'ndjson_oversized_notification',
+        method: 'session/update',
+      }),
+    );
+
+    inputController.close();
+    await expect(connection.closed).resolves.toBeUndefined();
+    expect(onTransportError).not.toHaveBeenCalled();
+    stderr.mockRestore();
+  });
+
   it('accepts a matching response before local write completion', async () => {
     let inputController!: ReadableStreamDefaultController<Uint8Array>;
     const input = new ReadableStream<Uint8Array>({
