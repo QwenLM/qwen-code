@@ -5591,6 +5591,40 @@ describe('Session', () => {
         internals.cronProcessing = false;
       }
     });
+
+    it('rejects while a close gate is held even though no turn is in flight', async () => {
+      // `#hasActiveTurn()` has no member for `closing`, yet
+      // `assertCanStartTurn()` rejects on it as its FIRST statement. A close
+      // gate held while every turn has already settled (`beginClose()` across
+      // `waitForActiveTurnsToSettle()`, or a disposed session) therefore used
+      // to report `canContinue: true`: the banner offered Continue,
+      // `continueLastTurn()` accepted, and the bridge drove the continuation
+      // into `'Session is closing'` — the accept-then-fail round trip this
+      // guard exists to prevent. Set the private flag the way the sibling
+      // tests set `notificationProcessing`.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as { closing: boolean };
+      internals.closing = true;
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(promptSpy).not.toHaveBeenCalled();
+      } finally {
+        internals.closing = false;
+      }
+    });
   });
 
   describe('restoreAskUserQuestion prompt', () => {

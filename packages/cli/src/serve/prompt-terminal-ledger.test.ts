@@ -136,6 +136,43 @@ function systemRecord(
   };
 }
 
+/**
+ * A system-injected background notification, shaped like
+ * `createNotificationRecord` (packages/core/src/services/chatRecordingService.ts):
+ * a user-role record with `subtype: 'notification'`, `provenance: 'system'`
+ * and a real `message`, so it enters the api history projection as a plain
+ * user entry whose text is the `<task-notification>` envelope.
+ */
+function notificationRecord(
+  fixture: Fixture,
+  uuid: string,
+  parentUuid: string,
+  atMs?: number,
+): ChatRecord {
+  const base =
+    atMs === undefined
+      ? record(fixture, uuid, parentUuid, '')
+      : recordAt(fixture, uuid, parentUuid, '', atMs);
+  return {
+    ...base,
+    type: 'user',
+    subtype: 'notification',
+    provenance: 'system',
+    message: {
+      role: 'user',
+      parts: [
+        {
+          text:
+            '<task-notification><task-id>agent-1</task-id>' +
+            '<status>completed</status>' +
+            '<summary>Agent "explore" completed.</summary>' +
+            '</task-notification>',
+        },
+      ],
+    },
+  };
+}
+
 function writeTranscript(
   fixture: Fixture,
   records: readonly ChatRecord[],
@@ -901,6 +938,68 @@ describe('reconcileDanglingPromptTerminals', () => {
         code: 'daemon_lost',
         at: expect.any(Number),
       },
+    ]);
+  });
+
+  it('keeps an id-less functionCall tail interrupted when a notification follows it', async () => {
+    // Both guards have to read the SAME tail. `detectTurnInterruption` trims
+    // the trailing notification, so the id-less guard must look at the trimmed
+    // tail as well: reading the raw last entry lets the notification hide the
+    // model entry from the guard while the trim hides the notification from
+    // detection — both miss at once and a prompt that died mid tool-run gets
+    // stamped `completed`. An ID'd call is unaffected (`danglingCalls` catches
+    // it), which is why the case above does not cover this shape.
+    const fixture = makeFixture();
+    writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'run something'),
+      toolCallRecord(fixture, 'a1', 'u1', null),
+      notificationRecord(fixture, 'n1', 'a1'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'interrupted',
+        code: 'daemon_lost',
+        at: expect.any(Number),
+      },
+    ]);
+  });
+
+  it('fails closed when the only post-admission write is a system notification', async () => {
+    // A notification record is user-role with a real `message`, so it does
+    // enter the projection — but the daemon persists it BEFORE the automatic
+    // turn runs, so it is not evidence that the target's own turn wrote
+    // anything. Counting it lets a notification-only post-admission tail pass
+    // attribution, and because detection returns `none` on that same trimmed
+    // tail, the ledger would synthesize `completed` for a prompt that never
+    // ran. Fail closed instead: append nothing and leave the prompt unknown.
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 1500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'earlier question', RECORD_BASE_MS),
+      recordAt(fixture, 'a1', 'u1', 'earlier answer', RECORD_BASE_MS + 1000),
+      notificationRecord(fixture, 'n1', 'a1', RECORD_BASE_MS + 2000),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
     ]);
   });
 

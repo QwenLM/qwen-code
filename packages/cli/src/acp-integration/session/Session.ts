@@ -5497,9 +5497,21 @@ export class Session implements SessionContext {
     // neutral — the bridge drives an accepted continuation through normal
     // prompt admission, which aborts both controllers, so the recovery button
     // would kill a healthy running turn.
+    //
+    // `closing` is checked alongside rather than by adopting `isTurnIdle()`:
+    // no `#hasActiveTurn()` member is set while a close gate is held
+    // (`beginClose()` / `dispose()`), yet `assertCanStartTurn()` rejects on it
+    // first — so accepting there is the same round trip this guard exists to
+    // prevent, just failing later. `isTurnIdle()` would also require
+    // `channelTaskCaptures.size === 0`, which `assertCanStartTurn()` does NOT
+    // reject, so taking it wholesale would suppress recovery while a channel
+    // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
-      canContinue: recoveryPlan?.canContinue === true && !this.#hasActiveTurn(),
+      canContinue:
+        recoveryPlan?.canContinue === true &&
+        !this.closing &&
+        !this.#hasActiveTurn(),
     };
   }
 

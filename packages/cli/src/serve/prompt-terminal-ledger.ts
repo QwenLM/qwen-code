@@ -9,6 +9,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import {
   buildSessionHistoryFromConversation,
   detectTurnInterruption,
+  effectiveHistoryEnd,
   SessionService,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   type ChatRecord,
@@ -230,6 +231,21 @@ export async function reconcileDanglingPromptTerminals(
       continue;
     }
     if (!record.message || record.subtype === 'realtime_message') continue;
+    // Entering the projection is necessary but not sufficient: the record also
+    // has to be the target turn's OWN write. A system-injected background
+    // notification is not — `createNotificationRecord`
+    // (packages/core/src/services/chatRecordingService.ts) stamps
+    // `provenance: 'system'` on a user-role record the daemon persists BEFORE
+    // the automatic turn runs, and it does enter the projection. Counting one
+    // as evidence lets a notification-only post-admission tail pass
+    // attribution; detection then returns `none` on that same trimmed tail and
+    // a `completed` terminal is synthesized for a prompt whose turn wrote
+    // nothing, against the fail-closed invariant above. Everything a prompt's
+    // own turn writes is `real_user` / `assistant_output` / `tool_result`
+    // (`createBaseRecord`), so this skip can only veto the notification/cron
+    // family. The verdict's tail is deliberately NOT trimmed here — the
+    // classifier owns that trim (`effectiveHistoryEnd` below).
+    if (record.provenance === 'system') continue;
     if (Number.isFinite(writeMs)) lastVisibleWriteMs = writeMs;
   }
   // FIFO evidence: under FIFO admission the target's turn can only start
@@ -267,8 +283,18 @@ export async function reconcileDanglingPromptTerminals(
   // needs no wire pairing — a model tail holding ANY functionCall means the
   // daemon died mid tool-run, so upgrade the verdict to interrupted
   // (`interrupted_turn` semantics).
+  //
+  // The guard has to read the SAME tail the verdict read. Detection trims
+  // trailing system-injected notifications internally, so passing the raw tail
+  // here lets a notification hide the model entry from this guard while the
+  // trim hides the notification from detection — both miss at once, and a
+  // prompt that died mid tool-run gets stamped `completed`.
+  const classifiableTail = historyTail.slice(
+    0,
+    effectiveHistoryEnd(historyTail),
+  );
   const interrupted =
-    verdict.kind !== 'none' || tailHoldsAnyFunctionCall(historyTail);
+    verdict.kind !== 'none' || tailHoldsAnyFunctionCall(classifiableTail);
   // TOCTOU fence: a prompt admitted while `loadSession` ran appended its
   // `in_flight` after the snapshot above, and the visible tail may now
   // belong to it — the verdict computed from the snapshot must not be
