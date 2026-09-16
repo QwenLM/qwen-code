@@ -48,7 +48,9 @@ the script body can read it. Fields outside that list are dropped. The
 approval dialog prints the name, the description, and each phase title with
 its `detail` as a one-line explanation beside it: give every phase a `detail`,
 because for a run that may dispatch hundreds of agents it is what the user
-reads before approving.
+reads before approving. In a workflow an extension ships, `whenToUse` also lists
+the workflow for the model to start when a request matches it; leave it out and
+the workflow runs only when someone asks for it by name.
 
 Injected globals, and nothing else:
 

@@ -28,6 +28,7 @@ import {
   EVENT_API_RESPONSE,
   EVENT_CLI_CONFIG,
   EVENT_FLASH_FALLBACK,
+  EVENT_GOAL_STATE,
   EVENT_TOOL_CALL,
   EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
@@ -57,6 +58,7 @@ import {
   logLoopDetected,
   logRepeatedToolFailureGuard,
   logFlashFallback,
+  logGoalState,
   logChatCompression,
   logMalformedJsonResponse,
   logFileOperation,
@@ -86,6 +88,7 @@ import {
   ApiRequestEvent,
   ApiResponseEvent,
   FlashFallbackEvent,
+  makeGoalStateEvent,
   StartSessionEvent,
   ToolCallEvent,
   UserPromptEvent,
@@ -1135,6 +1138,72 @@ describe('loggers', () => {
           auth_type: 'vertex-ai',
         },
       });
+    });
+  });
+
+  describe('logGoalState', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
+    } as unknown as Config;
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger.prototype, 'logGoalStateEvent');
+      vi.spyOn(metrics, 'recordGoalStateMetrics');
+    });
+
+    it('emits the transition with its figures and records its metrics', () => {
+      const event = makeGoalStateEvent({
+        cause: 'usage_limited',
+        goal_id: 'g-1',
+        revision: 2,
+        status: 'usage_limited',
+        limit_kind: 'turn_budget',
+        turn_count: 20,
+        tokens_used: 1_234,
+      });
+
+      logGoalState(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Goal usage_limited.',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_GOAL_STATE,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          cause: 'usage_limited',
+          goal_id: 'g-1',
+          revision: 2,
+          status: 'usage_limited',
+          limit_kind: 'turn_budget',
+          turn_count: 20,
+          tokens_used: 1_234,
+        },
+      });
+      expect(QwenLogger.prototype.logGoalStateEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(metrics.recordGoalStateMetrics).toHaveBeenCalledWith(
+        mockConfig,
+        event,
+      );
+    });
+
+    it('still reaches the analytics sink when the OpenTelemetry SDK is off', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const event = makeGoalStateEvent({
+        cause: 'create',
+        goal_id: 'g-1',
+        revision: 1,
+      });
+
+      logGoalState(mockConfig, event);
+
+      expect(QwenLogger.prototype.logGoalStateEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(mockLogger.emit).not.toHaveBeenCalled();
     });
   });
 

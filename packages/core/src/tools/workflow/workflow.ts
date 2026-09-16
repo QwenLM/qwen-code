@@ -1452,7 +1452,7 @@ Do not call this tool unless the user has asked for multi-agent orchestration. A
 
 - The user's message contains the word \`workflow\`; a system reminder confirms it when it does.
 - The user asked for orchestration in their own words — run a workflow, fan out agents, orchestrate this with subagents.
-- A skill or slash command the user invoked instructs you to use this tool.
+- A skill or slash command that ran — invoked by the user, or by you through the Skill tool — instructs you to use this tool.
 - The user named a saved workflow to run, reached through \`name\`, \`workflow('<name>')\` or \`scriptPath\`.
 - The user asked to resume or continue an earlier run, which is \`resumeFromRunId\`.
 
