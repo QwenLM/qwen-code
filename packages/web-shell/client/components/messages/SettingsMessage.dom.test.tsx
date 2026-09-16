@@ -8,6 +8,10 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspaceProviderStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  WEB_SHELL_SETTING_ITEM_IDS,
+  type WebShellSettingsOptions,
+} from '../../settings';
 import { I18nProvider } from '../../i18n';
 import {
   SettingsMessage,
@@ -185,6 +189,7 @@ function renderPanel(
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
     modelManagement: ModelManagementProps;
     initialCategory: string;
+    presentation: WebShellSettingsOptions;
   }> = {},
 ): HTMLElement {
   return render(
@@ -193,6 +198,7 @@ function renderPanel(
         settingsState={state}
         embedded
         initialCategory={overrides.initialCategory}
+        presentation={overrides.presentation}
         onLanguageChange={noop}
         onThemeChange={noop}
         onSubDialog={overrides.onSubDialog ?? noop}
@@ -637,5 +643,85 @@ describe('SettingsMessage user-scope editing', () => {
     const block = container.querySelector('[data-testid="model-management"]');
     expect(block).toBeTruthy();
     expect(block?.textContent).toContain('GPT-4o');
+  });
+  it('keeps the model list and selection when ordinary Model fields are excluded', () => {
+    const modelManagement = makeModelManagement();
+    modelManagement.currentModelId = 'other';
+    modelManagement.providers[0]!.models[0]!.isCurrent = false;
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      modelManagement,
+      presentation: { excludeItems: ['setting:fast-model'] },
+    });
+    expect(container.textContent).not.toContain('Fast Model');
+    const block = container.querySelector('[data-testid="model-management"]');
+    expect(block?.textContent).toContain('GPT-4o');
+    const modelButton = Array.from(block!.querySelectorAll('button')).find(
+      (b) => b.getAttribute('aria-label')?.includes('Set current'),
+    );
+    expect(modelButton).toBeTruthy();
+    act(() => modelButton!.click());
+    expect(modelManagement.onSelectModel).toHaveBeenCalledWith(
+      'gpt-4o(openai)',
+    );
+  });
+
+  it('excludes the model block without hiding ordinary Model settings', () => {
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      modelManagement: makeModelManagement(),
+      presentation: { excludeItems: ['builtin:model-management'] },
+    });
+    expect(container.textContent).toContain('Fast Model');
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeNull();
+  });
+
+  it('falls back from an excluded category and keeps exclusions in user scope', () => {
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      initialCategory: 'Model',
+      presentation: { excludeItems: ['setting:fast-model'] },
+    });
+    expect(container.querySelector('nav')?.textContent).not.toContain('Model');
+    expect(
+      container.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain('UI');
+    clickUserTab(container);
+    expect(container.textContent).not.toContain('Fast Model');
+  });
+
+  it('shows an empty state when every available item is excluded', () => {
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      modelManagement: makeModelManagement(),
+      presentation: { excludeItems: WEB_SHELL_SETTING_ITEM_IDS },
+    });
+    expect(container.querySelectorAll('nav button')).toHaveLength(0);
+    expect(container.querySelector('[data-slot="empty"]')).toBeTruthy();
+  });
+
+  it('preserves default content and counts for an empty exclusion list', () => {
+    const state = makeState([subDialogSetting()], vi.fn());
+    const options = { modelManagement: makeModelManagement() };
+    const baseline = renderPanel(state, options);
+    const empty = renderPanel(state, {
+      ...options,
+      presentation: { excludeItems: [] },
+    });
+    expect(empty.textContent).toBe(baseline.textContent);
+    expect(empty.querySelector('nav')?.textContent).toBe(
+      baseline.querySelector('nav')?.textContent,
+    );
+  });
+
+  it('keeps a model-only category when descriptors are absent', () => {
+    const container = renderPanel(makeState([], vi.fn()), {
+      initialCategory: 'Model',
+      modelManagement: makeModelManagement(),
+    });
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeTruthy();
+    expect(
+      container.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain('1');
   });
 });

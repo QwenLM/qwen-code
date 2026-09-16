@@ -240,6 +240,7 @@ import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { McpAppHostContext } from './mcpAppHostContext';
+import { isSettingExcluded, type WebShellSettingsOptions } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -1116,6 +1117,8 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Native settings-page presentation. Does not restrict commands or daemon access. */
+  settings?: WebShellSettingsOptions;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -3033,6 +3036,7 @@ export function App({
   bottomStatusItems,
   chatMaxWidth,
   sidebar,
+  settings: settingsPresentation,
   header,
   rightPanel,
   environmentPanel,
@@ -8286,6 +8290,9 @@ export function App({
   const [modelSettingScope, setModelSettingScope] = useState<
     'workspace' | 'user'
   >('workspace');
+  const settingsDialogKeyRef = useRef<string | undefined>(undefined);
+  const settingsPresentationRef = useRef(settingsPresentation);
+  settingsPresentationRef.current = settingsPresentation;
   const [showFallbacksDialog, setShowFallbacksDialog] = useState(false);
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
@@ -11566,7 +11573,8 @@ export function App({
           voiceFeaturesRef.current,
         ) &&
         (source === 'settings'
-          ? activePanelRef.current === 'settings'
+          ? activePanelRef.current === 'settings' &&
+            !isSettingExcluded('voiceModel', settingsPresentationRef.current)
           : activePanelRef.current === null) &&
         mainViewRef.current === 'chat' &&
         modelDialogModeRef.current === null &&
@@ -15215,10 +15223,12 @@ export function App({
             return true;
           }
           if (cmd === 'auth') {
+            settingsDialogKeyRef.current = undefined;
             setShowAuthDialog(true);
             return true;
           }
           if (cmd === 'model') {
+            settingsDialogKeyRef.current = undefined;
             const modelArg = text.slice(match[0].length).trim();
             if (
               !workspaceContextActive &&
@@ -17024,6 +17034,41 @@ export function App({
     }
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
+  useEffect(() => {
+    const key = settingsDialogKeyRef.current;
+    if (!key) return;
+    const excluded =
+      key === 'builtin:model-management'
+        ? settingsPresentation?.excludeItems?.includes(key)
+        : isSettingExcluded(key, settingsPresentation);
+    if (excluded) {
+      if (pendingVoicePickerSourceRef.current === 'settings') {
+        voicePickerRequestRef.current++;
+        pendingVoicePickerSourceRef.current = undefined;
+      }
+      setModelDialogMode(null);
+      setShowFallbacksDialog(false);
+      setShowApprovalModeDialog(false);
+      if (key === 'builtin:model-management') handleCloseAuthDialog();
+      settingsDialogKeyRef.current = undefined;
+    } else if (
+      !modelDialogMode &&
+      !showFallbacksDialog &&
+      !showApprovalModeDialog &&
+      !showAuthDialog &&
+      pendingVoicePickerSourceRef.current !== 'settings'
+    ) {
+      settingsDialogKeyRef.current = undefined;
+    }
+  }, [
+    settingsPresentation,
+    showAuthDialog,
+    handleCloseAuthDialog,
+    modelDialogMode,
+    showFallbacksDialog,
+    showApprovalModeDialog,
+  ]);
+
   const useWorkspaceSkillSnapshot =
     workspaceContextActive &&
     loadedSkillsReady &&
@@ -18675,6 +18720,7 @@ export function App({
                       {activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={targetedWorkspaceSettingsState}
+                        presentation={settingsPresentation}
                         embedded
                         initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
@@ -18695,9 +18741,15 @@ export function App({
                           busy: modelActionBusy,
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
-                          onAddModel: () => setShowAuthDialog(true),
+                          onAddModel: () => {
+                            if (settingsPresentation?.excludeItems?.includes('builtin:model-management')) return;
+                            settingsDialogKeyRef.current = 'builtin:model-management';
+                            setShowAuthDialog(true);
+                          },
                         }}
                         onSubDialog={(key, scope) => {
+                          if (isSettingExcluded(key, settingsPresentation)) return;
+                          settingsDialogKeyRef.current = key;
                           // Record the persist scope only for model settings —
                           // the reset effect is gated on the dialog/fallback/auth
                           // flags, so it never runs for the approvalMode dialog

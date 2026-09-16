@@ -118,6 +118,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it('forwards settings presentation through the public provider wrapper', async () => {
+  const settings = { excludeItems: ['setting:fast-model'] as const };
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounted.push({ root, container });
+  await act(async () => {
+    root.render(<WebShellWithProviders settings={settings} />);
+  });
+  expect(appProps.at(-1)?.settings).toBe(settings);
+});
+
 describe('WebShellWithProviders top-level boundary', () => {
   it('exports the readonly transcript entry', () => {
     const container = render(<WebShellTranscript blocks={[]} />);
