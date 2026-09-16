@@ -248,6 +248,19 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # Fail fast on a saturated pool host instead of dying on ENOSPC
+      # mid-job (#10035): this leg is the pool's heaviest disk consumer —
+      # the docker leg builds a fresh per-commit sandbox image on the same
+      # disk npm ci and the test containers fill, and both the in-job prune
+      # and the nightly host cleanup only reach images older than 24h, so a
+      # busy merge day saturates a host before either can reclaim it (run
+      # 35039618620 died before a single test reported). Gating ahead of
+      # `npm ci` turns that into a clear, retryable failure; a re-run lands
+      # on a host with headroom. Same gate ci.yml's pool jobs carry.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Install dependencies'
         env:
           # `npm ci` runs the `prepare` script, which builds and bundles the

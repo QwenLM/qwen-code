@@ -311,6 +311,39 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('disk floor gate', () => {
+    // The docker leg builds a fresh per-commit sandbox image on the same
+    // pool disk npm ci and the test containers fill, and both the in-job
+    // prune and the nightly host cleanup only reach images older than 24h,
+    // so a busy merge day saturates a host before either can reclaim it.
+    // Run 35039618620 (#11973) died on such a host before a single test
+    // reported. ci.yml's pool jobs have failed fast on a disk floor since
+    // #10035; this job is the pool's heaviest consumer and was never gated.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const gateName = 'Disk floor gate (self-hosted)';
+    const gate = steps.find((step) => step.name === gateName);
+
+    it('fails fast on a saturated pool host', () => {
+      expect(gate).toBeDefined();
+      expect(gate.if).toBe("${{ runner.environment == 'self-hosted' }}");
+      expect(gate.run).toBe(
+        'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      );
+      // Text pins never touch the tree: renaming the script the gate calls
+      // would leave the step red on a missing file.
+      expect(existsSync('.github/scripts/check-disk-floor.sh')).toBe(true);
+    });
+
+    it('runs after the checkout that carries the script and before npm ci', () => {
+      const names = steps.map((step) => step.name);
+      expect(names.indexOf('Checkout')).toBeGreaterThanOrEqual(0);
+      expect(names.indexOf('Checkout')).toBeLessThan(names.indexOf(gateName));
+      expect(names.indexOf(gateName)).toBeLessThan(
+        names.indexOf('Install dependencies'),
+      );
+    });
+  });
+
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
