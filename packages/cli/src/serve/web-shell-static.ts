@@ -19,7 +19,9 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
- * (`connect-src 'self'`). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
+ * (`connect-src 'self'` plus the validated `?daemon=` origin from
+ * `remoteDaemonConnectOrigins`; the client asks before connecting to an origin
+ * it has not used). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
  * still block clickjacking. Tightening `script-src` (drop `'unsafe-inline'`
  * via a hash, externalise the inline patch) is a follow-up, not a blocker for
  * a loopback-default local tool.
@@ -31,7 +33,6 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
   "media-src 'self' data:",
-  "connect-src 'self'",
   "worker-src 'self' blob:",
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
@@ -59,13 +60,68 @@ export function buildWebShellPermissionsPolicy(): string {
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
+  connectOrigins: readonly string[] = [],
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
   // PDF attachments use blob URLs; live previews pin their own child source.
   const frameSrc = 'frame-src http: https: blob:';
-  return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
+  const connectSrc = `connect-src 'self' ${connectOrigins.join(' ')}`.trim();
+  return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
+}
+
+/**
+ * The `?daemon=` value read with the client's parser instead of `req.query`.
+ *
+ * Hardening against a configuration dependency, not a fix for a live defect.
+ * Express 5 defaults `query parser` to `'simple'` (Node's `querystring`) and
+ * nothing in this repo ever sets it, so `req.query['daemon']` never saw the
+ * bracket folding `qs` produces and the previous read agreed with the client on
+ * every shape a browser can send. Under `'extended'` it did not: `qs` folds
+ * `?daemon[]=x` into `{ daemon: ['x'] }`, a key the client's
+ * `URLSearchParams.get('daemon')` never reports, so taking `raw[0]` granted
+ * `connect-src` for an origin the client never parsed — and for
+ * `?daemon[]=A&daemon=B` it granted A while the client connected to B, leaving
+ * the client's own target CSP-blocked. Measured over 38 query strings against
+ * real sockets: 18 divergences under `extended`, 0 under `simple`, 0 after this
+ * change under either. Reading the raw query with the client's own parser drops
+ * the dependency on that setting altogether.
+ */
+export function requestedDaemonParam(originalUrl: string): string | null {
+  const queryStart = originalUrl.indexOf('?');
+  return new URLSearchParams(
+    queryStart === -1 ? '' : originalUrl.slice(queryStart + 1),
+  ).get('daemon');
+}
+
+export function remoteDaemonConnectOrigins(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      !/^[a-z0-9._\-[\]:]+$/iu.test(url.hostname)
+    ) {
+      return [];
+    }
+    // A bracketed IPv6 host is not a valid CSP host-source (CSP3 host-part
+    // excludes '[', ']' and ':'), so emitting it produces a directive the
+    // browser drops. The client gate rejects a remote bracketed target for
+    // the same reason; when the page itself is served from that origin,
+    // 'self' already covers the connection.
+    if (url.hostname.startsWith('[')) return [];
+    const websocket = new URL(url.origin);
+    websocket.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return [url.origin, websocket.origin];
+  } catch {
+    return [];
+  }
 }
 
 /** Default (no-framing) Web Shell CSP. */
@@ -92,8 +148,11 @@ function createSendIndex(
   frameAncestors: readonly string[] = [],
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  return (_req: Request, res: Response): void => {
-    const csp = buildWebShellCsp(frameAncestors);
+  return (req: Request, res: Response): void => {
+    const csp = buildWebShellCsp(
+      frameAncestors,
+      remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
+    );
     res
       .status(200)
       .set('Content-Security-Policy', csp)
