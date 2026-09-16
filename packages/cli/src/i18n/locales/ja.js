@@ -512,6 +512,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 件のフックが設定されています',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、Qwen Code に尋ねてください。',
+  'Reopen this menu to reload hook definitions.':
+    'このメニューを再度開くと、フック定義を再読み込みできます。',
+  'Hook controls and HTTP security settings require a restart.':
+    'フックの制御設定と HTTP セキュリティ設定の変更には再起動が必要です。',
+  'Failed to reload hook definitions: {{error}}':
+    'フック定義の再読み込みに失敗しました: {{error}}',
   'Enter to select · Esc to cancel': 'Enter で選択 · Esc でキャンセル',
   // Hooks - Detail Step
   'Exit codes:': '終了コード：',
