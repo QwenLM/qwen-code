@@ -104,6 +104,10 @@ jobs:
         shell: 'bash'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
+      - name: 'Build packages'
+        shell: 'bash'
+        run: 'npm run build'
+
       - name: 'Run tests and generate reports'
         shell: 'bash'
         env:

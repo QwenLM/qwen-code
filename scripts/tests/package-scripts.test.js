@@ -1337,6 +1337,12 @@ describe('package scripts', () => {
   it('runs prepare steps in order when CI does not skip prepare', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-bin-'));
     const logFile = path.join(binDir, 'commands.log');
+    const distCli = path.join(root, 'dist/cli.js');
+    const hadDist = existsSync(distCli);
+    if (!hadDist) {
+      mkdirSync(path.dirname(distCli), { recursive: true });
+      writeFileSync(distCli, '');
+    }
 
     try {
       if (process.platform === 'win32') {
@@ -1379,10 +1385,10 @@ describe('package scripts', () => {
       expect(result.status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         'husky',
-        'npm run build',
-        'npm run bundle',
+        'npm run generate',
       ]);
     } finally {
+      if (!hadDist) rmSync(distCli, { force: true });
       rmSync(binDir, { recursive: true, force: true });
     }
   });
@@ -1447,7 +1453,7 @@ describe('package scripts', () => {
           path.join(binDir, 'npm.cmd'),
           [
             '@echo(npm %*>>"%PREPARE_LOG_FILE%"',
-            '@if "%1 %2"=="run build" exit /b 7',
+            '@if "%1 %2"=="run generate" exit /b 7',
             '@exit /b 0',
             '',
           ].join('\r\n'),
@@ -1462,7 +1468,7 @@ describe('package scripts', () => {
           [
             '#!/bin/sh',
             'echo "npm $*" >> "$PREPARE_LOG_FILE"',
-            'if [ "$1 $2" = "run build" ]; then exit 7; fi',
+            'if [ "$1 $2" = "run generate" ]; then exit 7; fi',
             '',
           ].join('\n'),
         );
@@ -1487,11 +1493,11 @@ describe('package scripts', () => {
 
       expect(result.status).toBe(7);
       expect(result.stderr).toContain(
-        'prepare: npm run build exited with status 7',
+        'prepare: npm run generate exited with status 7',
       );
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         'husky',
-        'npm run build',
+        'npm run generate',
       ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });
