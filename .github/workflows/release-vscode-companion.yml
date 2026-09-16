@@ -116,13 +116,22 @@ jobs:
         # exactly there. --retry-all-errors is what makes a 404 retryable;
         # without it --retry only covers connection errors and 408/429/5xx, so
         # the retries never fired.
+        #
+        # --retry-max-time bounds one curl invocation, so the 40 minutes is
+        # spent against a deadline both fetches share rather than granted to
+        # each of them.
         run: |-
           renderer_version=$(node -p "require('./package.json').version")
           published_renderer=$(mktemp)
           trap 'rm -f "${published_renderer}"' EXIT
+          deadline=$(($(date +%s) + 2400))
           for asset in js css; do
+            budget=$((deadline - $(date +%s)))
+            if [[ "${budget}" -lt 1 ]]; then
+              budget=1
+            fi
             curl --fail --location --silent --show-error \
-              --retry 80 --retry-delay 30 --retry-all-errors --retry-max-time 2400 \
+              --retry 80 --retry-delay 30 --retry-all-errors --retry-max-time "${budget}" \
               "https://unpkg.com/@qwen-code/qwen-code@${renderer_version}/export-transcript-document.${asset}" \
               --output "${published_renderer}"
             cmp "packages/web-templates/src/export-html/dist/export-transcript-document.${asset}" \
