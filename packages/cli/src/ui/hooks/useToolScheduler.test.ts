@@ -539,68 +539,72 @@ describe('useReactToolScheduler', () => {
             );
           }),
       );
-    const { result } = renderScheduler();
-    const request = {
-      callId: 'queued-full-turn-call',
-      name: 'mockTool',
-      args: {},
-    } as ToolCallRequestInfo;
-    const abortController = new AbortController();
+    try {
+      const { result } = renderScheduler();
+      const request = {
+        callId: 'queued-full-turn-call',
+        name: 'mockTool',
+        args: {},
+      } as ToolCallRequestInfo;
+      const abortController = new AbortController();
 
-    act(() => {
-      result.current[1]([request], abortController.signal, 'vision-agent\0');
-    });
-    // Let resolveForModel settle so the request is queued before the abort.
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-    expect(scheduleSpy).toHaveBeenCalled();
+      act(() => {
+        result.current[1]([request], abortController.signal, 'vision-agent\0');
+      });
+      // Let resolveForModel settle so the request is queued before the abort.
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+      expect(scheduleSpy).toHaveBeenCalled();
 
-    act(() => {
-      abortController.abort();
-    });
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
+      act(() => {
+        abortController.abort();
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
 
-    expect(mockTool.execute).not.toHaveBeenCalled();
-    expect(result.current[0]).toEqual([]);
-    expect(
-      onComplete.mock.calls
-        .flat(Infinity)
-        .filter(
-          (toolCall: any) =>
-            toolCall?.status === 'error' ||
-            toolCall?.response?.errorType === ToolErrorType.UNHANDLED_EXCEPTION,
-        ),
-    ).toEqual([]);
-    // The cancelled call still travels the completion path so the caller
-    // releases the batch and continuation ownership it registered.
-    expect(onComplete).toHaveBeenCalledTimes(1);
-    expect(onComplete).toHaveBeenCalledWith([
-      expect.objectContaining({
-        status: 'cancelled',
-        request,
-        response: expect.objectContaining({
-          callId: request.callId,
-          errorType: undefined,
-          executionStatus: 'not_started',
-          responseParts: [
-            {
-              functionResponse: {
-                id: request.callId,
-                name: 'mockTool',
-                response: {
-                  error:
-                    '[Operation Cancelled] Reason: Tool call cancelled before execution.',
+      expect(mockTool.execute).not.toHaveBeenCalled();
+      expect(result.current[0]).toEqual([]);
+      expect(
+        onComplete.mock.calls
+          .flat(Infinity)
+          .filter(
+            (toolCall: any) =>
+              toolCall?.status === 'error' ||
+              toolCall?.response?.errorType ===
+                ToolErrorType.UNHANDLED_EXCEPTION,
+          ),
+      ).toEqual([]);
+      // The cancelled call still travels the completion path so the caller
+      // releases the batch and continuation ownership it registered.
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(onComplete).toHaveBeenCalledWith([
+        expect.objectContaining({
+          status: 'cancelled',
+          request,
+          response: expect.objectContaining({
+            callId: request.callId,
+            errorType: undefined,
+            executionStatus: 'not_started',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: 'mockTool',
+                  response: {
+                    error:
+                      '[Operation Cancelled] Reason: Tool call cancelled before execution.',
+                  },
                 },
               },
-            },
-          ],
+            ],
+          }),
         }),
-      }),
-    ]);
-    scheduleSpy.mockRestore();
+      ]);
+    } finally {
+      scheduleSpy.mockRestore();
+    }
   });
 
   it('keeps a full-turn cancellation when the signal is already aborted before scheduling', async () => {
