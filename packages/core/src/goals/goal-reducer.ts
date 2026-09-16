@@ -30,6 +30,20 @@ import {
 
 const MAX_BLOCKED_AUDIT_COUNT = 3;
 
+export function reduceGoalSpend(
+  goal: GoalRecord,
+  tokens: number,
+  now: number,
+): GoalRecord {
+  if (!Number.isFinite(tokens) || tokens <= 0) return goal;
+  return {
+    ...goal,
+    tokensUsed: goal.tokensUsed + tokens,
+    activeTimeMs: elapsedActiveTime(goal, now),
+    updatedAt: now,
+  };
+}
+
 export interface GoalControlTransition {
   request: GoalControlRequest;
   now: number;

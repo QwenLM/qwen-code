@@ -43,6 +43,10 @@ import {
   type SessionWriterLease,
 } from '@qwen-code/qwen-code-core';
 import {
+  AcpChildCapacityExceededError,
+  type AcpChildCapacity,
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import {
   parseCallerSuppliedSessionId,
   normalizeSessionIdForLookup,
   type CallerSuppliedSessionIdParseResult,
@@ -104,6 +108,7 @@ export class StandaloneSessionServiceError extends Error {
     readonly sessionId: string | undefined,
     message: string,
     readonly retryable = false,
+    readonly capacity?: AcpChildCapacity,
   ) {
     super(message);
   }
@@ -222,6 +227,7 @@ export type RestoreStandaloneSessionOptions = Pick<
   | 'clientId'
   | 'historyPageSize'
   | 'liveReplayMode'
+  | 'compactedReplayMode'
   | 'hideInheritedHistory'
   | 'approvalMode'
 >;
@@ -2331,6 +2337,9 @@ export class StandaloneSessionService {
               ...(action === 'load' && options.historyPageSize !== undefined
                 ? { historyPageSize: options.historyPageSize }
                 : {}),
+              ...(action === 'load' && options.compactedReplayMode !== undefined
+                ? { compactedReplayMode: options.compactedReplayMode }
+                : {}),
               ...(action === 'load' && options.liveReplayMode !== undefined
                 ? { liveReplayMode: options.liveReplayMode }
                 : {}),
@@ -2671,7 +2680,25 @@ export class StandaloneSessionService {
         } catch {
           this.beginTerminalQuarantine(runtime);
         }
-        throw serviceError('standalone_creation_rolled_back', sessionId, true);
+        const outcome = serviceError(
+          'standalone_creation_rolled_back',
+          sessionId,
+          true,
+        );
+        if (error.cause instanceof AcpChildCapacityExceededError) {
+          throw new StandaloneSessionServiceError(
+            outcome.code,
+            sessionId,
+            outcome.message,
+            outcome.retryable,
+            {
+              code: error.cause.code,
+              maxConcurrentChildren: error.cause.maxConcurrentChildren,
+              committedAcpChildren: error.cause.committedAcpChildren,
+            },
+          );
+        }
+        throw outcome;
       }
       this.beginTerminalQuarantine(runtime);
     }
