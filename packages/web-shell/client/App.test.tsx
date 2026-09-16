@@ -5311,11 +5311,9 @@ describe('task activity key', () => {
   });
 
   it('keeps pane-bound usage tabs restored through the sessionStorage split', async () => {
-    // The uncontrolled reload path: per-tab split storage, not the prop.
-    sessionStorage.setItem(
-      'qwen-webshell-split-sessions',
-      JSON.stringify(['pane-session']),
-    );
+    // The uncontrolled reload path: per-tab split storage, not the prop. Seeded
+    // through the real save path, so the set carries its daemon-target owner.
+    saveSplitSessions(['pane-session']);
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
       JSON.stringify({

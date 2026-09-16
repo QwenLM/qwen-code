@@ -1,6 +1,8 @@
 // Load resets before any component can import CSS modules.
 import './styles/globals.css';
 import React from 'react';
+import { StandaloneContext } from './config/standalone';
+import { isKnownDaemonTarget } from './config/daemon';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -27,6 +29,14 @@ import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
+const REQUESTED_DAEMON_TARGET =
+  new URLSearchParams(window.location.search).get('daemon') || '';
+const INVALID_DAEMON_TARGET =
+  Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
+// A `?daemon=` link can name any origin; one this browser has never connected
+// to is shown for confirmation instead of being probed on load.
+const UNCONFIRMED_DAEMON_TARGET =
+  Boolean(DAEMON_BASE_URL) && !isKnownDaemonTarget(DAEMON_BASE_URL);
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
@@ -192,12 +202,10 @@ function replaceStandaloneSessionUrl(
   url.searchParams.delete('theme');
   url.searchParams.delete('language');
   url.searchParams.delete('lang');
-  // Boot already scrubbed ?token= (dev included), so drop it here too; dev
-  // keeps ?daemon= so a reload still targets the same local daemon.
+  // Boot already scrubbed ?token= (dev included), so drop it here too.
+  // `daemon` is connection identity, not a one-shot preference: keep it so
+  // session navigation and refresh stay on the selected remote daemon.
   url.searchParams.delete('token');
-  if (!import.meta.env.DEV) {
-    url.searchParams.delete('daemon');
-  }
   window.history.replaceState(null, '', url);
 }
 
@@ -359,60 +367,80 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         language={documentLanguage ?? normalizeLanguage(navigator.language)}
         options={{ defaultEnabled: true }}
       >
-        <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-          <WorkspaceSessionProvider
-            sessionId={sessionId}
-            workspaceId={workspaceId}
-            sessionContext={sessionContext}
-            chromeTheme={documentTheme}
-            chromeLanguage={documentLanguage}
-            webShellProps={{
-              theme,
-              onThemeChange: handleThemeChange,
-              onThemeResolved: handleThemeResolved,
-              language,
-              onLanguageChange: handleLanguageChange,
-              onLanguageResolved: handleLanguageResolved,
-              onBrandResolved: handleBrandResolved,
-              onSessionIdChange: handleSessionIdChange,
-              sidebar: { enabled: true, showLive: true },
-              header: {
-                items: [
-                  'title',
-                  'environment',
-                  'rightPanel',
-                  'tokenUsage',
-                  'contextUsage',
-                ],
-              },
-              rightPanel: {
-                items: ['review', 'sideTask', 'terminal', 'webPreview'],
-              },
-              environmentPanel: {
-                items: [
-                  'environment',
-                  'sources',
-                  'subagents',
-                  'backgroundTasks',
-                  'attachments',
-                  'artifacts',
-                ],
-              },
-              compactThinking: true,
-              markdownTableMode: 'advanced',
-              composerToolbarAdditionalActions:
-                STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-            }}
-          />
-        </DaemonWorkspaceProvider>
+        <StandaloneContext.Provider value={true}>
+          <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
+            <WorkspaceSessionProvider
+              sessionId={sessionId}
+              workspaceId={workspaceId}
+              sessionContext={sessionContext}
+              chromeTheme={documentTheme}
+              chromeLanguage={documentLanguage}
+              webShellProps={{
+                theme,
+                onThemeChange: handleThemeChange,
+                onThemeResolved: handleThemeResolved,
+                language,
+                onLanguageChange: handleLanguageChange,
+                onLanguageResolved: handleLanguageResolved,
+                onBrandResolved: handleBrandResolved,
+                onSessionIdChange: handleSessionIdChange,
+                sidebar: { enabled: true, showLive: true },
+                header: {
+                  items: [
+                    'title',
+                    'environment',
+                    'rightPanel',
+                    'tokenUsage',
+                    'contextUsage',
+                  ],
+                },
+                rightPanel: {
+                  items: ['review', 'sideTask', 'terminal', 'webPreview'],
+                },
+                environmentPanel: {
+                  items: [
+                    'environment',
+                    'sources',
+                    'subagents',
+                    'backgroundTasks',
+                    'attachments',
+                    'artifacts',
+                  ],
+                },
+                compactThinking: true,
+                markdownTableMode: 'advanced',
+                composerToolbarAdditionalActions:
+                  STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+              }}
+            />
+          </DaemonWorkspaceProvider>
+        </StandaloneContext.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>
   );
 }
 
 async function main() {
-  const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
-  removeDaemonTokenFromUrl();
+  const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  const storedToken = INVALID_DAEMON_TARGET
+    ? undefined
+    : getDaemonToken(baseUrl);
+  const daemonToken =
+    storedToken ??
+    (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
+      ? await waitForDaemonTokenMessage()
+      : undefined);
+  if (INVALID_DAEMON_TARGET) {
+    // Keep a fragment token for recovery, but never leave a server-visible
+    // query token in the address bar or history.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('token')) {
+      url.searchParams.delete('token');
+      window.history.replaceState(null, '', url);
+    }
+  } else {
+    removeDaemonTokenFromUrl();
+  }
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -425,13 +453,16 @@ async function main() {
   ReactDOM.createRoot(container!).render(
     <React.StrictMode>
       <StandaloneAuth
-        baseUrl={DAEMON_BASE_URL || window.location.origin}
+        baseUrl={baseUrl}
         initialToken={daemonToken}
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.
         language={getInitialLanguage() ?? normalizeLanguage(navigator.language)}
+        initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         theme={getInitialTheme()}
+        invalidTarget={INVALID_DAEMON_TARGET}
+        unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
         {(token) => <StandaloneApp daemonToken={token} />}
       </StandaloneAuth>
