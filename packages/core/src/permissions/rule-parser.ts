@@ -953,16 +953,20 @@ function isCommentStart(command: string, index: number): boolean {
   if (index === 0) {
     return true;
   }
-  // Step back over every `\<newline>` pair bash deletes, so the word test and
-  // its escape parity are both evaluated against the character bash leaves
-  // adjacent to the `#`.
+  // Step back over the `\<newline>` pair bash deletes — one pair per step, not
+  // the whole backslash run. bash pairs a run from the left, so an odd run of
+  // three or more leaves a literal backslash adjacent to the `#`, and `\` is no
+  // word boundary: `bash --noprofile --norc -xc` over `echo a \\\` + newline +
+  // `# c ; echo TAIL` traces `+ echo a '\#' c` and then `+ echo TAIL`. Deleting
+  // the whole run tested the character before it instead, read that literal `#`
+  // as a comment, and folded the real `;` away.
   let previousIndex = index - 1;
   while (command[previousIndex] === '\n') {
     const continuation = precedingBackslashCount(command, previousIndex);
     if (continuation % 2 === 0) {
       break;
     }
-    previousIndex -= continuation + 1;
+    previousIndex -= 2;
   }
   if (previousIndex < 0) {
     // The command opens with continuations, so bash sees the `#` at the start
@@ -988,6 +992,16 @@ export interface CompoundCommandSegment {
    * shell runs in a subshell (`&`).
    */
   terminator: string;
+  /**
+   * Nesting depth of the `$( … )` / backtick body the terminating operator was
+   * found in; absent when the segment ended at a top-level operator. Such a
+   * segment is a slice of a substitution body, which bash runs in a subshell,
+   * so a stateful caller must not let it move the cwd the following segments
+   * are attributed to. It is still a segment, and stays one: cutting the body
+   * at its operators is what keeps `echo "$(ls && rm -rf /tmp/x)"` visible to
+   * the per-segment Bash rules.
+   */
+  substitutionDepth?: number;
 }
 
 /**
@@ -1208,7 +1222,12 @@ export function splitCompoundCommandSegments(
       }
       const segment = command.substring(lastSplit, i).trim();
       if (segment) {
-        segments.push({ command: segment, terminator: op });
+        const substitutionDepth = commandSubDepth + backtickDepth;
+        segments.push(
+          substitutionDepth > 0
+            ? { command: segment, terminator: op, substitutionDepth }
+            : { command: segment, terminator: op },
+        );
       }
       lastSplit = i + op.length;
       i = lastSplit - 1; // -1 because the loop will i++

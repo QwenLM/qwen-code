@@ -2200,8 +2200,15 @@ export function stripHeredocBodies(command: string): string {
     }
 
     kept.push(line);
-    const registered = getHeredocDelimiters(line);
-    if (registered.length > 0 && endsWithLineContinuation(line)) {
+    const { delimiters: registered, codeEnd } = getHeredocDelimiters(line);
+    // Only the code before a `#` can continue the line: bash discards a
+    // comment at the physical newline, escape included, so a backslash inside
+    // one leaves the marker line complete and the body still starts at the next
+    // physical line.
+    if (
+      registered.length > 0 &&
+      endsWithLineContinuation(line.slice(0, codeEnd))
+    ) {
       continuedMarker = true;
     }
     pendingDelimiters.push(...registered);
@@ -2244,7 +2251,15 @@ function endsWithLineContinuation(line: string): boolean {
   return backslashes % 2 === 1;
 }
 
-function getHeredocDelimiters(line: string): string[] {
+function getHeredocDelimiters(line: string): {
+  delimiters: string[];
+  /**
+   * Index of the `#` that ended the scan, or `line.length` when the whole line
+   * is code. Text from here on is a comment bash discards, so it can hold no
+   * heredoc operator — and no line continuation either.
+   */
+  codeEnd: number;
+} {
   const delimiters: string[] = [];
   let inSingle = false;
   let inDouble = false;
@@ -2301,7 +2316,7 @@ function getHeredocDelimiters(line: string): string[] {
       ch === '#' &&
       (i === 0 || ' \t;&|'.includes(line[i - 1]!))
     ) {
-      break;
+      return { delimiters, codeEnd: i };
     }
     if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
       continue;
@@ -2335,7 +2350,7 @@ function getHeredocDelimiters(line: string): string[] {
     }
     i = wordEnd;
   }
-  return delimiters;
+  return { delimiters, codeEnd: line.length };
 }
 
 function walkCompoundCommand(
@@ -2350,24 +2365,30 @@ function walkCompoundCommand(
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
 
-  for (const { command: sub, terminator } of subCommands) {
+  for (const { command: sub, terminator, substitutionDepth } of subCommands) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
     // the cwd the following segments run in. Treating it as a foreground `cd`
     // would attribute their relative writes to the wrong directory — for
     // `cd /tmp & echo {} > settings.json` the write lands in the *original*
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
+    // A `cd` inside a `$( … )` / backtick body is the same case: bash runs the
+    // body in a subshell, so it cannot move the parent's cwd. The split keeps
+    // the body's operators — that is what makes `echo "$(ls && rm -rf /tmp/x)"`
+    // visible to the Bash rules — so the slice reaches here as its own segment
+    // and only its depth says it is not top level.
+    const movesCwd = !backgrounded && substitutionDepth === undefined;
 
     const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
     if (cdTarget.kind === 'static') {
-      if (!backgrounded) {
+      if (movesCwd) {
         effectiveCwd = cdTarget.cwd;
         cwdUnknown = cdTarget.cwdUnknown;
       }
       continue;
     }
     if (cdTarget.kind === 'dynamic') {
-      if (!backgrounded) {
+      if (movesCwd) {
         cwdUnknown = true;
       }
       continue;

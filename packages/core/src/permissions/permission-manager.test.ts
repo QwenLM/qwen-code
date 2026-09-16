@@ -27,7 +27,10 @@ import {
   buildHumanReadableRuleLabel,
   TOOL_NAME_ALIASES,
 } from './rule-parser.js';
-import { stripHeredocBodies } from './shell-semantics.js';
+import {
+  stripHeredocBodies,
+  extractShellOperationsAcrossCommand,
+} from './shell-semantics.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -932,6 +935,44 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('echo hi \\\n# c ; rm -rf /tmp/x')).toEqual([
       'echo hi \\\n# c ; rm -rf /tmp/x',
     ]);
+  });
+
+  // …but bash pairs a backslash run from the *left*, so an odd run of three or
+  // more leaves one literal backslash adjacent to the `#` and the `#` stays
+  // mid-word: `bash --noprofile --norc -xc` over `echo a \\\` + newline +
+  // `# c ; echo TAIL_RAN` traces `+ echo a '\#' c` and then `+ echo TAIL_RAN`
+  // (five backslashes trace `+ echo a '\\#' c` and the same tail). Stepping back
+  // over the whole run tested the space before it instead, read that literal `#`
+  // as a comment, and folded the real `;` away with the tail's rule check.
+  it.each([
+    ['three', 'echo a \\\\\\\n# c ; rm -rf /tmp/x', 'echo a \\\\\\\n# c'],
+    [
+      'five',
+      'echo a \\\\\\\\\\\n# c ; rm -rf /tmp/x',
+      'echo a \\\\\\\\\\\n# c',
+    ],
+  ])(
+    'keeps a # after a %s-backslash continuation literal',
+    async (_count, command, head) => {
+      expect(splitCompoundCommand(command)).toEqual([head, 'rm -rf /tmp/x']);
+    },
+  );
+
+  // A backslash inside a `#` comment on a heredoc marker line is not a
+  // continuation — bash discards the comment at the physical newline, escape
+  // included, and `bash --noprofile --norc -x` runs the trailing `rm` with and
+  // without that backslash — so the body still starts on the next physical line
+  // and the strip must not be refused. Refusing it left the body's stray
+  // backtick to strand the splitter's backtick state, and the `rm` folded into
+  // the `echo`-headed segment that `Bash(*)` covers.
+  it('strips a heredoc whose marker line ends in a commented backslash', async () => {
+    const split = splitCompoundCommand(
+      stripHeredocBodies(
+        "cat <<'EOF' # x \\\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x",
+      ),
+    );
+    expect(split).toHaveLength(3);
+    expect(split[2]).toBe('rm -rf /tmp/x');
   });
 
   // A space-preceded `#` inside a `${ … }` parameter expansion is literal: bash
@@ -2993,6 +3034,81 @@ describe('PermissionManager', () => {
           toolName: 'run_shell_command',
           command: 'echo hi && cat <<EOF \\\n && rm -rf /tmp/x\nbody\nEOF',
         }),
+      ).toBe('deny');
+    });
+
+    // Pinned at evaluate level, where the split-level row cannot see it: bash
+    // discards a comment at the physical newline, escape included, so the marker
+    // line below is complete and the body really is data —
+    // `bash --noprofile --norc -x` traces `+ cat`, `+ echo a` and `+ rm -rf
+    // victim` both with and without that backslash. Counting the commented
+    // backslash as a continuation refused the strip, the body's stray backtick
+    // then stranded the splitter's backtick state, and the `rm` folded into the
+    // `echo`-headed segment `Bash(*)` covers: allow on a command bash runs the
+    // `rm` of.
+    it('heredoc marker ending in a commented backslash: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(*)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cat <<'EOF' # x \\\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x",
+        }),
+      ).toBe('deny');
+    });
+
+    // The `;` below is a real boundary: with three backslashes bash leaves one
+    // literal backslash adjacent to the `#`, so the `#` is mid-word and the tail
+    // runs (`bash --noprofile --norc -xc` traces `+ echo a '\#' c` and then the
+    // tail). Folding it into one segment put a configured hard deny past a
+    // command bash executes.
+    it('odd backslash run before a continued #: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo a \\\\\\\n# c ; rm -rf /tmp/x',
+        }),
+      ).toBe('deny');
+    });
+
+    // A `cd` inside `$( … )` runs in a subshell: `bash --noprofile --norc -x`
+    // traces `+ cd conf`, `++ cd decoy` and creates `conf/secret.txt`, never
+    // `decoy/secret.txt`. The split still cuts the body at its operators — that
+    // is what keeps an `&& rm -rf …` inside a substitution visible to the Bash
+    // rules — so the `cd` slice reaches the stateful walk as a segment of its
+    // own, and only its substitution depth says it cannot move the cwd the
+    // following write is attributed to.
+    it('a cd inside a command substitution does not move the cwd of later writes', async () => {
+      const command =
+        'cd conf && echo "$(x=1 && cd /tmp && pwd)" && echo pwned > secret.txt';
+      expect(
+        extractShellOperationsAcrossCommand(command, '/project').map(
+          (op) => op.filePath,
+        ),
+      ).toContain('/project/conf/secret.txt');
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(*)'],
+          permissionsDeny: ['Write(./conf/secret.txt)'],
+          cwd: '/project',
+          projectRoot: '/project',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
       ).toBe('deny');
     });
 
