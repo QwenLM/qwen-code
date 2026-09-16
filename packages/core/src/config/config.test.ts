@@ -90,7 +90,7 @@ import {
   resetDebugLoggingState,
   setDebugLogSession,
 } from '../utils/debugLogger.js';
-import { logRipgrepFallback } from '../telemetry/loggers.js';
+import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -393,6 +393,7 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   return {
     ...actual,
     logRipgrepFallback: vi.fn(),
+    logGoalState: vi.fn(),
     logStartSession: vi.fn(actual.logStartSession),
     logSessionEnd: vi.fn(actual.logSessionEnd),
   };
@@ -3975,6 +3976,61 @@ describe('Server Config (config.ts)', () => {
       const replacement = await config.getGoalRuntimeReady();
       expect(replacement).not.toBe(initial);
       expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('reports a committed Goal transition to telemetry', async () => {
+      vi.mocked(logGoalState).mockClear();
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const runtime = config.getGoalRuntime();
+
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(logGoalState).toHaveBeenCalledTimes(1);
+      expect(logGoalState).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          cause: 'create',
+          status: 'active',
+          revision: 1,
+        }),
+      );
+    });
+
+    it("does not report a resumed session's recovered Goal again", async () => {
+      // The restore broadcast names the recovered record's cause. Reporting it
+      // would count this paused Goal as paused a second time.
+      vi.mocked(logGoalState).mockClear();
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+
+      const runtime = await config.getGoalRuntimeReady();
+      expect(logGoalState).not.toHaveBeenCalled();
+
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: 'g-resumed',
+        expectedRevision: 1,
+      });
+      expect(logGoalState).toHaveBeenCalledTimes(1);
+      expect(logGoalState).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ cause: 'resume', goal_id: 'g-resumed' }),
+      );
+
+      expect(runtime.getRecoveryCause?.()).toBe('pause');
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: 'g-resumed',
+        expectedRevision: runtime.getSnapshot().goal!.revision,
+      });
+      expect(logGoalState).toHaveBeenCalledTimes(2);
+      expect(logGoalState).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({ cause: 'pause', goal_id: 'g-resumed' }),
+      );
     });
 
     it('holds selective Goal readiness and autonomous work until finalization', async () => {
