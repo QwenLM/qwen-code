@@ -221,6 +221,23 @@ export default {
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
+  'toolDisplayName.DownsampleImage': '降採樣圖像',
+  'toolDisplayName.DownscaleVideo': '降採樣影片',
+  'toolDisplayName.DownsampleAudio': '降採樣音訊',
+  'toolDisplayName.ExtractKeyframes': '擷取關鍵影格',
+  'toolDisplayName.ExtractAudio': '擷取音軌',
+  'toolDisplayName.ClipVideo': '剪輯影片',
+  'toolDisplayName.ClipImage': '裁剪圖像',
+  'toolDisplayName.ClipAudio': '剪輯音訊',
+  'toolDisplayName.CaptionImage': '描述圖像',
+  'toolDisplayName.CaptionAudio': '描述音訊',
+  'toolDisplayName.OcrImage': '識別圖像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解影片',
+  'toolDisplayName.ConvertImage': '轉換圖像',
+  'toolDisplayName.TranscribeAudio': '轉寫音訊',
+  'toolDisplayName.RecallMediaMemory': '召回媒體記憶',
+  '[fixed-only: runs via media policies, not the model]':
+    '［僅固定策略：由媒體策略調用，不開放給模型］',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
@@ -1013,6 +1030,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 個 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此選單為只讀。要添加或修改 Hook，請直接編輯 settings.json 或詢問 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新開啟此選單可重新載入 Hook 定義。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制項與 HTTP 安全設定需要重新啟動後生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新載入 Hook 定義失敗：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 選擇 · Esc 取消',
   'Exit codes:': '退出碼：',
   'Configured hooks:': '已配置的 Hook：',
@@ -2054,8 +2077,6 @@ export default {
     '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已儲存，但此工作區不受信任時不會生效。',
-  'Set a goal — keep working until the condition is met':
-    '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
@@ -2161,6 +2182,11 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'Large workflow': '大型工作流程',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流程：已排定 {{agents}} 個 agent（警示門檻 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流程：預計輸出 ~{{tokens}} 個 token（警示門檻 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',

@@ -148,6 +148,43 @@ describe('<GoalStatusMessage />', () => {
     }
   });
 
+  it.each([
+    [3, 20, 723_000, 1_800_000, '3/20 turns · 12m 3s/30m'],
+    [1, 20, 0, undefined, '1/20 turns'],
+    [1, 1, 0, undefined, '1/1 turn'],
+    [3, undefined, 723_000, undefined, '3 turns · 12m 3s'],
+  ])(
+    'shows turn and active-time budgets (%s/%s)',
+    (turnCount, turnBudget, activeTimeMs, activeTimeBudgetMs, expected) => {
+      const { lastFrame } = render(
+        <GoalStatusMessage
+          snapshot={snapshot('paused', 'idle', undefined, {
+            turnCount,
+            turnBudget,
+            activeTimeMs,
+            activeTimeBudgetMs,
+          })}
+        />,
+      );
+      expect(lastFrame()).toContain(expected);
+    },
+  );
+
+  it('hides unused turn and active-time budgets', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'idle', undefined, {
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        })}
+      />,
+    );
+    expect(lastFrame()).not.toContain('turns');
+    expect(lastFrame()).not.toContain('/30m');
+  });
+
   it('reports spend against the budget on a lifecycle card', () => {
     const { lastFrame } = render(
       <GoalStatusMessage

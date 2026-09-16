@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   buildHooksListing,
   type ContentGeneratorConfig,
@@ -88,6 +89,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
+  ToolErrorType,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
@@ -139,6 +141,7 @@ import {
   type ChatRecord,
   type ToolInvocationGuard,
   type WorkflowParams,
+  type WorkflowSourceRef,
   type WorkflowToolResult,
   type WorkflowRunRegistry,
   getWorkflowTaskMutationKey,
@@ -205,13 +208,14 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
-import { Readable, Writable } from 'node:stream';
+import { Readable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
@@ -502,6 +506,39 @@ function isSessionOwnedWorkflowTool(
     'buildSessionOwnedBackground' in value &&
     typeof value.buildSessionOwnedBackground === 'function'
   );
+}
+
+/**
+ * Start a session-owned run, reporting a rejected parameter as one.
+ *
+ * `buildSessionOwnedBackground` validates the call the way the tool would for
+ * the model — a `sourceRef` that is not `{id, revision}`, an empty script —
+ * and throws a plain `Error`. Left alone that reaches the caller as an
+ * internal error, which reads as a daemon fault rather than the request
+ * problem it is.
+ */
+async function startSessionOwnedWorkflow(
+  tool: SessionOwnedWorkflowTool,
+  params: Omit<WorkflowParams, 'run_in_background'>,
+  workflowName: string | undefined,
+): Promise<WorkflowToolResult> {
+  let invocation;
+  try {
+    invocation = tool.buildSessionOwnedBackground(params, workflowName);
+  } catch (error) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const result = await invocation.execute(new AbortController().signal);
+  if (result.error?.type === ToolErrorType.INVALID_TOOL_PARAMS) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      result.error.message,
+    );
+  }
+  return result;
 }
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -2848,9 +2885,10 @@ export async function runAcpAgent(
 
   let agentInstance: QwenAgent | undefined;
   let connection: AgentSideConnection;
+  let output: ReturnType<typeof createAcpOutput>;
   markAcpStartup('transportSetupStart');
   try {
-    const stdout = Writable.toWeb(process.stdout) as WritableStream;
+    output = createAcpOutput(process.stdout);
     const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
     // Stdout is used to send messages to the client, so console.log/console.info
@@ -2861,7 +2899,7 @@ export async function runAcpAgent(
 
     let initializeRequestId: string | number | null | undefined;
     const pendingNewSessionRequestIds = new Set<string | number | null>();
-    const stream = ndJsonStream(stdout, stdin, {
+    const stream = ndJsonStream(output.stream, stdin, {
       onMessageObserved: ({ direction, bytes, message }) => {
         if (direction === 'sent') {
           observeAcpToolResultWire(message, bytes);
@@ -3145,6 +3183,7 @@ export async function runAcpAgent(
   const shutdownHandler = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    prepareFileWatchersForProcessExit();
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
 
     if (agentInstance?.isTrustedManagedParent()) {
@@ -3204,8 +3243,10 @@ export async function runAcpAgent(
   process.on('SIGTERM', shutdownHandler);
   process.on('SIGINT', shutdownHandler);
 
+  const shutdownFailures: unknown[] = [];
   try {
     await connection.closed;
+    prepareFileWatchersForProcessExit();
     if (agentInstance?.isTrustedManagedParent()) {
       try {
         await shutdownManagedAgent(
@@ -3224,10 +3265,21 @@ export async function runAcpAgent(
       await drainPoolBeforeExit('ide_close');
       await disposeSessionsOnce();
     }
+  } catch (error) {
+    shutdownFailures.push(error);
   } finally {
+    try {
+      if (!shuttingDown) await output.close();
+    } catch (error) {
+      if (!shuttingDown) shutdownFailures.push(error);
+    }
     process.off('SIGTERM', shutdownHandler);
     process.off('SIGINT', shutdownHandler);
     eventLoopMonitor.dispose();
+  }
+  if (shutdownFailures.length === 1) throw shutdownFailures[0];
+  if (shutdownFailures.length > 1) {
+    throw new AggregateError(shutdownFailures, 'ACP EOF shutdown failed');
   }
 }
 
@@ -8502,8 +8554,10 @@ class QwenAgent implements Agent {
       workflowsEnabled,
       workflowToolFeatures: {
         sourceRef: true,
-        agentStepId: false,
-        workflowStepId: false,
+        agentStepId: true,
+        workflowStepId: true,
+        runSavedArgs: true,
+        runScript: true,
       },
       savedWorkflows,
     };
@@ -12542,22 +12596,39 @@ class QwenAgent implements Agent {
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           );
         }
+        // What the two start actions run with. A retry or rerun replays the
+        // original run's own args and `sourceRef` — that is what keeps it the
+        // same run — so anything sent alongside those actions is ignored.
+        const startInput: Omit<WorkflowParams, 'run_in_background'> = {
+          // `args` is any JSON value, `null` included, so presence decides.
+          ...(Object.hasOwn(params, 'args') ? { args: params['args'] } : {}),
+          ...(params['sourceRef'] !== undefined
+            ? { sourceRef: params['sourceRef'] as WorkflowSourceRef }
+            : {}),
+        };
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         if (!this.canUseWorkflowControls(config)) {
           return { changed: false };
         }
+        // `taskId` is a run id for the control actions, a definition name for
+        // `run-saved` and the caller's own start key for `run-script`. Each
+        // namespace claims separately, so one cannot block another; within a
+        // namespace, a second concurrent start of the same key is refused.
         const mutationClaim =
           action === 'run-saved'
             ? getWorkflowTaskMutationKey(config, taskId, 'saved')
-            : getWorkflowTaskMutationKey(config, taskId);
+            : action === 'run-script'
+              ? getWorkflowTaskMutationKey(config, taskId, 'script')
+              : getWorkflowTaskMutationKey(config, taskId);
         if (action === 'delete-history') {
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
@@ -12605,14 +12676,56 @@ class QwenAgent implements Agent {
                   'The workflow tool is unavailable; cannot run this saved workflow.',
                 );
               }
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  {
-                    scriptPath: savedWorkflow.scriptPath,
-                  },
-                  savedWorkflow.name,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, scriptPath: savedWorkflow.scriptPath },
+                savedWorkflow.name,
+              );
+              const startedTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              return startedTask
+                ? {
+                    changed: true,
+                    status: startedTask.status,
+                    taskId: startedTask.runId,
+                  }
+                : { changed: false };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        if (action === 'run-script') {
+          const script = params['script'];
+          if (typeof script !== 'string' || script.length === 0) {
+            throw RequestError.invalidParams(
+              { errorKind: 'workflow_invalid_params' },
+              '`script` is required for the "run-script" action',
+            );
+          }
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'The workflow tool is unavailable; cannot run this script.',
+                );
+              }
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, script },
+                // No definition name: a caller-supplied script is named by its
+                // own `export const meta`, which is where the run's label
+                // comes from when no saved workflow backs it.
+                undefined,
+              );
               const startedTask = result.workflowRunId
                 ? registry.get(result.workflowRunId)
                 : undefined;
@@ -12693,12 +12806,11 @@ class QwenAgent implements Agent {
                 ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  startParams,
-                  readableScriptPath ? task.workflowName : undefined,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                startParams,
+                readableScriptPath ? task.workflowName : undefined,
+              );
               if (action === 'rerun') {
                 const rerunTask = result.workflowRunId
                   ? registry.get(result.workflowRunId)

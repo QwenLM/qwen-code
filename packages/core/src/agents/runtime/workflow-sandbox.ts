@@ -438,6 +438,10 @@ function isRegexContext(source: string, i: number): boolean {
   return /[{[(,;:=!&|?+\-*/%^~<>]/.test(prev);
 }
 
+import {
+  readWorkflowStepId,
+  type WorkflowCallTrace,
+} from '../workflow-correlation.js';
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
@@ -474,6 +478,7 @@ const ARGS_MAX_DEPTH = 64;
  * like `scema` before they reach dispatch.
  */
 export interface WorkflowAgentOpts {
+  stepId?: string;
   label?: string;
   phase?: string;
   schema?: object;
@@ -572,6 +577,8 @@ export interface WorkflowBudget {
  * workflow does not flood the registry with thousands of events.
  */
 export interface WorkflowOrchestratorEmitter {
+  workflowCallUpdated?(call: WorkflowCallTrace): void;
+  workflowCallsTruncated?(): void;
   /** Sandbox `phase(title)` was called. */
   phaseStarted?(title: string): void;
   /** Sandbox `log(...)` produced one line of output (or `console.log`). */
@@ -582,6 +589,8 @@ export interface WorkflowOrchestratorEmitter {
   agentCompleted?(label?: string, error?: string): void;
   /** A dispatch was issued and joined to the runtime dependency graph. */
   dispatchQueued?(event: {
+    stepId?: string;
+    workflowCallId?: string;
     id: string;
     label?: string;
     prompt: string;
@@ -653,6 +662,7 @@ export interface SandboxOptions {
   workflow?: (
     nameOrRef: string | { scriptPath: string },
     args: unknown,
+    stepId?: string,
   ) => Promise<unknown>;
   budget?: WorkflowBudget;
   /**
@@ -1014,7 +1024,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushPhase: safePhase,
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
-    hostAgent: opts.dispatch,
+    hostAgent: (
+      prompt: string,
+      agentOpts: WorkflowAgentOpts,
+      stepId: unknown,
+    ) => {
+      const validatedStepId = readWorkflowStepId(stepId);
+      const hostOpts = { ...agentOpts };
+      delete hostOpts.stepId;
+      if (validatedStepId !== undefined) hostOpts.stepId = validatedStepId;
+      return opts.dispatch(prompt, hostOpts);
+    },
     // Effort tiers are resolved host-side so the sandbox accepts exactly the
     // aliases `/effort` does without a second copy of the alias table. Takes
     // and returns primitives only.
@@ -1107,7 +1127,16 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     hasBudget: !!opts.budget,
     hostParallel: opts.parallel,
     hostPipeline: opts.pipeline,
-    hostWorkflow: opts.workflow,
+    hostWorkflow: (
+      ref: string | { scriptPath: string },
+      args: unknown,
+      stepId: unknown,
+    ) => {
+      const validated = readWorkflowStepId(stepId);
+      return validated === undefined
+        ? opts.workflow!(ref, args)
+        : opts.workflow!(ref, args, validated);
+    },
     budgetTotal: opts.budget ? opts.budget.total : null,
     hostBudgetSpent: opts.budget ? opts.budget.spent.bind(opts.budget) : null,
     hostBudgetRemaining: opts.budget
@@ -1530,7 +1559,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'disallowedTools'];
+      const KNOWN_AGENT_OPTS = ['stepId', 'label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'disallowedTools'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1683,7 +1712,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // value isn't a tool_call payload. logRevivalFailure surfaces
         // the actionable detail (slot 0 + the error string) to operators
         // so a real trigger in production isn't silent.
-        return __b.hostAgent(prompt, safeOpts).then(function (value) {
+        return __b.hostAgent(prompt, safeOpts, safeOpts.stepId).then(function (value) {
           if (value === null || typeof value !== 'object') {
             return value;
           }
@@ -1786,7 +1815,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // single-level nesting limit is enforced (a nested sandbox is created
       // without a workflow impl, so its workflow() lands in the else branch).
       if (__b.hasWorkflow) {
-        const callWorkflow = vmAsync(function (nameOrRef, wfArgs) {
+        const callWorkflow = vmAsync(function (nameOrRef, wfArgs, wfOpts) {
+          if (wfOpts !== undefined && (wfOpts === null || typeof wfOpts !== 'object' || Array.isArray(wfOpts) || Object.keys(wfOpts).some(function (key) { return key !== 'stepId'; }))) {
+            throw new Error('workflow() options must be an object containing only stepId.');
+          }
+          const stepId = wfOpts === undefined ? undefined : wfOpts.stepId;
           // Sanitize args through a JSON round-trip BEFORE crossing so the
           // host only ever sees vm-realm plain objects (same defense as
           // agent()'s safeOpts). nameOrRef may be a string or {scriptPath}.
@@ -1805,7 +1838,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
               String(e && e.message != null ? e.message : e)
             );
           }
-          return __b.hostWorkflow(safeRef, safeArgs).then(function (value) {
+          return __b.hostWorkflow(safeRef, safeArgs, stepId).then(function (value) {
             if (value === null || typeof value !== 'object') {
               return value;
             }
@@ -1817,8 +1850,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             }
           });
         });
-        globalThis.workflow = function workflow(nameOrRef, wfArgs) {
-          return callWorkflow(nameOrRef, wfArgs);
+        globalThis.workflow = function workflow(nameOrRef, wfArgs, wfOpts) {
+          return callWorkflow(nameOrRef, wfArgs, wfOpts);
         };
       } else {
         globalThis.workflow = function workflow() {

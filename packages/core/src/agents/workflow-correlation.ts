@@ -9,6 +9,18 @@ export interface WorkflowSourceRef {
   revision: string;
 }
 
+export interface WorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
+export const MAX_WORKFLOW_CALL_TRACES = 1_000;
+
 function isCorrelationId(value: unknown, maxLength: number): value is string {
   return (
     typeof value === 'string' &&
@@ -44,4 +56,14 @@ export function readWorkflowSourceRef(
     );
   }
   return Object.freeze({ id: value.id, revision: value.revision });
+}
+
+export function readWorkflowStepId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isCorrelationId(value, 128)) {
+    throw new Error(
+      'Workflow stepId must be a non-empty string of at most 128 characters without surrounding whitespace or control characters.',
+    );
+  }
+  return value;
 }
