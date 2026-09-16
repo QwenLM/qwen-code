@@ -891,10 +891,13 @@ export interface CompoundCommandSegment {
 export function splitCompoundCommandSegments(
   command: string,
 ): CompoundCommandSegment[] {
-  const boundaries = [
-    ...findOperatorBoundaries(command, 'bash'),
-    ...findOperatorBoundaries(command, 'escape-everywhere'),
-  ].sort((a, b) => a.start - b.start);
+  // The two readings differ only at a backslash, so one scan is enough without.
+  const boundaries = command.includes('\\')
+    ? [
+        ...findOperatorBoundaries(command, 'bash'),
+        ...findOperatorBoundaries(command, 'escape-everywhere'),
+      ].sort((a, b) => a.start - b.start)
+    : findOperatorBoundaries(command, 'bash');
 
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;

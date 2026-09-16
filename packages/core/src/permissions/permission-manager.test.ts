@@ -605,11 +605,32 @@ describe('splitCompoundCommand', () => {
       ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
     ],
     [
+      "echo 'c\\' $'a\\'' && touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    ["echo 'c\\' $'a\\'' | sh", ["echo 'c\\' $'a\\''", 'sh']],
+    [
+      "echo 'c\\' $'a\\'' & touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $'a\\''\ntouch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
       "echo 'c\\' \\\\$'a\\'' ; touch /tmp/x",
       ["echo 'c\\' \\\\$'a\\''", 'touch /tmp/x'],
     ],
     [
       "echo 'c\\' $\\\n'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\'' & touch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\''\ntouch /tmp/x",
       ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
     ],
     ["echo \\$'a\\' ; touch /tmp/x", ["echo \\$'a\\'", 'touch /tmp/x']],
@@ -643,6 +664,22 @@ describe('splitCompoundCommand', () => {
     ["echo 'a\\'' ; rm x'", ["echo 'a\\''", "rm x'"]],
   ])('keeps the boundaries main found in %s', async (command, parts) => {
     expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  it('reports the operator that terminated each segment', async () => {
+    // `cd x & …` is backgrounded, so shell-semantics must not move the cwd.
+    expect(
+      splitCompoundCommandSegments("cd 'a\\' & echo {} > settings.json"),
+    ).toEqual([
+      { command: "cd 'a\\'", terminator: '&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+    expect(
+      splitCompoundCommandSegments("cd 'a\\' && echo {} > settings.json"),
+    ).toEqual([
+      { command: "cd 'a\\'", terminator: '&&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
   });
 
   it('trims whitespace around sub-commands', async () => {
@@ -2375,6 +2412,8 @@ describe('PermissionManager', () => {
       ["echo 'a\\' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
       ["echo $'a\\'' ; rm -rf /tmp/x", [], 'ask'],
       ["echo $'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo 'c\\' $'a\\'' ; rm -rf /tmp/x", [], 'ask'],
+      ["echo 'c\\' $'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
       ["echo $\\\n'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
       ["echo done # note 'a\\''\nrm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
       [
