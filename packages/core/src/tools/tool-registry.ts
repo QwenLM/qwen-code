@@ -13,6 +13,7 @@ import type {
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import { type Config, matchesAnyServerPattern } from '../config/config.js';
+import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -1124,6 +1125,10 @@ export class ToolRegistry {
   }
 
   isToolDeclared(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (tool && isMediaPolicyToolHiddenFromModel(this.config, tool)) {
+      return false;
+    }
     return (
       name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
     );
