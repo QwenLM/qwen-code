@@ -4380,6 +4380,756 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+
+  omni: {
+    type: 'object',
+    label: 'Omni Multimodal',
+    category: 'Experimental',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Omni multimodal experiment (omni-experiment branch): upload-based ' +
+      'media delivery via the DashScope temporary upload channel. Requires ' +
+      'ffmpeg/ffprobe on PATH when enabled.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Omni Media Delivery',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the omni media pipeline. Media files (video, image, ' +
+          'audio) referenced with @ — and media served from @https:// ' +
+          'URLs — are recognized (ffprobe), stored content-addressed ' +
+          'under .qwen/omni/objects/, uploaded through the DashScope ' +
+          'temporary upload channel, and delivered as oss:// URLs instead ' +
+          'of inline base64. Only active for DashScope-compatible ' +
+          'endpoints. Can also be enabled via QWEN_CODE_ENABLE_OMNI=1.',
+        showInDialog: true,
+      },
+      processing: {
+        type: 'object',
+        label: 'Omni Processing',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Media policy processing: fixed-policy orchestration, transport ' +
+          'guard, per-root derivation limits, and policy tool overrides.',
+        showInDialog: false,
+        properties: {
+          limits: {
+            type: 'object',
+            label: 'Omni Processing Limits',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Per-invocation derivation budgets. Exceeding a budget stops ' +
+              'further derivation for that root resource (already committed ' +
+              'artifacts stand).',
+            showInDialog: false,
+            properties: {
+              maxConcurrentResources: {
+                type: 'number',
+                label: 'Max Concurrent Resources',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 1,
+                description:
+                  'Number of media resources processed by policies in ' +
+                  'parallel within one request.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 1 },
+              },
+              reservedOutputTokens: {
+                type: 'number',
+                label: 'Reserved Output Tokens',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 8192,
+                description:
+                  'Tokens reserved for model output when computing ' +
+                  'session.availableContextTokens for when-conditions.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 0,
+                  default: 8192,
+                },
+              },
+              maxLineageDepth: {
+                type: 'number',
+                label: 'Max Lineage Depth',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 8,
+                description:
+                  'Maximum derivation chain length from a root resource.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 8 },
+              },
+              maxPolicyRunsPerRoot: {
+                type: 'number',
+                label: 'Max Policy Runs Per Root',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 64,
+                description:
+                  'Maximum policy invocations attributable to one root ' +
+                  'resource within a single orchestrator run.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 64 },
+              },
+              maxArtifactsPerRoot: {
+                type: 'number',
+                label: 'Max Artifacts Per Root',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 256,
+                description:
+                  'Maximum derived artifacts attributable to one root ' +
+                  'resource within a single orchestrator run.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 256,
+                },
+              },
+              maxDerivedBytesPerRoot: {
+                type: 'number',
+                label: 'Max Derived Bytes Per Root',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 1073741824,
+                description:
+                  'Byte budget for derived artifacts per root resource ' +
+                  'within a single orchestrator run. Defaults to 1 GiB.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 1073741824,
+                },
+              },
+              maxTransportPasses: {
+                type: 'number',
+                label: 'Max Transport Passes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 3,
+                description:
+                  'Maximum transport-guard policy passes per resource before ' +
+                  'the media is removed with an explicit omission note.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 3 },
+              },
+            },
+          },
+          fixedPolicies: {
+            type: 'object',
+            label: 'Omni Fixed Policies',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {} as Record<string, Record<string, unknown> | null>,
+            description:
+              'User fixed policies keyed by policy id. There are no ' +
+              'built-in default policies: nothing runs unless configured ' +
+              'here. Across settings scopes entries merge by id ' +
+              '(whole-entry replacement); a null entry tombstones a policy ' +
+              'from a lower-priority scope. Validated and normalized at ' +
+              'startup.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+          },
+          transportGuard: {
+            type: 'object',
+            label: 'Omni Transport Guard',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Delivery-boundary enforcement: hard limits plus mandatory ' +
+              'guard policies applied when the final delivery set still ' +
+              'exceeds limits. Cannot be disabled.',
+            showInDialog: false,
+            properties: {
+              maxUploadFileBytes: {
+                type: 'number',
+                label: 'Max Upload File Bytes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 1073741824,
+                description:
+                  'Per-file byte ceiling for omni media uploads. Defaults ' +
+                  'to 1 GiB, the DashScope temporary-upload per-file cap ' +
+                  '(values above it are a startup configuration error). ' +
+                  'Media still above the limit after guard policies fail ' +
+                  'closed with an explanatory error.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  maximum: 1073741824,
+                  default: 1073741824,
+                },
+              },
+              maxEstimatedTokens: {
+                type: 'number',
+                label: 'Max Estimated Tokens',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 0,
+                description:
+                  'Estimated-token ceiling for a single omni media input, ' +
+                  'checked at the delivery boundary using the versioned ' +
+                  'raw-resource estimator. 0 disables the token guard — the ' +
+                  'estimation formula is pending confirmation with the ' +
+                  'model provider; set a positive threshold to enforce ' +
+                  'fail-closed rejection.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 0,
+                  default: 0,
+                },
+              },
+              maxDurationSeconds: {
+                type: 'number',
+                label: 'Max Duration Seconds',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 0,
+                description:
+                  'Duration ceiling in seconds for a single omni media ' +
+                  'input, checked at the delivery boundary. 0 disables it. ' +
+                  'Byte and token limits cannot express a provider duration ' +
+                  'cap: a long film downscaled under the byte ceiling still ' +
+                  'gets rejected by the API, after paying for the transcode. ' +
+                  'Set this and the guard omits it honestly instead.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'integer',
+                  minimum: 0,
+                  default: 0,
+                },
+              },
+              policies: {
+                type: 'object',
+                label: 'Omni Transport Guard Policies',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {} as Record<string, Record<string, unknown> | null>,
+                description:
+                  'Guard policies keyed by policy id, run only when the ' +
+                  'final delivery set exceeds transport limits. Merged with ' +
+                  'system defaults by id. The merged set must cover image, ' +
+                  'video, and audio and must not be empty; every policy ' +
+                  'output must use source: omit.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+              },
+            },
+          },
+          policyTools: {
+            type: 'object',
+            label: 'Omni Policy Tools',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {} as Record<string, Record<string, unknown> | null>,
+            description:
+              'Per-tool overrides keyed by policy tool name: settings ' +
+              '(default arguments), runtime (timeoutMs), ' +
+              'and modelAccess (enabled, defaultArguments, lockedArguments, ' +
+              'parameterSchema, output).',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+          },
+        },
+      },
+      delivery: {
+        type: 'object',
+        label: 'Omni Delivery',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'Model-delivery settings for omni media.',
+        showInDialog: false,
+        properties: {
+          upload: {
+            type: 'object',
+            label: 'Omni Delivery Upload',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description: 'Upload-channel delivery settings.',
+            showInDialog: false,
+            properties: {
+              baseUrl: {
+                type: 'string',
+                label: 'Upload Base URL',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: '',
+                description:
+                  'DashScope-compatible endpoint used only for temporary ' +
+                  'media uploads. Set together with apiKeyEnv and model to ' +
+                  'separate uploads from inference.',
+                showInDialog: false,
+              },
+              apiKeyEnv: {
+                type: 'string',
+                label: 'Upload API Key Environment Variable',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: '',
+                description:
+                  'Name of the environment variable containing the ' +
+                  'DashScope upload API key. The key itself is not stored ' +
+                  'in settings.',
+                showInDialog: false,
+              },
+              model: {
+                type: 'string',
+                label: 'Upload Model',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: '',
+                description:
+                  'DashScope model identifier sent to the temporary-upload ' +
+                  'policy endpoint.',
+                showInDialog: false,
+              },
+              urlTtlHours: {
+                type: 'number',
+                label: 'Upload URL TTL (hours)',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 47,
+                description:
+                  'Validity horizon for cached oss:// upload URLs. ' +
+                  'DashScope temporary uploads live 48h; the default keeps ' +
+                  'a 1h margin. 0 disables the upload cache (every ' +
+                  'delivery re-uploads).',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 0,
+                  default: 47,
+                },
+              },
+            },
+          },
+        },
+      },
+      ingestion: {
+        type: 'object',
+        label: 'Omni Ingestion',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'Media input ingestion settings for omni delivery.',
+        showInDialog: false,
+        properties: {
+          localization: {
+            type: 'object',
+            label: 'Omni Ingestion Localization',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description: 'Remote-media localization settings.',
+            showInDialog: false,
+            properties: {
+              url: {
+                type: 'object',
+                label: 'Omni URL Localization',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {},
+                description: 'URL media download settings.',
+                showInDialog: false,
+                properties: {
+                  maxFileBytes: {
+                    type: 'number',
+                    label: 'Max Download File Bytes',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 0,
+                    description:
+                      'Byte ceiling for downloading URL media inputs. 0 or ' +
+                      'unset follows ' +
+                      'omni.processing.transportGuard.maxUploadFileBytes ' +
+                      '(downloading more than the upload channel can ' +
+                      'deliver is pointless).',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'number',
+                      minimum: 0,
+                      default: 0,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      storage: {
+        type: 'object',
+        label: 'Omni Storage',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'Managed storage settings under .qwen/omni/.',
+        showInDialog: false,
+        properties: {
+          retentionDays: {
+            type: 'integer',
+            label: 'Object Retention (days)',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 14,
+            description:
+              'Days an object in .qwen/omni/objects/ that no memory ' +
+              'record references survives before garbage collection may ' +
+              'remove it. Referenced objects are never removed. Must be ' +
+              'at least 1; non-positive values fall back to the default.',
+            showInDialog: false,
+            jsonSchemaOverride: { type: 'integer', minimum: 1, default: 14 },
+          },
+          maxTotalBytes: {
+            type: 'integer',
+            label: 'Object Store Max Bytes',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 21474836480,
+            description:
+              'Soft byte budget for .qwen/omni/objects/. Over budget, ' +
+              'garbage collection removes the oldest unreferenced ' +
+              'objects regardless of age; if only referenced objects ' +
+              'remain it warns and suspends new policy derivations ' +
+              'instead of deleting them. Defaults to 20 GiB.',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'integer',
+              minimum: 1,
+              default: 21474836480,
+            },
+          },
+          quarantine: {
+            type: 'object',
+            label: 'Omni Quarantine',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Retention for failed policy invocations moved to ' +
+              '.qwen/omni/quarantine/ for diagnosis. Quarantined content ' +
+              'is never recalled into recognition or delivery.',
+            showInDialog: false,
+            properties: {
+              retentionDays: {
+                type: 'number',
+                label: 'Quarantine Retention (days)',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 7,
+                description:
+                  'Days a quarantined invocation directory is kept before ' +
+                  'startup recovery removes it. Must be at least 1; ' +
+                  'non-positive values fall back to the default.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 7 },
+              },
+              maxBytes: {
+                type: 'number',
+                label: 'Quarantine Max Bytes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 5368709120,
+                description:
+                  'Total byte budget for the quarantine directory. Startup ' +
+                  'recovery removes oldest entries first until within ' +
+                  'budget. Defaults to 5 GiB. Must be at least 1; ' +
+                  'non-positive values fall back to the default.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 5368709120,
+                },
+              },
+            },
+          },
+        },
+      },
+      memory: {
+        type: 'object',
+        label: 'Omni Media Memory',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Persistent multimodal media memory (collection of recognized ' +
+          'files and policy execution results, plus cross-session recall). ' +
+          'Invalid values abort startup.',
+        showInDialog: false,
+        properties: {
+          collection: {
+            type: 'object',
+            label: 'Omni Memory Collection',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description: 'Collection-side budgets.',
+            showInDialog: false,
+            properties: {
+              maxInlineTextBytes: {
+                type: 'number',
+                label: 'Max Inline Text Bytes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 65536,
+                description:
+                  'Upper bound for inline text persisted on a memory entry ' +
+                  '(transcripts, OCR). Longer text is truncated on the ' +
+                  'entry; the stored artifact keeps the full content.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'integer',
+                  minimum: 1,
+                  default: 65536,
+                },
+              },
+            },
+          },
+          recall: {
+            type: 'object',
+            label: 'Omni Memory Recall',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description: 'Recall-side exposure and budgets.',
+            showInDialog: false,
+            properties: {
+              mode: {
+                type: 'string',
+                label: 'Recall Mode',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 'active',
+                description:
+                  'Mutually exclusive recall exposure: "active" registers ' +
+                  'the recall tool for the model; "sideQuery" runs a ' +
+                  'passive selector before the main request instead.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'string',
+                  enum: ['active', 'sideQuery'],
+                  default: 'active',
+                },
+              },
+              maxEntries: {
+                type: 'number',
+                label: 'Max Recall Entries',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 12,
+                description: 'Maximum entries one recall may return.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'integer',
+                  minimum: 1,
+                  default: 12,
+                },
+              },
+              maxTextChars: {
+                type: 'number',
+                label: 'Max Recall Text Chars',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 24000,
+                description:
+                  'Total character budget across all text in one recall ' +
+                  'result.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'integer',
+                  minimum: 1,
+                  default: 24000,
+                },
+              },
+              kinds: {
+                type: 'array',
+                label: 'Recall Entry Kinds',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: [
+                  'metadata',
+                  'derived_media',
+                  'policy_result',
+                  'execution',
+                ] as string[],
+                description:
+                  'Entry kinds recall may surface. Replaces wholesale when ' +
+                  'set (never element-merged).',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.REPLACE,
+                jsonSchemaOverride: {
+                  type: 'array',
+                  items: {
+                    type: 'string',
+                    enum: [
+                      'metadata',
+                      'derived_media',
+                      'policy_result',
+                      'execution',
+                    ],
+                  },
+                  minItems: 1,
+                },
+              },
+              includeHistoricalVersions: {
+                type: 'boolean',
+                label: 'Include Historical Versions',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: false,
+                description:
+                  'Whether recall may surface entries for non-current file ' +
+                  'versions by default.',
+                showInDialog: false,
+              },
+              active: {
+                type: 'object',
+                label: 'Active Recall',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {},
+                description: 'Budgets for the active recall tool.',
+                showInDialog: false,
+                properties: {
+                  maxFilesPerCall: {
+                    type: 'number',
+                    label: 'Max Files Per Call',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 8,
+                    description:
+                      'Maximum distinct files one recall tool call may ' +
+                      'query.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'integer',
+                      minimum: 1,
+                      default: 8,
+                    },
+                  },
+                },
+              },
+              sideQuery: {
+                type: 'object',
+                label: 'Side-Query Recall',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {},
+                description: 'Budgets for the passive side-query selector.',
+                showInDialog: false,
+                properties: {
+                  model: {
+                    type: 'string',
+                    label: 'Selector Model',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: undefined as string | undefined,
+                    description:
+                      'Model for the passive selector; unset uses the ' +
+                      'side-query default (the configured fast model, ' +
+                      'falling back to the session model).',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: ['string', 'null'],
+                      default: null,
+                    },
+                  },
+                  timeoutMs: {
+                    type: 'number',
+                    label: 'Selector Timeout (ms)',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 30000,
+                    description:
+                      'Side-query timeout; on timeout the turn proceeds ' +
+                      'with an empty recall.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'integer',
+                      minimum: 1,
+                      default: 30000,
+                    },
+                  },
+                  maxCandidateEntries: {
+                    type: 'number',
+                    label: 'Max Candidate Entries',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 100,
+                    description:
+                      'Maximum candidate entries shown to the selector.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'integer',
+                      minimum: 1,
+                      default: 100,
+                    },
+                  },
+                  maxSelectedEntries: {
+                    type: 'number',
+                    label: 'Max Selected Entries',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 12,
+                    description:
+                      'Maximum entries the selector may pick. Must not ' +
+                      'exceed recall.maxEntries.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'integer',
+                      minimum: 1,
+                      default: 12,
+                    },
+                  },
+                  maxAttempts: {
+                    type: 'number',
+                    label: 'Max Selector Attempts',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 1,
+                    description:
+                      'Attempts allowed for the selector call itself ' +
+                      '(unparseable or schema-invalid output is retried up ' +
+                      'to this many times). A selection that parses but ' +
+                      'names entries outside the manifest is refused ' +
+                      'without a retry; the turn then proceeds with an ' +
+                      'empty recall.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'integer',
+                      minimum: 1,
+                      default: 1,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;
