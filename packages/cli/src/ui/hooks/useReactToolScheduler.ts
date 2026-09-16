@@ -344,10 +344,8 @@ export function useReactToolScheduler(
         // above are caller-supplied and may reject. Containing that here
         // keeps a rejected completion from surfacing as an unhandled
         // rejection, and deliberately does not retry or complete the batch a
-        // second time. Reaching it means the batch never got submitted to the
-        // model and the ownership registered for its callIds was never
-        // released, so keep the stack and the callIds: they are the only way
-        // to tie this line back to a turn.
+        // second time. Keep the stack and the callIds in the line: they are
+        // the only way to tie it back to a turn.
         const detail =
           error instanceof Error
             ? (error.stack ?? error.message)

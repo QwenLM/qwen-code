@@ -838,16 +838,29 @@ describe('useReactToolScheduler', () => {
     }
   });
 
-  it('classifies the rejection Core actually produces as a cancellation', async () => {
+  it('classifies the queue rejections real Core produces as cancellations', async () => {
     // Contract pin for the cancellation classifier. Every other test here
     // stubs `schedule()` with its own copy of Core's queue-rejection text, so
     // all of them stay green if Core rewords that string and the hook's
     // `error.message === …` comparison silently stops matching — which would
-    // send a user's Esc back down the error path (#11148). This one drives
-    // Core's real busy branch instead, so the rejection being classified is
-    // produced by Core's own code and the two sides cannot drift apart
-    // unnoticed.
-    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    // send a user's Esc back down the error path (#11148). This one makes the
+    // real scheduler busy by parking a batch on a tool that never settles, so
+    // both reject sites in `CoreToolScheduler.schedule` are reached through
+    // public behaviour: one for a signal already aborted at schedule time,
+    // and one for an abort that lands while the request sits in the queue —
+    // the #11148 path.
+    let releaseParked: ((result: ToolResult) => void) | undefined;
+    const parkedTool = new MockTool({
+      name: 'mockTool',
+      displayName: 'Mock Tool',
+      execute: vi.fn(
+        () =>
+          new Promise<ToolResult>((resolve) => {
+            releaseParked = resolve;
+          }),
+      ) as any,
+    });
+    mockToolRegistry.getTool.mockReturnValue(parkedTool);
     const runtimeView = {
       contentGenerator: {},
       contentGeneratorConfig: {
@@ -860,54 +873,153 @@ describe('useReactToolScheduler', () => {
       resolveForModel: vi.fn().mockResolvedValue(runtimeView),
     });
     const realSchedule = CoreToolScheduler.prototype.schedule;
-    // Put the real scheduler in its busy state rather than faking the
-    // rejection: `schedule()` rejects a request whose signal already aborted
-    // while it is scheduling, which is the branch under test.
+    // Record what Core's own `schedule()` rejected with, so the assertions
+    // below pin Core's half of the contract and not only the hook's.
+    const coreRejections: string[] = [];
     const scheduleSpy = vi
       .spyOn(CoreToolScheduler.prototype, 'schedule')
       .mockImplementation(function (
         this: CoreToolScheduler,
         ...args: Parameters<typeof realSchedule>
       ) {
-        (this as unknown as { isScheduling: boolean }).isScheduling = true;
-        return realSchedule.apply(this, args);
+        return realSchedule.apply(this, args).catch((error: unknown) => {
+          coreRejections.push(
+            error instanceof Error ? error.message : String(error),
+          );
+          throw error;
+        });
       });
     try {
-      const { result } = renderScheduler();
-      const request = {
-        callId: 'real-core-queue-rejection-call',
-        name: 'mockTool',
-        args: {},
-      } as ToolCallRequestInfo;
-      const abortController = new AbortController();
-      abortController.abort();
+      // Rendered directly rather than through `renderScheduler()`: that
+      // helper passes an inline arrow as `onEditorClose`, which is a
+      // `useMemo` dependency of the scheduler, so the display update from the
+      // parked batch below would swap in a fresh `CoreToolScheduler` and
+      // strand the batch that is supposed to keep it busy.
+      const onEditorClose = () => {};
+      const { result } = renderHook(() =>
+        useReactToolScheduler(
+          onComplete,
+          mockConfig as unknown as Config,
+          setPendingHistoryItem,
+          onEditorClose,
+        ),
+      );
+      const flush = async () => {
+        await act(async () => {
+          await vi.runAllTimersAsync();
+        });
+      };
+      const scheduleFullTurn = (callId: string, signal: AbortSignal) => {
+        const request = {
+          callId,
+          name: 'mockTool',
+          args: {},
+        } as ToolCallRequestInfo;
+        act(() => {
+          result.current[1]([request], signal, 'vision-agent\0');
+        });
+        return request;
+      };
+      const cancelledCallsFor = (callId: string) =>
+        onComplete.mock.calls
+          .flat(Infinity)
+          .filter(
+            (toolCall: any) =>
+              toolCall?.request?.callId === callId &&
+              toolCall?.status === 'cancelled',
+          );
+      const expectCancelledOnce = (
+        callId: string,
+        request: ToolCallRequestInfo,
+      ) => {
+        expect(cancelledCallsFor(callId)).toHaveLength(1);
+        // Core's own rejection was read as a user cancellation: no error
+        // history item, no UNHANDLED_EXCEPTION reported back to the model.
+        expect(onComplete).toHaveBeenCalledWith([
+          expect.objectContaining({
+            status: 'cancelled',
+            request,
+            response: expect.objectContaining({
+              callId,
+              error: undefined,
+              errorType: undefined,
+              executionStatus: 'not_started',
+            }),
+          }),
+        ]);
+      };
+
+      // Busy for real: the parked batch reaches `execute` and stays there, so
+      // `isRunning()` holds without touching any private scheduler field.
+      act(() => {
+        result.current[1](
+          [
+            {
+              callId: 'parked-call',
+              name: 'mockTool',
+              args: {},
+            } as ToolCallRequestInfo,
+          ],
+          new AbortController().signal,
+        );
+      });
+      await flush();
+      expect(releaseParked).toBeDefined();
+      expect(coreRejections).toHaveLength(0);
+
+      // Site 1: the signal is already aborted when Core is asked to schedule.
+      const preAbortedController = new AbortController();
+      preAbortedController.abort();
+      const preAbortedRequest = scheduleFullTurn(
+        'real-core-pre-aborted-call',
+        preAbortedController.signal,
+      );
+      await flush();
+      expect(coreRejections).toHaveLength(1);
+      expectCancelledOnce('real-core-pre-aborted-call', preAbortedRequest);
+
+      // Site 2: a live signal parks in `requestQueue` behind the busy batch
+      // and only the later abort rejects it. Site 1 rejects synchronously at
+      // schedule time, so a rejection that appears only after the abort
+      // cannot have come from it.
+      const queuedController = new AbortController();
+      const queuedRequest = scheduleFullTurn(
+        'real-core-queued-call',
+        queuedController.signal,
+      );
+      await flush();
+      expect(coreRejections).toHaveLength(1);
 
       act(() => {
-        result.current[1]([request], abortController.signal, 'vision-agent\0');
+        queuedController.abort();
+      });
+      await flush();
+      expect(coreRejections).toHaveLength(2);
+      expectCancelledOnce('real-core-queued-call', queuedRequest);
+
+      // Only the parked tool ever ran; neither full-turn batch executed, and
+      // neither was reported to the model as an unhandled failure.
+      expect(parkedTool.execute).toHaveBeenCalledTimes(1);
+      expect(
+        onComplete.mock.calls
+          .flat(Infinity)
+          .filter(
+            (toolCall: any) =>
+              toolCall?.response?.errorType ===
+              ToolErrorType.UNHANDLED_EXCEPTION,
+          ),
+      ).toEqual([]);
+    } finally {
+      scheduleSpy.mockRestore();
+      act(() => {
+        releaseParked?.({
+          llmContent: 'done',
+          returnDisplay: 'done',
+        } as ToolResult);
       });
       await act(async () => {
         await vi.runAllTimersAsync();
       });
-
-      expect(mockTool.execute).not.toHaveBeenCalled();
-      expect(scheduleSpy).toHaveBeenCalledTimes(1);
-      // Core's own rejection was read as a user cancellation: no error
-      // history item, no UNHANDLED_EXCEPTION reported back to the model.
-      expect(onComplete).toHaveBeenCalledTimes(1);
-      expect(onComplete).toHaveBeenCalledWith([
-        expect.objectContaining({
-          status: 'cancelled',
-          request,
-          response: expect.objectContaining({
-            callId: 'real-core-queue-rejection-call',
-            error: undefined,
-            errorType: undefined,
-            executionStatus: 'not_started',
-          }),
-        }),
-      ]);
-    } finally {
-      scheduleSpy.mockRestore();
     }
   });
 
