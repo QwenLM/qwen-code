@@ -581,6 +581,40 @@ describe('downgradeRejectedReasoningItems', () => {
     ]);
   });
 
+  it('downgrades the kept adjacent episode whose call group the rejected episode owned', () => {
+    // Two signed episodes replay adjacently and only the second is over the
+    // maximum. The first episode's group scan breaks on the second reasoning
+    // item, so the rejected episode's unit drop removes the only call group
+    // in the turn. A bare reasoning item in the retry 400s the same way, so
+    // the kept episode downgrades too, preserving its summary as a message.
+    const keep = userItem('hi');
+    const after = userItem('bye');
+    const items = Object.freeze([
+      keep,
+      reasoningItem('rs_short', ['first thought']),
+      reasoningItem(LONG, []),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+      after,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 2, maxLength: 64 }),
+    ).toEqual([
+      keep,
+      { type: 'message', role: 'assistant', content: 'first thought' },
+      after,
+    ]);
+  });
+
   it('scopes the unit drop to the rejected reasoning group only', () => {
     // A second call group later in the turn must survive the first group's
     // drop intact.

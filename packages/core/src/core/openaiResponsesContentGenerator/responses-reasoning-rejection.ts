@@ -249,6 +249,10 @@ export function downgradeRejectedReasoningItems(
   // downgraded reasoning; their outputs must follow or the retry leaves an
   // orphan output (#11665).
   const droppedCallIds = new Set<string>();
+  // Original items the rewrite removed without any representation in the
+  // output; the bare-episode sweep below reads whether a kept reasoning
+  // item's follower is gone.
+  const removedOriginals = new Set<ResponsesApiInputItem>();
   let droppedUnits = 0;
   let justDroppedUnit = false;
   for (let i = 0; i < items.length; i++) {
@@ -261,6 +265,7 @@ export function downgradeRejectedReasoningItems(
       droppedCallIds.has((item as ResponsesApiFunctionCallOutputItem).call_id)
     ) {
       changed = true;
+      removedOriginals.add(item);
       continue;
     }
     // A tool-media follow-up message captions media from a call the unit drop
@@ -268,6 +273,7 @@ export function downgradeRejectedReasoningItems(
     // attachment whose tool call is nowhere in the request.
     if (justDroppedUnit && isToolMediaFollowUp(item)) {
       changed = true;
+      removedOriginals.add(item);
       justDroppedUnit = false;
       continue;
     }
@@ -288,25 +294,68 @@ export function downgradeRejectedReasoningItems(
       for (const callId of unitCallIds) {
         droppedCallIds.add(callId);
       }
+      for (let k = 1; k <= unitCallIds.length; k++) {
+        removedOriginals.add(items[i + k]);
+      }
       i += unitCallIds.length;
       droppedUnits++;
       justDroppedUnit = true;
     }
     // A signature-only item has nothing human-readable to preserve; keeping
     // it as an empty assistant message would add a blank turn.
-    if (summary.length === 0) continue;
+    if (summary.length === 0) {
+      removedOriginals.add(item);
+      continue;
+    }
     rewritten.push({
       type: 'message',
       role: 'assistant',
       content: summary.join('\n'),
     });
   }
+  // A kept reasoning item can still end up bare: two episodes replay
+  // adjacently, and when only the later one is rejected its unit drop removes
+  // the item the earlier episode was followed by. The endpoint pairs every
+  // replayed reasoning with what follows it, so a bare one 400s the retry
+  // the same way. Downgrade such an episode like a rejected one, keeping its
+  // summary text; an episode whose follower survived (even as a downgraded
+  // message) stays. Scan right to left so a chain of adjacent episodes
+  // settles in one pass.
+  const finalized: ResponsesApiInputItem[] = [];
+  for (let j = rewritten.length - 1; j >= 0; j--) {
+    const item = rewritten[j];
+    if (!isReasoningItem(item)) {
+      finalized.push(item);
+      continue;
+    }
+    const originalIndex = items.indexOf(item);
+    const successor =
+      originalIndex >= 0 && originalIndex + 1 < items.length
+        ? items[originalIndex + 1]
+        : undefined;
+    if (successor !== undefined && removedOriginals.has(successor)) {
+      changed = true;
+      const summary = readSummaryTexts(item);
+      if (summary.length > 0) {
+        finalized.push({
+          type: 'message',
+          role: 'assistant',
+          content: summary.join('\n'),
+        });
+      } else {
+        removedOriginals.add(item);
+      }
+      continue;
+    }
+    finalized.push(item);
+  }
+  finalized.reverse();
   if (droppedUnits > 0) {
     debugLogger.debug(
       `Downgrade removed ${droppedUnits} reasoning/call unit(s); their tool calls and results are not part of the retry.`,
     );
   }
-  return changed ? rewritten : items;
+  return changed ? finalized : items;
 }
 
 function exceedsMax(
