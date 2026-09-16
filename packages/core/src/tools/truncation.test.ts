@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
 import {
   truncateAndSaveToFile,
@@ -12,6 +13,7 @@ import {
   truncateLlmContent,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   persistAndTruncateToolResult,
+  FULL_OUTPUT_DIGEST_LABEL,
 } from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -506,6 +508,82 @@ describe('persistAndTruncateToolResult', () => {
     expect(trackToolResultBytes).toHaveBeenCalledWith(
       Buffer.byteLength(content),
     );
+  });
+
+  it('reuses the producer-anchored failure-core digest instead of hashing the volatile full block', async () => {
+    // shell.ts failure blocks anchor a sha256 of the stable failure core
+    // (Output/Error/Exit Code/Signal) as a FULL_OUTPUT_DIGEST_LABEL line;
+    // the Command:/Directory:/PGID lines are per-call volatile. buildStub
+    // must reuse the anchored core digest: hashing the full block would
+    // fold the volatile lines into the envelope digest, fingerprinting
+    // every retry of the identical failure uniquely — the error-repetition
+    // guard would then never fire for failures in the (scheduler
+    // persistence gate, shell in-tool threshold] size band (issue #10887).
+    vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+    vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+    const config = {
+      getToolResultBytesWritten: () => 0,
+      trackToolResultBytes: vi.fn(),
+      storage: { getToolResultsDir: () => '/primary' },
+    } as unknown as Config;
+    const stableCore = [
+      'Output: fatal: unable to access',
+      'Error: (none)',
+      'Exit Code: 128',
+      'Signal: (none)',
+    ].join('\n');
+    const coreDigest = createHash('sha256').update(stableCore).digest('hex');
+    const blockFor = (attempt: number): string =>
+      [
+        `Command: git remote show origin attempt-${attempt}`,
+        `Directory: /work/dir-${attempt}`,
+        stableCore,
+        `Process Group PGID: ${10000 + attempt}`,
+        `${FULL_OUTPUT_DIGEST_LABEL}${coreDigest}`,
+      ].join('\n');
+
+    const envelopeDigests = new Set<string>();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const block = blockFor(attempt);
+      // Sanity: the per-call volatile lines really do change the full hash.
+      expect(createHash('sha256').update(block).digest('hex')).not.toBe(
+        coreDigest,
+      );
+      const result = await persistAndTruncateToolResult(
+        `call-${attempt}`,
+        'run_shell_command',
+        block,
+        config,
+      );
+      const match = result.content.match(
+        new RegExp(`${FULL_OUTPUT_DIGEST_LABEL}([0-9a-f]{64})`),
+      );
+      expect(match?.[1]).toBe(coreDigest);
+      envelopeDigests.add(match?.[1] ?? '');
+    }
+    expect(envelopeDigests.size).toBe(1);
+  });
+
+  it('keeps the full-content digest when the content carries no anchored producer digest', async () => {
+    // #9450 invariant: the preview only covers the first PREVIEW_SIZE_CHARS
+    // chars, so without a producer digest the envelope digest must stay
+    // sensitive to mutations anywhere in the full content.
+    vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+    vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+    const config = {
+      getToolResultBytesWritten: () => 0,
+      trackToolResultBytes: vi.fn(),
+      storage: { getToolResultsDir: () => '/primary' },
+    } as unknown as Config;
+    const content = 'x'.repeat(10_000);
+    const result = await persistAndTruncateToolResult(
+      'call-nodigest',
+      'run_shell_command',
+      content,
+      config,
+    );
+    const fullHash = createHash('sha256').update(content).digest('hex');
+    expect(result.content).toContain(`${FULL_OUTPUT_DIGEST_LABEL}${fullHash}`);
   });
 });
 
