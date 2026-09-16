@@ -30,8 +30,13 @@ command can now supply its buffered output; a command terminated by the timer
 still fails. Timer callback exceptions reject the query. Clear the timer on
 settlement, including synchronous launch errors.
 
-Keep the existing 1–2,000 ms query timeout clamp, 5-second ACP TERM grace,
+Keep the existing 1–2,000 ms query signal-timer clamp, 5-second ACP TERM grace,
 10-second teardown deadline, process ownership checks and failure reporting.
+The query timer sends SIGTERM; it does not independently settle the query
+promise. If the query child ignores SIGTERM and never closes, that await can
+remain pending despite the surrounding teardown deadline. A forced query
+settlement or escalation policy is deferred; the observed timeout samples exited
+on SIGTERM and do not establish a hard bound for a signal-ignoring child.
 Do not retry an empty table or treat one as success. Windows `taskkill` and
 synchronous process queries keep their existing implementation. No new public
 option, route, wire field or dependency is added.
@@ -76,13 +81,17 @@ notification and crashed the harness before recording the ACP exit code. A
 single improved observer rerun records ACP exit 0 with complete JSON lines;
 this does not explain or erase the first observation.
 
-Build, typecheck, bundle and targeted lint pass. The final four affected test
-files pass 200 tests (37 registry, 47 spawn-channel, 116 external executors).
-An initial spawn-channel run could not collect while a concurrent build removed
-its workspace dependency; the serial rerun after the build passes. A mutation
-that removes timer cleanup fails the new early-settlement regression test.
-Two final self-audit passes and independent source review find no outstanding
-defect in this fix.
+At the original query-output-fix stage on 2026-09-15, build, typecheck, bundle
+and targeted lint passed. That stage's four affected test files passed 200 tests:
+37 registry and 47 spawn-channel tests in
+`query-fix-final-bridge-tests-after-build.log`, plus 116 external-executor tests
+in `query-fix-cli-tests.log`, under the shutdown investigation directory.
+These are historical run counts, not counts of the current suites after later
+main integrations. An initial spawn-channel run could not collect while a
+concurrent build removed its workspace dependency; the serial rerun after that
+build passed. A mutation that removed timer cleanup failed the new
+early-settlement regression test. Two final self-audit passes and independent
+source review found no outstanding defect at that stage.
 
 The controlled query-output defect is verified fixed on macOS with Node
 v22.22.2. This does not make JavaScript timers preempt synchronous work or fix

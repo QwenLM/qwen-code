@@ -2660,6 +2660,9 @@ export function createSessionControlPlane(
   let activePromptCounter = 0;
   function touchActivity(): void {
     lastActivityTimestamp = Date.now();
+    if (harness.current && !harness.current.isDying) {
+      harness.current.lastUsedAt = lastActivityTimestamp;
+    }
   }
 
   /**
@@ -3335,6 +3338,7 @@ export function createSessionControlPlane(
   }
 
   function finishWorkspaceMcpDiscovery(ci: ChannelInfo): void {
+    ci.harness.lastUsedAt = Date.now();
     ci.workspaceMcpDiscoveryInFlight = false;
     if (ci.workspaceMcpDiscoveryTimer) {
       clearTimeout(ci.workspaceMcpDiscoveryTimer);
@@ -3483,7 +3487,7 @@ export function createSessionControlPlane(
     ci: ChannelInfo,
     fn: () => Promise<T>,
   ): Promise<T> {
-    return harness.withWorkspaceControl(ci.harness, fn);
+    return harness.withWorkspaceControl(ci.harness, fn, false);
   }
 
   function startSessionReaper(): void {
@@ -4121,6 +4125,7 @@ export function createSessionControlPlane(
     // handshaking channel.
     const physical: HarnessChannel = {
       id: acpChannelId,
+      lastUsedAt: Date.now(),
       channel,
       connection,
       workspaceControlInFlight: 0,
@@ -5608,6 +5613,7 @@ export function createSessionControlPlane(
             server.authenticationState !== 'pending'
           ) {
             info.workspaceMcpAuthenticationServerNames.delete(serverName);
+            info.harness.lastUsedAt = Date.now();
             const timer = info.workspaceMcpAuthenticationTimers.get(serverName);
             if (timer) clearTimeout(timer);
             info.workspaceMcpAuthenticationTimers.delete(serverName);
@@ -8889,6 +8895,39 @@ export function createSessionControlPlane(
         runtimeEpoch: runtimeLive ? harness.epoch : sourceRuntimeEpoch,
         activeWork,
       };
+    },
+
+    getIdleChannelCandidate() {
+      const info = liveChannelInfo();
+      if (
+        shuttingDown ||
+        !info ||
+        byId.size > 0 ||
+        channelShouldReapWhenIdle(info) ||
+        bridgeApi.getWorkspaceRuntimeLifecycleSnapshot!().activeWork
+      ) {
+        return undefined;
+      }
+      return {
+        channelId: info.id,
+        runtimeEpoch: harness.epoch,
+        lastUsedAt: info.harness.lastUsedAt,
+      };
+    },
+
+    async reclaimIdleChannel(candidate, signal) {
+      if (signal?.aborted) return false;
+      const current = bridgeApi.getIdleChannelCandidate!();
+      if (
+        !current ||
+        current.channelId !== candidate.channelId ||
+        current.runtimeEpoch !== candidate.runtimeEpoch ||
+        current.lastUsedAt !== candidate.lastUsedAt
+      ) {
+        return false;
+      }
+      await harness.reclaimIdleChannel(liveChannelInfo()!.harness);
+      return true;
     },
 
     get pendingPermissionCount() {

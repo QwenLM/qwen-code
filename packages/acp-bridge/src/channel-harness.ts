@@ -199,8 +199,10 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   async function withWorkspaceControl<T>(
     ci: HarnessChannel,
     fn: () => Promise<T>,
+    recordUse = true,
   ): Promise<T> {
     if (liveHarnessChannel() === ci) cancelIdleTimer();
+    if (recordUse) ci.lastUsedAt = Date.now();
     ci.workspaceControlInFlight++;
     try {
       return await fn();
@@ -208,6 +210,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       await retireChannelOnTimeout(ci, error, 'workspace control timeout');
       throw error;
     } finally {
+      if (recordUse) ci.lastUsedAt = Date.now();
       ci.workspaceControlInFlight = Math.max(
         0,
         ci.workspaceControlInFlight - 1,
@@ -297,7 +300,8 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         'channel.preheat',
         { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
         async () => {
-          await ensureChannel();
+          const info = await ensureChannel();
+          info.lastUsedAt = Date.now();
           if (keepAliveMs !== undefined) {
             keepAliveUntil = Math.max(keepAliveUntil, Date.now() + keepAliveMs);
           }
@@ -417,6 +421,19 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     releaseRuntimeOperationReservation,
     settleReleasedRuntimeWork,
     preheat,
+    reclaimIdleChannel(info: HarnessChannel) {
+      // Retire only this child; shutdown would permanently seal the bridge.
+      info.isDying = true;
+      cancelIdleTimer();
+      keepAliveUntil = 0;
+      info.channelLiveness?.stop();
+      writeStderrLine(`qwen serve: reclaiming idle ACP channel ${info.id}`);
+      return terminateChannel(
+        info.channel,
+        initTimeoutMs,
+        'capacity reclamation',
+      );
+    },
     markDying(channels: readonly HarnessChannel[]) {
       for (const ci of channels) {
         ci.isDying = true;

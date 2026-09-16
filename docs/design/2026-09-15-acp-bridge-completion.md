@@ -25,7 +25,12 @@ control-plane module can remain large; line count is not the acceptance test.
 This is a behavior-preserving TypeScript extraction. `deriveConfig` stays in
 core. No new public options, package exports, daemon routes, wire fields, JVM
 implementation, event store or stateless harness API are part of this work.
-The watcher, process-query and EOF shutdown fixes have separate evidence.
+The watcher, process-query and EOF shutdown fixes have separate evidence and
+include intentional behavior changes. In particular, failed EOF draining now
+reports exit 1 where the measured baseline exited 0 despite truncation or EPIPE.
+The drain covers frames forwarded to the inner stdout writer, not calls still
+queued upstream; those can be omitted with an SDK error log and exit 0. See the
+[EOF design](2026-09-15-acp-eof-output.md) for the exact boundary and measurements.
 
 ## State and construction boundary
 
@@ -121,9 +126,14 @@ their reports until evidence establishes their outcome.
 
 ## Pre-rebase boundary and evidence
 
-This section records the candidate committed as `88a5eb2bce`, based on
-`9efdd898e7`, before integration with updated main. Its counts and test results
-are retained as historical evidence for that candidate.
+This section records the pre-rebase local commit
+`88a5eb2bce7fc1dd3e932176dfd8d08ff82afe97`, based on `9efdd898e7`.
+As checked on 2026-09-16, that object still exists in the author's local Git
+object database, but is not an ancestor of published `b8124075c6` and GitHub's
+commit API returns 422 for it. Its counts and test results are retained as
+historical author evidence, not a publicly resolvable candidate or current
+verification. In particular, the 14,267-line, 2,092-test and 44-file counts below
+belong only to that pre-rebase candidate.
 
 Before integration with updated main, the public bridge was 23 lines of synchronous composition and compatibility
 exports. The 14,267-line control plane keeps the cohesive session policy closure;
@@ -390,9 +400,10 @@ These results do not erase the historical full-suite failures recorded above.
 
 ## Review follow-up and main integration on 2026-09-16
 
-This candidate merges main `888528dfae9b1dd0ea55ef2bab2e94bfcbaa911d` into
-`cc0f7c6949` and addresses the six review suggestions. The frozen 36-file
-non-document candidate manifest has SHA-256
+Published candidate `b8124075c63276d09987b9994005435c95739314` merged main
+`888528dfae9b1dd0ea55ef2bab2e94bfcbaa911d` into `cc0f7c6949` and addressed the
+six review suggestions. The results in this section belong to that candidate.
+The frozen 36-file non-document candidate manifest has SHA-256
 `90f2d468919cf77b2016868781994e0ea30b3cc1061ab8d0a4752e8c64e8fc53`.
 Its digest uses sorted repository-relative paths and file SHA-256 values,
 joined as `path + " " + hash` with newlines and no trailing newline.
@@ -426,10 +437,12 @@ Three independently observed mutation baselines passed 143 tests. All eight
 single mutations were rejected by the added named assertions: direct settings
 close, direct skill close, each of the five adjacent exit-step swaps, and
 unconditional cancellation of the replacement's idle timer on an old exit.
-They were assertion failures, not collection errors or timeouts. Removing the
-physical handle after the session callback also fails the original replacement
-test. Two limited historical witnesses load only the exact `cc0f7c6949` test
-files over current production dependencies: the old settings test survives
+They were assertion failures, not collection errors or timeouts. In the recorded
+final-step swap, the original replacement-flow test also failed with
+`BridgeChannelClosedError`; it does not directly assert the exit-step order.
+The dedicated six-step array assertion is the direct ordering evidence. Two
+limited historical witnesses load only the exact `cc0f7c6949` test files over
+current production dependencies: the old settings test survives
 direct close (46 passed), and the old harness test survives swapping the first
 two exit steps (two passed). These are not whole-commit historical runs.
 
@@ -471,3 +484,71 @@ the full dist tree digest is
 This is evidence for this integration, not a relabeling of earlier artifacts.
 The ordinary-prompt fixtures retain the background/permission and latency
 coverage limits above; historical full-workspace acceptance remains open.
+
+## Current conflict follow-up: idle-child reclamation integration
+
+Integration with main `9071c4eb705cf92ba517e007eb03b6178d7b8352` ports #11940
+idle-child reclamation to the extracted boundary, including candidate recency,
+busy guards and startup admission context. Before the port, all six unchanged
+upstream idle-reclamation tests failed on missing provider methods. After the
+port, the complete ACP bridge suite passed 2,173 tests in 45 files.
+
+Fresh dependency installation, build, workspace typecheck, DEV bundle, all 113
+consumed core subpath exports, serve bundle boundary and lockfile checks passed.
+ESLint passed for the four changed production files. The first nine-file CLI
+run had 2,062 passes and one failure: the invalid `entryIndex=abc` request
+expected 400 but received 401. Rerunning the complete server suite in the same
+isolated fixture, without changing source or assertions, passed all 1,296
+tests. Together with the other eight files' 767 passes, this supplies passing
+evidence for 2,063 related assertions, not an all-green original nine-file run.
+The original failure remains recorded and unattributed.
+
+The new two-workspace, capacity-one daemon scenario passed on the frozen local
+bundle (`FU1SmT`), with an explicit 30,000 ms initialization timeout, 60,000 ms
+channel idle timeout and disabled session reaper. Physical children changed from A epoch 1/PID 18795 to B
+epoch 1/PID 18878, then A epoch 2/PID 18884. A loaded idle session protected that
+last child: B received 503 `acp_child_capacity_exhausted`, A retained its PID and
+epoch, and both prompts around the refusal received their own reply and exactly
+one correlated terminal event. After session deletion, B started at epoch 2/PID 18951. All five checkpoints reported one committed child; retired child absence
+was checked separately. Workspace registration responses and saved registration
+bytes remained unchanged.
+
+One SIGTERM produced actual daemon exit 0 and stream close 0, without forced
+kill. Independent checks found no owned PID/process group or either listening
+port remaining. This is one two-workspace capacity scenario, not exhaustive LRU
+ordering, concurrency or latency evidence. Direct ACP exit codes were not
+inferred from child absence, and the earlier eight EOF/query/public scenarios
+were not rerun for this integration.
+
+The global 0.23.3 baseline rejected `--child-heap-mode admit` and exited 1 before
+listening, so no global-versus-local reclamation match is claimed. The first
+local observer (`SSviMm`) also failed: it treated listener readiness as runtime
+readiness, read `childHeap=null` from `runtime.loading=true` and threw. Its
+cleanup SIGTERM interrupted runtime mounting; actual daemon exit 1 is retained.
+The corrected observer only polls the existing public readiness field within
+its original 45-second observation bound before the same capacity assertions;
+the fixture's product configuration, deadlines and assertions did not change.
+
+All 1,083 dist files, four changed production modules and the separately
+imported registry build matched before and after the samples. CLI SHA-256 is
+`326c87c1a454f0ff42d03066bf66f005877a5ff84c2de632475e677328b3c853`;
+the recorded dist manifest digest is
+`2dfcc70b196ea01e036301649484eb611a3b9130b733af12e84b866db65c2d12`.
+None of the historical totals or artifacts above are relabeled as these
+results. Current logs are the `conflict2-*` records in the completion
+investigation directory; process evidence is under
+`.qwen/investigations/issue-11866-conflict2/`. See the corresponding PR follow-up
+for final lint and audit outcomes.
+
+The review also identified a Linux two-file core run with 91 passes and six
+skill-manager failures at `b8124075c6`. Its base comparison was blocked by missing
+build prerequisites, so the failures remain unattributed. The earlier local
+97-pass run does not resolve that Linux observation. A new macOS diagnostic
+uses the same isolated fixture and six original assertions: supplying
+`QWEN_HOME` produces six failures; removing only that override produces six
+passes. The complete two-file run without the override then passed all 97
+tests, with unchanged source/test identity. This verifies an override-induced
+failure mechanism locally; it does not establish the environment or cause of
+the earlier Linux run. The three observations remain separate from the
+historical full-workspace failures. Evidence is under
+`.qwen/investigations/issue-11866-conflict2/skills-*`.

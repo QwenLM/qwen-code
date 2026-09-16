@@ -24,8 +24,9 @@ Give `runAcpAgent` a private output owner in `acp-output.ts`. It holds the write
 for `Writable.toWeb(process.stdout)` and gives NDJSON a gated byte stream. Normal
 writes return the underlying write promise directly. After EOF cleanup, close
 admission synchronously and close the underlying writer. This queues native
-end/finish after frames already submitted to that writer; later frames never
-enter stdout. Keep the close promise idempotent.
+end/finish after frames the gated stream's sink has already forwarded to the
+inner writer's `write()`; subsequent sink callbacks reject without entering
+stdout. Keep the close promise idempotent.
 
 Await the writer's `closed` promise to retain original write/finish errors, even
 when `close()` on an errored stream reports only an invalid-state error. Limit
@@ -34,17 +35,35 @@ timeout, reject and destroy the native output directly; do not wait for a Web
 abort that can itself be queued behind the blocked write. Timers and writer
 locks are released on settlement.
 
-EOF cleanup failures and output failures both remain failures; aggregate them
-when both occur. Keep signal handlers installed during the bounded drain. The
-existing SIGTERM/SIGINT destroy-and-exit path retains its authority and is not
+Report EOF cleanup and output failures, aggregating them when both occur.
+Reporting a drain failure is an observable behavior change: the Linux review's
+base `a98711330c` exited 0 with truncated output for a permanently stalled reader,
+and exited 0 while logging EPIPE for a closed reader. Head `cc0f7c6949` exited 1
+with the drain timeout or original EPIPE respectively. This is improved failure
+reporting, not preservation of the baseline exit status. IDE and embedding
+clients that disconnect by closing their read pipe can observe the new exit 1.
+The [Linux A/B report](https://github.com/QwenLM/qwen-code/pull/11916#issuecomment-5677832569)
+records those measurements; they were not rerun for this documentation update.
+
+Keep signal handlers installed during the bounded drain. The existing
+SIGTERM/SIGINT destroy-and-exit path retains its authority and is not
 reported as an orderly output drain. No change to session disposal, available
 command contents, SDK queues, signal deadlines or protocol fields.
 
-The guarantee is complete frames already submitted to the output owner before
-sealing, or a reported drain failure. It does not promise replies for every
-inbound RPC still running after EOF, stop the SDK's internal queue, or deliver
-data to a peer that has stopped reading permanently. This is a separate bugfix
-from the #11866 behavior-preserving refactor.
+The guarantee covers frames already forwarded to the inner writer before
+sealing: they finish, or the drain reports a failure. Calls still queued in the
+SDK, NDJSON or gated Web stream have not crossed that boundary, even if the
+caller issued them before EOF. They can later be rejected with
+`ACP output is closed`, logged by the SDK, and omitted while ACP still exits 0. The
+[sandbox report](https://github.com/QwenLM/qwen-code/pull/11916#issuecomment-5691411334)
+measured this residual at `b8124075c6`: its 200-frame backlog delivered 93 complete
+frames (200,405 of 431,090 issued bytes, 46.5%) and exited 0, versus no bytes and
+exit 0 on its base. This is one harness observation, not a delivery percentage
+guarantee. Upstream queue draining remains deferred.
+
+The fix does not promise replies for every inbound RPC still running after EOF,
+stop the SDK's internal queue, or deliver data to a peer that has stopped reading
+permanently. It is separate from the #11866 behavior-preserving refactor.
 
 ## Verification
 

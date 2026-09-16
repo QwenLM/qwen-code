@@ -11,6 +11,7 @@ import type { ChannelLivenessMonitor } from './channel-liveness.js';
 
 export interface HarnessChannel {
   readonly id: string;
+  lastUsedAt: number;
   readonly channel: AcpChannel;
   readonly connection: ClientSideConnection;
   /** Workspace-level control calls that use the shared channel without a session. */
@@ -71,8 +72,9 @@ export interface HarnessChannel {
    * - `session-control-plane.ts`, `doSpawn()` and `restoreSessionWithReplay()`:
    *   session-creation failure when the control plane's session/work predicates
    *   allow the physical channel to be reaped.
-   * - `channel-harness.ts`, `killChannelWithLog()` / `reapPendingEmptyChannel()`:
-   *   immediate or delayed idle cleanup and retirement after session work drains.
+   * - `channel-harness.ts`, `killChannelWithLog()` / `reapPendingEmptyChannel()` /
+   *   `reclaimIdleChannel()`: idle cleanup, retirement after session work drains,
+   *   and explicit idle capacity reclamation.
    * - Control-plane `shutdown()` calls harness `markDying()` for its snapshot
    *   of `ChannelLifecycle.values()` before publishing session removals.
    *

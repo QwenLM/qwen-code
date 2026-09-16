@@ -730,6 +730,115 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('keeps the restored tool boundary through startup reminder refresh', async () => {
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+        apiHistory: [result],
+        completedToolCallIds: ['ended'],
+        uiTelemetryEvents: [],
+      } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      await resumedClient.refreshStartupContextReminder();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
+    it('restores a completed tool boundary from the legacy transcript', async () => {
+      const base = {
+        sessionId: 'session',
+        timestamp: new Date(0).toISOString(),
+        cwd: '/test/project',
+        version: 'test',
+        goalContext: { goalId: 'goal', revision: 1, turnId: 'turn' },
+      };
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'session',
+          projectHash: 'project',
+          startTime: base.timestamp,
+          lastUpdated: base.timestamp,
+          messages: [
+            {
+              ...base,
+              uuid: 'call',
+              parentUuid: null,
+              type: 'assistant',
+              message: {
+                role: 'model',
+                parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+              },
+            },
+            {
+              ...base,
+              uuid: 'result',
+              parentUuid: 'call',
+              type: 'tool_result',
+              message: result,
+            },
+            {
+              ...base,
+              uuid: 'end',
+              parentUuid: 'result',
+              type: 'system',
+              subtype: 'goal_turn_end',
+              systemPayload: { toolCallId: 'ended' },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: 'end',
+      });
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getChat().getCompletedToolCallIds()).toEqual([
+        'ended',
+      ]);
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
     it('initializes from the selective runtime projection without the full transcript', async () => {
       // Crossing a macrotask boundary is what makes this an oracle for the
       // `await`: a mock that returns `undefined` (or resolves in the same
@@ -1913,6 +2022,7 @@ describe('Gemini Client (client.ts)', () => {
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1921,7 +2031,10 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.refreshStartupContextReminder();
 
-      expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        currentHistory.slice(1),
+        undefined,
+      );
     });
 
     it('removes the full legacy 2-entry prelude, not just the first entry', async () => {
@@ -1951,6 +2064,7 @@ describe('Gemini Client (client.ts)', () => {
         ],
       };
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1963,10 +2077,10 @@ describe('Gemini Client (client.ts)', () => {
       await client.refreshStartupContextReminder();
 
       // slice(2) drops BOTH legacy entries; slice(1) would have left legacyAck.
-      expect(mockChat.setHistory).toHaveBeenCalledWith([
-        newPrelude,
-        ...currentHistory.slice(2),
-      ]);
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        [newPrelude, ...currentHistory.slice(2)],
+        undefined,
+      );
     });
   });
 
@@ -4081,6 +4195,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(['mc-call-0']),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4096,7 +4211,7 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalled();
+      expect(setHistory).toHaveBeenCalledWith(expect.any(Array), ['mc-call-0']);
       // The blanket wipe is gone — read-before-write state is preserved.
       expect(clear).not.toHaveBeenCalled();
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
@@ -4113,6 +4228,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4141,6 +4257,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4177,6 +4294,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4214,6 +4332,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4263,6 +4382,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4294,6 +4414,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4322,6 +4443,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4381,6 +4503,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(idless),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4440,6 +4563,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4511,6 +4635,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4543,6 +4668,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4569,6 +4695,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4595,6 +4722,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4621,6 +4749,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4648,6 +4777,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4705,6 +4835,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4755,6 +4886,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4801,6 +4933,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4826,6 +4959,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4855,6 +4989,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         getHistoryLength: vi.fn().mockReturnValue(history.length),
         stripOrphanedUserEntriesFromHistory: vi.fn(),
@@ -4884,6 +5019,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -5111,6 +5247,7 @@ describe('Gemini Client (client.ts)', () => {
           compressionStatus: CompressionStatus.COMPRESSED,
         }),
         isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
@@ -5125,11 +5262,29 @@ describe('Gemini Client (client.ts)', () => {
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'completed-call', name: 'update_goal' } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'completed-call',
+                name: 'update_goal',
+                response: { readyForVerification: true },
+              },
+            },
+          ],
+        },
       ];
       const originalChat = client.getChat();
       originalChat.setLastPromptTokenCount(200, true);
       vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
-        originalChat.setHistory(compressedHistory);
+        originalChat.setHistory(compressedHistory, ['completed-call']);
         return {
           originalTokenCount: 1000,
           newTokenCount: 200,
@@ -5155,6 +5310,10 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
       expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
+      expect(client.getChat().getCompletedToolCallIds()).toEqual([
+        'completed-call',
+      ]);
+      expect(client.getChat().getHistoryForRecovery()).toEqual([]);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -5591,6 +5750,7 @@ describe('Gemini Client (client.ts)', () => {
       );
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
       } as unknown as LlmChat;
@@ -5605,17 +5765,20 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalledWith([
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nMocked env context\n</system-reminder>',
-            },
-          ],
-        },
-        ...compactedHistory,
-      ]);
+      expect(setHistory).toHaveBeenCalledWith(
+        [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nMocked env context\n</system-reminder>',
+              },
+            ],
+          },
+          ...compactedHistory,
+        ],
+        undefined,
+      );
     });
   });
 

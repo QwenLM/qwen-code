@@ -20,7 +20,8 @@ SDK 在输入结束时完成 `connection.closed`，不等待私有写队列排�
 在 `acp-output.ts` 为 `runAcpAgent` 提供私有输出所有者。它持有
 `Writable.toWeb(process.stdout)` 的 writer，向 NDJSON 提供带准入检查的字节流。
 普通写入直接返回底层写 promise。EOF 清理后同步停止接收新帧，再关闭底层
-writer。原生 end/finish 排在已提交的帧之后，后续帧不会进入 stdout。
+writer。原生 end/finish 排在带准入检查的流的 sink 已转交给内层 writer
+`write()` 的帧之后；后续 sink 回调拒绝写入，不再进入 stdout。
 关闭操作复用同一个 promise，保持幂等。
 
 等待 writer 的 `closed` promise，保留原始写入/finish 错误，即使 errored
@@ -28,14 +29,29 @@ stream 的 `close()` 只报告状态错误。输出排空最多等待两秒，�
 预算一致。超时则拒绝并直接销毁原生输出，不等待可能排在阻塞写入之后的 Web
 abort。操作结束后释放定时器和 writer 锁。
 
-EOF 清理错误和输出错误都继续使操作失败，两者同时发生时聚合。排空期间保留
-信号处理器。现有 SIGTERM/SIGINT 的 destroy-and-exit 路径继续生效，不将其
-报告为正常排空。不修改会话 disposal、命令列表内容、SDK 队列、信号期限或
+报告 EOF 清理及输出错误，两者同时发生时聚合。排空失败的报告方式属于可观察
+行为变化：Linux 评审中的基线 `a98711330c` 在永久停读时输出被截断却退出 0，
+在读端关闭时记录 EPIPE 但仍退出 0；`cc0f7c6949` 则分别携带排空超时或原始
+EPIPE 退出 1。这是失败报告的改善，不是保留基线退出码。通过关闭读管道断开的
+IDE 或嵌入式客户端可能观察到新的退出码 1。
+[Linux A/B 报告](https://github.com/QwenLM/qwen-code/pull/11916#issuecomment-5677832569)
+记录了这些测量；本次文档修正没有重跑。
+
+排空期间保留信号处理器。现有 SIGTERM/SIGINT 的 destroy-and-exit 路径继续
+生效，不将其报告为正常排空。不修改会话 disposal、命令列表内容、SDK 队列、信号期限或
 协议字段。
 
-保证范围为：封口前已提交给输出所有者的帧完整写完，否则报告排空失败。
-不承诺 EOF 后仍在执行的每个入站 RPC 都收到回复，不停止 SDK 内部队列，也
-不能向永久停止读取的对端保证交付。这是独立于 #11866 保持行为重构的缺陷修复。
+保证范围仅包含封口前已转交给内层 writer 的帧：完整写完，否则报告排空失败。
+仍在 SDK、NDJSON 或带准入检查的 Web stream 中排队的调用尚未跨过这个边界，
+即使调用方在 EOF 前已经发出。它们之后可能被 `ACP output is closed` 拒绝，
+由 SDK 记录错误并丢弃，而 ACP 仍退出 0。
+[沙箱报告](https://github.com/QwenLM/qwen-code/pull/11916#issuecomment-5691411334)
+在 `b8124075c6` 测得该残余行为：200 帧积压仅交付 93 个完整帧（已发出的
+431,090 字节中收到 200,405 字节，46.5%），退出 0；其基线没有交付字节，
+也退出 0。这是单个测试脚本的观察，不是交付比例保证。上游队列排空继续延后。
+
+本修复不承诺 EOF 后仍在执行的每个入站 RPC 都收到回复，不停止 SDK 内部队列，
+也不能向永久停止读取的对端保证交付。它独立于 #11866 保持行为的重构。
 
 ## 验证
 

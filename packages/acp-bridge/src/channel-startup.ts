@@ -10,6 +10,7 @@ import type {
   AcpChannel,
   AcpChannelExitInfo,
   ChannelFactory,
+  ChannelFactoryStartupContext,
 } from './channel.js';
 import type { HarnessChannel, ChannelLifecycle } from './channel-lifecycle.js';
 import type {
@@ -19,6 +20,7 @@ import type {
 import type { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
   BridgeChannelClosedError,
+  BridgeTimeoutError,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
 import { CHANNEL_LIVENESS_VERSION } from './bridgeTypes.js';
@@ -122,6 +124,7 @@ export function createChannelStartup({
     const acpChannelId = randomUUID();
     const startupStartedAt = Date.now();
     const startupAbort = new AbortController();
+    const startup: ChannelFactoryStartupContext = {};
     const factoryPromise = telemetry.withSpan(
       'channel.spawn',
       {
@@ -137,6 +140,7 @@ export function createChannelStartup({
             [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
           },
           startupAbort.signal,
+          startup,
         ),
     );
     let channel: AcpChannel;
@@ -147,7 +151,11 @@ export function createChannelStartup({
         'channel factory',
       );
     } catch (error) {
-      startupAbort.abort(error);
+      const failure =
+        error instanceof BridgeTimeoutError
+          ? (startup.getTimeoutError?.() ?? error)
+          : error;
+      startupAbort.abort(failure);
       void factoryPromise.then(
         (lateChannel) =>
           terminateChannel(
@@ -161,7 +169,7 @@ export function createChannelStartup({
           }),
         () => undefined,
       );
-      throw error;
+      throw failure;
     }
     let info: HarnessChannel;
     try {
@@ -383,6 +391,7 @@ export function createChannelStartup({
       throw epochError;
     }
     runtimeEpoch = nextRuntimeEpoch;
+    info.lastUsedAt = Date.now();
     channelLifecycle.publish(info);
     info.handshakeComplete = true;
     if (channelLivenessNegotiated) {
