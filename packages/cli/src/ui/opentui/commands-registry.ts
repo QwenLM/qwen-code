@@ -255,6 +255,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
   { name: 'bug', results: ['none'] },
   { name: 'cd', results: ['confirm_action', 'message'] },
   { name: 'clear', altNames: ['reset', 'new'], results: ['message'] },
+  { name: 'commit', results: ['submit_prompt'] },
   {
     name: 'compress',
     altNames: ['summarize'],
