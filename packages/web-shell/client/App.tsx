@@ -1141,10 +1141,26 @@ export interface WebShellProps {
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
   onThemeChange?: (theme: WebShellTheme) => void;
+  /**
+   * Called when no `theme` prop was provided and the shell resolved a theme
+   * from the daemon's effective `ui.theme` setting. Unlike `onThemeChange`
+   * this is not a user action: a host that mirrors the theme onto document
+   * chrome (html class, `theme-color` meta) should follow it without
+   * persisting the value as its own preference, or the next settings edit
+   * would be shadowed by the stale copy.
+   */
+  onThemeResolved?: (theme: WebShellTheme) => void;
   /** UI language for the web-shell. Defaults to `?language=` or browser language. */
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
+  /**
+   * Called when no `language` prop was provided and the effective UI language
+   * changes without becoming a host opinion, including settings resolution and
+   * optimistic changes or rollbacks. Hosts may mirror document chrome but must
+   * not persist this value.
+   */
+  onLanguageResolved?: (language: WebShellLanguage) => void;
   /**
    * Product branding for the embedded shell. Replaces the daemon-resolved brand
    * wholesale when provided: a host that sets `brand` owns both the name and the
@@ -3001,8 +3017,10 @@ export function App({
   onSessionCreated,
   theme: providedTheme,
   onThemeChange,
+  onThemeResolved,
   language: providedLanguage,
   onLanguageChange,
+  onLanguageResolved,
   brand: providedBrand,
   onBrandResolved,
   className: externalClassName,
@@ -11734,6 +11752,14 @@ export function App({
     return options;
   }, [connection.models]);
 
+  // Settings-resolved values are reported to the host through refs, keyed on
+  // the setting value itself — an inline host handler must not re-fire the
+  // effect on every render (same loop hazard as onBrandResolved below).
+  const onThemeResolvedRef = useRef(onThemeResolved);
+  onThemeResolvedRef.current = onThemeResolved;
+  const onLanguageResolvedRef = useRef(onLanguageResolved);
+  onLanguageResolvedRef.current = onLanguageResolved;
+
   useEffect(() => {
     if (providedTheme) {
       setSelectedTheme(providedTheme);
@@ -11744,6 +11770,9 @@ export function App({
     );
     if (settingTheme) {
       setSelectedTheme(settingTheme);
+      // Let the host steer document chrome (html class, theme-color meta)
+      // without handing it a new opinion — the value stays settings-owned.
+      onThemeResolvedRef.current?.(settingTheme);
     }
   }, [providedTheme, themeSetting?.values.effective]);
 
@@ -11757,6 +11786,7 @@ export function App({
     );
     if (settingLanguage) {
       setSelectedLanguage(settingLanguage);
+      onLanguageResolvedRef.current?.(settingLanguage);
     }
   }, [providedLanguage, languageSetting?.values.effective]);
 
@@ -11815,7 +11845,6 @@ export function App({
       // which a plain scoped settings write wouldn't do.
       const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
       const command = `/language ui ${nextLanguage}${scopeFlag}`;
-      handleLanguageChange(nextLanguage);
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
         await Promise.all([
@@ -11828,15 +11857,38 @@ export function App({
         sessionHasActivePromptRef.current ||
         isGoalGateBlocked()
       ) {
-        handleLanguageChange(previousLanguage);
         blockCommand();
         return;
       }
+      // Switch optimistically only when settings own the language. An explicit
+      // host prop remains authoritative while a workspace value is persisted.
+      // onLanguageChange persists an accepted user-scoped choice as a new host
+      // opinion; the observe-only channel keeps settings-derived values from
+      // shadowing later settings.json edits (#11955).
+      const hostControlsLanguage = providedLanguage !== undefined;
+      if (!hostControlsLanguage) {
+        setSelectedLanguage(nextLanguage);
+        onLanguageResolvedRef.current?.(nextLanguage);
+      }
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
-        .then(refreshSettings)
+        .then(() => {
+          if (!owner.current.isCurrent()) return;
+          if (scope === 'user') {
+            // A user-scoped choice becomes the host's persisted opinion. A
+            // workspace choice remains settings-owned for that workspace.
+            handleLanguageChange(nextLanguage);
+          }
+          return refreshSettings().catch((error: unknown) => {
+            if (!owner.current.isCurrent()) return;
+            reportError(error, 'Failed to refresh settings after /language');
+          });
+        })
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
-          handleLanguageChange(previousLanguage);
+          if (!hostControlsLanguage) {
+            setSelectedLanguage(previousLanguage);
+            onLanguageResolvedRef.current?.(previousLanguage);
+          }
           reportError(error, 'Failed to sync /language command');
         });
     },
@@ -11845,6 +11897,7 @@ export function App({
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
+      providedLanguage,
       sessionWriteBlocked,
       sendPrompt,
       selectedLanguage,
@@ -15172,13 +15225,17 @@ export function App({
               }
               const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
+              const previousLanguage = selectedLanguage;
               // The daemon sync is what keeps the agent answering in the
               // language the chrome just switched to, so when it cannot run
               // (turn in flight, or a Goal owning the session) refuse the
               // command instead of switching the UI alone — the language
               // picker treats the identical condition the same way.
               if (commandBlocked) return blockCommand();
-              handleLanguageChange(nextLanguage);
+              setSelectedLanguage(nextLanguage);
+              if (providedLanguage === undefined) {
+                onLanguageResolvedRef.current?.(nextLanguage);
+              }
               {
                 const deferComposerCommit =
                   Boolean(
@@ -15200,10 +15257,23 @@ export function App({
                 )
                   .then(() => {
                     if (!owner.current.isCurrent()) return;
-                    return sessionActions.refreshCommands();
+                    handleLanguageChange(nextLanguage);
+                    return sessionActions
+                      .refreshCommands()
+                      .catch((error: unknown) => {
+                        if (!owner.current.isCurrent()) return;
+                        reportError(
+                          error,
+                          'Failed to refresh commands after /language',
+                        );
+                      });
                   })
                   .catch((error: unknown) => {
                     if (!owner.current.isCurrent()) return;
+                    setSelectedLanguage(previousLanguage);
+                    if (providedLanguage === undefined) {
+                      onLanguageResolvedRef.current?.(previousLanguage);
+                    }
                     reportError(error, 'Failed to sync /language command');
                   });
                 return clearComposerOnPromptStart ? false : true;
@@ -16081,6 +16151,7 @@ export function App({
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
       resumeChatBottomFollow,
+      providedLanguage,
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
