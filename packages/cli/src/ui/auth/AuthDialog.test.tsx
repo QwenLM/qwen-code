@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { setTimeout as settleInput } from 'node:timers/promises';
 import { AuthDialog } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
@@ -123,6 +124,7 @@ const typeText = async (
   text: string,
 ) => {
   const delay = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
+  await settleInput(150);
   for (const char of text) {
     stdin.write(char);
     await delay(5);
@@ -151,6 +153,7 @@ const waitForSelectedOption = async (
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
+  await settleInput(150);
 };
 
 const waitForText = async (
@@ -170,6 +173,7 @@ const pressEnterAndWaitFor = async (
   lastFrame: () => string | undefined,
   expectedText: string,
 ) => {
+  await settleInput(150);
   stdin.write('\r');
   await vi.waitFor(
     () => {
@@ -177,6 +181,7 @@ const pressEnterAndWaitFor = async (
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
+  await settleInput(150);
 };
 
 const moveDownAndWaitForSelection = async (
@@ -184,6 +189,7 @@ const moveDownAndWaitForSelection = async (
   lastFrame: () => string | undefined,
   label: string,
 ) => {
+  await settleInput(150);
   stdin.write('\u001b[B');
   await waitForSelectedOption(lastFrame, label);
 };
@@ -198,7 +204,7 @@ const navigateToCustomProtocolSelect = async (
   await pressEnterAndWaitFor(
     stdin,
     lastFrame,
-    'Custom Provider · Step 1/6 · Protocol',
+    'Custom Provider · Step 1/7 · Protocol',
   );
 };
 
@@ -210,7 +216,12 @@ const navigateToCustomBaseUrlInput = async (
   await pressEnterAndWaitFor(
     stdin,
     lastFrame,
-    'Custom Provider · Step 2/6 · Base URL',
+    'Custom Provider · Step 2/7 · API',
+  );
+  await pressEnterAndWaitFor(
+    stdin,
+    lastFrame,
+    'Custom Provider · Step 3/7 · Base URL',
   );
 };
 
@@ -222,7 +233,7 @@ const navigateToCustomApiKeyInput = async (
   await pressEnterAndWaitFor(
     stdin,
     lastFrame,
-    'Custom Provider · Step 3/6 · API Key',
+    'Custom Provider · Step 4/7 · API Key',
   );
 };
 
@@ -236,7 +247,7 @@ const navigateToCustomModelIdInput = async (
   await pressEnterAndWaitFor(
     stdin,
     lastFrame,
-    'Custom Provider · Step 4/6 · Model IDs',
+    'Custom Provider · Step 5/7 · Model IDs',
   );
 };
 
@@ -251,7 +262,7 @@ const navigateToCustomAdvancedConfig = async (
   await pressEnterAndWaitFor(
     stdin,
     lastFrame,
-    'Custom Provider · Step 5/6 · Advanced Config',
+    'Custom Provider · Step 6/7 · Advanced Config',
   );
 };
 
@@ -833,7 +844,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         {
           label: 'Custom Provider',
-          childTitle: 'Custom Provider · Step 1/6 · Protocol',
+          childTitle: 'Custom Provider · Step 1/7 · Protocol',
         },
       ];
 
@@ -1503,7 +1514,7 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       await vi.waitFor(
         () => {
           const frame = lastFrame();
-          expect(frame).toContain('Custom Provider · Step 1/6 · Protocol');
+          expect(frame).toContain('Custom Provider · Step 1/7 · Protocol');
           expect(frame).toContain('OpenAI-compatible');
           expect(frame).toContain('Anthropic-compatible');
           expect(frame).toContain('Gemini-compatible');
@@ -1542,7 +1553,7 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       await vi.waitFor(
         () => {
           const frame = lastFrame();
-          expect(frame).toContain('Custom Provider · Step 2/6 · Base URL');
+          expect(frame).toContain('Custom Provider · Step 3/7 · Base URL');
           expect(frame).toContain('Enter the API endpoint');
         },
         { timeout: WAIT_FOR_TIMEOUT },
@@ -1583,13 +1594,13 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Custom Provider · Step 6/6 · Review',
+        'Custom Provider · Step 7/7 · Review',
       );
 
       await vi.waitFor(
         () => {
           const frame = lastFrame();
-          expect(frame).toContain('Custom Provider · Step 6/6 · Review');
+          expect(frame).toContain('Custom Provider · Step 7/7 · Review');
           expect(frame).toContain('The following JSON will be saved');
           expect(frame).toContain('QWEN_CUSTOM_API_KEY_');
           expect(frame).toContain('qwen/qwen3-coder');
@@ -1635,7 +1646,7 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Custom Provider · Step 6/6 · Review',
+        'Custom Provider · Step 7/7 · Review',
       );
 
       await vi.waitFor(
@@ -1697,7 +1708,7 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame();
-        expect(frame).toContain('Custom Provider · Step 5/6 · Advanced Config');
+        expect(frame).toContain('Custom Provider · Step 6/7 · Advanced Config');
         expect(frame).toContain(
           'Optional: configure advanced generation settings',
         );
@@ -1742,7 +1753,7 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame();
-        expect(frame).toContain('Custom Provider · Step 5/6 · Advanced Config');
+        expect(frame).toContain('Custom Provider · Step 6/7 · Advanced Config');
       });
 
       // Toggle thinking (press Space — thinking is initially focused)
@@ -1821,30 +1832,35 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       );
 
       await navigateToCustomProtocolSelect(stdin, lastFrame);
-      await moveDownAndWaitForSelection(stdin, lastFrame, 'OpenAI Responses');
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Custom Provider · Step 2/6 · Base URL',
+        'Custom Provider · Step 2/7 · API',
+      );
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Responses');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 3/7 · Base URL',
       );
       // Submit the placeholder default endpoint for this protocol.
       await wait();
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Custom Provider · Step 3/6 · API Key',
+        'Custom Provider · Step 4/7 · API Key',
       );
       await typeText(stdin, 'sk-test');
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Custom Provider · Step 4/6 · Model IDs',
+        'Custom Provider · Step 5/7 · Model IDs',
       );
       await typeText(stdin, 'model-1');
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Custom Provider · Step 5/6 · Advanced Config',
+        'Custom Provider · Step 6/7 · Advanced Config',
       );
 
       // Toggle thinking (initially focused), then continue to review.

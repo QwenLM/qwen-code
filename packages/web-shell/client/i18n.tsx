@@ -2015,6 +2015,7 @@ const EN: Messages = {
   'auth.step.group': 'Type',
   'auth.step.provider': 'Provider',
   'auth.step.protocol': 'Protocol',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': 'Model IDs',
@@ -2025,6 +2026,8 @@ const EN: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API format',
   'auth.protocol.gemini': 'Gemini-compatible',
   'auth.protocol.geminiDesc': 'Google Gemini API format',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key cannot be empty.',
   'auth.baseUrlInvalid': 'Base URL must start with http:// or https://.',
   'auth.baseUrlPrompt': 'Enter the API endpoint for this protocol.',
@@ -2662,7 +2665,7 @@ const EN: Messages = {
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
-    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -5726,6 +5729,7 @@ const ZH: Messages = {
   'auth.step.group': '类型',
   'auth.step.provider': '供应商',
   'auth.step.protocol': '协议',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': '模型 ID',
@@ -5736,6 +5740,8 @@ const ZH: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API 格式',
   'auth.protocol.gemini': 'Gemini 兼容',
   'auth.protocol.geminiDesc': 'Google Gemini API 格式',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key 不能为空。',
   'auth.baseUrlInvalid': 'Base URL 必须以 http:// 或 https:// 开头。',
   'auth.baseUrlPrompt': '输入此协议的 API endpoint。',
@@ -6326,7 +6332,7 @@ const ZH: Messages = {
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
-    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',

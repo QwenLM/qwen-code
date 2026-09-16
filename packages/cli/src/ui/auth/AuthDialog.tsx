@@ -94,6 +94,7 @@ function providerToItem(config: ProviderConfig) {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -136,7 +137,16 @@ export function AuthDialog(): React.JSX.Element {
   const [mainIndex, setMainIndex] = useState<number | null>(null);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
+  );
 
   // -- Navigation -----------------------------------------------------------
 
@@ -179,6 +189,12 @@ export function AuthDialog(): React.JSX.Element {
     const saved = findExistingProviderModels(
       providerConfig,
       settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
@@ -191,7 +207,16 @@ export function AuthDialog(): React.JSX.Element {
     if (!providerConfig) return;
     setupFlow.start(
       providerConfig,
-      undefined,
+      findExistingProviderModels(
+        providerConfig,
+        settings.merged.modelProviders,
+        settings.merged.providerProtocol,
+        {
+          authType: settings.merged.security?.auth?.selectedType,
+          id: settings.merged.model?.name,
+          baseUrl: settings.merged.model?.baseUrl,
+        },
+      )?.protocol,
       existingEnv,
       getExistingModelIds(providerConfig),
     );
