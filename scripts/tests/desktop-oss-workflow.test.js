@@ -42,10 +42,13 @@ describe('Desktop OSS mirror workflow', () => {
 
     const syncOss = getWorkflowJob(releaseWorkflow, 'sync-oss');
     expect(syncOss).toContain(
-      "if: \"${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}\"",
+      "if: \"${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) }}\"",
     );
     expect(syncOss).toContain("- 'publish'");
     expect(syncOss).toContain("source: 'artifact'");
+    expect(syncOss).toContain(
+      'follows_release: "${{ github.event_name == \'release\' }}"',
+    );
     expect(syncOss).not.toContain('secrets: inherit');
   });
 
@@ -153,5 +156,86 @@ describe('Desktop OSS mirror workflow', () => {
   it('keeps the workflow default aligned with the shipped updater endpoint', () => {
     const firstEndpoint = tauriConfig.plugins.updater.endpoints[0];
     expect(syncWorkflow).toContain(new URL(firstEndpoint).origin);
+  });
+
+  it('admits the release path in the reusable sync job gate', () => {
+    const sync = getWorkflowJob(syncWorkflow, 'sync');
+    expect(sync).toContain(
+      "if: \"${{ github.repository == 'QwenLM/qwen-code' && (github.ref == 'refs/heads/main' || inputs.follows_release) }}\"",
+    );
+    expect(syncWorkflow).toContain(
+      "      follows_release:\n        default: false\n        type: 'boolean'",
+    );
+    expect(syncWorkflow).not.toContain(
+      '      follows_release:\n        required: true',
+    );
+  });
+
+  it('resolves the release tag parent before the main ancestry check', () => {
+    const source = getWorkflowStep(
+      getWorkflowJob(releaseWorkflow, 'prepare'),
+      'Resolve Qwen Code source',
+    );
+    expect(source).toContain(
+      'if [ "$GITHUB_REF_NAME" != \'main\' ] && [ "$GITHUB_EVENT_NAME" != \'release\' ]; then',
+    );
+    expect(source).toContain(
+      '::error::Published desktop releases must run from main or follow a published release.',
+    );
+    expect(source).toContain('ancestor="$sha"');
+    expect(source).toContain('if [ "$GITHUB_EVENT_NAME" = \'release\' ]; then');
+    expect(source).toContain('ancestor="$(git rev-parse "${sha}^")"');
+    expect(source).toContain(
+      'git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main',
+    );
+    expect(
+      source.indexOf('ancestor="$(git rev-parse "${sha}^")"'),
+    ).toBeGreaterThan(source.indexOf('ancestor="$sha"'));
+    expect(
+      source.indexOf('ancestor="$(git rev-parse "${sha}^")"'),
+    ).toBeLessThan(source.indexOf('git merge-base --is-ancestor "$ancestor"'));
+    expect(source).toContain('sha="$(git rev-parse FETCH_HEAD)"');
+    expect(source).toContain('echo "sha=$sha" >> "$GITHUB_OUTPUT"');
+    expect(source).not.toContain('sha="$ancestor"');
+  });
+
+  it('puts the feed-clobbering publish behind the deployment gate', () => {
+    const publish = getWorkflowJob(releaseWorkflow, 'publish');
+    expect(publish).toContain("environment:\n      name: 'production-release'");
+  });
+});
+
+describe('Desktop release event', () => {
+  it('gates automatic publishing like the VS Code release workflow', () => {
+    expect(releaseWorkflow).toContain("release:\n    types: ['published']");
+    const prepare = getWorkflowJob(releaseWorkflow, 'prepare');
+    expect(prepare).toContain(
+      "github.event_name != 'release' ||\n" +
+        '        (\n' +
+        "          github.repository == 'QwenLM/qwen-code' &&\n" +
+        "          vars.RELEASE_DESKTOP_SYNC_PUBLISH == 'true' &&\n" +
+        "          startsWith(github.event.release.tag_name, 'v') &&\n" +
+        '          github.event.release.prerelease == false',
+    );
+    expect(prepare).toContain(
+      "INPUT_VERSION: '${{ github.event.release.tag_name || inputs.version }}'",
+    );
+    expect(prepare).toContain(
+      "INPUT_REF: '${{ github.event.release.tag_name || inputs.qwen_code_ref }}'",
+    );
+    expect(releaseWorkflow).not.toContain(
+      '      follows_release:\n        default:',
+    );
+    expect(prepare).toContain('$GITHUB_EVENT_NAME');
+    expect(prepare).toContain('if [ "$IS_DRY_RUN" != \'true\' ]; then');
+    expect(getWorkflowJob(releaseWorkflow, 'build')).toContain(
+      "github.event_name == 'release' || inputs.dry_run == false",
+    );
+    expect(getWorkflowJob(releaseWorkflow, 'publish')).toContain(
+      "github.event_name == 'release' || inputs.dry_run == false",
+    );
+    expect(getWorkflowJob(releaseWorkflow, 'sync-oss')).toContain(
+      'follows_release: "${{ github.event_name == \'release\' }}"',
+    );
   });
 });

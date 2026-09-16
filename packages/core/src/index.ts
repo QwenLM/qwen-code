@@ -484,6 +484,7 @@ export * from './services/backgroundShellRegistry.js';
 export * from './agents/background-notification-queue.js';
 export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
+export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export {
   listSavedWorkflows,
@@ -510,6 +511,8 @@ export {
   extractAndStripMeta,
   type WorkflowMeta,
 } from './agents/runtime/workflow-sandbox.js';
+export * from './agents/runtime/workflow-size.js';
+export * from './agents/runtime/workflow-script-shape.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
@@ -619,6 +622,7 @@ export {
   logSpeculation,
   logWorkflowKeyword,
   logWorkflowRun,
+  logWorkflowSizeWarning,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -636,6 +640,7 @@ export {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
 
 // ============================================================================

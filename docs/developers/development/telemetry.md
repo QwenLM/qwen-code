@@ -734,6 +734,9 @@ The following events are logged:
 - `qwen-code.workflow_run`: Workflow run reached terminal state.
   - **Attributes**: `status` (string), `agents_dispatched` (int), `agents_completed` (int, all settled dispatches), `agents_failed` (int, settled dispatches with failed status), `agents_cached` (int, settled dispatches served from a prior run), `agents_respawned` (int, dispatched calls re-run after a prior failed or interrupted attempt), `phase_count` (int), `tokens_spent` (int), `duration_ms` (int). `agents_failed` and `agents_cached` are subsets of `agents_completed`, while `agents_respawned` describes provenance and is not an additional outcome count.
 
+- `qwen-code.workflow_size_warning`: A running workflow crossed its large-run threshold; emitted at most once per run.
+  - **Attributes**: `axis` (string: "agents"/"tokens", the threshold crossed first), `scheduled_agents` (int, dispatches excluding journal replays), `total_tokens` (int), `projected_tokens` (int), `agent_cap` (int), `token_cap` (int), `cap_from_guideline` (boolean, whether the agent threshold came from `tools.workflowSizeGuideline`)
+
 #### Auto-Memory Events
 
 - `qwen-code.memory.extract`: Memory extraction run completed.
