@@ -63,6 +63,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
@@ -738,6 +739,18 @@ export function toRpcError(err: unknown): {
   }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
+  if (
+    isObject(err) &&
+    isObject(err['data']) &&
+    err['data']['errorKind'] === 'workflow_invalid_params' &&
+    typeof err['message'] === 'string'
+  ) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err['message'],
+      data: { errorKind: 'workflow_invalid_params', httpStatus: 400 },
+    };
+  }
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -3911,14 +3924,15 @@ export class AcpDispatcher {
               action !== 'retry' &&
               action !== 'rerun' &&
               action !== 'delete-history' &&
-              action !== 'run-saved'
+              action !== 'run-saved' &&
+              action !== 'run-script'
             ) {
               if (id !== undefined) {
                 conn.sendConn(
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
                   ),
                 );
               }
@@ -3933,6 +3947,7 @@ export class AcpDispatcher {
               taskId,
               action,
               this.sessionCtx(conn, sessionId, loopback),
+              readServeWorkflowActionInput(params),
             );
             this.replyConn(conn, id, result as unknown);
           });
@@ -5892,7 +5907,9 @@ export class AcpDispatcher {
         sessionId,
         // SECURITY NOTE: `params.sessionId` already equals the routing
         // `sessionId` (both from the same params), so there's no routing
-        // divergence today. If the bridge ever trusts an additional
+        // divergence today. eventDetailMode is an intentional daemon extension:
+        // like REST prompt, it controls this turn's shared retention/delivery.
+        // If the bridge ever trusts an additional privileged
         // `sendPrompt` field by name (e.g. a priority/temperature override),
         // force-stamp it here like the REST surface does (`{ ...body,
         // sessionId, prompt }`) so it can't become client-controlled.

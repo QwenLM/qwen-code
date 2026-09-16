@@ -5,6 +5,7 @@
  */
 
 import { getRelaunchEnvProvenance } from './config/environment.js';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   AuthType,
   type ChatRecord,
@@ -1224,6 +1225,7 @@ export async function main() {
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.
+        prepareFileWatchersForProcessExit();
         await runExitCleanup();
       }
       process.exit(0);

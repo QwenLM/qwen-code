@@ -649,6 +649,7 @@ interface AcpGoalTurn extends GoalContinuationTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   modelStarted: boolean;
+  endingToolCallId?: string;
 }
 
 function sameGoalPermit(
@@ -2844,6 +2845,29 @@ export class Session implements SessionContext {
           await runtime.releaseTurn(turn.turnKey, { requeue: false });
         } else {
           await runtime.releaseTurn(turn.turnKey);
+        }
+      }
+      if (
+        turn.endingToolCallId &&
+        result?.stopReason === 'end_turn' &&
+        failureMessage === undefined &&
+        !turn.controller.signal.aborted
+      ) {
+        const recorder = this.config.getChatRecordingService();
+        if (recorder) {
+          try {
+            await recorder.recordGoalTurnEnd(
+              turn.endingToolCallId,
+              turn.permit,
+            );
+            const chat = this.#getCurrentChat();
+            chat.setCompletedToolCallIds([
+              ...chat.getCompletedToolCallIds(),
+              turn.endingToolCallId,
+            ]);
+          } catch (error) {
+            debugLogger.warn('Failed to record ACP Goal turn end:', error);
+          }
         }
       }
     } catch (error) {
@@ -5263,6 +5287,20 @@ export class Session implements SessionContext {
     let promptFailureMessage: string | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
+      const reasoningMeta = (params as { _meta?: Record<string, unknown> })
+        ._meta;
+      if (
+        scheduledGoalTurn === undefined &&
+        !(params as { retry?: boolean }).retry &&
+        !reasoningMeta?.[DAEMON_RETRY_META_KEY] &&
+        !reasoningMeta?.[DAEMON_CONTINUE_META_KEY] &&
+        !reasoningMeta?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] &&
+        this.config.applyReasoningOverrides?.()
+      ) {
+        this.reconcileReasoningSelection(this.config.getModel(), {
+          persist: false,
+        });
+      }
       const result = await this.#executePrompt(
         params,
         pendingSend,
@@ -5437,6 +5475,7 @@ export class Session implements SessionContext {
         : undefined);
     return buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
+      completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
         : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
@@ -8694,6 +8733,9 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
+    goalTurn.endingToolCallId = toolRun.parts.findLast(
+      (part) => part.functionResponse?.id,
+    )?.functionResponse?.id;
     return true;
   }
 

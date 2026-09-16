@@ -1,9 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LightbulbIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
+import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import {
@@ -31,6 +33,8 @@ interface AssistantMessageProps {
   showBranchAction?: boolean;
   isLocateFlashing?: boolean;
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -42,6 +46,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   showBranchAction = false,
   isLocateFlashing = false,
   customFooterInfo,
+  turnSources,
+  onSourceOpen,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
@@ -49,7 +55,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
   const showFooter =
-    !!content && !isStreaming && showFooterActions && !documentMode;
+    !!content &&
+    !isStreaming &&
+    (showFooterActions || (turnSources?.length ?? 0) > 0) &&
+    !documentMode;
   const customFooter = useMemo(
     () =>
       customFooterInfo
@@ -97,16 +106,18 @@ export const AssistantMessage = memo(function AssistantMessage({
       )}
       {showFooter && (
         <div className={styles.messageFooter}>
-          <button
-            type="button"
-            className={styles.copyButton}
-            title={t('assistant.copy')}
-            aria-label={t('assistant.copy')}
-            onClick={handleCopy}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
-          {showBranchAction && onBranchSession && (
+          {showFooterActions && (
+            <button
+              type="button"
+              className={styles.copyButton}
+              title={t('assistant.copy')}
+              aria-label={t('assistant.copy')}
+              onClick={handleCopy}
+            >
+              {copied ? <CheckIcon /> : <CopyIcon />}
+            </button>
+          )}
+          {showFooterActions && showBranchAction && onBranchSession && (
             <button
               type="button"
               className={styles.copyButton}
@@ -118,7 +129,10 @@ export const AssistantMessage = memo(function AssistantMessage({
               <BranchIcon />
             </button>
           )}
-          {timestamp !== undefined && (
+          {turnSources?.length ? (
+            <TurnSources sources={turnSources} onOpen={onSourceOpen} />
+          ) : null}
+          {showFooterActions && timestamp !== undefined && (
             <span className={styles.footerTime} aria-hidden="true">
               {formatTimestamp(timestamp)}
             </span>

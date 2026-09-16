@@ -40,6 +40,17 @@ import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
+const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+    >()),
+    prepareFileWatchersForProcessExit: mockPrepareFileWatchersForProcessExit,
+  }),
+);
+
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
@@ -3195,6 +3206,14 @@ describe('llm.tsx main function kitty protocol', () => {
     }
 
     expect(cleanupModule.runExitCleanup).toHaveBeenCalledTimes(2);
+    expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledTimes(2);
+    for (const index of [0, 1]) {
+      expect(
+        mockPrepareFileWatchersForProcessExit.mock.invocationCallOrder[index],
+      ).toBeLessThan(
+        vi.mocked(cleanupModule.runExitCleanup).mock.invocationCallOrder[index],
+      );
+    }
   });
 
   // Shared config/settings mocks for the interactive signal-handler tests.
@@ -3727,6 +3746,10 @@ describe('startInteractiveUI', () => {
       ui: {
         hideWindowTitle: false,
       },
+      // Messaging is on by default, and on it binds an inbox and arms its
+      // own exit cleanup. These tests are about startup order and render
+      // options; the messaging path is covered in startInteractiveUI.test.
+      agents: { crossSessionMessaging: false },
     },
     getUserHooks: () => undefined,
     getProjectHooks: () => undefined,
@@ -4059,6 +4082,8 @@ describe('startInteractiveUI', () => {
         ui: {
           hideWindowTitle: false,
         },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        agents: { crossSessionMessaging: false },
       },
     } as LoadedSettings;
 
@@ -4407,7 +4432,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
 
       await startInteractiveUI(
@@ -4438,7 +4467,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
       // An earlier describe's vi.restoreAllMocks() wipes the shared ink
       // render mock's return value in the full run, so re-arm it here.

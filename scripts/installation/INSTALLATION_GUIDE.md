@@ -148,8 +148,9 @@ matching `@teddyzhu/clipboard` native package for clipboard image paste. They
 also ship `@lydell/node-pty` plus the matching platform prebuild for
 `darwin-arm64`, `darwin-x64`, `linux-x64` and `win-x64`, which is what the web
 terminal and the PTY-backed interactive shell resolve at runtime. `linux-arm64`
-is the exception: no `@lydell/node-pty-linux-arm64` package is published yet,
-so that archive ships without PTY support and reports `PTY not available`.
+is the exception: `@lydell/node-pty-linux-arm64` is published, but this repo
+does not pin it, so that archive ships without PTY support and reports
+`PTY not available`.
 
 Use `--method npm` if you specifically need npm to resolve optional native
 modules for the current machine.
