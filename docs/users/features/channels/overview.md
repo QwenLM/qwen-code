@@ -63,7 +63,6 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `allowedUsers`      | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                                   |
 | `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                                      |
-| `messagePrefix`     | No               | Only dispatch user messages that begin with this exact, case-sensitive prefix after any leading `@mentions`; the prefix and following whitespace are removed before dispatch                                            |
 | `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`      | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -73,10 +72,6 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from authorized senders or members of approved paired groups for the next bot mention/reply. |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                      |
 | `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                          |
-
-When `messagePrefix` is set, every user-authored message must begin with the prefix and a non-empty payload, for example `/review inspect #123`. Only the prefix and the mentions ahead of it are removed; a mention the user typed after the prefix reaches the agent unchanged. Shared and agent commands use the same rule (`/review /help`, `/review /clear`, and so on). Telegram's registered command-menu actions remain available without the prefix — unless the configured prefix is itself one of them, in which case the prefix wins and that command has to be sent prefixed too (`/new /new`). Attachments need a matching caption when the platform supports one; captionless Telegram, Feishu, WeChat, DingTalk and WeCom media messages continue to run, and their placeholder text is never quoted back as group history. Native todos, webhooks, and provider-generated assignment or review-request events also continue to run without a prefix because they are system events rather than chat messages.
-
-Two behaviours are deliberate and worth knowing before you turn the prefix on. A voice message whose transcript DingTalk or WeCom fills in counts as text the user spoke, so it must carry the prefix like any other message and is dropped otherwise — only an untranscribed voice note runs as captionless media. And the prefix is checked before pairing, so first contact from an unknown sender or an unapproved group has to carry the prefix as well; without that ordering every unprefixed message in a busy group would draw a pairing reply, which is exactly the noise the prefix exists to suppress. Tell new users the prefix out of band, or leave pairing channels unprefixed.
 
 ### Sender Policy
 
@@ -420,6 +415,18 @@ Channels use their normal response delivery path. The shared delivery layer send
 
 The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings are no longer supported and can be removed from channel configuration. They do not affect delivery. Channel settings management rejects newly added or changed values for these fields. An unchanged stored value is retained, or removed, when the edit keeps the channel's `type`; changing a channel's `type` requires removing these fields first.
 
+### Turn output mode
+
+`outputMode` is a shared channel setting with adapter opt-in. Currently only **DingTalk** supports it and defaults to `per_turn` when the setting is omitted. Other adapters retain their existing behavior and receive no output-mode default: the channel editor does not offer this field, and configuration parsing or management saves reject an explicit value on unsupported adapters.
+
+- `per_task` waits for the main task and its associated background tasks and notifications, then delivers one final result containing the last non-empty assistant reply for that task.
+- `per_response` delivers each complete assistant response, not each token chunk.
+- `per_turn` delivers the last non-empty assistant reply within each turn. The main turn finishes immediately when its prompt ends; later background notification turns deliver separate results.
+
+In the default `per_turn` mode, a later background callback cannot reopen or replace the completed main result. A main result followed by eleven independent callback turns can therefore produce twelve result messages or cards. Choose `per_task` when the final result should wait for the associated background work. These modes select assistant output; they do not generate an extra summary or concatenate every intermediate reply.
+
+The selected policy applies whether interactive cards are enabled or replies use ordinary messages. The shared layer owns output selection and task/turn coordination; native rendering, media and fallback delivery remain adapter-specific. See [DingTalk turn output mode](./dingtalk#turn-output-mode) for presentation details and the conversation scope. Channel loops and webhook runs are unchanged.
+
 ## Scheduled Channel Loops
 
 Channels have a persistent scheduler for prompts that should run later and push
@@ -524,7 +531,11 @@ qwen channel status --daemon-url http://127.0.0.1:4170 --token secret
 qwen channel stop --daemon-url http://127.0.0.1:4170 --token secret
 ```
 
-This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. A daemon started without `--channel` does not load channel adapters or reserve the channel-service PID lease until the first `qwen channel set`.
+This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. An explicit `--channel` selection takes precedence and fails daemon startup if it cannot become ready. On a flagless boot, the trusted primary workspace's `serve.channels` setting is restored. Secondary workspaces do not independently restore their own `serve.channels`. Without either source, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`.
+
+Automatic restore skips invalid startup settings and validation or lease failures that occur before workers start, while preserving unrelated settings. After a worker startup fails, the daemon continues only once cleanup succeeds. A global runtime startup timeout or an unconfirmed worker stop still follows the normal startup-failure path; the service lease remains held while worker termination is unconfirmed. Check the daemon log for messages identifying `serve.channels` when a channel does not restore.
+
+Stored startup names must be non-empty, have no leading or trailing whitespace, and contain no unsafe control or invisible characters. Invalid entries are skipped individually and logged by their array index. Startup does not rename instances or rewrite the configuration. The channel startup toggle reflects the saved setting; runtime state shows whether the channel is running.
 
 `qwen serve --channel` is not the same service as `qwen channel start`. Standalone `qwen channel start` still uses the ACP-backed channel service and can run channel configs with different `cwd` values. Daemon-managed channels require every selected channel's `cwd` to resolve to a workspace registered by the daemon. In multi-workspace mode, a selection replacement keeps workers for workspaces whose ordered channel list did not change; `all` remains primary-workspace-only.
 

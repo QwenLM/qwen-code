@@ -14,6 +14,9 @@ import {
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 
+const longBranch =
+  'feature/session-details-with-a-very-long-branch-name-for-constrained-viewports';
+
 test('persists collapsed session groups across reload @smoke', async ({
   page,
 }, testInfo) => {
@@ -85,12 +88,12 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
 
   await sessionTitle.hover();
   const details = page.getByRole('dialog', { name: longTitle });
-  const title = details.getByTitle(longTitle);
+  const title = details.getByText(longTitle, { exact: true });
   const copyAction = details.getByRole('button', {
     name: 'Copy session ID',
   });
   await expect(details).toBeVisible();
-  await expect(title).toHaveAttribute('title', longTitle);
+  await expect(title).toHaveText(longTitle);
   await expect(copyAction).toBeVisible();
   await expect(
     details.getByText(scenario.sessionId, { exact: true }),
@@ -110,22 +113,46 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     await sessionTitle.hover();
     await expect(details).toBeVisible();
     await expectDetailsInsideRoot(webShellRoot, details);
+    await copyAction.scrollIntoViewIfNeeded();
+    await expect(copyAction).toBeInViewport();
     await expect(copyAction).toBeVisible();
   }
 
-  const titleMetrics = await title.evaluate((element) => {
-    const style = window.getComputedStyle(element);
-    return {
-      clientHeight: element.clientHeight,
-      lineHeight: Number.parseFloat(style.lineHeight),
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-    };
-  });
-  expect(titleMetrics.clientHeight).toBeLessThanOrEqual(
-    titleMetrics.lineHeight + 1,
-  );
-  expect(titleMetrics.scrollWidth).toBeGreaterThan(titleMetrics.clientWidth);
+  for (const [name, value] of Object.entries({
+    title,
+    workspace: details.getByTitle(scenario.workspaceCwd, { exact: true }),
+    sessionId: details.locator('[data-web-shell-session-id]'),
+    branch: details.getByTitle(longBranch, { exact: true }),
+  })) {
+    await test.step(`${name} wraps without clipping`, async () => {
+      await expect(value).toHaveCount(1);
+      const metrics = await value.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+      }));
+      expect(metrics.clientHeight, `${name} wraps`).toBeGreaterThan(
+        metrics.lineHeight,
+      );
+      expect(metrics.scrollHeight, `${name} height`).toBeLessThanOrEqual(
+        metrics.clientHeight + 1,
+      );
+      expect(metrics.scrollWidth, `${name} width`).toBeLessThanOrEqual(
+        metrics.clientWidth + 1,
+      );
+    });
+  }
+  expect(
+    await copyAction.evaluate((button) => {
+      const scroller = button.closest('[role="dialog"]')!.firstElementChild!;
+      return getComputedStyle(scroller).overscrollBehaviorY;
+    }),
+  ).toBe('contain');
+  await copyAction.click();
+  await expect(details).toContainText('Session ID copied');
+  await expectDetailsInsideRoot(webShellRoot, details);
 });
 
 async function expectDetailsInsideRoot(
@@ -155,8 +182,10 @@ async function expectDetailsInsideRoot(
 function createOrganizedScenario(
   currentSessionDisplayName = 'E2E Harness Session',
 ): WebShellDaemonScenario {
-  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
-  const sessionId = 'web-shell-e2e-session';
+  const workspaceCwd =
+    '/tmp/qwen-web-shell-e2e/workspaces/feature-session-details/packages/web-shell/client/components/sidebar';
+  const sessionId =
+    'web-shell-e2e-session-with-a-long-id-that-wraps-across-multiple-lines';
   return createWebShellDaemonScenario({
     workspaceCwd,
     sessionId,
@@ -188,6 +217,10 @@ function createOrganizedScenario(
         createdAt: '2026-07-03T00:00:00.000Z',
         updatedAt: '2026-07-03T00:00:00.000Z',
         displayName: currentSessionDisplayName,
+        branch: {
+          name: longBranch,
+          baseBranch: 'main',
+        },
         clientCount: 1,
         hasActivePrompt: false,
         groupId: null,

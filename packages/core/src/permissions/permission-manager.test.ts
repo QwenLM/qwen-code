@@ -16,6 +16,7 @@ import {
   matchesPathPattern,
   matchesDomainPattern,
   resolveToolName,
+  getToolNameAliases,
   resolvePathPattern,
   getSpecifierKind,
   toolMatchesRuleToolName,
@@ -42,6 +43,38 @@ const debugLoggerMock = vi.hoisted(() => ({
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => debugLoggerMock,
 }));
+
+// ─── getToolNameAliases ──────────────────────────────────────────────────────
+
+describe('getToolNameAliases', () => {
+  it('lists every name that resolves to the tool', () => {
+    expect(getToolNameAliases('run_shell_command')).toEqual(
+      expect.arrayContaining([
+        'run_shell_command',
+        'Shell',
+        'ShellTool',
+        'Bash',
+      ]),
+    );
+    expect(getToolNameAliases('read_file')).toEqual(
+      expect.arrayContaining(['read_file', 'ReadFile', 'Read']),
+    );
+    for (const [alias, canonical] of Object.entries(TOOL_NAME_ALIASES)) {
+      expect(getToolNameAliases(canonical)).toContain(alias);
+    }
+  });
+
+  it('does not expand permission meta-categories', () => {
+    expect(getToolNameAliases('grep_search')).not.toContain('Read');
+    expect(getToolNameAliases('write_file')).not.toContain('Edit');
+    expect(getToolNameAliases('monitor')).not.toContain('Bash');
+  });
+
+  it('returns nothing for a name that is not a canonical tool name', () => {
+    expect(getToolNameAliases('mcp__server__tool')).toEqual([]);
+    expect(getToolNameAliases('Bash')).toEqual([]);
+  });
+});
 
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
@@ -3148,6 +3181,20 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('clearSessionAllowRules drops live and AUTO-stashed session grants', async () => {
+      const call = { toolName: 'run_shell_command', command: 'npm test' };
+      pm.addSessionAllowRule('Bash(git *)');
+      pm.stripDangerousRulesForAutoMode();
+      pm.addSessionAllowRule('Bash(npm *)');
+      expect(pm.getStrippedDangerousRules()?.session).toHaveLength(1);
+
+      pm.clearSessionAllowRules();
+      pm.restoreDangerousRules();
+
+      expect(pm.getAllowRawStrings()).toEqual([]);
+      expect(await pm.evaluate(call)).not.toBe('allow');
+    });
+
     it('addSessionAllowRule deduplicates identical rules', () => {
       pm.addSessionAllowRule('Bash(git *)');
       pm.addSessionAllowRule('Bash(git *)');
@@ -3846,6 +3893,38 @@ describe('PermissionManager.findMatchingDenyRule', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('cites the deny rule for a compound command segment', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(npm view *)'] }),
+    );
+    pm.initialize();
+
+    // evaluate() splits the compound command and denies on the `npm view`
+    // segment, so findMatchingDenyRule must cite that same rule (issue #11405).
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'run_shell_command',
+        command: 'cd /tmp && npm view foo',
+      }),
+    ).toBe('Bash(npm view *)');
+  });
+
+  it('cites the deny rule when a shell command is denied via a virtual file op', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Read(//**/node_modules/**)'] }),
+    );
+    pm.initialize();
+
+    // A `cat` of a node_modules file is denied through the shell virtual-op
+    // pass (Read rule), not a Bash rule. findMatchingDenyRule must cite it.
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: 'run_shell_command',
+        command: 'cat /app/node_modules/lodash/index.js',
+      }),
+    ).toBe('Read(//**/node_modules/**)');
   });
 });
 

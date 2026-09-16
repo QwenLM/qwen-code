@@ -9,6 +9,11 @@ import {
   type DaemonSessionSummary,
   type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import {
+  clickSidebarElement,
+  installSidebarDomShims,
+  resolveWebShellSessions,
+} from '../../test/sidebarHarness';
 
 const {
   connection,
@@ -215,20 +220,11 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         workspaceCwd: connection.workspaceCwd,
         options,
       };
-      if (options?.enabled === false) {
-        return { ...state, sessions: [], data: undefined, catalogQuery };
-      }
-      // A useSessions implementation may model an unsettled catalog page with
-      // an explicit `data` key (undefined until the fetch settles), matching
-      // the real store's empty snapshot on a query-key change.
-      return {
-        ...state,
-        data:
-          'data' in state
-            ? (state as { data?: DaemonSessionSummary[] }).data
-            : state.sessions,
+      return resolveWebShellSessions(
+        state,
+        options?.enabled !== false,
         catalogQuery,
-      };
+      );
     },
     useSessionCatalogController: () => ({
       refreshQueries: refreshSessionCatalogQueries,
@@ -353,22 +349,7 @@ const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+installSidebarDomShims();
 
 const capabilities = {
   qwenCodeVersion: '1.2.3',
@@ -431,7 +412,6 @@ function renderSidebar(
             | 'hooks'
           )[];
         };
-    onOpenGitDiff?: (cwd: string) => void;
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
     onOpenWorkspacesOverview?: () => void;
@@ -489,7 +469,6 @@ function renderSidebar(
           footer={overrides.footer}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaceOverview={overrides.workspaceOverview}
-          onOpenGitDiff={overrides.onOpenGitDiff}
           onNewWorktreeSession={overrides.onNewWorktreeSession}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
@@ -523,11 +502,7 @@ function menuItemLabels(): string[] {
 }
 
 function click(element: HTMLElement): void {
-  element.dispatchEvent(
-    new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-  );
-  element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  clickSidebarElement(element, true);
 }
 
 function setInputValue(input: HTMLInputElement, value: string): void {
@@ -1679,7 +1654,6 @@ describe('WebShellSidebar workspace removal', () => {
       projectFeaturesEnabled: false,
       onOpenAddWorkspace: vi.fn(),
       onOpenWorkspacesOverview: vi.fn(),
-      onOpenGitDiff: vi.fn(),
     });
     await act(async () => {
       await Promise.resolve();
@@ -3378,7 +3352,6 @@ describe('WebShellSidebar workspace removal', () => {
     const onNewSession = vi.fn(() => true);
     const onNewWorktreeSession = vi.fn();
     renderSidebar({
-      onOpenGitDiff: vi.fn(),
       onNewSession,
       onNewWorktreeSession,
       workspaces: [
@@ -3398,6 +3371,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     act(() => click(workspaceAction('/tmp/other')!));
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(menuItemLabels()).toContain('New worktree task');
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
@@ -3442,7 +3418,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
 
-    act(() => click(workspaceAction('/tmp/project')!));
+    await act(async () => {
+      click(workspaceAction('/tmp/project')!);
+    });
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
     ).find((element) => element.textContent === 'New worktree task');
@@ -3571,16 +3549,18 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    const clickWorktree = () => {
-      act(() => click(workspaceAction('/tmp/other')!));
+    const clickWorktree = async () => {
+      await act(async () => {
+        click(workspaceAction('/tmp/other')!);
+      });
       const item = Array.from(
         document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
       ).find((element) => element.textContent === 'New worktree task');
       expect(item).toBeDefined();
       act(() => click(item!));
     };
-    clickWorktree();
-    clickWorktree();
+    await clickWorktree();
+    await clickWorktree();
     expect(onNewWorktreeSession).toHaveBeenCalledTimes(1);
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
     const catalogCallsBefore = refreshWorkspaceSessionCatalog.mock.calls.length;
@@ -3653,8 +3633,7 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    // The selection drives the fetch: skills is never requested.
-    expect(workspaceMcp).toHaveBeenCalled();
+    expect(workspaceMcp).not.toHaveBeenCalled();
     expect(workspaceSkills).not.toHaveBeenCalled();
 
     // Hovering the header lists only the selected facet in the popover.
@@ -3671,6 +3650,8 @@ describe('WebShellSidebar workspace removal', () => {
     const rows = document.querySelectorAll(
       '[role="dialog"] [data-web-shell-workspace-overview]',
     );
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(workspaceSkills).not.toHaveBeenCalled();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.getAttribute('data-web-shell-workspace-overview')).toBe(
       'mcp',
@@ -4743,13 +4724,32 @@ describe('WebShellSidebar session source switch', () => {
       '[data-web-shell-scheduled-task-session]',
     );
     expect(sourceIcon).toBeTruthy();
-    expect(sourceIcon?.getAttribute('title')).toBe('Scheduled Tasks');
+    expect(sourceIcon?.getAttribute('title')).toBeNull();
+    expect(sourceIcon?.querySelector('svg')?.getAttribute('aria-label')).toBe(
+      'Scheduled Tasks',
+    );
+    expect(sourceIcon?.closest('[class*="sessionMetaSlot"]')).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionStatusSlot"]')).toBeNull();
     expect(row?.textContent).not.toContain('🧵');
     expect(row?.textContent).not.toContain('⏰');
 
     active.sessions = [{ ...scheduledRun, hasActivePrompt: true }];
     renderSidebar();
     await act(async () => Promise.resolve());
+    const runningRow = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    )
+      .find(
+        (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+      )
+      ?.closest('[role="button"]');
+    expect(
+      runningRow?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(
+      runningRow?.querySelector('[data-web-shell-session-running]'),
+    ).toBeTruthy();
+
     active.sessions = [{ ...scheduledRun, hasActivePrompt: false }];
     renderSidebar();
     await act(async () => Promise.resolve());
@@ -4767,6 +4767,97 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       completedRow?.querySelector('[data-web-shell-session-completed-unread]'),
     ).toBeTruthy();
+  });
+
+  it.each([
+    {
+      label: 'active work',
+      activeWorkState: 'active' as const,
+      selector: '[data-web-shell-session-active-work]',
+    },
+    {
+      label: 'unknown activity',
+      activeWorkState: 'unknown' as const,
+      selector: '[aria-label="Background activity unknown"]',
+    },
+  ])('keeps the scheduled-task marker with $label status', async (scenario) => {
+    active.sessions.push({
+      sessionId: `scheduled-${scenario.activeWorkState}`,
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      activeWorkState: scenario.activeWorkState,
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const row = container
+      .querySelector('[data-web-shell-session-title]')
+      ?.closest('[role="button"]');
+    expect(
+      row?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(Boolean(row?.querySelector(scenario.selector))).toBe(
+      scenario.activeWorkState === 'active',
+    );
+  });
+
+  it('keeps the scheduled-task marker when a run is grouped by color', async () => {
+    const organizedCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organizedCapabilities;
+    workspace.capabilities = organizedCapabilities;
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      color: 'blue',
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const colorGroup = container.querySelector('section[aria-label="Blue"]');
+    const row = colorGroup
+      ?.querySelector('[data-web-shell-session-title]')
+      ?.closest('[role="button"]');
+    expect(row).toBeTruthy();
+    const sourceIcon = row?.querySelector(
+      '[data-web-shell-scheduled-task-session]',
+    );
+    expect(sourceIcon).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionMetaSlot"]')).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionStatusSlot"]')).toBeNull();
+  });
+
+  it('keeps the scheduled-task marker in the archived row meta slot', async () => {
+    archived.sessions.push({
+      sessionId: 'archived-scheduled-run',
+      displayName: 'Archived hourly review',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      isArchived: true,
+    });
+
+    renderSidebar();
+    await expandArchived();
+
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((candidate) => candidate.textContent === 'Archived hourly review');
+    const sourceIcon = title
+      ?.closest('[class*="sessionRow"]')
+      ?.querySelector('[data-web-shell-scheduled-task-session]');
+    expect(sourceIcon).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionMetaSlot"]')).toBeTruthy();
+    expect(sourceIcon?.closest('[class*="sessionStatusSlot"]')).toBeNull();
   });
 
   it('preserves channel completion state while the tasks source is active', async () => {

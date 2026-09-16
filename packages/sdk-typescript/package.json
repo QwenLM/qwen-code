@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/sdk",
-  "version": "0.1.9",
+  "version": "0.1.12",
   "description": "TypeScript SDK for programmatic access to qwen-code CLI",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -26,6 +26,11 @@
       "types": "./dist/daemon/transcript.d.ts",
       "import": "./dist/daemon/transcript.js",
       "require": "./dist/daemon/transcript.cjs"
+    },
+    "./peer": {
+      "types": "./dist/peer/index.d.ts",
+      "import": "./dist/peer/index.js",
+      "require": "./dist/peer/index.cjs"
     },
     "./package.json": "./package.json"
   },

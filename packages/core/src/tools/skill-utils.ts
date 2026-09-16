@@ -17,6 +17,23 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('SKILL');
 
 /**
+ * Why the model cannot invoke a skill right now, or `undefined` when it can.
+ * Shared by the availability filter and the resume path, so a resumed session
+ * never re-arms a skill no tool call could load. Read live, not off
+ * `SkillTool`'s asynchronously refreshed snapshots.
+ */
+export function skillModelInvocationBlock(
+  config: Config,
+  skillManager: SkillManager,
+  skill: SkillConfig,
+): 'disabled' | 'inactive' | 'hidden' | undefined {
+  if (!config.isSkillEnabled(skill)) return 'disabled';
+  if (skill.disableModelInvocation) return 'hidden';
+  if (!skillManager.isSkillActive(skill)) return 'inactive';
+  return undefined;
+}
+
+/**
  * Builds the LLM-facing content string when a skill body is injected.
  * Shared between SkillToolInvocation (runtime) and /context (estimation)
  * so that token estimates stay in sync with actual usage.
@@ -137,19 +154,14 @@ async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
 ): Promise<CollectedAvailableSkills> {
-  // Include a skill only when (a) it is not hidden from the model
-  // (`disable-model-invocation`), (b) it is not user-disabled via
-  // `skills.disabled`, and (c) it is unconditional or already activated by a
-  // matching file path this session. Keeps the listing small in large monorepos
+  // Include a skill only when the model could invoke it right now (see
+  // `skillModelInvocationBlock`). Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
   const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
-    (s) =>
-      !s.disableModelInvocation &&
-      skillManager.isSkillActive(s) &&
-      isEnabled(s),
+    (s) => skillModelInvocationBlock(config, skillManager, s) === undefined,
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -389,6 +401,12 @@ export function applySkillHooks(
   }
 }
 
+export class ReviewWorkflowActivationError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 /**
  * Applies every side effect a skill declares — `allowedTools` session allow
  * rules and frontmatter `hooks:` — behind the single folder-trust gate.
@@ -400,17 +418,18 @@ export function applySkillHooks(
  * skill's instructions reached the model while the hook that was supposed to
  * enforce them was never registered.
  *
- * Both underlying registrations dedup, so calling this repeatedly for the same
+ * The registrations dedup, so calling this repeatedly for the same
  * skill is safe — and necessary, since folder trust can be granted mid-session.
+ * Await review workflow registration before returning the skill to the model.
  */
-export function applySkillSideEffects(
+export async function applySkillSideEffects(
   config:
     | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
-        Pick<Config, 'isTrustedFolder'>)
+        Pick<Config, 'isTrustedFolder' | 'enableReviewWorkflow'>)
     | null
     | undefined,
   skill: SkillConfig,
-): void {
+): Promise<void> {
   if (!config) {
     return;
   }
@@ -426,6 +445,13 @@ export function applySkillSideEffects(
     trustGated: skill.level === 'project',
   });
   applySkillHooks(config, skill);
+  if (skill.level === 'bundled' && skill.name === 'review') {
+    try {
+      await config.enableReviewWorkflow();
+    } catch (error) {
+      throw new ReviewWorkflowActivationError(error);
+    }
+  }
 }
 
 /**

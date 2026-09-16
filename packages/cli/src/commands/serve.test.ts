@@ -429,6 +429,9 @@ describe('serve rate limit env parsing', () => {
     );
 
     await startServeHandlerWithArgs('--open-with-auth');
+    // Wait out the fire-and-forget handler's browser-open phase so its
+    // openBrowserSecurely call cannot land in the next test.
+    await vi.waitFor(() => expect(mockOpenBrowserSecurely).toHaveBeenCalled());
 
     expect(mockApplyOpenWithAuth).toHaveBeenCalledWith(expect.any(Object));
     expect(tokenAtBoot).toBe('generated-token');
@@ -627,6 +630,9 @@ describe('serve rate limit env parsing', () => {
     await startServeHandlerWithArgs(
       '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
     );
+    // Wait out the fire-and-forget handler's pairing phase so it cannot
+    // consume the one-shot QR mock the next test installs.
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
 
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).toEqual(
@@ -818,18 +824,21 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
-  it('passes --child-heap-mode to runQwenServe', async () => {
-    mockRunQwenServe.mockResolvedValueOnce({
-      url: 'http://127.0.0.1:4170/',
-      webShellMounted: false,
-    });
+  it.each(['off', 'admit'])(
+    'passes --child-heap-mode %s to runQwenServe',
+    async (mode) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
 
-    await startServeHandlerWithArgs('--no-web --child-heap-mode off');
+      await startServeHandlerWithArgs(`--no-web --child-heap-mode ${mode}`);
 
-    expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ childHeapMode: 'off' }),
-    );
-  });
+      expect(mockRunQwenServe).toHaveBeenCalledWith(
+        expect.objectContaining({ childHeapMode: mode }),
+      );
+    },
+  );
 
   it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
     mockRunQwenServe.mockResolvedValueOnce({

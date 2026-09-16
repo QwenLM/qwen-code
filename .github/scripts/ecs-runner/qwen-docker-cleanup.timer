@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Qwen CI Docker cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

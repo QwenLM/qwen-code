@@ -12,6 +12,7 @@ import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
 } from '@qwen-code/sdk/daemon';
+import type { ContextUsageControls } from '../hooks/useContextUsageControls';
 import { I18nProvider } from '../i18n';
 import { formatDateTime } from '../utils/formatDateTime';
 import {
@@ -540,6 +541,86 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('publishes owner-specific context controls and withdraws them on unmount', () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const cleanups: ReturnType<typeof vi.fn>[] = [];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => {
+        const cleanup = vi.fn();
+        cleanups.push(cleanup);
+        return cleanup;
+      },
+    );
+    render({ registerContextUsageControls, onOpenContextUsage: vi.fn() });
+    expect(latestChatEditorProps.contextUsageControls).toBe(
+      registerContextUsageControls.mock.calls.at(-1)![0],
+    );
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionId: connectionState.sessionId,
+        canCompress: true,
+      }),
+    );
+    pendingPermission = {
+      id: 'perm-1',
+      toolName: 'write_file',
+      rawInput: {},
+    };
+    rerender({ registerContextUsageControls });
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    pendingPermission = null;
+    rerender({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
+    sessionHasActivePromptValue = true;
+    rerender({ registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    expect(cleanups[0]).toHaveBeenCalledOnce();
+    act(() => root!.unmount());
+    root = null;
+    expect(cleanups.at(-1)).toHaveBeenCalledOnce();
+  });
+
+  it('clears the previous follow-up before submitting context compression', async () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => vi.fn(),
+    );
+    const command = deferred<{ stopReason: 'cancelled' }>();
+    const onBeforeContextCompress = vi.fn();
+    sendPrompt.mockReturnValue(command.promise);
+    render({ registerContextUsageControls, onBeforeContextCompress });
+    let pending!: Promise<void>;
+    act(() => {
+      pending = registerContextUsageControls.mock.calls.at(-1)![0].compress();
+    });
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
+    expect(clearFollowup).toHaveBeenCalledOnce();
+    expect(onBeforeContextCompress).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+    );
+    expect(clearFollowup.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
+    expect(onBeforeContextCompress.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPrompt.mock.invocationCallOrder[0],
+    );
+    await act(async () => {
+      command.resolve({ stopReason: 'cancelled' });
+      await pending;
+    });
+  });
+
   it('exposes the selected pane without confusing it with a running session', () => {
     const props = { isActive: true };
     render(props);
@@ -1866,6 +1947,7 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      submittedPrompt: 'hello there',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2021,6 +2103,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2044,6 +2127,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      '/deploy staging',
     );
   });
 
@@ -2077,6 +2161,7 @@ describe('ChatPane', () => {
       'onSlashCommand callback failed',
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      submittedPrompt: '/deploy staging',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2092,6 +2177,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      submittedPrompt: '/usr/local/bin/tool',
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2157,6 +2243,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('with image', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
+      submittedPrompt: 'with image',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2172,6 +2259,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
     expect(sendPrompt).toHaveBeenCalledWith('', {
+      submittedPrompt: '',
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2204,6 +2292,7 @@ describe('ChatPane', () => {
       });
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      submittedPrompt: 'check @.husky/',
       inputAnnotations,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2226,6 +2315,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued next',
     );
     expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(sendPrompt).not.toHaveBeenCalled();
@@ -2344,6 +2434,7 @@ describe('ChatPane', () => {
       undefined,
       inputAnnotations,
       expect.any(Function),
+      'queue @.husky/',
     );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
@@ -2362,6 +2453,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       expect.any(Function),
+      'queued image',
     );
   });
 
@@ -2374,7 +2466,15 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('', images, undefined);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      '',
+      images,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '',
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -2412,7 +2512,16 @@ describe('ChatPane', () => {
       options?.onAdmissionStarted?.();
       throw new Error('disconnected');
     });
-    render({ onError, onImageIngestionNotice });
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    const registerContextUsageControls = vi.fn(
+      (_controls: ContextUsageControls) => vi.fn(),
+    );
+    render({ onError, onImageIngestionNotice, registerContextUsageControls });
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
     const commit = vi.fn();
     await act(async () => {
       latestOnSubmit!('hi', undefined, undefined, commit);
@@ -2428,6 +2537,13 @@ describe('ChatPane', () => {
     const notice = testid('pane-prompt-admission-unknown');
     expect(notice).not.toBeNull();
     expect(latestChatEditorProps.disabled).toBe(true);
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: false }),
+    );
+    await act(async () => {
+      await registerContextUsageControls.mock.calls.at(-1)![0].compress();
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
       '/w',
     );
@@ -2447,6 +2563,9 @@ describe('ChatPane', () => {
     });
     expect(commit).not.toHaveBeenCalled();
     expect(latestChatEditorProps.disabled).toBe(false);
+    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
+      expect.objectContaining({ canCompress: true }),
+    );
     expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     confirm.mockRestore();
@@ -2904,6 +3023,57 @@ describe('ChatPane', () => {
     );
   });
 
+  it('suppresses stale context and its action after a pane session becomes unavailable', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = null;
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('suppresses stale context while the pane connection is in error', () => {
+    connectionState.status = 'error';
+    connectionState.sessionId = 'sess-1';
+    connectionState.tokenCount = 23_000;
+    connectionState.contextWindow = 131_072;
+    render();
+    expect(latestChatEditorProps.tokenCount).toBe(0);
+    expect(latestChatEditorProps.contextWindow).toBe(0);
+    expect(latestChatEditorProps.onShowContextUsage).toBeUndefined();
+  });
+
+  it('opens composer details with the pane session and actions without adding a snapshot', () => {
+    const onOpenContextUsage = vi.fn();
+    render({ onOpenContextUsage });
+    act(() => latestChatEditorProps.onOpenContextUsage());
+    expect(onOpenContextUsage).toHaveBeenCalledExactlyOnceWith(
+      connectionState.sessionId,
+      daemonActions,
+    );
+    expect(appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+    const opener = latestChatEditorProps.onOpenContextUsage;
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBe(opener);
+    connectionState.status = 'error';
+    rerender({ onOpenContextUsage });
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls.canCompress).toBe(false);
+  });
+
+  it('keeps embedded side-task context read-only without a detail recovery path', () => {
+    connectionState.commands = [
+      { name: 'compress', source: 'builtin-command' },
+    ];
+    render({ embedded: true });
+    expect(latestChatEditorProps.onShowContextUsage).toBeTypeOf('function');
+    expect(latestChatEditorProps.onOpenContextUsage).toBeUndefined();
+    expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
+  });
+
   it('shows context usage for this pane session', async () => {
     render();
 
@@ -3156,6 +3326,49 @@ describe('ChatPane', () => {
     },
   );
 
+  it.each(['success', 'failure', 'replacement'])(
+    'blocks compression while preparing a /plan prompt and releases the gate after %s',
+    async (outcome) => {
+      connectionState.commands = [
+        { name: 'compress', source: 'builtin-command' },
+      ];
+      const prepared = deferred<{ mode: string }>();
+      setApprovalMode.mockReturnValueOnce(prepared.promise);
+      let controls!: ContextUsageControls;
+      const registerContextUsageControls = (value: ContextUsageControls) => {
+        controls = value;
+        return () => {};
+      };
+      render({ registerContextUsageControls });
+      expect(controls.canCompress).toBe(true);
+      const staleCompress = controls.compress;
+      act(() => {
+        latestOnSubmit!('/plan explain the migration');
+      });
+      expect(setApprovalMode).toHaveBeenCalledOnce();
+      expect(controls.canCompress).toBe(false);
+      await act(async () => staleCompress());
+      expect(sendPrompt).not.toHaveBeenCalled();
+      if (outcome === 'replacement') {
+        ownerVersion++;
+        connectionState.sessionId = 'replacement';
+        rerender({ registerContextUsageControls });
+        expect(controls.canCompress).toBe(true);
+      }
+      await act(async () => {
+        if (outcome === 'failure') prepared.reject(new Error('mode failed'));
+        else prepared.resolve({ mode: 'plan' });
+      });
+      expect(controls.canCompress).toBe(true);
+      if (outcome === 'success') {
+        expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+          'explain the migration',
+          expect.any(Object),
+        );
+      } else expect(sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
   it('sends /plan prompts through normal admission callbacks after applying Plan', async () => {
     const firstPrompt = vi.fn();
     const commit = vi.fn();
@@ -3364,4 +3577,112 @@ describe('ChatPane daemon keep-alive (#9487)', () => {
     expect(status!.getAttribute('data-has-active-prompt')).toBe('false');
     expect(testid('pane-running')!.textContent).toBe('false');
   });
+});
+
+describe('ChatPane continuation errors', () => {
+  it.each([false, true])(
+    'keeps a current continuation failure visible and isolates old owners (replace owner: %s)',
+    async (replaceOwner) => {
+      const { createDaemonSessionActions } = await import(
+        '../daemon/session/actions'
+      );
+      const request = deferred<never>();
+      const continueRequest = vi.fn(() => request.promise);
+      const addNotice = vi.fn();
+      const onError = vi.fn();
+      const requestError = new TypeError('Failed to fetch continuation');
+      const sessionRef = {
+        current: {
+          sessionId: 'sess-1',
+          clientId: 'pane-client',
+          continueSession: continueRequest,
+        },
+      };
+      connectionState.context = {
+        v: 1,
+        sessionId: 'sess-1',
+        workspaceCwd: '/w',
+        state: {},
+        recovery: { kind: 'interrupted_prompt', canContinue: true },
+      };
+      // Actual action + actual ChatPane/Banner; only SDK request and hook state
+      // delivery are simulated. No SSE frames or provider replay are invented.
+      const actions = createDaemonSessionActions({
+        store: { getSnapshot: () => ({ activeAssistantBlockId: undefined }) },
+        sessionRef,
+        activePromptsRef: { current: new Map() },
+        settledPromptsRef: { current: new Map() },
+        pendingSessionLoadIdRef: { current: 0 },
+        sessionRecoveryGeneration: new WeakMap(),
+        passiveAssistantDoneTimerRef: { current: undefined },
+        getConnection: () => connectionState,
+        hasSessionActivePrompt: () => false,
+        setConnection: (next: unknown) => {
+          connectionState =
+            typeof next === 'function' ? next(connectionState) : next;
+        },
+        setPromptStatus: vi.fn(),
+        addNotice,
+      } as unknown as Parameters<typeof createDaemonSessionActions>[0]);
+      const continueAction = vi.fn(actions.continueSession);
+      Object.assign(daemonActions, { continueSession: continueAction });
+      try {
+        render({ onError });
+        const button = testid('session-recovery-banner')?.querySelector(
+          'button',
+        );
+        expect(button).toBeTruthy();
+        act(() => {
+          button!.click();
+          button!.click();
+        });
+        rerender({ onError });
+        expect(continueRequest).toHaveBeenCalledOnce();
+        expect(connectionState.context.recovery.canContinue).toBe(false);
+        expect(
+          testid('session-recovery-banner')?.querySelector('button'),
+        ).toBeFalsy();
+        if (replaceOwner) {
+          ownerVersion += 1;
+          sessionRef.current = { ...sessionRef.current, sessionId: 'sess-2' };
+          connectionState = {
+            ...connectionState,
+            sessionId: 'sess-2',
+            context: { ...connectionState.context, sessionId: 'sess-2' },
+          };
+          rerender({ onError });
+        }
+        await act(async () => {
+          request.reject(requestError);
+          await Promise.resolve();
+        });
+        await expect(continueAction.mock.results[0]!.value).rejects.toBe(
+          requestError,
+        );
+        rerender({ onError });
+        const inlineErrors = Array.from(
+          container!.querySelectorAll('[role="alert"]'),
+        )
+          .map((alert) => alert.textContent)
+          .filter(Boolean);
+        expect(continueRequest).toHaveBeenCalledOnce();
+        expect(connectionState.context.recovery.canContinue).toBe(false);
+        expect(
+          testid('session-recovery-banner')?.querySelector('button'),
+        ).toBeFalsy();
+        if (replaceOwner) {
+          expect(onError).not.toHaveBeenCalled();
+          expect(inlineErrors).toEqual([]);
+          expect(addNotice).not.toHaveBeenCalled();
+        } else {
+          expect(addNotice).toHaveBeenCalledOnce();
+          expect(inlineErrors).toEqual([
+            'Could not continue the conversation.',
+          ]);
+        }
+      } finally {
+        Reflect.deleteProperty(daemonActions, 'continueSession');
+      }
+    },
+  );
 });

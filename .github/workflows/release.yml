@@ -209,6 +209,17 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
+      # Fail fast on a saturated pool instance instead of dying on ENOSPC
+      # mid-job (#10035): a re-run lands on an instance with headroom. The
+      # script rides the selected ref, so a ref that predates it skips.
+      - &release_disk_floor_gate
+        name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if [ -f .github/scripts/check-disk-floor.sh ]; then
+            bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"
+          fi
+
       - name: 'Verify nightly promotion'
         id: 'promotion'
         if: "${{ github.event.inputs.promote_nightly != '' }}"
@@ -319,6 +330,7 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
+      - *release_disk_floor_gate
       - &install_release_dependencies
         name: 'Install Dependencies'
         env:
@@ -356,6 +368,7 @@ jobs:
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
       - *install_release_dependencies
 
       # This materializes the repo-root dist packed below.
@@ -402,6 +415,7 @@ jobs:
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
       - *install_release_dependencies
 
       - &download_release_build
@@ -441,6 +455,7 @@ jobs:
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
       - *install_release_dependencies
       - *download_release_build
       - *unpack_release_build
@@ -476,6 +491,7 @@ jobs:
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
       - *install_release_dependencies
       - *download_release_build
       - *unpack_release_build
@@ -540,6 +556,7 @@ jobs:
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
       - *install_release_dependencies
 
       - name: 'Build Bundle'
@@ -580,6 +597,7 @@ jobs:
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted
+      - *release_disk_floor_gate
       - *install_release_dependencies
 
       - name: 'Build Bundle'

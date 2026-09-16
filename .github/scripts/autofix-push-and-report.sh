@@ -103,6 +103,16 @@ CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
 # verdict under the key the baseline was READ under — same rule as
 # the growth markers, same dead-key hazard (a supersede-exempt
 # round can report under a stale WINDOW after a re-arm).
+# In-round self-review record (af-156): the gate-published token string
+# Finalize verification selected, never a re-read of the branch-writable
+# self-review.json. The grammar is re-pinned at the render site so a forged
+# step output can never close the marker early.
+emit_self_review_marker() {
+  local SELF_REVIEW_RE='^[a-z0-9=. -]+$'
+  if [[ "${SELF_REVIEW:-}" =~ ${SELF_REVIEW_RE} ]]; then
+    echo "<!-- autofix-self-review ${SELF_REVIEW} -->"
+  fi
+}
 # Full rationale → qwen-autofix.md#af-131
 emit_growth_audit_marker() {
   local allow_rearm="${1:-false}"
@@ -608,6 +618,22 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
   # the per-PR tracking issue (script content from expression
   # context; append-only comment design — see the script).
   run_deferred_upsert
+  # The sha the push loop above actually left on the branch — the merge
+  # retry can advance it past the verified head, and the regression marker
+  # must name what the PR now carries.
+  PUSHED_HEAD="$(git rev-parse HEAD 2> /dev/null || echo '')"
+  # The premise the push marker stamps: the head state prepare classified,
+  # unless the pushed head did not start from that head -- a salvage-merged
+  # branch move or a base-conflict merge carries content prepare never
+  # classified, and an unknown premise is never green.
+  PUSH_PRE="${CHECK_STATE:-none}"
+  [[ "${PUSH_RACE_MERGED}" == 'true' ]] && PUSH_PRE='none'
+  [[ "${CONFLICT:-false}" == 'true' ]] && PUSH_PRE='none'
+  # A merge commit between the head prepare classified and the head this
+  # round pushes -- a clean in-round merge of main trips neither arm above
+  # -- means the pushed head carries content prepare never classified: the
+  # premise is unknown, and an unknown premise is never green.
+  [[ -n "$(git rev-list --merges "${REPORT_HEAD}..${PUSHED_HEAD}" 2>/dev/null)" ]] && PUSH_PRE='none'
   {
     echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
     echo
@@ -643,6 +669,10 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
       echo
       echo "${RESOLUTION_NOTE}"
     fi
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo
+      echo "🩸 Regression charged to round ${REGRESSED_ROUND}: that round pushed onto a head whose checks were all green and left them red. It no longer counts as progress for the consecutive-failure brake. · 已将回归记在第 ${REGRESSED_ROUND} 轮：该轮在检查全绿的 head 上推送后检查转红，因此不再计入连续失败熔断的有进展判定。"
+    fi
     echo
     echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
     echo
@@ -651,6 +681,21 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+    # Regression accounting (af-157). Two distinct facts, both keyed to the
+    # eval marker's window so the consecutive-failure walk reads them with
+    # the same filter it already applies to the eval markers:
+    #   autofix-push       — what THIS round pushed, and whether the head it
+    #                        pushed ONTO was fully green. Only an acted round
+    #                        writes it; a no-op pushed nothing to regress.
+    #                        head= is the PUSHED sha, not REPORT_HEAD (which
+    #                        deliberately records the pre-round head).
+    #   autofix-regression — the PRIOR round prepare found had left a green
+    #                        head red. Written by whichever report this round
+    #                        posts, so the record survives a later failure.
+    echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->"
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
+    fi
     if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
       echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     fi
@@ -660,6 +705,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     # that run's latest attempt).
     echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     emit_growth_audit_marker true
+    emit_self_review_marker
   } > "${WORKDIR}/report.md"
   STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
 else
@@ -688,12 +734,21 @@ else
       echo
       echo "${RESOLUTION_NOTE}"
     fi
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo
+      echo "🩸 Regression charged to round ${REGRESSED_ROUND}: that round pushed onto a head whose checks were all green and left them red. It no longer counts as progress for the consecutive-failure brake. · 已将回归记在第 ${REGRESSED_ROUND} 轮：该轮在检查全绿的 head 上推送后检查转红，因此不再计入连续失败熔断的有进展判定。"
+    fi
     echo
     echo "---"
     echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+    # No autofix-push marker: a no-op round pushed nothing that could
+    # regress. The regression it OBSERVED still has to be recorded here.
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
+    fi
     if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
       echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     fi
@@ -703,6 +758,7 @@ else
     # that run's latest attempt).
     echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     emit_growth_audit_marker true
+    emit_self_review_marker
   } > "${WORKDIR}/report.md"
   STATUS="no action needed"
 fi
@@ -719,6 +775,42 @@ for attempt in 1 2 3; do
   fi
   if [[ "${attempt}" == 3 ]]; then
     echo "::error::report post failed ${attempt} times for PR #${PR}; giving up"
+    # The report is the only carrier of this round's af-157 state, and no
+    # other step re-posts the report of a round that reached this script:
+    # the handoff comment the workflow can still post is gated on an
+    # outcome that is neither `fixed` nor `noop`. So whenever THIS round
+    # authored af-157 state -- a push whose head a later round can charge,
+    # an observation it made about the PRIOR round, or both -- a
+    # marker-only note carries it. Best-effort, and deliberately not
+    # gated on the outcome: a no-op round pushes nothing, but the
+    # regression it observed is just as unrecoverable once its report is
+    # lost, because the marker it read is superseded by the next push.
+    if [[ -n "${PUSHED_HEAD:-}" || -n "${REGRESSED_ROUND:-}" ]]; then
+      {
+        if [[ -n "${PUSHED_HEAD:-}" ]]; then
+          echo "🤖 Round ${NEXT_ROUND} pushed ${PUSHED_HEAD:0:9} but its report could not be posted; this note carries the round's push record only. · 第 ${NEXT_ROUND} 轮已推送 ${PUSHED_HEAD:0:9}，但报告发布失败；本条仅记录本轮的推送标记。"
+        else
+          echo "🤖 Round ${ROUND} could not post its report; this note carries the round's regression record only. · 第 ${ROUND} 轮报告发布失败；本条仅记录本轮的回归标记。"
+        fi
+        echo
+        # R31-2: the note must also carry the eval marker — round numbering
+        # reads autofix-eval only, and a fallback-posted round that consumes
+        # no number makes the NEXT round reuse it (the brake's
+        # regression-round walk then charges two rounds as one).
+        if [[ -n "${PUSHED_HEAD:-}" ]]; then
+          echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+        else
+          echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+        fi
+        if [[ -n "${PUSHED_HEAD:-}" ]]; then
+          echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->"
+        fi
+        if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+          echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
+        fi
+      } > "${WORKDIR}/push-marker.md"
+      gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/push-marker.md" || echo "::warning::push marker fallback post failed for PR #${PR}"
+    fi
   else
     echo "::warning::report post attempt ${attempt} failed for PR #${PR}; retrying"
     sleep 10

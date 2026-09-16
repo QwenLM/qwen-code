@@ -64,6 +64,9 @@ const verdict = {
   downgraded: true,
   downgradedFrom: 'Request changes',
   remediation: ['Run verification again.'],
+  // Non-empty on purpose, like `remediation`: a verdict composed before the
+  // field existed reads as `[]`, so the fixture value proves passthrough.
+  waivedFixes: ['reverse audit: the rebuild FIX is withheld — the wall.'],
   // Non-zero on purpose: the copy test then proves passthrough, not just
   // the validator's absent-means-zero default.
   deferredCount: 2,
@@ -429,6 +432,24 @@ describe('saveReviewArtifact', () => {
     },
   );
 
+  it('reads an absent waivedFixes as none withheld, and refuses a present one of the wrong shape', () => {
+    // A verdict composed before the field existed named nothing withheld;
+    // a present field is the composer's list and must be strings.
+    const bad = fixture();
+    writeJson(bad.composed, { ...verdict, waivedFixes: 'not a list' });
+    expect(() =>
+      saveReviewArtifact({ ...bad, target: 'local', effort: 'medium' }),
+    ).toThrow(/waivedFixes/);
+    expect(existsSync(bad.out)).toBe(false);
+
+    const paths = fixture();
+    const { waivedFixes: _dropped, ...older } = verdict;
+    writeJson(paths.composed, older);
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const document = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(document.verdict.waivedFixes).toEqual([]);
+  });
+
   it('PRESERVES an absent or null postedInline — zero would assert an unobserved count', () => {
     // The one field here whose absence is not defaulted. Its siblings'
     // defaults are true of a pre-feature round (it deferred nothing,
@@ -629,6 +650,52 @@ describe('saveReviewArtifact', () => {
     expect(() =>
       saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
     ).toThrow(/postedFresh/);
+  });
+
+  it('PRESERVES an absent or null fixedFindings — "no rulings recorded" is not "recorded: none"', () => {
+    // The field's own distinction, pinned: an artifact written before the
+    // thread lifecycle shipped carries no rulings, and defaulting absence
+    // to `[]` would stamp a claim the older round never made.
+    const paths = fixture();
+    const { fixedFindings: _absent, ...preLifecycle } = verdict as Record<
+      string,
+      unknown
+    >;
+    for (const composed of [
+      preLifecycle,
+      { ...verdict, fixedFindings: null },
+    ]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+      expect('fixedFindings' in saved.verdict).toBe(false);
+      rmSync(paths.out, { force: true });
+    }
+  });
+
+  it('round-trips a valid fixedFindings list and refuses a malformed one', () => {
+    // One acceptance table for the state JSON and the artifact read-back:
+    // a corrupt artifact must fail loudly here, not feed `submit` rulings
+    // the compose boundary would have refused.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      fixedFindings: [{ id: 'R1-2', by: 'the guard rewrite' }, { id: 'R2-7' }],
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the guard rewrite' }, { id: 'R2-7' }]);
+    rmSync(paths.out, { force: true });
+
+    writeJson(paths.composed, {
+      ...verdict,
+      fixedFindings: [{ id: 'not-a-ledger-id' }],
+    });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/fixedFindings/);
+    expect(existsSync(paths.out)).toBe(false);
   });
 
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {

@@ -74,6 +74,10 @@ export default defineConfig({
           __dirname,
           '../core/src/utils/conversations-runtime-marker.ts',
         ),
+        '@qwen-code/qwen-code-core/subagentRuntime': path.resolve(
+          __dirname,
+          '../core/src/subagent-runtime.ts',
+        ),
       }),
       // Mirrors `"@qwen-code/qwen-code-core/*": ["../core/src/*"]` from
       // packages/cli/tsconfig.json. esbuild reads that paths block when it

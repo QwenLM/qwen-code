@@ -2545,7 +2545,7 @@ describe('SessionRouter', () => {
           'ch:alice:chat1': {
             sessionId: 'worktree-session',
             target,
-            cwd: '/tmp/worktree-task',
+            cwd: worktreeTaskPath,
             isolation: 'worktree',
             workspaceCwd: '/tmp',
           },
@@ -2560,7 +2560,7 @@ describe('SessionRouter', () => {
         hasActivePrompt: false,
         worktree: {
           slug: 'task',
-          path: '/tmp/worktree-task',
+          path: worktreeTaskPath,
           branch: 'task',
         },
         worktreeState: 'persisted-v1' as const,
@@ -2601,9 +2601,7 @@ describe('SessionRouter', () => {
       expect(router.getSession('ch', 'alice', 'chat1')).toBe(
         'worktree-session',
       );
-      expect(router.getSessionCwd('worktree-session')).toBe(
-        '/tmp/worktree-task',
-      );
+      expect(router.getSessionCwd('worktree-session')).toBe(worktreeTaskPath);
 
       // A later persist keeps the restore metadata on the route.
       router.activateManagedSession(
@@ -2615,7 +2613,7 @@ describe('SessionRouter', () => {
         'ch:alice:chat1': {
           sessionId: 'worktree-session',
           target,
-          cwd: '/tmp/worktree-task',
+          cwd: worktreeTaskPath,
           isolation: 'worktree',
           workspaceCwd: '/tmp',
         },
@@ -2699,7 +2697,7 @@ describe('SessionRouter', () => {
         'replacement-session',
       );
       expect(router.getSessionCwd('replacement-session')).toBe(
-        '/tmp/worktree-task',
+        worktreeTaskPath,
       );
 
       // The replacement inherits the route's restore metadata.
@@ -2712,7 +2710,7 @@ describe('SessionRouter', () => {
       expect(data['ch:alice:chat1']).toEqual({
         sessionId: 'replacement-session',
         target,
-        cwd: '/tmp/worktree-task',
+        cwd: worktreeTaskPath,
         isolation: 'worktree',
         workspaceCwd: '/tmp',
       });
@@ -2747,7 +2745,7 @@ describe('SessionRouter', () => {
         'ch:alice:chat1': {
           sessionId: 'replacement-session',
           target,
-          cwd: '/tmp/worktree-task',
+          cwd: worktreeTaskPath,
           isolation: 'worktree',
           workspaceCwd: '/tmp',
         },
@@ -2765,7 +2763,7 @@ describe('SessionRouter', () => {
           'ch:alice:chat1': {
             sessionId: 'worktree-session',
             target,
-            cwd: '/tmp/worktree-task',
+            cwd: worktreeTaskPath,
           },
         }),
       );
@@ -2778,7 +2776,7 @@ describe('SessionRouter', () => {
       router.activateManagedSession(
         'worktree-session',
         target,
-        '/tmp/worktree-task',
+        worktreeTaskPath,
         { isolation: 'worktree', workspaceCwd: '/tmp' },
       );
 
@@ -2786,7 +2784,7 @@ describe('SessionRouter', () => {
         'ch:alice:chat1': {
           sessionId: 'worktree-session',
           target,
-          cwd: '/tmp/worktree-task',
+          cwd: worktreeTaskPath,
           isolation: 'worktree',
           workspaceCwd: '/tmp',
         },
@@ -2820,7 +2818,7 @@ describe('SessionRouter', () => {
           'ch:alice:chat1': {
             sessionId: 'worktree-session',
             target,
-            cwd: '/tmp/worktree-task',
+            cwd: worktreeTaskPath,
             isolation: 'worktree',
           },
         }),
@@ -2845,7 +2843,7 @@ describe('SessionRouter', () => {
       router.activateManagedSession(
         'worktree-session',
         target,
-        '/tmp/worktree-task',
+        worktreeTaskPath,
         { isolation: 'worktree', workspaceCwd: '/tmp' },
       );
 
@@ -2853,7 +2851,7 @@ describe('SessionRouter', () => {
         'ch:alice:chat1': {
           sessionId: 'worktree-session',
           target,
-          cwd: '/tmp/worktree-task',
+          cwd: worktreeTaskPath,
           isolation: 'worktree',
           workspaceCwd: '/tmp',
         },
@@ -2872,7 +2870,7 @@ describe('SessionRouter', () => {
       router.activateManagedSession(
         'worktree-session',
         target,
-        '/tmp/worktree-task',
+        worktreeTaskPath,
         { isolation: 'worktree', workspaceCwd: '/tmp' },
       );
       expect(router.removeSessionId('worktree-session')).toBe(true);
@@ -2887,7 +2885,7 @@ describe('SessionRouter', () => {
         router.activateManagedSession(
           'worktree-session',
           target,
-          '/tmp/worktree-task',
+          worktreeTaskPath,
           { isolation: 'worktree', workspaceCwd: '' },
         ),
       ).toThrow('workspace cwd');
@@ -2911,7 +2909,7 @@ describe('SessionRouter', () => {
       expect(data['ch:alice:chat1']).toEqual({
         sessionId: 'worktree-session',
         target,
-        cwd: '/tmp/worktree-task',
+        cwd: worktreeTaskPath,
         isolation: 'worktree',
         workspaceCwd: '/tmp',
       });

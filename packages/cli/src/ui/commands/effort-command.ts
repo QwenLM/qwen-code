@@ -77,15 +77,16 @@ export const effortCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: current
-          ? t(
-              'Current reasoning effort: {{current}}\nAvailable: {{tiers}}\nUse "/effort <tier>" to change it.',
-              { current, tiers: availableTierList },
-            )
-          : t(
-              'Reasoning effort: not set (using the model/provider default).\nAvailable: {{tiers}}\nUse "/effort <tier>" to set it.',
-              { tiers: availableTierList },
-            ),
+        content:
+          current && availableTiers.includes(current)
+            ? t(
+                'Current reasoning effort: {{current}}\nAvailable: {{tiers}}\nUse "/effort <tier>" to change it.',
+                { current, tiers: availableTierList },
+              )
+            : t(
+                'Reasoning effort: not set (using the model/provider default).\nAvailable: {{tiers}}\nUse "/effort <tier>" to set it.',
+                { tiers: availableTierList },
+              ),
       };
     }
 

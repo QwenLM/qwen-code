@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isTaskExecutionMode } from '@qwen-code/sdk/daemon';
+import {
+  isTaskExecutionMode,
+  parseDaemonBackgroundTurn,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -62,32 +65,75 @@ interface TranscriptMessageOptions {
 
 interface BackgroundAgentTaskUpdate {
   status: string;
+  awaitingProcessing: boolean;
   endTime: number;
 }
 
-function collectBackgroundAgentTaskUpdates(
+function collectBackgroundTaskUpdates(
   blocks: readonly DaemonTranscriptBlock[],
-): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
-  const updates = new Map<string, BackgroundAgentTaskUpdate>();
-  for (const block of blocks) {
-    if (block.kind !== 'assistant' && block.kind !== 'user') continue;
-    const meta = getRecord(block.meta);
-    if (
-      meta?.['source'] !== 'background_notification' ||
-      meta['qwenDiscreteMessage'] !== true
-    ) {
-      continue;
+) {
+  const agentUpdates = new Map<string, BackgroundAgentTaskUpdate>();
+  const latestTasks = new Map<string, Record<string, unknown>>();
+  const tasksByExecution = new Map<
+    string,
+    Record<string, unknown> | undefined
+  >();
+  const lastConsumedTaskIndex = new Map<string, number>();
+  const automaticTaskIds = new Set<string>();
+  for (const [index, block] of blocks.entries()) {
+    const meta = getRecord((block as ExtendedDaemonTextTranscriptBlock).meta);
+    const source = block.kind === 'status' ? block.source : meta?.['source'];
+    const completed = source === 'background_task_completed';
+    const task = getRecord(
+      block.kind === 'status' ? block.data : meta?.['backgroundTask'],
+    );
+    const taskId = getString(task, 'taskId');
+    if (task && taskId && (completed || source === 'background_notification')) {
+      latestTasks.set(taskId, task);
+      if (!completed) lastConsumedTaskIndex.set(taskId, index);
+      const toolUseId = getString(task, 'toolUseId');
+      const status = getString(task, 'status');
+      if (
+        task['kind'] === 'agent' &&
+        toolUseId &&
+        status &&
+        (block.kind === 'status' || meta?.['qwenDiscreteMessage'] === true)
+      ) {
+        agentUpdates.set(toolUseId, {
+          status,
+          awaitingProcessing: completed,
+          endTime:
+            (!completed ? agentUpdates.get(toolUseId)?.endTime : undefined) ??
+            block.serverTimestamp ??
+            block.clientReceivedAt,
+        });
+      }
     }
-    const task = getRecord(meta['backgroundTask']);
-    const toolUseId = getString(task, 'toolUseId');
-    const status = getString(task, 'status');
-    if (task?.['kind'] !== 'agent' || !toolUseId || !status) continue;
-    updates.set(toolUseId, {
-      status,
-      endTime: block.serverTimestamp ?? block.clientReceivedAt,
-    });
+    const turn = parseDaemonBackgroundTurn(
+      block.backgroundTurn ?? meta?.['backgroundTurn'],
+    );
+    if (
+      !turn ||
+      completed ||
+      ('parentToolCallId' in block && block.parentToolCallId) ||
+      tasksByExecution.has(turn.turnId)
+    )
+      continue;
+    lastConsumedTaskIndex.set(turn.taskId, index);
+    automaticTaskIds.add(turn.taskId);
+    const result = latestTasks.get(turn.taskId);
+    tasksByExecution.set(turn.turnId, result);
+    const agentUpdate = agentUpdates.get(
+      turn.toolUseId ?? getString(result, 'toolUseId') ?? '',
+    );
+    if (agentUpdate) agentUpdate.awaitingProcessing = false;
   }
-  return updates;
+  return {
+    agentUpdates,
+    tasksByExecution,
+    lastConsumedTaskIndex,
+    automaticTaskIds,
+  };
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
@@ -396,13 +442,26 @@ export function transcriptBlocksToDaemonMessages(
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const serverStartTimes = new Map<string, number>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
-  const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
+  const {
+    agentUpdates: backgroundAgentTaskUpdates,
+    tasksByExecution: backgroundTasksByExecution,
+    lastConsumedTaskIndex,
+    automaticTaskIds,
+  } = collectBackgroundTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
   let currentThinkingIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
   // the next top-level assistant/thought block must start a fresh assistant
   // message instead of being appended to text that appeared before the tool.
   let needsNewContentMessage = false;
+  let previousPromptId: string | undefined;
+  const backgroundResultMarkers = new Set<string>();
+  const loadedToolIds = new Set(
+    blocks.flatMap((block) =>
+      block.kind === 'tool' ? [block.toolCallId] : [],
+    ),
+  );
+  const completedTaskIds = new Set<string>();
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -410,6 +469,106 @@ export function transcriptBlocksToDaemonMessages(
     // message. Prefer the daemon-authoritative stamp so every client agrees;
     // fall back to the local receive time when the daemon left it unset.
     const blockTime = block.serverTimestamp ?? block.clientReceivedAt;
+    const blockMeta = getRecord(
+      (block as ExtendedDaemonTextTranscriptBlock).meta,
+    );
+    const backgroundTurn = parseDaemonBackgroundTurn(
+      block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
+    );
+    const promptId = backgroundTurn?.turnId ?? block.promptId;
+    if (
+      promptId !== undefined &&
+      previousPromptId !== undefined &&
+      promptId !== previousPromptId
+    ) {
+      currentAssistantIdx = null;
+      currentThinkingIdx = null;
+      needsNewContentMessage = true;
+    }
+    if (promptId !== undefined) previousPromptId = promptId;
+    if (
+      backgroundTurn &&
+      blockMeta?.['source'] !== 'background_task_completed' &&
+      !(
+        block.kind === 'status' && block.source === 'background_task_completed'
+      ) &&
+      !('parentToolCallId' in block && block.parentToolCallId) &&
+      !backgroundResultMarkers.has(backgroundTurn.turnId)
+    ) {
+      backgroundResultMarkers.add(backgroundTurn.turnId);
+      messages.push({
+        id: `background-turn:${backgroundTurn.turnId}`,
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: backgroundTurn.label ?? backgroundTurn.kind,
+        data: {
+          ...backgroundTurn,
+          backgroundTask: backgroundTasksByExecution.get(backgroundTurn.turnId),
+        },
+        backgroundTurn,
+        timestamp: backgroundTurn.startedAt,
+        sourceBlockIds: [block.id],
+      });
+      currentAssistantIdx = null;
+      currentThinkingIdx = null;
+      needsNewContentMessage = true;
+    }
+    if (
+      blockMeta?.['source'] === 'background_notification_turn_started' ||
+      (block.kind === 'status' &&
+        block.source === 'background_notification_turn_started')
+    )
+      continue;
+    if (
+      (block.kind === 'status' &&
+        block.source === 'background_task_completed') ||
+      ((block.kind === 'assistant' || block.kind === 'user') &&
+        blockMeta?.['source'] === 'background_task_completed')
+    ) {
+      const task = getRecord(
+        block.kind === 'status' ? block.data : blockMeta?.['backgroundTask'],
+      );
+      const taskId = getString(task, 'taskId');
+      if (taskId) completedTaskIds.add(taskId);
+      const awaitingProcessing =
+        (lastConsumedTaskIndex.get(taskId ?? '') ?? -1) <= i;
+      if (
+        !awaitingProcessing ||
+        (task?.['kind'] === 'agent' &&
+          loadedToolIds.has(getString(task, 'toolUseId') ?? ''))
+      )
+        continue;
+      messages.push({
+        id: block.id,
+        role: 'system',
+        variant: 'info',
+        source: 'background_task_completed',
+        content: block.text,
+        data: {
+          ...task,
+          awaitingProcessing,
+        },
+        timestamp: blockTime,
+        sourceBlockIds: [block.id],
+      });
+      currentAssistantIdx = null;
+      currentThinkingIdx = null;
+      needsNewContentMessage = true;
+      continue;
+    }
+    const notificationTaskId = getString(
+      getRecord(blockMeta?.['backgroundTask']),
+      'taskId',
+    );
+    if (
+      blockMeta?.['source'] === 'background_notification' &&
+      notificationTaskId &&
+      (backgroundTurn ||
+        completedTaskIds.has(notificationTaskId) ||
+        automaticTaskIds.has(notificationTaskId))
+    )
+      continue;
 
     switch (block.kind) {
       case 'user': {
@@ -713,12 +872,9 @@ export function transcriptBlocksToDaemonMessages(
         if (toolBlock.serverTimestamp !== undefined) {
           serverStartTimes.set(toolCall.callId, toolBlock.serverTimestamp);
         }
-        const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
-        if (permissionInfo?.title) {
-          toolCall.title = permissionInfo.title;
-        }
-        if (!toolCall.args && permissionInfo?.args) {
-          toolCall.args = permissionInfo.args;
+        if (backgroundAgentUpdate) {
+          toolCall.backgroundResultPending =
+            backgroundAgentUpdate.awaitingProcessing;
         }
         const parentSubAgent = toolCall.parentToolCallId
           ? toolsByCallId.get(toolCall.parentToolCallId)
@@ -726,6 +882,8 @@ export function transcriptBlocksToDaemonMessages(
         const existingTool = toolsByCallId.get(toolCall.callId);
 
         if (existingTool) {
+          existingTool.backgroundResultPending =
+            toolCall.backgroundResultPending;
           mergeToolCall(existingTool, toolCall, {
             replaceArgs:
               safeToolProjection ||
@@ -1025,6 +1183,9 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
+          ...(block.elapsedMs !== undefined
+            ? { data: { elapsedMs: block.elapsedMs } }
+            : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],
         });
@@ -1037,6 +1198,11 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   for (const tool of toolsByCallId.values()) {
+    const permissionInfo = permissionToolInfoByCallId.get(tool.callId);
+    if (permissionInfo?.title) tool.title = permissionInfo.title;
+    if (!Array.isArray(tool.args?.questions) && permissionInfo?.args) {
+      tool.args = permissionInfo.args;
+    }
     if (
       isSubAgentToolCall(tool) &&
       isActiveToolStatus(tool.status) &&
@@ -1205,6 +1371,10 @@ function mergeToolCall(
     target.args = source.args ?? target.args;
   }
   target.executionMode = source.executionMode ?? target.executionMode;
+  target.subagentSessionReady =
+    target.subagentSessionReady === true
+      ? true
+      : (source.subagentSessionReady ?? target.subagentSessionReady);
   target.locations = source.locations ?? target.locations;
 }
 
@@ -1296,6 +1466,7 @@ function daemonToolBlockToToolCall(
     executionMode: isTaskExecutionMode(executionMode)
       ? executionMode
       : undefined,
+    subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime:
@@ -1488,6 +1659,13 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'question_answers') {
+    return {
+      type: 'ask_user_question_answers',
+      text: preview.text,
+      answers: preview.answers,
+    };
+  }
   if (preview.kind === 'text') return preview.text;
   if (preview.kind === 'generic') return preview.summary;
   return {
@@ -1744,7 +1922,7 @@ function extractJsonObject(text: string, start: number): string | null {
   return null;
 }
 
-function splitInsightSegments(text: string): InsightSegment[] | null {
+export function splitInsightSegments(text: string): InsightSegment[] | null {
   const segments: InsightSegment[] = [];
   let lastIndex = 0;
   let pos = 0;

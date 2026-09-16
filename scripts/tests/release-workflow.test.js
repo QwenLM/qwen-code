@@ -102,7 +102,7 @@ const liveHostOssWorkflow = readFileSync(
 describe('CUA release workflow', () => {
   it('keeps the Node REPL package independently versioned', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.3');
+    expect(nodeReplPackage.version).toBe('0.1.5');
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
@@ -356,6 +356,57 @@ describe('release workflow', () => {
     }
   });
 
+  it('gates every pool-routed job on a disk floor before its heavy steps', () => {
+    // The release lane's slice of #10035. ci.yml has gated its heavy jobs on
+    // check-disk-floor.sh since that incident; release validation went
+    // without until a saturated instance died on ENOSPC mid-step — no log,
+    // no annotation — and took the release with it (runs 34998771277 and
+    // 35024357480). The gate fails the job fast instead, and a re-run lands
+    // on an instance with headroom. publish is hosted-only and stays ungated.
+    const isPoolRouted = (job) =>
+      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+    const gated = [];
+    for (const [id, job] of Object.entries(releaseYaml.jobs)) {
+      if (!isPoolRouted(job)) continue;
+      gated.push(id);
+      const steps = job.steps ?? [];
+      const gateIndex = steps.findIndex(
+        (step) => step.name === 'Disk floor gate (self-hosted)',
+      );
+      expect(gateIndex, id).toBeGreaterThanOrEqual(0);
+      const gate = steps[gateIndex];
+      expect(gate.if, id).toBe("${{ runner.environment == 'self-hosted' }}");
+      // The gate script rides the selected ref's checkout, so the gate can
+      // only stand between that checkout and the first heavy step, and a ref
+      // that predates the script must skip the gate rather than fail on it.
+      expect(gate.run, id).toBe(
+        'if [ -f .github/scripts/check-disk-floor.sh ]; then\n' +
+          '  bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"\n' +
+          'fi',
+      );
+      const checkoutIndex = steps.findIndex((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      );
+      const installIndex = steps.findIndex(
+        (step) => step.name === 'Install Dependencies',
+      );
+      expect(checkoutIndex, id).toBeGreaterThanOrEqual(0);
+      expect(installIndex, id).toBeGreaterThan(checkoutIndex);
+      expect(gateIndex, id).toBeGreaterThan(checkoutIndex);
+      expect(gateIndex, id).toBeLessThan(installIndex);
+    }
+    expect(gated.sort()).toEqual([
+      'integration_docker',
+      'integration_none',
+      'prepare',
+      'quality_build',
+      'quality_scripts',
+      'quality_static',
+      'quality_typecheck',
+      'workspace_tests',
+    ]);
+  });
+
   it('uses shallow history only for validation jobs', () => {
     const checkoutDepth = (id) =>
       releaseYaml.jobs[id].steps.find((step) =>
@@ -484,14 +535,20 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
-    // 900, raised from 830 for the promote_nightly wiring: the promotion
+    // 950, raised from 830 by two independent features that both landed on
+    // this branch. The promote_nightly wiring needed 900: the promotion
     // step, its input/version/promotion refusal outputs, and the
-    // release-source evidence step all add orchestration, and the
-    // notify_failure fallback is deliberately inline because it reports the
-    // very jobs a trusted checkout or the extracted runner would fail to run.
-    // Every step still stays under the per-step cap below, which is the rule
-    // that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(900);
+    // release-source evidence step all add orchestration. The pool-wide
+    // disk-floor gate needed 850: one anchored step plus one alias per
+    // pool-routed job is still orchestration, because the gate's logic lives
+    // in .github/scripts/check-disk-floor.sh (#10035). Carrying both sums to
+    // 950. 830 was itself raised from 800 for the notify_failure fallback:
+    // that job may not depend on the trusted checkout or the extracted
+    // runner, because it is the job that reports their failure, so its
+    // last-resort issue filing is deliberately inline. Every step still
+    // stays under the per-step cap below, which is the rule that actually
+    // keeps logic out of the YAML.
+    expect(workflow.split('\n').length).toBeLessThan(950);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;

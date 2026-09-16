@@ -5,6 +5,10 @@
  */
 
 import {
+  isSummaryReplayEvent,
+  summarizeReplayEvent,
+} from './replay-summary.js';
+import {
   EVENT_SCHEMA_VERSION,
   logEventSizingFailed,
   serializedBridgeEventByteLength,
@@ -148,7 +152,7 @@ function lastRecordIdIn(events: BridgeEvent[]): string | undefined {
 
 function lastSummaryRecordIdIn(events: BridgeEvent[]): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
-    if (!isSummaryLiveJournalEvent(events[i]!)) continue;
+    if (!isSummaryReplayEvent(events[i]!)) continue;
     const id = replayRecordId(events[i]!);
     if (id !== undefined) return id;
   }
@@ -319,7 +323,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     // are sparse (only stamped on session_updates at turn boundaries),
     // so `replayRecordId` returning undefined is the common case and
     // intentionally leaves `activeRecordId` untouched.
-    const summaryEvent = isSummaryLiveJournalEvent(event);
+    const summaryEvent = summarizeReplayEvent(event);
     const seenRecordId = replayRecordId(event);
     if (seenRecordId !== undefined) {
       this.activeRecordId = seenRecordId;
@@ -328,7 +332,11 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     this.appendLiveJournal(this.fullJournal, event, byteLength);
     if (summaryEvent) {
-      this.appendLiveJournal(this.summaryJournal, event, byteLength);
+      this.appendLiveJournal(
+        this.summaryJournal,
+        summaryEvent,
+        summaryEvent === event ? byteLength : undefined,
+      );
     }
 
     if (TURN_BOUNDARY_TYPES.has(event.type)) {
@@ -1196,29 +1204,6 @@ function extractParentToolCallIdFromMeta(meta: unknown): string | undefined {
     return typeof val === 'string' && val.length > 0 ? val : undefined;
   }
   return undefined;
-}
-
-function isSummaryLiveJournalEvent(event: BridgeEvent): boolean {
-  if (event.type !== 'session_update') return true;
-  const data = event.data as SessionUpdateData | undefined;
-  const meta = data?.update?._meta;
-  const parentToolCallId = extractParentToolCallIdFromMeta(meta);
-  if (parentToolCallId === undefined) return true;
-  // Mirror the UI normalizer's self-reference guard
-  // (normalizeToolUpdate drops parentToolCallId === toolCallId): such a
-  // frame renders as a ROOT tool block in the main transcript, so the
-  // summary journal must retain it too or a refresh drops a block the
-  // user was just looking at.
-  if (parentToolCallId === data?.update?.toolCallId) return true;
-  if (data?.update?.sessionUpdate !== 'agent_message_chunk') return false;
-  if (typeof meta !== 'object' || meta === null) return false;
-  const usage = (meta as Record<string, unknown>)['usage'];
-  if (typeof usage !== 'object' || usage === null) return false;
-  const fields = usage as Record<string, unknown>;
-  return (
-    typeof fields['inputTokens'] === 'number' ||
-    typeof fields['outputTokens'] === 'number'
-  );
 }
 
 function extractSourceRecordIdsFromMeta(

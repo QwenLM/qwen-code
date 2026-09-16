@@ -68,19 +68,28 @@ vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
 import {
   ToolConfirmationOutcome,
+  type Config,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
+  type ToolExecuteConfirmationDetails,
+  type ToolPlanConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
-  buildOutcomeOptions,
+  buildConfirmationPrompt,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
 
 const onConfirmNoop = async () => {};
 
+/** The dialog only ever asks the config whether the folder is trusted. */
+const fakeConfig = (isTrustedFolder: boolean): Config =>
+  ({ isTrustedFolder: () => isTrustedFolder }) as unknown as Config;
+
+const trustedConfig = fakeConfig(true);
+
 const execDetails = (
   hideAlwaysAllow?: boolean,
-): ToolCallConfirmationDetails => ({
+): ToolExecuteConfirmationDetails => ({
   type: 'exec',
   title: 'Run command',
   onConfirm: onConfirmNoop,
@@ -108,10 +117,28 @@ const askDetails = (
   onConfirm,
 });
 
-describe('buildOutcomeOptions', () => {
-  it('offers allow-once, both always-allow rows, and cancel by default', () => {
-    const values = buildOutcomeOptions(execDetails()).map((o) => o.value);
-    expect(values).toEqual([
+const planDetails = (prePlanMode?: string): ToolPlanConfirmationDetails => ({
+  type: 'plan',
+  title: 'Approve this plan?',
+  plan: 'step one',
+  prePlanMode,
+  onConfirm: onConfirmNoop,
+});
+
+describe('buildConfirmationPrompt', () => {
+  it('names the granted scope in the exec always-allow rows', () => {
+    const prompt = buildConfirmationPrompt(
+      { ...execDetails(), permissionRules: ['Bash(touch *)'] },
+      true,
+    );
+    expect(prompt.question).toBe("Allow execution of: 'ls'?");
+    expect(prompt.options.map((o) => o.label)).toEqual([
+      'Yes, allow once',
+      "Always allow run 'touch *' commands in this project",
+      "Always allow run 'touch *' commands for this user",
+      'No, suggest changes (esc)',
+    ]);
+    expect(prompt.options.map((o) => o.value)).toEqual([
       ToolConfirmationOutcome.ProceedOnce,
       ToolConfirmationOutcome.ProceedAlwaysProject,
       ToolConfirmationOutcome.ProceedAlwaysUser,
@@ -119,20 +146,117 @@ describe('buildOutcomeOptions', () => {
     ]);
   });
 
-  it('drops the always-allow rows when hideAlwaysAllow is set', () => {
-    const values = buildOutcomeOptions(execDetails(true)).map((o) => o.value);
+  it('falls back to the unscoped labels when no rules are supplied', () => {
+    const labels = buildConfirmationPrompt(execDetails(), true).options.map(
+      (o) => o.label,
+    );
+    expect(labels).toContain('Always allow in this project');
+    expect(labels).toContain('Always allow for this user');
+  });
+
+  it('drops the always-allow rows in an untrusted folder', () => {
+    // Granting a durable rule for a workspace the user has not trusted is not
+    // a decision the dialog may offer — ink gates these the same way.
+    const values = buildConfirmationPrompt(
+      { ...execDetails(), permissionRules: ['Bash(touch *)'] },
+      false,
+    ).options.map((o) => o.value);
     expect(values).toEqual([
       ToolConfirmationOutcome.ProceedOnce,
       ToolConfirmationOutcome.Cancel,
     ]);
   });
 
-  it('handles details without the hideAlwaysAllow field at all', () => {
-    // ask_user_question has no hideAlwaysAllow — reading it unguarded is a
-    // type error and would misrender the dialog for every question card.
-    const values = buildOutcomeOptions(askDetails()).map((o) => o.value);
-    expect(values).toContain(ToolConfirmationOutcome.ProceedOnce);
-    expect(values).toContain(ToolConfirmationOutcome.Cancel);
+  it('drops the always-allow rows when hideAlwaysAllow is set', () => {
+    const values = buildConfirmationPrompt(execDetails(true), true).options.map(
+      (o) => o.value,
+    );
+    expect(values).toEqual([
+      ToolConfirmationOutcome.ProceedOnce,
+      ToolConfirmationOutcome.Cancel,
+    ]);
+  });
+
+  it('offers edit a session-wide allow-always, not a persisted rule', () => {
+    const prompt = buildConfirmationPrompt(
+      {
+        type: 'edit',
+        title: 'Confirm Edit',
+        fileName: 'a.txt',
+        filePath: '/w/a.txt',
+        fileDiff: '',
+        originalContent: null,
+        newContent: 'x',
+        onConfirm: onConfirmNoop,
+      },
+      true,
+    );
+    expect(prompt.question).toBe('Apply this change?');
+    expect(prompt.options.map((o) => o.value)).toEqual([
+      ToolConfirmationOutcome.ProceedOnce,
+      ToolConfirmationOutcome.ProceedAlways,
+      ToolConfirmationOutcome.Cancel,
+    ]);
+  });
+
+  it('offers the plan outcomes, including restoring the previous mode', () => {
+    const prompt = buildConfirmationPrompt(planDetails('auto_edit'), true);
+    expect(prompt.question).toBe('Approve this plan?');
+    expect(prompt.options.map((o) => o.value)).toEqual([
+      ToolConfirmationOutcome.RestorePrevious,
+      ToolConfirmationOutcome.ProceedAlways,
+      ToolConfirmationOutcome.ProceedOnce,
+      ToolConfirmationOutcome.Cancel,
+    ]);
+    expect(prompt.options[0].label).toBe(
+      'Yes, restore previous mode (auto_edit)',
+    );
+    expect(prompt.options[3].label).toBe('No, keep planning (esc)');
+  });
+
+  it('defaults the plan restore label when no previous mode is recorded', () => {
+    expect(buildConfirmationPrompt(planDetails(), true).options[0].label).toBe(
+      'Yes, restore previous mode (default)',
+    );
+  });
+
+  it('suppresses only on an explicit hideAlwaysAllow true', () => {
+    const values = buildConfirmationPrompt(
+      { ...execDetails(), hideAlwaysAllow: false },
+      true,
+    ).options.map((o) => o.value);
+    expect(values).toContain(ToolConfirmationOutcome.ProceedAlwaysProject);
+  });
+
+  it('offers to leave AUTO mode when the classifier was unavailable', () => {
+    const values = buildConfirmationPrompt(
+      {
+        ...execDetails(),
+        autoModeFallback: {
+          reason: 'classifier_unavailable',
+          message: 'classifier down',
+        },
+      },
+      false,
+    ).options.map((o) => o.value);
+    expect(values).toEqual([
+      ToolConfirmationOutcome.ProceedOnce,
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+      ToolConfirmationOutcome.Cancel,
+    ]);
+  });
+
+  it('does not offer the AUTO-mode switch for an unrelated fallback reason', () => {
+    const values = buildConfirmationPrompt(
+      {
+        ...execDetails(),
+        autoModeFallback: { reason: 'total_denial', message: 'too many' },
+      },
+      false,
+    ).options.map((o) => o.value);
+    expect(values).not.toContain(
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    );
   });
 });
 
@@ -158,6 +282,7 @@ describe('OpenTuiToolConfirmation', () => {
           name: 'run_shell_command',
           confirmationDetails: { ...execDetails(), onConfirm },
         }}
+        config={trustedConfig}
         onSettled={onSettled}
       />,
     );
@@ -181,6 +306,7 @@ describe('OpenTuiToolConfirmation', () => {
           name: 'run_shell_command',
           confirmationDetails: { ...execDetails(), onConfirm },
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
@@ -206,6 +332,7 @@ describe('OpenTuiToolConfirmation', () => {
           name: 'ask_user_question',
           confirmationDetails: askDetails(undefined, onConfirm),
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
@@ -225,6 +352,7 @@ describe('OpenTuiToolConfirmation', () => {
           name: 'ask_user_question',
           confirmationDetails: askDetails([], onConfirm),
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
@@ -235,7 +363,7 @@ describe('OpenTuiToolConfirmation', () => {
     );
   });
 
-  it('renders the ink question line for MCP tool confirmations', () => {
+  it('renders the ink question line and labeled body for MCP confirmations', () => {
     const { container } = render(
       <OpenTuiToolConfirmation
         call={{
@@ -250,15 +378,64 @@ describe('OpenTuiToolConfirmation', () => {
             onConfirm: onConfirmNoop,
           },
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
-    // The question line carries the raw toolName; the accent line below it
-    // carries the human display name — kept distinct so this test pins both.
-    expect(container.textContent).toContain(
+    const text = container.textContent ?? '';
+    expect(text).toContain(
       'Allow execution of MCP tool "context_remember" from server "external-context"?',
     );
-    expect(container.textContent).toContain('Context Remember');
+    expect(text).toContain('MCP Server: external-context');
+    expect(text).toContain('Tool: context_remember');
+  });
+
+  it('renders the exec question line and numbered, scoped options', () => {
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: {
+            ...execDetails(),
+            rootCommand: 'touch',
+            command: 'touch marker',
+            permissionRules: ['Bash(touch *)'],
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain("Allow execution of: 'touch'?");
+    // Numbered rows, and the scope the user is actually granting.
+    expect(text).toContain('1.');
+    expect(text).toContain('4.');
+    expect(text).toContain(
+      "Always allow run 'touch *' commands in this project",
+    );
+    expect(text).toContain('No, suggest changes (esc)');
+  });
+
+  it('never renders the always-allow rows in an untrusted folder', () => {
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: {
+            ...execDetails(),
+            permissionRules: ['Bash(touch *)'],
+          },
+        }}
+        config={fakeConfig(false)}
+        onSettled={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Yes, allow once');
+    expect(text).not.toContain('Always allow');
   });
 
   it('keeps the head of a long info body and expands it on ctrl-s', () => {
@@ -282,6 +459,7 @@ describe('OpenTuiToolConfirmation', () => {
             onConfirm: onConfirmNoop,
           },
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
@@ -322,6 +500,7 @@ describe('OpenTuiToolConfirmation', () => {
             onConfirm: onConfirmNoop,
           },
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
@@ -349,6 +528,7 @@ describe('OpenTuiToolConfirmation', () => {
             onConfirm: onConfirmNoop,
           },
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
@@ -389,6 +569,7 @@ describe('OpenTuiToolConfirmation', () => {
             onConfirm: onConfirmNoop,
           },
         }}
+        config={trustedConfig}
         onSettled={() => {}}
       />,
     );
