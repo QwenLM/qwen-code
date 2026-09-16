@@ -30,6 +30,7 @@ import { Storage } from '../config/storage.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { hasRootlessMarker } from '../utils/container-runtime.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type {
   ToolConfirmationOutcome,
@@ -523,10 +524,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
         `${options.runtime} info failed: ${serverErrors.join('; ')}`,
       );
     }
-    const rootless =
-      info.includes('"name=rootless"') ||
-      info.includes('"rootless":true') ||
-      info.includes('"Rootless":true');
+    const rootless = hasRootlessMarker(info);
     const lines = config.getTruncateToolOutputLines();
     const threshold = config.getTruncateToolOutputThreshold();
     const workerOptions: ExecutionWorkerOptions = {
@@ -752,6 +750,8 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
           [...this.workers].map((worker) => worker.dispose()),
         );
         const failure = results.find((result) => result.status === 'rejected');
+        // A failed removal may leave a worker using these mounts. Retain the
+        // lease and temporary files until a later dispose removes that worker.
         if (failure?.status === 'rejected') throw failure.reason;
         this.invocations.clear();
         this.workers.clear();

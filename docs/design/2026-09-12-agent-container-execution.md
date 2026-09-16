@@ -31,7 +31,9 @@ or deleting a project value cannot overwrite or relabel an operator requirement.
 For this selector, a nonempty file-sourced value (including a home `.env` or
 inherited file provenance) is rejected with an instruction to export it in the
 launch environment. It must never silently become a local default. Home-file
-activation is not supported by this slice.
+activation is not supported by this slice. A nonempty selector in merged
+`settings.env`, including user settings, remains excluded and emits an export
+remediation diagnostic during loading, runtime snapshots and reloads.
 Agent has no `execution_backend` parameter. Definitions can request
 `executionBackend: container`; omission
 inherits the operator policy, and no definition value can weaken it. Without
@@ -92,7 +94,8 @@ model arguments cannot override it.
 Only the resolved string `container` is a valid definition value. Project
 declarations require a trusted workspace, matching external executors. Null, `local`, other
 values, duplicate keys, malformed YAML and invalid required fields must produce
-a named refusal, not fall through to a lower-priority local agent. Preserve the
+a named refusal, not fall through to a lower-priority local agent. Refusals
+reserve every declared top-level name, including middle duplicate keys. Preserve the
 field through save, unrelated edits, extensions and SDK session objects. Validate
 session objects when consumed; never filter invalid declarations and continue
 initialization with a builtin. Explicit deletion removes only the definition
@@ -276,7 +279,10 @@ egress or mandatory `--ignore-scripts` would be a separate policy change.
 
 Both paths use the same explicit environment allowlist and temporary HOME. No
 model, GitHub, cloud or MCP credentials are forwarded. Images and the container
-runtime are trusted infrastructure. Rootful runtimes use the invoking host
+runtime are trusted infrastructure. Rootless detection reads only Docker
+`SecurityOptions` and Podman `Host.Security.Rootless` or `host.security.rootless`;
+unrelated labels and unknown shapes do not disable host UID/GID mapping.
+Rootful runtimes use the invoking host
 UID/GID; a root operator therefore runs UID 0 inside the container. The dropped
 capabilities and `no-new-privileges` still apply; UID mapping does not guarantee
 an unprivileged user. This first backend is unavailable inside
@@ -312,6 +318,9 @@ synchronization. Failed path-specific invalidation after microcompaction also
 advances the host cache generation, so the next tool must resynchronize before
 reading; already compressed history and its result are retained.
 Memory-only cache eviction does not invalidate worker reads.
+Container cleanup failure reports preserved worktrees only when Agent created
+them. Caller-owned `working_dir` worktrees retain caller ownership and are never
+reported as leftover worktrees created by Agent.
 Permission preparation receives the caller cancellation signal, defaulting to
 the invocation-owned signal when omitted. Releasing an invocation cancels
 pending preparation and permission; abort listeners are removed first to avoid

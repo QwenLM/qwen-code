@@ -2672,7 +2672,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       return (
         `\n\n[Container cleanup failed: ${message}]` +
         formatWorktreeSuffix(
-          worktreeIsolation
+          worktreeIsolation && !worktreeIsolation.externallyManaged
             ? {
                 preservedPath: worktreeIsolation.path,
                 preservedBranch: worktreeIsolation.branch,

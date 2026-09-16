@@ -6,22 +6,7 @@
 
 import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from './env-provenance.js';
 
-/**
- * The whole `info` document is searched rather than one schema path, because
- * the two runtimes spell this in unrelated places — docker as a
- * `SecurityOptions` entry, podman as `Host.Security.Rootless` — and a
- * per-runtime template that a version rename breaks would fail to the rootful
- * answer without saying so. Verified against a live rootful docker: the word
- * does not occur anywhere in its `info` document, so a marker hit is a
- * positive statement, not an accident of some unrelated field.
- */
-export function hasRootlessMarker(info: string): boolean {
-  return (
-    info.includes('"name=rootless"') ||
-    info.includes('"rootless":true') ||
-    info.includes('"Rootless":true')
-  );
-}
+export { hasRootlessMarker } from '@qwen-code/qwen-code-core/utils/container-runtime.js';
 
 // Preserve the established review sandbox HOME path for both consumers.
 export const CONTAINER_HOME = '/qwen-review-home';

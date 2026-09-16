@@ -740,9 +740,16 @@ describe('AgentTool', () => {
       );
     });
 
-    it.each(['normal', 'cleanup-failure', 'setup-cleanup-failure'])(
-      'preserves isolated workspace data when finalizing %s',
-      async (mode) => {
+    it.each(
+      [false, true].flatMap((externallyManaged) =>
+        ['normal', 'cleanup-failure', 'setup-cleanup-failure'].map((mode) => ({
+          mode,
+          externallyManaged,
+        })),
+      ),
+    )(
+      'preserves isolated workspace data when finalizing $mode (caller-owned=$externallyManaged)',
+      async ({ mode, externallyManaged }) => {
         vi.useRealTimers();
         const repo = fs.realpathSync(
           fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-container-worktree-')),
@@ -776,6 +783,14 @@ describe('AgentTool', () => {
           ] as const) {
             vi.mocked(config[getter]).mockReturnValue(repo);
           }
+          const suppliedPath = path.join(repo, 'caller-worktree');
+          if (externallyManaged) {
+            execFileSync(
+              'git',
+              ['worktree', 'add', '-q', '-b', 'caller', suppliedPath],
+              { cwd: repo },
+            );
+          }
           config.getExecutionEnvironmentFactory = () => async (child) => {
             childPath = child.getWorkingDir();
             if (mode === 'setup-cleanup-failure')
@@ -793,13 +808,25 @@ describe('AgentTool', () => {
             );
           });
           const result = await (agentTool as AgentToolWithProtectedMethods)
-            .createInvocation({ ...params, isolation: 'worktree' })
+            .createInvocation({
+              ...params,
+              ...(externallyManaged
+                ? { working_dir: suppliedPath }
+                : { isolation: 'worktree' as const }),
+            })
             .execute();
           expect(childPath).not.toBe(repo);
           expect(fs.existsSync(childPath)).toBe(true);
-          expect(partToString(result.llmContent)).toContain(
-            `[worktree preserved: ${childPath}`,
-          );
+          if (externallyManaged) {
+            expect(childPath).toBe(suppliedPath);
+            expect(partToString(result.llmContent)).not.toContain(
+              '[worktree preserved:',
+            );
+          } else {
+            expect(partToString(result.llmContent)).toContain(
+              `[worktree preserved: ${childPath}`,
+            );
+          }
           if (mode === 'normal') {
             expect(
               fs.readFileSync(path.join(childPath, 'result.txt'), 'utf8'),

@@ -171,6 +171,53 @@ afterEach(() => {
 });
 
 describe('operator container requirement across environment reload', () => {
+  it.each(['load', 'reload', 'snapshot'])(
+    'reports an excluded home settings.env requirement during %s',
+    (operation) => {
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const key = AGENT_EXECUTION_BACKEND_ENV;
+      const settingsFile = path.join(os.homedir(), '.qwen', 'settings.json');
+      fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({
+          env: { [key]: 'docker', RUNTIME_SETTINGS_ONLY: 'loaded' },
+        }),
+      );
+      const settings = testSettings(
+        JSON.parse(fs.readFileSync(settingsFile, 'utf8')),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        if (operation === 'snapshot') {
+          const snapshot = buildRuntimeEnvironment(
+            settings,
+            workspace,
+            {},
+            true,
+          );
+          expect(snapshot.effectiveEnv[key]).toBeUndefined();
+          expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe('loaded');
+        } else {
+          if (operation === 'load') loadEnvironment(settings, workspace);
+          else reloadEnvironment(settings, workspace, true);
+          expect(process.env[key]).toBeUndefined();
+          expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('loaded');
+        }
+        expect(agentExecutionBackend()).toBeUndefined();
+        expect(isFileSourcedEnvKey(key)).toBe(false);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    },
+  );
+
   it.each(
     ['.env', '.qwen/.env', 'settings.env'].flatMap((source) =>
       ['', 'docker', 'podman'].map((value) => ({ source, value })),

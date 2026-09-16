@@ -177,6 +177,43 @@ describe.skipIf(process.platform === 'win32')(
       return volume!.slice(0, -suffix.length);
     };
 
+    it.each([
+      [{ Labels: ['name=rootless'] }, false],
+      [{ Plugins: { Rootless: true } }, false],
+      [{ Registries: { rootless: true } }, false],
+      [{ SecurityOptions: ['name=rootless'] }, true],
+      [{ Host: { Security: { Rootless: true } } }, true],
+      [{ host: { security: { rootless: true } } }, true],
+    ])(
+      'uses security metadata for both worker UID mappings: %j',
+      async (info, rootless) => {
+        await environment.dispose();
+        runtime.execFile.mockClear();
+        runtime.execFile.mockImplementation(
+          (_runtime, args, _options, callback) => {
+            callback(
+              null,
+              args[0] === 'info' ? JSON.stringify(info) : '{}',
+              '',
+            );
+          },
+        );
+        environment = await createEnvironment();
+        await prepareInstall();
+        const creates = runtime.execFile.mock.calls
+          .map((call) => call[1] as string[])
+          .filter((args) => args[0] === 'create');
+        expect(creates).toHaveLength(2);
+        for (const args of creates) {
+          expect(args.includes('--user')).toBe(!rootless);
+          if (!rootless)
+            expect(args[args.indexOf('--user') + 1]).toBe(
+              `${process.getuid!()}:${process.getgid!()}`,
+            );
+        }
+      },
+    );
+
     it.each([false, true])(
       'reclaims failed startup after runtime recovery (shutdown also fails=%s)',
       async (failShutdown) => {

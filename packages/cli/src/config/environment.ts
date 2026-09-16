@@ -22,6 +22,7 @@ import {
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { publishPendingCompileCache } from './compile-cache.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
   ENV_CORRUPTED_PATH,
@@ -536,6 +537,26 @@ function setRuntimeEnvIfUnset(
   }
 }
 
+function reportRejectedSettingsEnv(
+  env: Record<string, unknown>,
+  startDir: string,
+): void {
+  const source = `settings.env (${startDir})`;
+  reportRejectedLoaderKeys(source, Object.keys(env));
+  if (
+    Object.entries(env).some(
+      ([key, value]) =>
+        key.toUpperCase() === 'QWEN_AGENT_EXECUTION_BACKEND' &&
+        typeof value === 'string' &&
+        value.trim() !== '',
+    )
+  ) {
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.`,
+    );
+  }
+}
+
 export function buildRuntimeEnvironment(
   settings: Settings,
   startDir: string = process.cwd(),
@@ -585,10 +606,7 @@ export function buildRuntimeEnvironment(
       if (typeof value !== 'string') continue;
       setRuntimeEnvIfUnset(effectiveEnv, key, value);
     }
-    reportRejectedLoaderKeys(
-      `settings.env (${startDir})`,
-      Object.keys(settings.env),
-    );
+    reportRejectedSettingsEnv(settings.env, startDir);
   }
 
   const overlayKeys = Object.keys(effectiveEnv)
@@ -690,10 +708,7 @@ export function loadEnvironment(
         lastReloadSnapshot.set(key, value);
       }
     }
-    reportRejectedLoaderKeys(
-      `settings.env (${startDir})`,
-      Object.keys(settings.env),
-    );
+    reportRejectedSettingsEnv(settings.env, startDir);
   }
   lastReloadSnapshotSeeded = true;
   Object.assign(process.env, getRelaunchEnvProvenance());
@@ -778,10 +793,7 @@ export function reloadEnvironment(
       if (dotEnvReadFailed && lastReloadSnapshot.has(key)) continue;
       newSettingsEnvKeys.set(key, value);
     }
-    reportRejectedLoaderKeys(
-      `settings.env (${workspaceCwd})`,
-      Object.keys(settings.env),
-    );
+    reportRejectedSettingsEnv(settings.env, workspaceCwd);
   }
 
   // Union of all new keys

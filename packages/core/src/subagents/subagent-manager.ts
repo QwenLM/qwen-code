@@ -8,7 +8,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import { isNode, parseDocument } from 'yaml';
+import { isMap, isNode, isScalar, parseDocument } from 'yaml';
 import {
   parse as parseYaml,
   sanitizeValue,
@@ -119,14 +119,17 @@ function isNamedExecutionRefusal(error: unknown): error is SubagentError {
   );
 }
 
-const acceptedRefusalNames = new WeakMap<SubagentError, string>();
+const acceptedRefusalNames = new WeakMap<SubagentError, readonly string[]>();
 
 function recordExecutionRefusal(
   refusals: Map<string, SubagentError>,
   error: unknown,
 ): void {
   if (!isNamedExecutionRefusal(error)) return;
-  for (const name of [error.subagentName, acceptedRefusalNames.get(error)]) {
+  for (const name of [
+    error.subagentName,
+    ...(acceptedRefusalNames.get(error) ?? []),
+  ]) {
     if (name) refusals.set(name.toLowerCase(), error);
   }
 }
@@ -1949,6 +1952,7 @@ function parseSubagentContent(
   let claimsExecutor = false;
   let executionBackend: 'container' | undefined;
   let declaredName: string | undefined;
+  const declaredNames: string[] = [];
   let acceptedName: string | undefined;
   try {
     const normalizedContent = normalizeContent(content);
@@ -1992,19 +1996,23 @@ function parseSubagentContent(
       executorClaimMatch !== null &&
       !probeMatchInsideBlockScalar(document, executorClaimMatch.index);
     claimsExecutor = hasExecutor || probeIsClaim;
-    try {
-      const nameNode = document.get('name');
-      // Resolve this node alone: a broken backend alias must not hide its name.
-      const nodeName = isNode(nameNode)
-        ? sanitizeValue(nameNode.toJS(document))
-        : nameNode;
-      if (nodeName != null) {
-        const normalizedName = String(nodeName);
-        if (normalizedName !== '') declaredName = normalizedName;
+    if (isMap(document.contents)) {
+      for (const { key, value } of document.contents.items) {
+        if (!isScalar(key) || key.value !== 'name') continue;
+        try {
+          // Resolve each name alone: an invalid sibling must not hide it.
+          const nodeName = isNode(value)
+            ? sanitizeValue(value.toJS(document))
+            : value;
+          if (nodeName != null && String(nodeName) !== '') {
+            declaredNames.push(String(nodeName));
+          }
+        } catch {
+          // An unresolved alias cannot hide the remaining declared names.
+        }
       }
-    } catch {
-      // toJS/node reads can throw on an unresolved alias; keep the lenient name.
     }
+    declaredName = declaredNames[0];
     if (declaredName === undefined) {
       const lenientName = frontmatter['name'];
       if (lenientName != null && lenientName !== '') {
@@ -2338,8 +2346,11 @@ function parseSubagentContent(
   } catch (error) {
     const refuse = (refusal: SubagentError): never => {
       // Malformed YAML can make the AST and the accepted lenient name differ.
-      if (isNamedExecutionRefusal(refusal) && acceptedName) {
-        acceptedRefusalNames.set(refusal, acceptedName);
+      if (isNamedExecutionRefusal(refusal)) {
+        acceptedRefusalNames.set(
+          refusal,
+          acceptedName ? [...declaredNames, acceptedName] : declaredNames,
+        );
       }
       throw refusal;
     };
