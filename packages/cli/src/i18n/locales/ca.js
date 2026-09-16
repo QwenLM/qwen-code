@@ -792,6 +792,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurats',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Torneu a obrir aquest menú per recarregar les definicions dels hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Els controls dels hooks i la configuració de seguretat HTTP requereixen un reinici.',
+  'Failed to reload hook definitions: {{error}}':
+    'No s’han pogut recarregar les definicions dels hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Return per seleccionar · Esc per cancel·lar',
   'Exit codes:': 'Codis de sortida:',
@@ -1600,6 +1606,11 @@ export default {
   'No tasks currently running': 'No hi ha cap tasca en execució',
   'No entry to show.': 'No hi ha cap entrada per mostrar.',
   'needs approval': 'necessita aprovació',
+  'Large workflow': 'Workflow gran',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow gran: {{agents}} agents programats (llindar d’avís {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow gran: ~{{tokens}} tokens de sortida previstos (llindar d’avís {{cap}}).',
   'rejected — edit config to re-approve':
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
@@ -2740,8 +2751,6 @@ export default {
   // ============================================================================
   // Ordres diverses
   // ============================================================================
-  'Set a goal — keep working until the condition is met':
-    'Estableix un objectiu — continua treballant fins que es compleixi la condició',
   'Show current process memory diagnostics':
     'Mostra els diagnòstics de memòria del procés actual',
   'Record a CPU profile for Chrome DevTools analysis':
