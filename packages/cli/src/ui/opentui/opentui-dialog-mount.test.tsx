@@ -326,7 +326,7 @@ describe('OpenTuiDialogMount routing', () => {
 
       expect(mocks.state.dialogProps['hooks']?.['notice']).toBe(
         available
-          ? 'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.'
+          ? 'Reopen this menu to reload hook definitions.\nHook controls and HTTP security settings require a restart.'
           : undefined,
       );
     },

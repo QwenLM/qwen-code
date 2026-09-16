@@ -513,9 +513,12 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           notice={
             config?.getHookSystem()
-              ? t(
-                  'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.',
-                )
+              ? [
+                  t('Reopen this menu to reload hook definitions.'),
+                  t(
+                    'Hook controls and HTTP security settings require a restart.',
+                  ),
+                ].join('\n')
               : undefined
           }
           onClose={onClose}

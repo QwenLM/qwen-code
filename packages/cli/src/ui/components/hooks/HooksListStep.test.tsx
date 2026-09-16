@@ -152,8 +152,10 @@ describe('HooksListStep', () => {
       <HooksListStep hooks={hooks} selectedIndex={0} hooksReloadable />,
     );
 
-    expect(lastFrame()?.replace(/\s+/g, ' ')).toContain(
-      'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.',
+    const flattened = lastFrame()?.replace(/\s+/g, ' ');
+    expect(flattened).toContain('Reopen this menu to reload hook definitions.');
+    expect(flattened).toContain(
+      'Hook controls and HTTP security settings require a restart.',
     );
   });
 

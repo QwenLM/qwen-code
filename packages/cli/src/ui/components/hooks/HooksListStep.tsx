@@ -69,11 +69,14 @@ export function HooksListStep({
           )}
         </Text>
         {hooksReloadable && (
-          <Text color={theme.text.secondary}>
-            {t(
-              'Reopen this menu to reload hook definitions. Hook controls and HTTP security settings require a restart.',
-            )}
-          </Text>
+          <>
+            <Text color={theme.text.secondary}>
+              {t('Reopen this menu to reload hook definitions.')}
+            </Text>
+            <Text color={theme.text.secondary}>
+              {t('Hook controls and HTTP security settings require a restart.')}
+            </Text>
+          </>
         )}
       </Box>
 
