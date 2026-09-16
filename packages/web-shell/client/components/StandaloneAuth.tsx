@@ -52,6 +52,7 @@ interface AuthCopy {
   confirmTarget: string;
   remoteHint: string;
   remoteUnreachable: string;
+  switchUnavailable: string;
   addressLabel: string;
   tokenLabel: string;
   connect: string;
@@ -84,6 +85,8 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
       'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
     remoteHint:
       'The token is sent to the address shown above. Enter only a token issued by that daemon.',
+    switchUnavailable:
+      'Browser storage is unavailable, so the token could not be carried to that daemon.',
     addressLabel: 'Daemon address',
     tokenLabel: 'Bearer token (optional)',
     connect: 'Connect',
@@ -109,6 +112,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     confirmTarget:
       '此页面指向一个本浏览器从未连接过的守护进程。仅在你信任它时再连接。',
     remoteHint: '令牌会发送到上方显示的地址。请只输入该守护进程签发的令牌。',
+    switchUnavailable: '浏览器存储不可用，因此无法把 token 带到该 daemon。',
     addressLabel: 'Daemon 地址',
     tokenLabel: 'Bearer token（可选）',
     connect: '连接',
@@ -151,7 +155,7 @@ export function StandaloneAuth({
   invalidTarget?: boolean;
   /** The daemon came from a link to an origin this browser has not used. */
   unconfirmedTarget?: boolean;
-  onChangeTarget?: (daemonOrigin: string, token?: string) => void;
+  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
@@ -358,10 +362,14 @@ export function StandaloneAuth({
                 return;
               }
               if (changingTarget) {
-                onChangeTarget(
+                const switched = onChangeTarget(
                   normalizedAddress,
                   token.trim() || getDaemonToken(normalizedAddress),
                 );
+                if (switched === false) {
+                  setBusy(false);
+                  setStatus(copy.switchUnavailable);
+                }
                 return;
               }
               // Confirming an unfamiliar target starts its first probe.
