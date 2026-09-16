@@ -22,17 +22,19 @@
  *
  * Not ported, and recorded as follow-ups: word jumps (ctrl/alt+←/→, alt+b/f),
  * delete-word-right (alt+d, ctrl/alt+Delete), kill-line (ctrl+k/ctrl+u) and
- * undo/redo (ctrl+z) — all of which ink's TextInput does bind. ctrl+D is
- * deliberately absent: the app's global EXIT binding acts on it, and this
- * reducer hands it back unhandled, so no field ever edits on that key. Three
- * rendering differences remain as well: ink windows the field at `inputWidth`
- * columns, and its one-line viewport shows only the line the caret is on, so a
- * pasted multi-line value hides everything off that line, while these rows
- * render the whole value; ink blinks the cursor cell every 530 ms, where a
+ * undo/redo (ctrl+z) — all of which ink's TextInput does bind, as it does
+ * clear-input (ctrl+C) and open-external-editor (ctrl+X). Neither is ported:
+ * the app's exit handler acts on ctrl+C wherever a dialog owns the screen, and
+ * ctrl+X is unbound in this renderer. ctrl+D is deliberately absent: the app's
+ * global EXIT binding acts on it, and this reducer hands it back unhandled, so
+ * no field ever edits on that key. Three rendering differences remain as well:
+ * ink windows the field at `inputWidth` columns, where these rows do no column
+ * windowing of their own; ink blinks the cursor cell every 530 ms, where a
  * steady cell keeps the dialog from repainting on a timer; and the cell carries
  * the theme accent, as the composer's cursor does, where ink paints a gray read
  * from the terminal background (and falls back to an underline where a block
- * would corrupt IME composition).
+ * would corrupt IME composition). A pasted multi-line value shows only the line
+ * the caret is on, as ink's one-line viewport does.
  */
 
 import { useRef, useState } from 'react';
@@ -75,9 +77,16 @@ export function clampCaret(state: LineState): LineState {
  * The caret indexes the value the owner acknowledged, not the text this module
  * last proposed: an owner that refuses a character would otherwise leave the
  * caret one cell right of where the user put it, and the next Backspace would
- * delete a character the user never inserted. Capping the caret at the code
- * points the two texts agree on makes a refused keystroke leave no trace at all,
- * and is just the clamp when they are equal.
+ * delete a character the user never inserted.
+ *
+ * Walking the two texts together and charging the caret only for the code points
+ * dropped ahead of it covers both shapes an owner refuses in. A single refused
+ * keystroke drops one code point at the caret and leaves nothing behind it, and
+ * an owner that filters the middle of a pasted value (`1,024` → `1024`) keeps the
+ * caret following the accepted tail rather than stranding it on the first
+ * character it removed. A value the walk cannot align — the owner inserted or
+ * substituted instead of dropping — falls back to capping the caret at the code
+ * points the two texts agree on. Both reduce to the clamp when they are equal.
  */
 export function caretForAcceptedValue(
   state: LineState,
@@ -86,16 +95,37 @@ export function caretForAcceptedValue(
   if (accepted === state.text) return clampCaret(state);
   const proposed = toCodePoints(state.text);
   const current = toCodePoints(accepted);
-  let shared = 0;
-  while (
-    shared < proposed.length &&
-    shared < current.length &&
-    proposed[shared] === current[shared]
-  ) {
-    shared++;
+  const caret0 = Math.min(state.cursor, proposed.length);
+  let p = 0;
+  let c = 0;
+  let dropped = 0;
+  while (p < proposed.length && c < current.length) {
+    if (proposed[p] === current[c]) {
+      p++;
+      c++;
+    } else if (p < caret0) {
+      p++;
+      dropped++;
+    } else {
+      break;
+    }
   }
-  const cursor = Math.min(state.cursor, shared);
-  return { text: accepted, cursor };
+  let cursor = caret0 - dropped;
+  if (c < current.length) {
+    let shared = 0;
+    while (
+      shared < proposed.length &&
+      shared < current.length &&
+      proposed[shared] === current[shared]
+    ) {
+      shared++;
+    }
+    cursor = Math.min(state.cursor, shared);
+  }
+  return {
+    text: accepted,
+    cursor: Math.max(0, Math.min(cursor, current.length)),
+  };
 }
 
 /** `[start, end)` code-point bounds of the line the caret sits on. */
@@ -295,24 +325,33 @@ export function useLineEdit(
   /** Inserts at the caret: a paste, or a printable key. */
   insert: (text: string) => void;
   /**
-   * The field submitted and the wizard moved on. A keystroke handled now would
-   * land in the step this read already left, because the read keeps dispatching
-   * to the handler of the render that armed it.
+   * The field submitted and its owner moved on. Keys and pastes handled from here
+   * would land in the row this read already left, because one stdin read keeps
+   * dispatching to the handler of the render that armed it — and the render the
+   * submit itself schedules can leave the row mounted and focused.
    */
   settle: () => void;
-  /** Whether {@link settle} was called on this field. */
+  /**
+   * Whether {@link settle} was called on this field. Holds across renders until
+   * `mountKey` re-seeds it, so a submit's own re-render does not disarm the latch.
+   */
   readonly settled: boolean;
 } {
   const [, repaint] = useState(0);
-  // Per render, not per mount: a fresh handler closes over a fresh copy of this,
-  // so the flag spans exactly one stdin read while the render that follows the
-  // submit clears it. A field whose submit was rejected stays editable.
-  let settled = false;
+  // A ref, not a per-render binding: the render a successful submit schedules
+  // would otherwise clear the latch, and in the question dialog that render
+  // leaves the submitted row mounted and focused for the whole 150 ms pause, so
+  // the next stdin read would keep editing an answer already recorded. Clearing
+  // it where the mirror is re-seeded re-arms the field exactly when its owner
+  // moves on to another row. A field whose submit was rejected stays editable,
+  // because only `settle` arms this and every consumer calls it after success.
+  const settledRef = useRef(false);
   const mirror = useRef<LineState>(endOfLine(value));
   const mounted = useRef<unknown>(mountKey);
   if (mounted.current !== mountKey) {
     mounted.current = mountKey;
     mirror.current = endOfLine(value);
+    settledRef.current = false;
   } else {
     mirror.current = caretForAcceptedValue(mirror.current, value);
   }
@@ -337,14 +376,19 @@ export function useLineEdit(
       return true;
     },
     insert: (text) => {
+      // Enforced here rather than at each call site: a bracketed paste arrives as
+      // its own event on the same still-registered handler, so a latch only the
+      // keyboard branch checks would let a paste trailing the step-leaving Enter
+      // edit a field the wizard has already left.
+      if (settledRef.current) return;
       const edited = insertAtCaret(mirror.current, text);
       if (edited !== mirror.current) commit(edited);
     },
     settle: () => {
-      settled = true;
+      settledRef.current = true;
     },
     get settled() {
-      return settled;
+      return settledRef.current;
     },
   };
 }

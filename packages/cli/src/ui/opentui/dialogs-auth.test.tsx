@@ -522,8 +522,9 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
   it('submits the burst that shares one batch with its Enter', async () => {
     await runToApiKeyStep();
     await typeBatchedThenEnter('sk-burst-key');
-    // The Enter read the flow's state, which no render had refreshed yet, so the
-    // step refused the key it was showing and stayed put.
+    // Before the fix the Enter read the flow's state, which no render had
+    // refreshed yet, and the step refused the key it was showing; the submit now
+    // reads the editor's live text, so the burst lands on the models step.
     expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
   });
 
@@ -605,6 +606,31 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     });
     // The review step prints what will be saved, and the Enter that left the
     // advanced-config step carried 12. The trailing digit belongs to no step.
+    expect(document.body.textContent).toContain('"contextWindowSize": 12');
+    expect(document.body.textContent).not.toContain('"contextWindowSize": 123');
+  });
+
+  it('ignores the paste that trails the advanced-config step Enter', async () => {
+    await runToApiKeyStep();
+    await typeText('sk-test');
+    await press('return'); // apiKey → models
+    await typeText('test-model');
+    await press('return'); // models → advancedConfig
+    await press('down'); // thinking → modality
+    await press('down'); // modality → context window
+    const handler = lastKeyboardHandler();
+    const pasteHandler = mocks.state.pasteHandlers.at(-1);
+    if (!pasteHandler) throw new Error('no paste handler registered');
+    await act(async () => {
+      for (const char of '12') {
+        handler(baseKeyEvent({ name: char, sequence: char }));
+      }
+      handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      // One stdin read dispatches its keys and its pastes in order to the same
+      // still-registered handlers, with no commit in between, so a paste the
+      // terminal buffered while the app was busy lands after the Enter.
+      pasteHandler(makePasteEvent('3'));
+    });
     expect(document.body.textContent).toContain('"contextWindowSize": 12');
     expect(document.body.textContent).not.toContain('"contextWindowSize": 123');
   });

@@ -320,6 +320,33 @@ describe('line-edit', () => {
     });
   });
 
+  it('follows the accepted tail of a value the owner filtered in the middle', () => {
+    // A paste into a field whose setter strips characters out of the middle is
+    // not a refusal at the caret. Capping the caret at the shared prefix strands
+    // it on the first code point the owner dropped, so the next digit lands
+    // ahead of the tail the user pasted and the next Backspace eats a real one.
+    expect(caretForAcceptedValue({ text: '1,024', cursor: 5 }, '1024')).toEqual(
+      {
+        text: '1024',
+        cursor: 4,
+      },
+    );
+    expect(
+      caretForAcceptedValue(
+        { text: 'context window: 32768', cursor: 21 },
+        '32768',
+      ),
+    ).toEqual({ text: '32768', cursor: 5 });
+    // A caret ahead of the dropped code point keeps its own offset: nothing was
+    // removed before it, so there is nothing to charge it for.
+    expect(caretForAcceptedValue({ text: '1,024', cursor: 1 }, '1024')).toEqual(
+      {
+        text: '1024',
+        cursor: 1,
+      },
+    );
+  });
+
   it('splits the value at the caret for cursor rendering', () => {
     expect(caretSpans({ text: 'abc', cursor: 1 })).toEqual({
       before: 'a',
