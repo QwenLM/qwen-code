@@ -57,14 +57,15 @@ reconstruction.
 Each scenario runs twice, once per renderer, from the same bundle and the same
 boot arguments, and checkpoints are declared by the scenario rather than
 sampled on a timer, so both legs are captured at the same point in the script
-rather than at the same wall-clock moment. Twenty-six scenarios cover boot, a
+rather than at the same wall-clock moment. Twenty-seven scenarios cover boot, a
 narrow terminal, typing and completion, `@` completion, mid-stream indicators,
 a tool run under auto-approval, a tool confirmation, the slash dialogs, the
 approval-mode cycle, the auto-mode boot notice, an error path, a resize, clear
 and exit, a long hold that cycles the loading phrases, a to-do card, the
 question dialog on its own, the same dialog across three questions with a
 multi-select and a typed answer, that dialog's free-text row corrected in the
-middle of a typed value, the release of a parked confirmation when the
+middle of a typed value, the same dialog's chip row on a terminal narrow enough
+to ellipsize a header, the release of a parked confirmation when the
 approval mode changes, the approval of a gated server at startup, a tool call
 whose arguments are long enough to be capped, a control arm that repeats that
 call with the arguments row switched off, an answer long enough to overflow
@@ -1641,20 +1642,38 @@ that own the behaviour it takes away:
 | the unreachable cancel restored                      | nothing — which is the finding |
 | the lock's tab clause restored                       | nothing — which is the finding |
 
-The machine leg is recorded with the matrix re-run below.
+The machine leg was re-run at this head: twenty-seven scenarios on both legs,
+fifty-four runs, none of them erroring. Of the seventy-eight checkpoints,
+twenty-two have identical non-blank content rows and fifty-four diverge,
+carrying 241 rows only ink draws and 282 only this port draws; the two that
+remain are the sampled checkpoints — the spinner's phrase rotation and the
+mid-stream indicator — which are counted apart, since what they hold is elapsed
+time and a phrase chosen per tick. Against the previous head, 146 of the 152
+plain captures are byte-identical, and the six that are not are three
+checkpoints differing on both legs at once: the mid-stream indicator, `/stats`,
+and the held-phrase row — the content that moves between two runs of the same
+binary.
+
+Nothing recorded in this decision moves a frame, and that is the expected result
+rather than a missing one. The bound on the answer row is the identity until a
+value exceeds the window, and no scenario types one that does; the paste guards,
+the retry counter and the settle verdict all turn on what a single stdin read
+carries beside the key that submitted it, which is a property of the tty rather
+than of any script. Like the caret rule in Decision 35, these five rest on the
+unit suites.
 
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for twenty-six scenarios at 100×40 and, for the narrow
-  and resize scenarios, at 60×24 — seventy-seven checkpoints in all, of which
-  twenty-two match byte for byte. Both legs from one bundle and one set of
-  boot arguments.
+  reconstructed screen, for twenty-seven scenarios — twenty-two at 100×40, the
+  three transcript arms at 100×30, the narrow boot at 60×24 and the chip row at
+  58×40 — seventy-eight checkpoints in all, of which twenty-two match byte for
+  byte. Both legs from one bundle and one set of boot arguments.
 - **Colour was not verified, apart from one row family.** The reconstruction is
   text. Several rows are known to differ only in which theme token they use.
-  A styled capture backs all but three of the seventy-seven checkpoints and was
+  A styled capture backs all but three of the seventy-eight checkpoints and was
   read for one family only — Decision 32's cursor cell — leaving the rest
   unread.
 - **The scrollbar costs the transcript no column.** Measured at a hundred
