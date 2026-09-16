@@ -34,6 +34,26 @@ publish_package() {
 
 case "${step}" in
   set-flags)
+    if [[ -n "${PROMOTE_NIGHTLY}" && ( "${CREATE_NIGHTLY_RELEASE}" == "true" || "${CREATE_PREVIEW_RELEASE}" == "true" ) ]]; then
+      echo "::error::promote_nightly cannot be combined with nightly or preview release mode"
+      # Deterministic input refusal: mark it so notify_failure skips the
+      # release-failed issue and autofix dispatch, then fail the job. This
+      # guard fires before the promotion step exists, so the marker rides the
+      # prepare input_refusal output.
+      echo "input_refusal=true" >> "${GITHUB_OUTPUT}"
+      exit 1
+    fi
+
+    # Promotion takes its source from the nightly tag, but `ref` is a required
+    # input with a default, so the form gives no hint it is ignored: refuse it
+    # rather than release a different revision.
+    if [[ -n "${PROMOTE_NIGHTLY}" && -n "${REF_INPUT}" && "${REF_INPUT}" != "main" ]]; then
+      echo "::error::promote_nightly ignores the ref input; leave it at the default ('main'). The source revision is taken from the nightly tag."
+      # Deterministic input refusal; see the mode guard above.
+      echo "input_refusal=true" >> "${GITHUB_OUTPUT}"
+      exit 1
+    fi
+
     release_is_nightly="false"
     if [[ "${CRON}" == "0 21 * * *" || "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
       release_is_nightly="true"
@@ -54,12 +74,23 @@ case "${step}" in
     ;;
 
   resolve-commit)
-    echo "release_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+    release_sha="${PROMOTION_SHA:-$(git rev-parse HEAD)}"
+    echo "release_sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+    printf '%s\n' "${release_sha}" > "${RUNNER_TEMP}/release-source.txt"
     ;;
 
   resolve-version)
     version_args=()
-    if [[ "${IS_NIGHTLY}" == "true" ]]; then
+    if [[ -n "${PROMOTE_NIGHTLY}" ]]; then
+      # The nightly tag names the source, not the version: its base is main's
+      # package.json version, which the stable path publishes on its own.
+      # `version` names the stable release; left empty, the script derives the
+      # next minor after `latest`.
+      version_args+=(--type=promote-nightly "--promote_nightly_version=${PROMOTE_NIGHTLY}")
+      if [[ -n "${MANUAL_VERSION}" ]]; then
+        version_args+=("--promote_nightly_stable_version=${MANUAL_VERSION}")
+      fi
+    elif [[ "${IS_NIGHTLY}" == "true" ]]; then
       version_args+=(--type=nightly)
     elif [[ "${IS_PREVIEW}" == "true" ]]; then
       version_args+=(--type=preview)
@@ -81,7 +112,22 @@ case "${step}" in
       fi
     fi
 
-    version_json=$(node scripts/get-release-version.js "${version_args[@]}")
+    version_status=0
+    version_json=$(node scripts/get-release-version.js "${version_args[@]}") || version_status=$?
+    if [[ "${version_status}" -eq 3 || "${version_status}" -eq 4 ]]; then
+      # A decisive, benign refusal: exit 3 is the prepare-time "already
+      # shipped" refusal (a re-dispatched promotion whose version a first
+      # attempt published before failing); exit 4 is a deterministic
+      # version-input refusal (a malformed or retrograde explicit version).
+      # Both are correct outcomes, not release failures: mark them so
+      # notify_failure skips the release-failed issue and autofix dispatch,
+      # then fail the job.
+      echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+      exit 1
+    fi
+    if [[ "${version_status}" -ne 0 ]]; then
+      exit "${version_status}"
+    fi
     echo "RELEASE_TAG=$(echo "$version_json" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
     echo "RELEASE_VERSION=$(echo "$version_json" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
     echo "NPM_TAG=$(echo "$version_json" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"

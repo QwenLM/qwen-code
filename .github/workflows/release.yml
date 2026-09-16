@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'The version to release (e.g., v0.1.11 or v0.1.11-preview.0). Required for manual patch releases.'
+        description: 'The version to release (e.g., v0.1.11 or v0.1.11-preview.0). Required for manual patch releases. With promote_nightly, the stable version to publish (X.Y.Z).'
         required: false
         type: 'string'
       ref:
@@ -33,6 +33,10 @@ on:
         required: false
         type: 'boolean'
         default: false
+      promote_nightly:
+        description: 'Promote this exact validated nightly tag to a stable release. Leave ref at its default; set version to the stable version to publish, or leave version empty to use the next minor after the latest release.'
+        required: false
+        type: 'string'
       force_skip_tests:
         description: 'Skip the release validation jobs ("quality", "integration_none", and "integration_docker"), allowing publish to proceed without them. Prod releases should run validation.'
         required: false
@@ -53,6 +57,7 @@ jobs:
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
+      actions: 'read'
       contents: 'read'
     outputs:
       release_sha: '${{ steps.source.outputs.release_sha }}'
@@ -63,6 +68,14 @@ jobs:
       is_nightly: '${{ steps.vars.outputs.is_nightly }}'
       is_preview: '${{ steps.vars.outputs.is_preview }}'
       is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
+      reuse_validation: '${{ steps.promotion.outputs.reuse_validation }}'
+      version_refusal: '${{ steps.version.outputs.version_refusal }}'
+      promotion_refusal: '${{ steps.promotion.outputs.promotion_refusal }}'
+      # Deterministic input refusals decided by the vars step (the mode
+      # and ref guards) fire before the promotion step exists, so they
+      # carry their own marker; notify_failure treats it like the other
+      # refusal markers.
+      input_refusal: '${{ steps.vars.outputs.input_refusal }}'
 
     steps:
       - &restore_release_workspace
@@ -155,7 +168,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
+          ref: "${{ github.event.inputs.promote_nightly != '' && github.sha || github.event.inputs.ref || github.sha }}"
           fetch-depth: 0
 
       - &checkout_release_workflow_scripts
@@ -176,13 +189,11 @@ jobs:
         env:
           CREATE_NIGHTLY_RELEASE: '${{ github.event.inputs.create_nightly_release }}'
           CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
+          PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
+          REF_INPUT: '${{ github.event.inputs.ref }}'
           CRON: '${{ github.event.schedule }}'
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh set-flags'
-
-      - name: 'Resolve release commit'
-        id: 'source'
-        run: '.release-workflow/.github/scripts/run-release-step.sh resolve-commit'
 
       - name: 'Set up Node.js (hosted)'
         if: "${{ runner.environment != 'self-hosted' }}"
@@ -197,6 +208,44 @@ jobs:
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
+
+      - name: 'Verify nightly promotion'
+        id: 'promotion'
+        if: "${{ github.event.inputs.promote_nightly != '' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
+          FORCE_SKIP_TESTS: '${{ github.event.inputs.force_skip_tests }}'
+        run: |-
+          if [[ "${FORCE_SKIP_TESTS}" == "true" ]]; then
+            echo "::error::promote_nightly cannot be combined with force_skip_tests"
+            # Deterministic input refusal; this step's id feeds prepare's
+            # promotion_refusal output, so mark it before failing.
+            echo "promotion_refusal=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          # The script writes source_sha, reuse_validation, the evidence
+          # summary and any soft finding itself.
+          node scripts/verify-nightly-promotion.js "${PROMOTE_NIGHTLY}"
+
+      - name: 'Resolve release commit'
+        id: 'source'
+        env:
+          PROMOTION_SHA: '${{ steps.promotion.outputs.source_sha }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh resolve-commit'
+
+      # Evidence for a possible later promotion, not a release requirement:
+      # a flaky upload must not fail an otherwise fine release. A missing
+      # record only makes this run unpromotable (docs/design/
+      # nightly-release-promotion.md).
+      - name: 'Record release source'
+        continue-on-error: true
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-source-${{ steps.source.outputs.release_sha }}'
+          path: '${{ runner.temp }}/release-source.txt'
+          if-no-files-found: 'error'
+          overwrite: true
 
       - name: 'Install Dependencies'
         env:
@@ -218,6 +267,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          PROMOTE_NIGHTLY: '${{ github.event.inputs.promote_nightly }}'
           MANUAL_VERSION: '${{ inputs.version }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh resolve-version'
 
@@ -228,7 +278,7 @@ jobs:
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: &release_test_env
@@ -288,7 +338,7 @@ jobs:
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -342,7 +392,7 @@ jobs:
       - 'prepare'
       - 'quality_build'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -377,7 +427,7 @@ jobs:
       - 'prepare'
       - 'quality_build'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -416,7 +466,7 @@ jobs:
       - 'prepare'
       - 'quality_build'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -451,7 +501,7 @@ jobs:
       - 'quality_scripts'
     # Cancelled runs stay cancelled; completed validation fails closed.
     if: |-
-      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}
+      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions: {}
     steps:
       - name: 'Verify quality results'
@@ -480,7 +530,7 @@ jobs:
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -511,7 +561,7 @@ jobs:
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
-      ${{ github.event.inputs.force_skip_tests != 'true' }}
+      ${{ github.event.inputs.force_skip_tests != 'true' && needs.prepare.outputs.reuse_validation != 'true' }}
     permissions:
       contents: 'read'
     env: *release_test_env
@@ -563,6 +613,8 @@ jobs:
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     uses: './.github/workflows/audio-capture-prebuilds.yml'
+    with:
+      source_ref: '${{ needs.prepare.outputs.release_sha }}'
 
   publish:
     name: 'Publish Release'
@@ -583,6 +635,7 @@ jobs:
           needs.audio_capture_prebuilds.result == 'success'
         ) &&
         (
+          needs.prepare.outputs.reuse_validation == 'true' ||
           github.event.inputs.force_skip_tests == 'true' ||
           (
             needs.quality.result == 'success' &&
@@ -757,6 +810,18 @@ jobs:
       - 'integration_none'
       - 'integration_docker'
       - 'publish'
+    # A decisive refusal is a correct outcome, not a release failure, so it
+    # must not file a "Release Failed" issue and dispatch autofix: the
+    # push-time guard's "already shipped" refusal (publish's
+    # version_refusal) means the version shipped via another attempt, or
+    # partially; prepare's version_refusal (the same refusal decided before
+    # validation, plus a malformed/retrograde explicit version),
+    # promotion_refusal (the promotion gate's deterministic evidence and
+    # input refusals, including an already-promoted source or a malformed
+    # nightly tag) and input_refusal (the vars step's mode/ref input
+    # guards) mean no code change can alter the outcome. Genuine
+    # failures — including the guards' fail-closed probe errors, which carry
+    # no refusal marker — still notify.
     if: |-
       ${{
         always() &&
@@ -765,7 +830,12 @@ jobs:
           github.event.inputs.dry_run != 'true'
         ) &&
         (
-          needs.prepare.result == 'failure' ||
+          (
+            needs.prepare.result == 'failure' &&
+            needs.prepare.outputs.version_refusal != 'true' &&
+            needs.prepare.outputs.promotion_refusal != 'true' &&
+            needs.prepare.outputs.input_refusal != 'true'
+          ) ||
           needs.quality.result == 'failure' ||
           needs.integration_none.result == 'failure' ||
           needs.integration_docker.result == 'failure' ||
