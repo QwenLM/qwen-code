@@ -15136,6 +15136,74 @@ describe('App session callbacks', () => {
     });
   });
 
+  it.each(['main', 'split'] as const)(
+    'delegates %s composer details to the host context usage callback',
+    async (entry) => {
+      const onContextUsageOpen = vi.fn();
+      renderApp({
+        header: { items: [] },
+        ...(entry === 'split' ? { splitSessionIds: ['s1'] } : {}),
+        onContextUsageOpen,
+      });
+      await flush();
+      await act(async () => {
+        if (entry === 'split') {
+          testState.latestSplitViewProps!.onOpenContextUsage!(
+            's1',
+            mockPaneSessionActions,
+          );
+        } else {
+          testState.latestChatEditorProps!.onOpenContextUsage!();
+        }
+      });
+      await flush();
+      expect(onContextUsageOpen).toHaveBeenCalledExactlyOnceWith(
+        entry === 'split' ? 's1' : 'session-1',
+      );
+      expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      expect(mockPaneSessionActions.getContextUsage).not.toHaveBeenCalled();
+      expect(
+        document.body.querySelector('button[title="Context Usage"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('updates and removes the host context usage callback without changing snapshots', async () => {
+    const onContextUsageOpen = vi.fn();
+    const replacement = vi.fn();
+    const { rerender } = renderApp({ onContextUsageOpen });
+    await flush();
+    rerender({ onContextUsageOpen: replacement });
+    await flush();
+    await act(async () =>
+      testState.latestChatEditorProps!.onOpenContextUsage!(),
+    );
+    expect(replacement).toHaveBeenCalledExactlyOnceWith('session-1');
+    expect(onContextUsageOpen).not.toHaveBeenCalled();
+    await act(async () =>
+      testState.latestChatEditorProps!.onShowContextUsage!(),
+    );
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: false,
+    });
+    expect(replacement).toHaveBeenCalledTimes(1);
+    mockSessionActions.getContextUsage.mockClear();
+    rerender({});
+    await flush();
+    await act(async () =>
+      testState.latestChatEditorProps!.onOpenContextUsage!(),
+    );
+    await flush();
+    expect(replacement).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(
+      document.body.querySelector('button[title="Context Usage"]'),
+    ).not.toBeNull();
+  });
+
   it('opens details and compresses through the composer with the header entry hidden', async () => {
     mockConnection.commands = [
       { name: 'compress', description: '', source: 'builtin-command' },
