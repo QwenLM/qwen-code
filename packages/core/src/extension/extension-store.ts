@@ -95,6 +95,8 @@ interface ExtensionTransactionJournal {
   swapStrategy?: 'rename' | 'copy';
   /** Absent means false. Set when a rollback could not complete. */
   rollbackBlocked?: boolean;
+  /** Absent means false. Set when a rollback restored but its backup survived. */
+  cleanupPending?: boolean;
   previousGeneration: number;
   targetGeneration: number;
   targetSnapshot: ExtensionStoreSnapshot;
@@ -153,6 +155,31 @@ function isDirectoryLockError(error: unknown): boolean {
 
 function isNotFoundError(error: unknown): boolean {
   return isNodeError(error) && error.code === 'ENOENT';
+}
+
+/**
+ * The test recovery uses to decide a transaction needs no rollback: its state
+ * is committed, or a rollback already restored the destination and only left
+ * its backup behind.
+ */
+function isTransactionResolved(
+  journal: ExtensionTransactionJournal,
+  snapshot: ExtensionStoreSnapshot | null | undefined,
+): boolean {
+  return (
+    journal.phase === 'state_committed' ||
+    journal.cleanupPending === true ||
+    (!journal.rollbackBlocked &&
+      (snapshot?.generation ?? -1) >= journal.targetGeneration)
+  );
+}
+
+/** Sleeps one copy swap or rollback may spend on lock retries in total. */
+const LOCK_RETRY_BUDGET_MS = 1000;
+
+/** Keeps one operation's retries from scaling with the entries it walks. */
+interface LockRetryBudget {
+  remainingMs: number;
 }
 
 function partialBackupPath(backupDirectory: string): string {
@@ -882,6 +909,11 @@ export class ExtensionStore {
         noFollow: true,
       });
 
+      // One allowance per transaction: a transient hold spends it once, so the
+      // store lock is not held longer for a tree with many held entries.
+      const swapBudget: LockRetryBudget = {
+        remainingMs: LOCK_RETRY_BUDGET_MS,
+      };
       let stateCommitted = false;
       try {
         if (destinationExists) {
@@ -912,10 +944,10 @@ export class ExtensionStore {
             // A half-copied backup would be restored over an intact destination.
             const partialBackup = partialBackupPath(backupDirectory);
             await this.withLockHint(backupDirectory, () =>
-              fsp.rm(partialBackup, { recursive: true, force: true }),
+              this.removeWithRetry(partialBackup, swapBudget),
             );
             await this.withLockHint(destinationDirectory, () =>
-              this.copyTree(destinationDirectory, partialBackup),
+              this.copyTree(destinationDirectory, partialBackup, swapBudget),
             );
             await this.withLockHint(backupDirectory, () =>
               renameWithRetry(partialBackup, backupDirectory, 3, 50),
@@ -924,20 +956,26 @@ export class ExtensionStore {
         }
         if (journal.swapStrategy === 'copy') {
           if (input.operation === 'uninstall') {
-            await this.removeDirectoryInPlace(destinationDirectory);
+            await this.removeDirectoryInPlace(destinationDirectory, swapBudget);
           } else {
             const stagingDirectory = input.stagingDirectory!;
             await this.withLockHint(destinationDirectory, async () => {
               await this.removeKindConflicts(
                 stagingDirectory,
                 destinationDirectory,
+                swapBudget,
               );
               // Copy first, then prune: deleting ahead of the copy would widen the
               // window in which a crash leaves the extension missing content.
-              await this.copyTree(stagingDirectory, destinationDirectory);
+              await this.copyTree(
+                stagingDirectory,
+                destinationDirectory,
+                swapBudget,
+              );
               await this.pruneStalePaths(
                 stagingDirectory,
                 destinationDirectory,
+                swapBudget,
               );
             });
           }
@@ -972,8 +1010,8 @@ export class ExtensionStore {
       } catch (error) {
         if (!stateCommitted) {
           try {
-            await this.rollbackJournal(journal);
-            await fsp.rm(journalPath, { force: true });
+            await this.rollbackJournal(journal, swapBudget);
+            await this.finishRollback(journal, journalPath, swapBudget);
           } catch (rollbackError) {
             throw new AggregateError(
               [error, rollbackError],
@@ -986,7 +1024,7 @@ export class ExtensionStore {
       }
 
       try {
-        await this.cleanupCommittedJournal(journal, journalPath);
+        await this.cleanupCommittedJournal(journal, journalPath, swapBudget);
       } catch {
         // The committed state is authoritative. Recovery retries cleanup on
         // the next store operation without reporting a false mutation failure.
@@ -1660,7 +1698,16 @@ export class ExtensionStore {
 
   private async recoverTransactionsUnlocked(): Promise<void> {
     const transactionsDir = path.join(this.storeDir, 'transactions');
-    const entries = (await this.readRealDirectory(transactionsDir)) ?? [];
+    const entries = await this.readRealDirectory(transactionsDir);
+    if (!entries) {
+      debugLogger.warn(
+        'extension transactions directory is not a real directory; skipping recovery:',
+        transactionsDir,
+      );
+      return;
+    }
+    // One allowance per recovery pass, so stacked journals cannot multiply it.
+    const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
     const snapshot = await this.readSnapshotUnlocked();
     // Newest first: a destination's stacked transactions end on the last backup.
     const ordered: Array<{ journalPath: string; mtimeMs: number }> = [];
@@ -1674,42 +1721,47 @@ export class ExtensionStore {
     for (const { journalPath } of ordered) {
       const journal = await this.readRecoverableJournalUnlocked(journalPath);
       if (!journal) continue;
-      if (
-        journal.phase === 'state_committed' ||
-        (!journal.rollbackBlocked &&
-          (snapshot?.generation ?? -1) >= journal.targetGeneration)
-      ) {
+      if (isTransactionResolved(journal, snapshot)) {
         try {
-          await this.cleanupCommittedJournal(journal, journalPath);
+          await this.cleanupCommittedJournal(journal, journalPath, budget);
         } catch {
-          // The authoritative state is already committed. Keep the journal so
-          // a later store operation can retry cleanup without blocking reads
-          // or unrelated mutations.
+          // The destination is already settled. Keep the journal so a later
+          // store operation can retry cleanup without blocking reads or
+          // unrelated mutations.
         }
-      } else {
-        try {
-          await this.rollbackJournal(journal);
-          await fsp.rm(journalPath, { force: true });
-        } catch (error: unknown) {
-          if (!isDirectoryLockError(error)) throw error;
-          // Marked and kept, so a later operation retries the rollback instead of
-          // reading the generation it never reached as a commit.
-          debugLogger.warn('extension transaction rollback blocked:', error);
-          await this.markRollbackBlocked(journal, journalPath);
-        }
+        continue;
+      }
+      try {
+        await this.rollbackJournal(journal, budget);
+        await this.finishRollback(journal, journalPath, budget);
+      } catch (error: unknown) {
+        if (!isDirectoryLockError(error)) throw error;
+        // A rollback that left the destination missing is not absorbed: every
+        // read path would report the extension as installed without an
+        // artifact.
+        if (!(await this.pathExists(journal.destinationDirectory))) throw error;
+        // Marked and kept, so a later operation retries the rollback instead of
+        // reading the generation it never reached as a commit.
+        debugLogger.warn('extension transaction rollback blocked:', error);
+        await this.recordPendingStep(journal, journalPath, 'rollback');
       }
     }
   }
 
-  /** Records that a rollback could not complete, so recovery retries it. */
-  private async markRollbackBlocked(
+  /** Persists the step a later operation must retry, so recovery repeats it. */
+  private async recordPendingStep(
     journal: ExtensionTransactionJournal,
     journalPath: string,
+    pendingStep: 'rollback' | 'cleanup',
   ): Promise<void> {
     try {
       await atomicWriteJSON(
         journalPath,
-        { ...journal, rollbackBlocked: true },
+        {
+          ...journal,
+          rollbackBlocked: pendingStep === 'rollback' ? true : undefined,
+          cleanupPending: pendingStep === 'cleanup' ? true : undefined,
+        },
         { mode: 0o600, forceMode: true, noFollow: true },
       );
     } catch (error) {
@@ -1724,6 +1776,7 @@ export class ExtensionStore {
     const transactionsDir = path.join(this.storeDir, 'transactions');
     const entries = await this.readRealDirectory(transactionsDir);
     if (!entries) return;
+    const snapshot = await this.readSnapshotUnlocked();
     const resolvedDestination = path.resolve(destinationDirectory);
     for (const entry of entries) {
       if (!entry.name.endsWith('.json')) continue;
@@ -1731,13 +1784,19 @@ export class ExtensionStore {
         path.join(transactionsDir, entry.name),
       );
       if (
-        journal &&
-        path.resolve(journal.destinationDirectory) === resolvedDestination
+        !journal ||
+        path.resolve(journal.destinationDirectory) !== resolvedDestination ||
+        isTransactionResolved(journal, snapshot)
       ) {
-        throw new ExtensionConflictError(
-          `Extension transaction ${journal.transactionId} for ${destinationDirectory} is still unresolved.`,
-        );
+        continue;
       }
+      if (journal.rollbackBlocked) {
+        // The retry carries the diagnosis the attempt that blocked it gave.
+        throw new ExtensionDirectoryLockedError(journal.destinationDirectory);
+      }
+      throw new ExtensionConflictError(
+        `Extension transaction ${journal.transactionId} for ${destinationDirectory} is still unresolved.`,
+      );
     }
   }
 
@@ -1829,6 +1888,8 @@ export class ExtensionStore {
           !['rename', 'copy'].includes(journal.swapStrategy)) ||
         (journal.rollbackBlocked !== undefined &&
           typeof journal.rollbackBlocked !== 'boolean') ||
+        (journal.cleanupPending !== undefined &&
+          typeof journal.cleanupPending !== 'boolean') ||
         !Number.isSafeInteger(journal.previousGeneration) ||
         journal.targetGeneration !== journal.previousGeneration + 1
       ) {
@@ -1916,6 +1977,7 @@ export class ExtensionStore {
   private async pruneStalePaths(
     stagingDirectory: string,
     destinationDirectory: string,
+    budget: LockRetryBudget,
   ): Promise<void> {
     const entries = await this.readRealDirectory(destinationDirectory);
     if (!entries) return;
@@ -1924,11 +1986,11 @@ export class ExtensionStore {
       const staged = path.join(stagingDirectory, entry.name);
       const stagedStats = await lstatOrNull(staged);
       if (!stagedStats) {
-        await this.removeWithRetry(destination);
+        await this.removeWithRetry(destination, budget);
         continue;
       }
       if (stagedStats.isDirectory() && entry.isDirectory()) {
-        await this.pruneStalePaths(staged, destination);
+        await this.pruneStalePaths(staged, destination, budget);
       }
     }
   }
@@ -1937,6 +1999,7 @@ export class ExtensionStore {
   private async removeKindConflicts(
     referenceDirectory: string,
     destinationDirectory: string,
+    budget: LockRetryBudget,
   ): Promise<void> {
     const entries = await this.readRealDirectory(destinationDirectory);
     if (!entries) return;
@@ -1946,43 +2009,64 @@ export class ExtensionStore {
       const referenceStats = await lstatOrNull(reference);
       if (!referenceStats) continue;
       if (entryKind(referenceStats) !== entryKind(entry)) {
-        await this.removeWithRetry(destination);
+        await this.removeWithRetry(destination, budget);
         continue;
       }
       if (referenceStats.isDirectory()) {
-        await this.removeKindConflicts(reference, destination);
+        await this.removeKindConflicts(reference, destination, budget);
       }
     }
   }
 
-  private async emptyDirectory(directory: string): Promise<void> {
+  private async emptyDirectory(
+    directory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
     const entries = await this.readRealDirectory(directory);
     if (!entries) {
       // A linked root: unlink it instead of emptying what it points at.
-      await this.removeWithRetry(directory);
+      await this.removeWithRetry(directory, budget);
       return;
     }
     for (const entry of entries) {
-      await this.removeWithRetry(path.join(directory, entry.name));
+      await this.removeWithRetry(path.join(directory, entry.name), budget);
     }
   }
 
   /** A linked or non-directory root fails every copy over it, so replace it. */
-  private async removeNonDirectoryRoot(directory: string): Promise<void> {
+  private async removeNonDirectoryRoot(
+    directory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
     const stats = await lstatOrNull(directory);
     if (stats && !stats.isDirectory()) {
-      await fsp.rm(directory, { recursive: true, force: true });
+      await this.removeWithRetry(directory, budget);
     }
   }
 
-  /** Runs a filesystem step, retrying the lock errors the rename path absorbs. */
-  private async retryLock<T>(step: () => Promise<T>): Promise<T> {
+  /**
+   * Runs a filesystem step, retrying the lock errors the rename path absorbs.
+   * The sleeps come out of a shared budget, so a tree whose entries are each
+   * held retries each of them once instead of four times.
+   */
+  private async retryLock<T>(
+    step: () => Promise<T>,
+    budget: LockRetryBudget,
+  ): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await step();
       } catch (error: unknown) {
-        if (!isDirectoryLockError(error) || attempt >= 3) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+        const delayMs = 50 * 2 ** attempt;
+        if (
+          !isDirectoryLockError(error) ||
+          attempt >= 3 ||
+          budget.remainingMs < delayMs
+        ) {
+          throw error;
+        }
+        budget.remainingMs -= delayMs;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
   }
@@ -1991,28 +2075,38 @@ export class ExtensionStore {
   private async copyTree(
     sourceDirectory: string,
     destinationDirectory: string,
+    budget: LockRetryBudget,
   ): Promise<void> {
-    await this.retryLock(() =>
-      fsp.cp(sourceDirectory, destinationDirectory, {
-        recursive: true,
-        force: true,
-        preserveTimestamps: true,
-        verbatimSymlinks: true,
-      }),
+    await this.retryLock(
+      () =>
+        fsp.cp(sourceDirectory, destinationDirectory, {
+          recursive: true,
+          force: true,
+          preserveTimestamps: true,
+          verbatimSymlinks: true,
+        }),
+      budget,
     );
   }
 
-  private async removeWithRetry(target: string): Promise<void> {
-    await this.retryLock(() =>
-      fsp.rm(target, { recursive: true, force: true }),
+  private async removeWithRetry(
+    target: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    await this.retryLock(
+      () => fsp.rm(target, { recursive: true, force: true }),
+      budget,
     );
   }
 
-  private async removeDirectoryInPlace(directory: string): Promise<void> {
+  private async removeDirectoryInPlace(
+    directory: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
     await this.withLockHint(directory, async () => {
-      await this.emptyDirectory(directory);
+      await this.emptyDirectory(directory, budget);
       // `rm`, not `rmdir`: emptying a linked root already unlinked it.
-      await fsp.rm(directory, { recursive: true, force: true });
+      await this.removeWithRetry(directory, budget);
     });
   }
 
@@ -2032,16 +2126,42 @@ export class ExtensionStore {
 
   private async removeTransactionBackup(
     journal: ExtensionTransactionJournal,
+    budget: LockRetryBudget,
   ): Promise<void> {
-    await fsp.rm(journal.backupDirectory, { recursive: true, force: true });
-    await fsp.rm(partialBackupPath(journal.backupDirectory), {
-      recursive: true,
-      force: true,
-    });
+    await this.removeWithRetry(journal.backupDirectory, budget);
+    await this.removeWithRetry(
+      partialBackupPath(journal.backupDirectory),
+      budget,
+    );
+  }
+
+  /**
+   * Removes the journal once its rollback is done. A backup a lock error keeps
+   * is retried by a later operation, so the journal stays and says which step
+   * is left - re-running the restore would copy an already-restored backup.
+   */
+  private async finishRollback(
+    journal: ExtensionTransactionJournal,
+    journalPath: string,
+    budget: LockRetryBudget,
+  ): Promise<void> {
+    try {
+      if (journal.stagingDirectory) {
+        await this.removeWithRetry(journal.stagingDirectory, budget);
+      }
+      await this.removeTransactionBackup(journal, budget);
+    } catch (error: unknown) {
+      if (!isDirectoryLockError(error)) throw error;
+      debugLogger.warn('extension transaction cleanup blocked:', error);
+      await this.recordPendingStep(journal, journalPath, 'cleanup');
+      return;
+    }
+    await fsp.rm(journalPath, { force: true });
   }
 
   private async rollbackJournal(
     journal: ExtensionTransactionJournal,
+    budget: LockRetryBudget,
   ): Promise<void> {
     const hasBackup = await this.pathExists(journal.backupDirectory);
     const copySwap = journal.swapStrategy === 'copy';
@@ -2055,25 +2175,25 @@ export class ExtensionStore {
             ? await this.pathExists(journal.stagingDirectory)
             : false)))
     ) {
-      await fsp.rm(journal.destinationDirectory, {
-        recursive: true,
-        force: true,
-      });
+      await this.removeWithRetry(journal.destinationDirectory, budget);
     }
     if (hasBackup) {
       if (copySwap) {
-        await this.removeNonDirectoryRoot(journal.destinationDirectory);
+        await this.removeNonDirectoryRoot(journal.destinationDirectory, budget);
         await this.removeKindConflicts(
           journal.backupDirectory,
           journal.destinationDirectory,
+          budget,
         );
         await this.copyTree(
           journal.backupDirectory,
           journal.destinationDirectory,
+          budget,
         );
         await this.pruneStalePaths(
           journal.backupDirectory,
           journal.destinationDirectory,
+          budget,
         );
       } else {
         await renameWithRetry(
@@ -2084,26 +2204,16 @@ export class ExtensionStore {
         );
       }
     }
-    if (journal.stagingDirectory) {
-      await fsp.rm(journal.stagingDirectory, {
-        recursive: true,
-        force: true,
-      });
-    }
-    // A copy-mode rollback restores from the backup without consuming it.
-    await this.removeTransactionBackup(journal);
   }
 
   private async cleanupCommittedJournal(
     journal: ExtensionTransactionJournal,
     journalPath: string,
+    budget: LockRetryBudget,
   ): Promise<void> {
-    await this.removeTransactionBackup(journal);
+    await this.removeTransactionBackup(journal, budget);
     if (journal.stagingDirectory) {
-      await fsp.rm(journal.stagingDirectory, {
-        recursive: true,
-        force: true,
-      });
+      await this.removeWithRetry(journal.stagingDirectory, budget);
     }
     await fsp.rm(journalPath, { force: true });
   }

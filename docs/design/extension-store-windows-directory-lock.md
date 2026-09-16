@@ -107,7 +107,9 @@ In scope:
 - When the swap is still impossible, say so in terms the user can act on, and
   leave the previous version installed.
 - Keep the journal recovery story explicit. The copy fallback is Windows-only; the
-  rollback-keeps-its-journal rule applies on every platform.
+  journal markers and the rules that follow from them - a settled transaction does
+  not block the next mutation, a rollback that left the destination missing stops
+  the caller - apply on every platform.
 
 Out of scope:
 
@@ -131,11 +133,14 @@ rollback and recovery paths:
 swapStrategy?: 'rename' | 'copy';
 ```
 
-`ExtensionTransactionJournal` gains that optional field. An absent field means
-`rename`, so journals written by older builds recover unchanged and `version`
-stays `1`. The strategy is persisted before the first irreversible write. The
-rename path itself is unchanged: rename destination to backup, rename staging to
-destination. The copy path is:
+`ExtensionTransactionJournal` gains that optional field, plus two markers that
+record which step a settled transaction still owes: `rollbackBlocked` (a rollback
+could not complete) and `cleanupPending` (a rollback restored the destination but
+its backup survived). Absent fields mean `rename` and false, so journals written
+by older builds recover unchanged and `version` stays `1`. The strategy is
+persisted before the first irreversible write. The rename path itself is
+unchanged: rename destination to backup, rename staging to destination. The copy
+path is:
 
 1. **Backup by copy.** Copy `destinationDirectory` into `backupDirectory`. Proven
    to work under a descendant handle. The copy lands first at
@@ -149,9 +154,15 @@ destination. The copy path is:
    refuses to replace those, and refuses before a prune could reach them - then
    `fsp.cp(stagingDirectory, destinationDirectory, { recursive: true,
 force: true })` with `preserveTimestamps` and `verbatimSymlinks` on and
-   `dereference` left false. The copy retries a lock error the way the rename path
-   does - four attempts inside about 350 ms - because a scanner or an indexer can
-   hold one file transiently, which is the case the rename path used to absorb.
+   `dereference` left false. The copy retries the store's lock-classified error - a
+   wider set than the `EPERM`/`EACCES` pair `renameWithRetry` retries, because a
+   child process whose working directory is the destination reports `EBUSY` -
+   because a scanner or an indexer can hold one file transiently, which is the
+   case the rename-only code used to absorb around that call. The retries come out
+   of one allowance per store operation (`LOCK_RETRY_BUDGET_MS`, one second of
+   sleeps) instead of one allowance per call: a step that is re-run is re-run
+   whole, so a retried copy is four full tree passes at worst, but an
+   entry-count-sized tree cannot multiply how long the store lock is held.
    `verbatimSymlinks` is what keeps a relative target relative: without it `fsp.cp`
    rewrites the target to an absolute path under the staging directory, which the
    commit then removes.
@@ -162,8 +173,11 @@ force: true })` with `preserveTimestamps` and `verbatimSymlinks` on and
    could leave the extension missing content as narrow as a copy-based swap
    allows.
 4. For `uninstall`, replace steps 2-3 with: wipe the destination's children, then
-   remove the destination itself; a linked destination is unlinked rather than
-   emptied. If the wipe fails, the directory is held open as a working directory;
+   remove the destination itself. A destination that is not a real directory is
+   refused before the wipe by the root guard below, and the wipe keeps the leaf
+   rule anyway, so a destination that becomes a link between the guard and the
+   wipe is unlinked rather than emptied through. If the wipe fails, the directory
+   is held open as a working directory;
    restore from the backup copy and raise the locked error. A manifest-less husk
    must not survive, because `pathExists()` would report it as installed and block
    a later reinstall.
@@ -177,15 +191,29 @@ caller-side check.
 
 `rollbackJournal()` gains the matching direction: with `swapStrategy: 'copy'` it
 restores by copying `backupDirectory` over the destination and pruning what the
-backup does not carry, rather than emptying the destination first, and then
-deletes the backup, which a copy leaves in place where a rename would have
-consumed it. Restoring over the live tree is what keeps a manifest-less husk out
-of reach when an entry cannot be deleted: the swap fails, but the tree it failed
-over is the installed one. Recovery needs no new concept -
-`recoverTransactionsUnlocked()` keeps its existing phase comparison and simply
-calls the strategy-aware rollback. A rollback a lock error defeated is marked and
-kept, so the operation proceeds and a later recovery retries it; any other failure
-still stops the caller.
+backup does not carry, rather than emptying the destination first. Restoring over
+the live tree is what keeps a manifest-less husk out of reach when an entry cannot
+be deleted: the swap fails, but the tree it failed over is the installed one.
+Recovery keeps its existing phase comparison - `recoverTransactionsUnlocked()` and
+the commit-side guard `assertNoPendingTransaction()` share one predicate for "this
+transaction still needs a rollback" - and calls the strategy-aware rollback. What
+the catch does with a lock error depends on which step it defeated, because the two
+leave different states:
+
+- **A rollback** is marked `rollbackBlocked` and kept, so the operation proceeds
+  and a later recovery retries it - but only while the destination still exists. A
+  rename-mode rollback deletes the destination before it renames the backup back,
+  so absorbing that failure would leave the store reporting an extension as
+  installed with no artifact at all; it stops the caller instead.
+- **A cleanup** that fails after a rollback already restored the destination is
+  marked `cleanupPending` instead: the retry repeats the backup removal, not the
+  restore, so a settled rollback is not copied over the live tree again and does not
+  refuse the next mutation. That step is also what removes the backup a copy-mode
+  rollback restored from, and an unpublished `.partial` tree.
+
+Either marker keeps the journal out of the generation comparison, so a transaction
+whose rollback is still owed can never be read as a commit. Any failure that is not
+a lock error still stops the caller.
 
 **B - actionable failure text.** Alongside the existing store errors:
 
@@ -224,6 +252,12 @@ Decisions:
 - **Staging stays on disk until the commit is clean.** This is already true, and it
   is what lets a copy-mode transaction that died mid-apply be rolled back by a
   later run.
+- **A commit refuses to stack on an unresolved transaction.** Before writing its
+  journal, a commit checks `transactions/` for a journal that resolves to the same
+  destination and that the shared predicate does not settle. A genuinely unresolved
+  one is refused; one the holder blocked is refused with the locked-directory
+  message, so a retry carries the same diagnosis as the attempt that caused it. A
+  committed transaction awaiting cleanup is settled, and never refuses.
 
 Rejected:
 
@@ -262,13 +296,21 @@ Rejected:
   timing; nothing here makes it safe.
 - **Extra I/O** on the locked path: two full tree copies per update. Extension
   trees that ship `node_modules` make this noticeable - the largest installed here
-  is 55.6 MB over 298 files - though bounded and Windows-only.
+  is 55.6 MB over 298 files - though bounded and Windows-only. A retried copy is a
+  whole tree pass, so a step that is retried four times writes the tree four times;
+  the allowance below bounds the sleeps, not the passes.
+- **Retries are bounded per store operation, not per call.** One allowance covers
+  a transaction, and one covers a recovery pass, so a tree whose entries are each
+  transiently held is retried for the first second of the operation and then fails
+  with the locked-directory error, instead of holding the store lock for one
+  backoff per entry - which the ~27 s a waiting session allows would not survive.
 - **EBUSY from a running child process is not solved by copying** when the
   process's working directory is the extension directory itself and the operation
   is an uninstall. That case ends in B's message, which is the intended outcome.
-- `assertRecoveredJournalPaths()` validates journal paths and must accept the new
-  optional field without loosening any path check; an unrecognised strategy is
-  quarantined.
+- `assertRecoveredJournalPaths()` validates journal paths only; the schema check
+  for the three optional fields (`swapStrategy`, `rollbackBlocked`,
+  `cleanupPending`) lives in `readJournalUnlocked`, which must accept them without
+  loosening any path check. An unrecognised strategy is quarantined.
 - Copy and prune must not follow symlinks out of the destination tree - the staging
   content is already validated by `archive-safety`, but the prune walk has to treat
   a symlink as a leaf. The same rule covers the root: the walks enumerate only a
@@ -278,9 +320,15 @@ Rejected:
   replace a file with a directory or the reverse, so those entries are removed
   ahead of the copy - the only deletion allowed before it, since a blanket
   prune-before-copy would widen the crash window.
-- **A failed swap leaves extra content, not a hole.** Restoring over the live tree
-  means an entry that cannot be deleted leaves stale files in place instead of
-  emptying the destination; the next successful swap prunes them.
+- **A failed swap leaves extra content; a hole is possible only while the holder
+  holds.** Restoring over the live tree means an entry that cannot be deleted
+  leaves stale files in place instead of emptying the destination, and the next
+  successful swap prunes them. `removeKindConflicts` can still delete an entry
+  whose replacement copy then fails, so a copy-mode rollback that the same holder
+  defeats can leave that entry missing until a later operation retries it, and the
+  read path serves the committed old version in the meantime. The rename path
+  cannot promise even that - it deletes the destination before it restores - which
+  is why a restore it cannot run stops the caller instead of being marked.
 
 ## Verification and Acceptance
 
@@ -296,9 +344,18 @@ destination that resolves outside the extensions root, and a linked root inside 
 each being refused with the relocated tree left intact; a relative symlink target
 surviving a copy swap; a lock-defeated rollback keeping its journal and its backup
 once the generation moves; a destination's stacked transactions replayed newest
-first; a second transaction for one destination refused; a copy-mode uninstall
-restoring the installed tree when its wipe is blocked; a non-lock rollback failure
-still reaching the caller; an entry whose type changes
+first; a second transaction for one destination refused, and refused with the
+locked-directory message when the holder is what blocked the first one; a committed
+journal awaiting cleanup not refusing the next commit; a rename-mode restore the
+holder defeated stopping the caller instead of being marked, with the destination
+left missing and the extension not reported as installed; a settled rollback whose
+backup removal was held being retried, leaving no journal and no re-copied backup;
+a copy the holder released being retried to completion; a destination removal the
+holder released being retried to completion; the shared allowance bounding the
+retries one swap spends on held entries; a transactions root that is not a real
+directory being reported instead of silently recovering nothing; a copy-mode
+uninstall restoring the installed tree when its wipe is blocked; a non-lock rollback
+failure still reaching the caller; an entry whose type changes
 between versions being reconciled so the copy runs; an interrupted backup's `.partial` tree being removed by
 recovery; quarantining a journal whose strategy is unrecognised; and the pre-existing
 journals without the field keeping their current behaviour. The one branch that is
@@ -319,10 +376,18 @@ Acceptance:
 - On Windows, with at least one other interactive session running,
   `qwen extensions update <name>` completes and the new version loads.
 - A swap that cannot complete reports `extension_directory_locked` naming the
-  directory, and the previous version is still installed and loadable.
+  directory, and the previous version is still installed and loadable. The one
+  state that can differ is a copy-mode rollback the same holder defeats: it may
+  leave stale content, or an entry it deleted and could not copy back, until the
+  holder releases and a later operation settles the tree (see Risks).
 - `npm run build && npm run typecheck` and the `packages/core` unit tests for the
   touched files pass, on both Windows and the Linux lane.
-- POSIX code paths are unchanged except that a lock-defeated rollback is kept.
+- POSIX code paths are unchanged except for four rules that apply on every
+  platform: a lock-defeated rollback is marked and kept, a transaction that is
+  settled (committed, or restored with its backup left behind) does not block the
+  next mutation while a genuinely unresolved one is refused, a rollback that left
+  the destination missing stops the caller, and pending journals replay newest
+  first.
 
 ## Open Questions
 
