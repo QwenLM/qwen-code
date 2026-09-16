@@ -8,6 +8,7 @@ import {
   act,
   StrictMode,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -156,6 +157,38 @@ function OscillatingBox({ onRender }: { onRender?: () => void } = {}) {
   );
 }
 
+function ParentRoutedChild({
+  width,
+  onMeasure,
+}: {
+  width: number;
+  onMeasure: (width: number) => void;
+}) {
+  const ref = useRef<DOMElement>(null);
+  const { width: measuredWidth, hasMeasured } = useBoxMetrics(ref);
+  useLayoutEffect(() => {
+    if (hasMeasured) {
+      onMeasure(measuredWidth);
+    }
+  }, [hasMeasured, measuredWidth, onMeasure]);
+
+  return (
+    <Box ref={ref} width={width}>
+      <Text>x</Text>
+    </Box>
+  );
+}
+
+function ParentRoutedOscillatingBox() {
+  const [measuredWidth, setMeasuredWidth] = useState(0);
+  return (
+    <ParentRoutedChild
+      width={measuredWidth === 2 ? 3 : 2}
+      onMeasure={setMeasuredWidth}
+    />
+  );
+}
+
 // Gates the measured element's own mounting on `hasMeasured`, and the attached
 // box computes to all zeros, so `metrics` never changes value: the only setter
 // scheduling commits is `setHasMeasured`. `onRender` counts commits the same way
@@ -216,6 +249,13 @@ describe('ink useBoxMetrics loop guard', () => {
 
     // The oscillator re-renders until its budget trips. Without the guard this
     // mount throws "Maximum update depth exceeded" out of the commit phase.
+    expect(lastFrame()).toContain('x');
+  });
+
+  it('settles an oscillation routed through parent state', async () => {
+    const { stdout, lastFrame } = createTestStdout();
+    await mount(<ParentRoutedOscillatingBox />, stdout);
+
     expect(lastFrame()).toContain('x');
   });
 

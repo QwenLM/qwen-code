@@ -204,7 +204,7 @@ index 0000000..745a4ba
 +export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
 +//# sourceMappingURL=frame-controller.js.map
 diff --git a/node_modules/ink/build/hooks/use-box-metrics.js b/node_modules/ink/build/hooks/use-box-metrics.js
-index c4386e4..2611ed1 100644
+index c4386e4..753a9b4 100644
 --- a/node_modules/ink/build/hooks/use-box-metrics.js
 +++ b/node_modules/ink/build/hooks/use-box-metrics.js
 @@ -1,4 +1,4 @@
@@ -213,66 +213,78 @@ index c4386e4..2611ed1 100644
  import { addLayoutListener } from '../dom.js';
  import useStdout from './use-stdout.js';
  const emptyMetrics = {
-@@ -7,6 +7,18 @@ const emptyMetrics = {
+@@ -7,6 +7,50 @@ const emptyMetrics = {
      left: 0,
      top: 0,
  };
 +// React throws error #185 once 50 nested updates stack up on a root, so the loop
-+// guard below has to stop a self-sustaining cascade before that. The limit is a
-+// plain count of charged layout-listener invocations, not a function of elapsed
-+// time, so a cascade that keeps re-entering this instance trips after the same
-+// number of them on any machine - and only that shape of cascade: because the
-+// budget is per hook instance while the cap is per root, a cascade re-entering
-+// through a parent's state, or one where two instances in a single component
-+// refill each other, never reaches this count and only React stops it (#11858).
-+// It is a per-commit bound only while the measured element stays mounted: an
-+// instance whose measured ref is detached is unsubscribed for those commits and
-+// trips at up to twice this count.
++// guard below has to stop a self-sustaining cascade before that. The budget is
++// shared by every useBoxMetrics instance on the root and charged once per commit
++// in which any instance scheduled an update. A microtask refills it only after
++// the current synchronous nested-update chain has unwound, so parent-routed
++// commits cannot re-arm it while later input and timer events remain live.
 +const maxSelfDrivenMeasurements = 16;
++const measurementGuards = new WeakMap();
++const getMeasurementGuard = (rootNode) => {
++    const existing = measurementGuards.get(rootNode);
++    if (existing) {
++        return existing;
++    }
++    const guard = {
++        count: 0,
++        listeners: new Set(),
++    };
++    measurementGuards.set(rootNode, guard);
++    addLayoutListener(rootNode, () => {
++        if (guard.count >= maxSelfDrivenMeasurements) {
++            return;
++        }
++        let changed = false;
++        for (const listener of guard.listeners) {
++            changed = listener() || changed;
++        }
++        if (changed) {
++            if (guard.count === 0) {
++                queueMicrotask(() => {
++                    guard.count = 0;
++                });
++            }
++            guard.count += 1;
++        }
++    });
++    return guard;
++};
++const addMeasurementListener = (rootNode, listener) => {
++    const guard = getMeasurementGuard(rootNode);
++    guard.listeners.add(listener);
++    return () => {
++        guard.listeners.delete(listener);
++    };
++};
  // eslint-disable-next-line @typescript-eslint/no-restricted-types
  const findRootNode = (node) => {
      if (!node) {
-@@ -50,18 +62,88 @@ const useBoxMetrics = (
+@@ -50,21 +94,48 @@ const useBoxMetrics = (
  ref) => {
      const [metrics, setMetrics] = useState(emptyMetrics);
      const [hasMeasured, setHasMeasured] = useState(false);
-+    // Per-instance budget breaking the commit -> layout listener -> setState
-+    // feedback loop. A box whose measured size feeds back into its own layout
-+    // can oscillate, re-measuring and re-rendering until React throws error
-+    // #185 and the process dies.
-+    //
-+    // Only a measurement that changes the metrics schedules another render of
-+    // this component, and only a `hasMeasured` transition schedules one without
-+    // a changed measurement, so those two spend budget. The budget refills on
-+    // every layout-listener invocation the hook did not cause and on a terminal
-+    // resize, which keeps mount, streaming content and resize measuring
-+    // indefinitely. That listener is registered while the measured ref resolves
-+    // to an ink root, so while it is registered it sees every commit in that
-+    // root, not only commits that re-render this subtree. A detached measured
-+    // element leaves the instance unsubscribed for the commits in between, so
-+    // such an instance is charged for roughly every other one and trips at up to
-+    // twice the count below.
-+    //
-+    // Every refill is an event in React's own update chain, so a cascade that
-+    // keeps re-entering this instance trips after the same number of charged
-+    // invocations on any machine - and only that shape of cascade, for the reason
-+    // recorded at the count above. Refilling on elapsed wall-clock time does not
-+    // have that property: it only trips while the whole cascade fits inside one
-+    // window, which stops holding under CPU contention or on a slower platform,
-+    // and then React's 50-update cap fires first (#11817). A timer based refill
-+    // is out for the reason it always was - it would leave a pending handle that
-+    // fake-timer tests never drain, which stalls React's act queue.
-+    const guardRef = useRef({
-+        count: 0,
-+        armed: false,
++    // Per-instance measurement state. The budget itself lives on the ink root,
++    // because React applies its nested-update limit at that scope too.
++    const stateRef = useRef({
 +        last: null,
 +        hasMeasured: false,
++        rootNode: undefined,
 +    });
      const { stdout } = useStdout();
      const updateMetrics = useCallback(() => {
-+        const guard = guardRef.current;
-+        if (guard.count >= maxSelfDrivenMeasurements) {
-+            return;
++        const state = stateRef.current;
++        const rootNode = findRootNode(ref.current) ?? state.rootNode;
++        if (rootNode) {
++            state.rootNode = rootNode;
++        }
++        const guard = rootNode ? getMeasurementGuard(rootNode) : undefined;
++        if (guard?.count >= maxSelfDrivenMeasurements) {
++            return false;
 +        }
          const layout = ref.current?.yogaNode?.getComputedLayout() ?? emptyMetrics;
 -        setMetrics(previousMetrics => {
@@ -283,58 +295,40 @@ index c4386e4..2611ed1 100644
 -            return hasChanged ? layout : previousMetrics;
 -        });
 -        setHasMeasured(Boolean(ref.current));
-+        const last = guard.last;
++        const last = state.last;
 +        const hasChanged = last === null ||
 +            last.width !== layout.width ||
 +            last.height !== layout.height ||
 +            last.left !== layout.left ||
 +            last.top !== layout.top;
 +        if (hasChanged) {
-+            guard.last = layout;
-+            // Arms the next commit as one this hook caused; the layout listener
-+            // below settles the budget when that commit arrives.
-+            guard.armed = true;
++            state.last = layout;
 +            setMetrics(layout);
 +        }
 +        const nextHasMeasured = Boolean(ref.current);
-+        if (nextHasMeasured !== guard.hasMeasured) {
-+            // `setHasMeasured` schedules a commit of its own when it flips, and
-+            // that commit is this hook's as much as the metrics one, so it arms
-+            // the guard too. Only the transition may: the call below is
-+            // unconditional, and arming on it would charge the external commits
-+            // that keep a streaming box measuring.
-+            guard.hasMeasured = nextHasMeasured;
-+            guard.armed = true;
++        const hasMeasuredChanged = nextHasMeasured !== state.hasMeasured;
++        if (hasMeasuredChanged) {
++            state.hasMeasured = nextHasMeasured;
 +        }
 +        setHasMeasured(nextHasMeasured);
++        return hasChanged || hasMeasuredChanged;
      }, [ref]);
-+    // Settles the budget for the commit this is called from, once per commit and
-+    // never during render. Accounting kept in render would be invoked twice under
-+    // StrictMode - spent by the first invocation and refilled by the second - and
-+    // the guard would then never trip on the one code path that renders inside
-+    // StrictMode (`DEBUG=1 npm run dev`), letting React's 50-update cap fire
-+    // instead. A commit is this hook's own when the measurement that scheduled it
-+    // armed the guard, and any other commit refills the budget.
-+    const onLayout = useCallback(() => {
-+        const guard = guardRef.current;
-+        if (guard.armed) {
-+            guard.armed = false;
-+            guard.count += 1;
-+        }
-+        else {
-+            guard.count = 0;
-+        }
-+        updateMetrics();
-+    }, [updateMetrics]);
      // Runs after every render of this component.
      // This keeps metrics fresh when local state/props in this subtree change.
-     useEffect(updateMetrics);
-@@ -72,16 +154,22 @@ ref) => {
+-    useEffect(updateMetrics);
++    useEffect(() => {
++        updateMetrics();
++    });
+     // Subscribe to root layout commits so memoized components still receive
+     // sibling-driven position/size updates, even when they skip re-rendering.
+     useEffect(() => {
+@@ -72,16 +143,27 @@ ref) => {
          if (!rootNode) {
              return;
          }
 -        return addLayoutListener(rootNode, updateMetrics);
-+        return addLayoutListener(rootNode, onLayout);
++        stateRef.current.rootNode = rootNode;
++        return addMeasurementListener(rootNode, updateMetrics);
      });
      // Terminal resize events do not go through React's render cycle. Ink
      // recalculates Yoga layout in its own resize handler — registered in the
@@ -345,7 +339,11 @@ index c4386e4..2611ed1 100644
 +        const onResize = () => {
 +            // A resize is a new interaction, so it refills the budget even when
 +            // an earlier oscillation already tripped it.
-+            guardRef.current.count = 0;
++            const rootNode = findRootNode(ref.current) ?? stateRef.current.rootNode;
++            if (rootNode) {
++                const guard = getMeasurementGuard(rootNode);
++                guard.count = 0;
++            }
 +            updateMetrics();
 +        };
 +        stdout.on('resize', onResize);
