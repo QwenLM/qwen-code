@@ -10,6 +10,7 @@ import {
   _resetRipgrepUtilsCachesForTest,
   canUseRipgrep,
   getBuiltinRipgrep,
+  resolveHealthyBuiltinRipgrep,
   resolveRipgrep,
   runRipgrep,
 } from './ripgrepUtils.js';
@@ -673,6 +674,20 @@ describe('ripgrepUtils', () => {
       builtinFailsSystemWorks();
 
       await expect(canUseRipgrep(true)).resolves.toBe(true);
+    });
+
+    it('returns only a healthy bundled ripgrep path', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+
+      await expect(resolveHealthyBuiltinRipgrep()).resolves.toBe(
+        getBuiltinRipgrep(),
+      );
+    });
+
+    it('declines when ripgrep resolution falls back to the system binary', async () => {
+      builtinFailsSystemWorks();
+
+      await expect(resolveHealthyBuiltinRipgrep()).resolves.toBeNull();
     });
 
     it('caches the fallback selection and does not re-probe the broken builtin', async () => {
