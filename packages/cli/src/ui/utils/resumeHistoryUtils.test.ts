@@ -10,6 +10,7 @@ import {
   buildResumedHistoryItems,
   stripSuppressOnRestore,
   expandCollapsedHistory,
+  computeResumedPromptCountSeed,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
@@ -477,7 +478,12 @@ describe('resumeHistoryUtils', () => {
         },
       });
       expect(items).toEqual([
-        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt\nbare injected context',
+          promptOwnerText: 'my prompt',
+        },
       ]);
     });
 
@@ -783,7 +789,14 @@ describe('resumeHistoryUtils', () => {
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'raw @file prompt',
+        promptOwnerText: 'expanded model prompt',
+      },
+    ]);
   });
 
   it('projects the user turn when legacy @-command metadata has no userText', () => {
@@ -880,6 +893,7 @@ describe('resumeHistoryUtils', () => {
         id: 31,
         type: 'user',
         text: 'user prompt\nlegacy bare hook context',
+        promptOwnerText: 'user prompt',
       },
     ]);
   });
@@ -2099,6 +2113,75 @@ describe('resumed identity survives a synthetic display string', () => {
     ).toBe(4);
   });
 
+  it('resolves a turn whose recorded prompt begins with a standalone system-reminder part', () => {
+    // Per-turn reminders (plan mode, hook context) are prepended as extra
+    // parts on the SAME record, so the record's first text part can be a
+    // reminder. The gate's consumer skips a leading standalone reminder when
+    // picking the entry's prompt; the record-side modelFacingText must
+    // mirror that skip, or the resumed item's promptOwnerText is the
+    // reminder text, the ownership proof never matches the turn's own entry,
+    // and the gate refuses (-1) a plainly reachable turn (R48-4).
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nplan mode is on\n</system-reminder>',
+              },
+              { text: 'run the tests' },
+            ],
+          },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it("claims a pre-identity turn's unmarked entry by its model-facing text in the safe-cut scan", () => {
+    // The safe-cut scan pairs an UNMARKED entry (here the middle turn's own,
+    // recorded before identities existed) against each still-displayed
+    // pre-target turn's model-facing text. That text was captured only when
+    // the record's promptId survived the duplicate census, so for exactly
+    // the no-mark population the scan fell back to the DISPLAY string —
+    // '[User message with attachments]' matches no entry — and the demotion
+    // cut at 4, dropping the displayed middle turn's own entry while its UI
+    // item stayed on screen (R50-1). The goal_runtime record between the
+    // turns inflates the walk (counted, no UI item) so the demotion engages.
+    expect(
+      truncationIndexForLastUserTurn([
+        rec({
+          type: 'user',
+          promptId: 's########0',
+          message: { role: 'user', parts: [{ text: 'first prompt' }] },
+        }),
+        model('r0'),
+        rec({
+          type: 'user',
+          subtype: 'goal_runtime',
+          message: { role: 'user', parts: [{ text: 'goal tick' }] },
+        }),
+        model('rX'),
+        rec({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'target prompt' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(6);
+  });
+
   it('still resolves a placeholder-texted turn that follows an attachment-only turn', () => {
     // R32-1 (the behind direction): an attachment-only record resumes to a
     // visible '[User message with attachments]' turn whose API entry has no
@@ -2249,5 +2332,62 @@ describe('resumed promptId attachment', () => {
       undefined,
       's########2',
     ]);
+  });
+});
+
+describe('computeResumedPromptCountSeed', () => {
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  it('seeds past a file-history snapshot key a dropped turn retained', () => {
+    // A conversation-only rewind drops the target turn from the transcript
+    // but re-records the surviving file-history snapshots — the dropped
+    // turn's included — on the active branch. A seed derived only from the
+    // surviving user turns re-mints that key on the first post-resume
+    // submit, and the shared-key refusal then blocks that turn's file
+    // restore (R48-1).
+    const records = [
+      rec({
+        type: 'user',
+        promptId: 's########0',
+        message: { role: 'user', parts: [{ text: 'first prompt' }] },
+      }),
+      rec({
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'r0' }] },
+      }),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: { role: 'user', parts: [{ text: 'second prompt' }] },
+      }),
+      rec({
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'r1' }] },
+      }),
+      rec({
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 's########2',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        },
+      }),
+    ];
+    expect(computeResumedPromptCountSeed(records, 's')).toBe(3);
+  });
+
+  it('keeps seeding from zero when no turn or snapshot claims an id', () => {
+    expect(computeResumedPromptCountSeed([], 's')).toBe(0);
   });
 });

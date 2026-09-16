@@ -80,7 +80,11 @@ another entrance). A match is accepted only when **all** hold:
    same id with the same text, and at most one post-`startIndex` entry carries
    the target's text. The census skips entries marked with a different id
    (provably another turn's own — the user simply sent the same text twice),
-   and for a placeholder-texted target it counts only the walk's own
+   skips notification-provenance entries (a drained background-agent/cron
+   submission has a notification item as its UI half, never a user turn, so
+   it cannot be the target's own and cannot impostor one — a cron fire whose
+   raw prompt equals the target's text must not veto the proof), and for a
+   placeholder-texted target it counts only the walk's own
    population (a same-mime cleared media-only sibling never had a UI turn;
    placeholder-vs-placeholder ambiguity is the ordinal check's job);
 7. the positional walk does not land earlier than the match for a reason the
@@ -91,9 +95,19 @@ another entrance). A match is accepted only when **all** hold:
    real user-role entry, while a mid-turn steer message owns no counted entry
    and displays as a `sentToModel: false` user item. Even then the demotion
    fires only when the cut is safe: dropping [walk, match) must not truncate
-   an entry a still-displayed turn before the target claims by mark — when it
-   would, the early walk is an unowned excess entry's doing (a Goal
-   continuation, a submit_prompt turn) and the proven match stays.
+   an entry a still-displayed turn before the target claims — by mark, or,
+   for an entry that carries no mark (a retry's re-push, a pre-identities
+   transcript, a checkpoint restore), by its prompt text equalling that
+   turn's model-facing text (`promptOwnerText ?? text`). When the cut would
+   drop one, the early walk is an unowned excess entry's doing (a Goal
+   continuation, a submit_prompt turn) and the proven match stays;
+8. no entry AFTER the match is owned by a still-displayed turn before the
+   target (by mark, or by text when the entry carries no mark): the match
+   cannot be the target's own in that case — its true entry must follow that
+   turn's. That is the claimant-less re-send wearing the absorbed target's id
+   and text, and the demotion in condition 7 cannot catch it because the
+   absorbed target leaves the walk one short. Identity does not resolve; the
+   gate falls back to the walk, whose loud -1 is the pre-identity answer.
 
 Anything else falls through to the positional walk, whose loud -1 is the safe
 refusal. So the change can only make rewind more accurate than it was, never

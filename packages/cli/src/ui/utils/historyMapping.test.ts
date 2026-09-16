@@ -2191,19 +2191,23 @@ describe('owner-paired censuses close the unpaired-producer class (R40-3)', () =
     expect(computeApiTruncationIndex(ui, 6, api)).toBe(-1);
   });
 
-  it('keeps the ownership-proven match when a submit_prompt turn inflates the walk', () => {
-    // A slash-command submit_prompt turn sends its expanded content with a
-    // promptId minted like any first-party prompt, but its UI item is the
-    // command invocation, not a real user turn — a marked, ownable entry no
-    // real UI turn claims. The demotion weighed only the excess, so it
-    // discarded the target's proven match (6) onto the walk's boundary (4),
-    // truncating a still-displayed turn's own entry out of model context.
+  it('keeps the ownership-proven match when a Goal continuation inflates the walk past a submit_prompt turn', () => {
+    // Production shape (R49-2): a submit_prompt invocation item IS a real
+    // user turn — both dispatch paths set sentToModel on it when the
+    // expanded content is submitted — so its marked entry is owned and
+    // never inflates the walk. The unpaired excess here is the Goal
+    // continuation: an unmarked user-role entry no UI item owns, while its
+    // response still renders as an ordinary model item. The walk counts the
+    // excess and lands a full turn early (6); only the safe-cut scan —
+    // the shown turn's marked entry inside [walk, match) — keeps the
+    // target's proven match (8).
     const firstEntry = userContent('first prompt');
     markApiHistoryPrompt(firstEntry, 'session########0');
     const submitPromptEntry = userContent('expanded submit_prompt content');
-    // No real UI turn wears this id: the invocation item renders the
-    // command text, which isRealUserTurn excludes as a slash command.
+    // Owned by the invocation item below: it renders the command text AND
+    // carries sentToModel, so it counts on the UI side as well.
     markApiHistoryPrompt(submitPromptEntry, 'session########1');
+    const goalEntry = userContent('goal continuation'); // unmarked; no UI item
     const shownEntry = userContent('shown turn');
     markApiHistoryPrompt(shownEntry, 'session########2');
     const targetEntry = userContent('target prompt');
@@ -2212,25 +2216,28 @@ describe('owner-paired censuses close the unpaired-producer class (R40-3)', () =
     const ui: HistoryItem[] = [
       withPromptId(1, 'first prompt', 'session########0'),
       llmItem(2),
-      userItem(3, '/review'), // the submit_prompt invocation item
+      userItem(3, '/review', true), // the submit_prompt invocation item
       llmItem(4),
-      withPromptId(5, 'shown turn', 'session########2'),
-      llmItem(6),
-      withPromptId(7, 'target prompt', 'session########3'),
-      llmItem(8),
+      llmItem(5), // the Goal continuation's rendered response
+      withPromptId(6, 'shown turn', 'session########2'),
+      llmItem(7),
+      withPromptId(8, 'target prompt', 'session########3'),
+      llmItem(9),
     ];
     const api: Content[] = [
       firstEntry,
       modelContent('r0'),
       submitPromptEntry,
       modelContent('r1'),
+      goalEntry,
+      modelContent('g1'),
       shownEntry, // a still-displayed turn's own entry, marked
       modelContent('r2'),
-      targetEntry, // the target's own entry sits at index 6
+      targetEntry, // the target's own entry sits at index 8
       modelContent('r3'),
     ];
 
-    expect(computeApiTruncationIndex(ui, 7, api)).toBe(6);
+    expect(computeApiTruncationIndex(ui, 8, api)).toBe(8);
   });
 });
 
