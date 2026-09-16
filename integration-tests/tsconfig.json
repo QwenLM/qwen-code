@@ -45,6 +45,10 @@
       // (`../../packages/cli/src/...`), so those files get checked here too
       // and must resolve their own imports.
       "@qwen-code/qwen-code-core": ["../packages/core/src/index.ts"],
+      "@qwen-code/qwen-code-core/omni": ["../packages/core/src/omni/index.ts"],
+      "@qwen-code/qwen-code-core/omniPolicyCollection": [
+        "../packages/core/src/omni/policy/model-call-collection.ts"
+      ],
       "@qwen-code/qwen-code-core/subSessionConstants": [
         "../packages/core/src/tools/sub-session-constants.ts"
       ],
@@ -62,6 +66,9 @@
       ],
       "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
         "../packages/core/src/utils/conversations-runtime-marker.ts"
+      ],
+      "@qwen-code/qwen-code-core/subagentRuntime": [
+        "../packages/core/src/subagent-runtime.ts"
       ],
       "@qwen-code/qwen-code-core/storage": [
         "../packages/core/src/config/storage.ts"
@@ -117,6 +124,9 @@
       ],
       "@qwen-code/acp-bridge/channelControlTimeouts": [
         "../packages/acp-bridge/src/channel-control-timeouts.ts"
+      ],
+      "@qwen-code/acp-bridge/processRegistry": [
+        "../packages/acp-bridge/src/process-registry.ts"
       ],
       "@qwen-code/acp-bridge/childHeapPolicy": [
         "../packages/acp-bridge/src/child-heap-policy.ts"

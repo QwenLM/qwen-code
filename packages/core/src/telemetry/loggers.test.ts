@@ -28,6 +28,7 @@ import {
   EVENT_API_RESPONSE,
   EVENT_CLI_CONFIG,
   EVENT_FLASH_FALLBACK,
+  EVENT_GOAL_STATE,
   EVENT_TOOL_CALL,
   EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
@@ -45,6 +46,7 @@ import {
   EVENT_TOOL_OUTPUT_TRUNCATED,
   EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_WORKFLOW_RUN,
 } from './constants.js';
 import {
   logApiRequest,
@@ -56,6 +58,7 @@ import {
   logLoopDetected,
   logRepeatedToolFailureGuard,
   logFlashFallback,
+  logGoalState,
   logChatCompression,
   logMalformedJsonResponse,
   logFileOperation,
@@ -72,6 +75,7 @@ import {
   logApiRetry,
   logProtocolTagSanitized,
   logMemoryRecallDelivery,
+  logWorkflowRun,
   normalizeToolCallEvent,
 } from './loggers.js';
 import * as metrics from './metrics.js';
@@ -84,6 +88,7 @@ import {
   ApiRequestEvent,
   ApiResponseEvent,
   FlashFallbackEvent,
+  makeGoalStateEvent,
   StartSessionEvent,
   ToolCallEvent,
   UserPromptEvent,
@@ -106,6 +111,7 @@ import {
   LoopDetectedEvent,
   LoopType,
   RepeatedToolFailureGuardEvent,
+  WorkflowRunEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -139,6 +145,36 @@ describe('loggers', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('publishes the workflow outcome and resume counters', () => {
+    const config = makeFakeConfig({ sessionId: 'test-session-id' });
+    logWorkflowRun(
+      config,
+      new WorkflowRunEvent({
+        status: 'completed',
+        agents_dispatched: 5,
+        agents_completed: 5,
+        agents_failed: 2,
+        agents_cached: 1,
+        agents_respawned: 3,
+        phase_count: 2,
+        tokens_spent: 900,
+        duration_ms: 1_200,
+      }),
+    );
+
+    expect(mockLogger.emit).toHaveBeenCalledWith({
+      body: 'Workflow run completed.',
+      attributes: expect.objectContaining({
+        'event.name': EVENT_WORKFLOW_RUN,
+        agents_dispatched: 5,
+        agents_completed: 5,
+        agents_failed: 2,
+        agents_cached: 1,
+        agents_respawned: 3,
+      }),
+    });
   });
 
   describe('logChatCompression', () => {
@@ -1102,6 +1138,72 @@ describe('loggers', () => {
           auth_type: 'vertex-ai',
         },
       });
+    });
+  });
+
+  describe('logGoalState', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
+    } as unknown as Config;
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger.prototype, 'logGoalStateEvent');
+      vi.spyOn(metrics, 'recordGoalStateMetrics');
+    });
+
+    it('emits the transition with its figures and records its metrics', () => {
+      const event = makeGoalStateEvent({
+        cause: 'usage_limited',
+        goal_id: 'g-1',
+        revision: 2,
+        status: 'usage_limited',
+        limit_kind: 'turn_budget',
+        turn_count: 20,
+        tokens_used: 1_234,
+      });
+
+      logGoalState(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Goal usage_limited.',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_GOAL_STATE,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          cause: 'usage_limited',
+          goal_id: 'g-1',
+          revision: 2,
+          status: 'usage_limited',
+          limit_kind: 'turn_budget',
+          turn_count: 20,
+          tokens_used: 1_234,
+        },
+      });
+      expect(QwenLogger.prototype.logGoalStateEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(metrics.recordGoalStateMetrics).toHaveBeenCalledWith(
+        mockConfig,
+        event,
+      );
+    });
+
+    it('still reaches the analytics sink when the OpenTelemetry SDK is off', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const event = makeGoalStateEvent({
+        cause: 'create',
+        goal_id: 'g-1',
+        revision: 1,
+      });
+
+      logGoalState(mockConfig, event);
+
+      expect(QwenLogger.prototype.logGoalStateEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(mockLogger.emit).not.toHaveBeenCalled();
     });
   });
 

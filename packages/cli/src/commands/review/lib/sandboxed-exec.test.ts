@@ -907,6 +907,25 @@ describe('mountRootFor', () => {
     },
   );
 
+  itWhereRootsCanMount(
+    'answers for the review temp dir ITSELF, not only for its children',
+    () => {
+      // The marker ends in a separator, so a path ending AT `.qwen/tmp`
+      // matched no temp dir at all: `untrustedRepositoryFrom` short-circuited
+      // on its first line, the launch-directory question went unpolicied for a
+      // process standing there, and `lib/git` memoized that negative as
+      // trusted for the rest of the process.
+      const root = tmp();
+      const tmpDir = join(root, '.qwen', 'tmp');
+      mkdirSync(tmpDir, { recursive: true });
+      expect(mountRootFor(tmpDir)).toBe(realpathSync(tmpDir));
+      // ...and a child of it answers the same root, as before.
+      const tree = join(tmpDir, 'review-pr-1');
+      mkdirSync(tree, { recursive: true });
+      expect(mountRootFor(tree)).toBe(realpathSync(tmpDir));
+    },
+  );
+
   it('is null outside a temp dir, so a local checkout is never mounted', () => {
     // `/review` of a local checkout has no sibling layout: the tree under test
     // IS the user's working copy.

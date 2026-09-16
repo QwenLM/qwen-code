@@ -371,7 +371,7 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(document.activeElement).toBe(content);
   });
 
-  it('collects pasted images and lets plain text paste natively', async () => {
+  it('collects image-only paste and lets mixed text/image paste natively', async () => {
     mockTouchDevice();
     await mount();
     const preventDefault = vi.fn();
@@ -388,7 +388,12 @@ describe('useComposerCore mobile textarea backend', () => {
       cancelable: true,
     });
     Object.defineProperty(imageEvent, 'clipboardData', {
-      value: { files: [], items: [imageItem], types: ['Files'] },
+      value: {
+        files: [],
+        items: [imageItem],
+        types: ['Files'],
+        getData: () => '',
+      },
     });
     await act(async () => {
       imageEvent.preventDefault = preventDefault;
@@ -407,8 +412,12 @@ describe('useComposerCore mobile textarea backend', () => {
     Object.defineProperty(textEvent, 'clipboardData', {
       value: {
         files: [],
-        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
-        types: ['text/plain'],
+        items: [
+          imageItem,
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? 'PPT 文字' : ''),
       },
     });
     act(() => {
@@ -416,6 +425,8 @@ describe('useComposerCore mobile textarea backend', () => {
       container!.querySelector('textarea')!.dispatchEvent(textEvent);
     });
     expect(textPreventDefault).not.toHaveBeenCalled();
+    expect(latest!.pastedImages).toHaveLength(1);
+    expect(latest!.pendingImageBatchCount).toBe(0);
   });
 
   it('saves the draft immediately on blur before the debounce timer fires', async () => {
@@ -443,5 +454,50 @@ describe('useComposerCore mobile textarea backend', () => {
       ),
     ).toBe('mobile draft text');
     vi.useRealTimers();
+  });
+
+  it('walks prompt history from navigatePrevHistory/navigateNextHistory', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('first message');
+    act(() => latest!.submitText());
+    typeText('second message');
+    act(() => latest!.submitText());
+    typeText('working draft');
+    expect(latest!.mobileComposer!.value).toBe('working draft');
+
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('second message');
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('first message');
+    act(() => latest!.navigateNextHistory());
+    expect(latest!.mobileComposer!.value).toBe('second message');
+    act(() => latest!.navigateNextHistory());
+    expect(latest!.mobileComposer!.value).toBe('working draft');
+  });
+
+  it('persists the draft again once the user edits after a history walk', async () => {
+    mockTouchDevice();
+    await mount({
+      sessionId: 'mobile-session',
+      atWorkspaceCwd: '/workspace/mobile',
+    });
+    typeText('first message');
+    act(() => latest!.submitText());
+    typeText('draft text');
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('first message');
+
+    typeText('edited after walk');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(
+      localStorage.getItem(
+        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
+      ),
+    ).toBe('edited after walk');
   });
 });

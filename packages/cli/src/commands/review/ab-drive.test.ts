@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -573,29 +574,81 @@ describe('runAbDrive, harnessed', () => {
 
   it('drives both arms with one script and pairs the captures', () => {
     const args = baseArgs({});
+    // Count inside a PRIVATE TMPDIR, not the machine-wide one: another job's
+    // ab-drive run (the review pipeline drives it for real on shared runners)
+    // landing a run dir between the two reads is indistinguishable from a
+    // leak this run made. On Windows TMPDIR is a no-op and the count reads
+    // the global temp dir as before (same precedent as the TMPDIR test above).
+    const savedTmp = process.env['TMPDIR'];
+    process.env['TMPDIR'] = tempDir('ab-privtmp-');
     const runDirs = () =>
       readdirSync(tmpdir()).filter((d) => d.startsWith('qwen-review-ab-drive-'))
         .length;
-    const before = runDirs();
-    const h = harness({ server: args.server });
-    const r = runAbDrive({ ...args, exec: h.exec });
-    expect(r.observed).toBe(true);
-    expect(r.a?.outcome).toBe('completed');
-    expect(r.b?.outcome).toBe('completed');
-    expect(r.a?.output).toContain('arm-a output');
-    expect(r.b?.output).toContain('arm-b output');
-    expect(r.identicalOutput).toBe(false);
-    // The digest is the same-bytes fact a witness quotes — pinned to the
-    // script's actual bytes, not merely to being 64 hex characters.
-    expect(r.scriptSha256).toBe(
-      createHash('sha256').update('true').digest('hex'),
-    );
-    // Cleanup is unconditional and last — a leaked server is the next run's
-    // wrong observation.
-    expect(h.log.at(-1)).toEqual(['tmux', '-L', args.server, 'kill-server']);
-    // The mkdtemp'd run dir is swept on the success path too.
-    expect(runDirs()).toBe(before);
+    try {
+      const before = runDirs();
+      const h = harness({ server: args.server });
+      const r = runAbDrive({ ...args, exec: h.exec });
+      expect(r.observed).toBe(true);
+      expect(r.a?.outcome).toBe('completed');
+      expect(r.b?.outcome).toBe('completed');
+      expect(r.a?.output).toContain('arm-a output');
+      expect(r.b?.output).toContain('arm-b output');
+      expect(r.identicalOutput).toBe(false);
+      // The digest is the same-bytes fact a witness quotes — pinned to the
+      // script's actual bytes, not merely to being 64 hex characters.
+      expect(r.scriptSha256).toBe(
+        createHash('sha256').update('true').digest('hex'),
+      );
+      // Cleanup is unconditional and last — a leaked server is the next run's
+      // wrong observation.
+      expect(h.log.at(-1)).toEqual(['tmux', '-L', args.server, 'kill-server']);
+      // The mkdtemp'd run dir is swept on the success path too.
+      expect(runDirs()).toBe(before);
+    } finally {
+      if (savedTmp === undefined) delete process.env['TMPDIR'];
+      else process.env['TMPDIR'] = savedTmp;
+    }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'the sweep count is hermetic — a foreign run dir in the shared temp dir does not move it',
+    () => {
+      // Pins the private-TMPDIR redirect above: another job's ab-drive run
+      // dir appearing mid-run in the MACHINE-WIDE temp dir must not register.
+      // Without the redirect this fails as `expected 1 to be +0` — the exact
+      // assertion signature a foreign run dir produced on a shared runner.
+      const sharedTmp = tmpdir();
+      const args = baseArgs({});
+      let foreignDir = '';
+      const h = harness({
+        server: args.server,
+        onSession: (name) => {
+          if (name === 'hold' && foreignDir === '') {
+            foreignDir = mkdtempSync(join(sharedTmp, 'qwen-review-ab-drive-'));
+          }
+        },
+      });
+      const savedTmp = process.env['TMPDIR'];
+      process.env['TMPDIR'] = tempDir('ab-privtmp-');
+      const runDirs = () =>
+        readdirSync(tmpdir()).filter((d) =>
+          d.startsWith('qwen-review-ab-drive-'),
+        ).length;
+      try {
+        const before = runDirs();
+        const r = runAbDrive({ ...args, exec: h.exec });
+        expect(r.observed).toBe(true);
+        // The pollution really landed inside the measured window.
+        expect(existsSync(foreignDir)).toBe(true);
+        expect(runDirs()).toBe(before);
+      } finally {
+        if (savedTmp === undefined) delete process.env['TMPDIR'];
+        else process.env['TMPDIR'] = savedTmp;
+        if (foreignDir !== '')
+          rmSync(foreignDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('carries each arm script’s own exit code — never a fabricated zero', () => {
     // The success note quotes `a: exit N`, and a verifier quotes the note;
@@ -1060,29 +1113,38 @@ describe.skipIf(!hasTmux || process.platform === 'win32')(
     });
 
     it('an upstream that exits at birth is a confound, not a comparison — and still cleans up', () => {
-      const before = readdirSync(tmpdir()).filter((d) =>
-        d.startsWith('qwen-review-ab-drive-'),
-      ).length;
-      const r = runAbDrive({
-        shared: 'true',
-        script: 'sleep 1; echo watched-nothing',
-        armA: tempDir('ab-real-da-'),
-        armB: tempDir('ab-real-db-'),
-        readyTimeout: 5,
-        timeout: 30,
-        sharedReadyTimeout: 5,
-        sharedOnce: false,
-        server: `abreald-${process.pid}`,
-      });
-      expect(r.a?.outcome).toBe('completed');
-      expect(r.a?.sharedAliveAtEnd).toBe(false);
-      expect(r.observed).toBe(false);
-      expect(r.note).toContain('died');
-      // The mkdtemp'd run dir is swept on this failing path too.
-      const after = readdirSync(tmpdir()).filter((d) =>
-        d.startsWith('qwen-review-ab-drive-'),
-      ).length;
-      expect(after).toBe(before);
+      // Private TMPDIR for the same reason as the harnessed sweep count
+      // above — and this drive runs for seconds against real tmux, a far
+      // wider window for another job's run dir to land mid-measurement.
+      const savedTmp = process.env['TMPDIR'];
+      process.env['TMPDIR'] = tempDir('ab-privtmp-');
+      const runDirs = () =>
+        readdirSync(tmpdir()).filter((d) =>
+          d.startsWith('qwen-review-ab-drive-'),
+        ).length;
+      try {
+        const before = runDirs();
+        const r = runAbDrive({
+          shared: 'true',
+          script: 'sleep 1; echo watched-nothing',
+          armA: tempDir('ab-real-da-'),
+          armB: tempDir('ab-real-db-'),
+          readyTimeout: 5,
+          timeout: 30,
+          sharedReadyTimeout: 5,
+          sharedOnce: false,
+          server: `abreald-${process.pid}`,
+        });
+        expect(r.a?.outcome).toBe('completed');
+        expect(r.a?.sharedAliveAtEnd).toBe(false);
+        expect(r.observed).toBe(false);
+        expect(r.note).toContain('died');
+        // The mkdtemp'd run dir is swept on this failing path too.
+        expect(runDirs()).toBe(before);
+      } finally {
+        if (savedTmp === undefined) delete process.env['TMPDIR'];
+        else process.env['TMPDIR'] = savedTmp;
+      }
     });
 
     it('an arm path that is a FILE is refused with the directory message', () => {

@@ -123,6 +123,7 @@ export type {
   DaemonUiToolProvenance,
   // Session-meta events
   DaemonUiSessionMetadataChangedEvent,
+  DaemonUiSessionSourceChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,
