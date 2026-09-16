@@ -10333,6 +10333,18 @@ function emitPartialSkillMutation(
   emitSkillMutation(id, skills, 'partial');
 }
 
+// The recap is a single local annotation: the automatic trigger writes the same
+// message the manual one does, so it renders in the messages list rather than as
+// a store status block.
+function visibleRecapTexts(): string[] {
+  return (testState.latestMessageListProps?.messages ?? []).flatMap(
+    (message) =>
+      message.role === 'system' && message.source === 'recap'
+        ? [message.content]
+        : [],
+  );
+}
+
 async function triggerAutoRecap(): Promise<{
   recap: ReturnType<
     typeof deferred<{ sessionId: string; recap: string | null }>
@@ -20998,18 +21010,15 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('dispatches an automatic recap when the session remains active', async () => {
+  it('shows an automatic recap when the session remains active', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {
       recap.resolve({ sessionId: 'session-1', recap: 'Current session recap' });
       await recap.promise;
     });
 
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        source: 'recap',
-        text: expect.stringContaining('Current session recap'),
-      }),
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Current session recap'),
     ]);
   });
 
@@ -21025,9 +21034,7 @@ describe('App session callbacks', () => {
       await recap.promise;
     });
 
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
-    ]);
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('discards an automatic recap when the session becomes active without a new user block', async () => {
@@ -21041,9 +21048,7 @@ describe('App session callbacks', () => {
       await recap.promise;
     });
 
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
-    ]);
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('discards an automatic recap after starting a new session', async () => {
@@ -21060,9 +21065,7 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
-    ]);
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('discards an automatic recap tagged for a different session', async () => {
@@ -21072,9 +21075,7 @@ describe('App session callbacks', () => {
       await recap.promise;
     });
 
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
-    ]);
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('discards an automatic recap after switching to an existing session', async () => {
@@ -21096,9 +21097,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
       workspaceCwd: undefined,
     });
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
-    ]);
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('keeps an automatic recap when an existing-session switch fails', async () => {
@@ -21118,11 +21117,8 @@ describe('App session callbacks', () => {
       await recap.promise;
     });
 
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        source: 'recap',
-        text: expect.stringContaining('Current session recap'),
-      }),
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Current session recap'),
     ]);
   });
 
@@ -21143,9 +21139,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
       workspaceCwd: undefined,
     });
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
-    ]);
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('discards an automatic recap after clearing the screen', async () => {
@@ -21164,9 +21158,7 @@ describe('App session callbacks', () => {
     });
 
     expect(mockStore.reset).toHaveBeenCalled();
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
-    ]);
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('discards an automatic recap when the connection session id changes', async () => {
@@ -21178,9 +21170,179 @@ describe('App session callbacks', () => {
       await recap.promise;
     });
 
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({ source: 'recap' }),
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
+  it('keeps only the newest automatic recap across away cycles', async () => {
+    const first = deferred<{ sessionId: string; recap: string | null }>();
+    const second = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    await act(async () => {
+      first.resolve({ sessionId: 'session-1', recap: 'First away recap' });
+      await first.promise;
+    });
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('First away recap'),
     ]);
+
+    hidden = true;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    testState.blocks = Array.from({ length: 8 }, () => ({}));
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      second.resolve({ sessionId: 'session-1', recap: 'Second away recap' });
+      await second.promise;
+    });
+
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Second away recap'),
+    ]);
+  });
+
+  it('replaces an automatic recap with a manual one', async () => {
+    const { recap, container } = await triggerAutoRecap();
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Automatic recap' });
+      await recap.promise;
+    });
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Automatic recap'),
+    ]);
+
+    const manual = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValueOnce(manual.promise);
+    testState.prompt = '/recap';
+    await clickSubmit(container);
+    await act(async () => {
+      manual.resolve({ sessionId: 'session-1', recap: 'Manual recap' });
+      await manual.promise;
+    });
+
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Manual recap'),
+    ]);
+  });
+
+  it('keeps the newer manual recap when an older automatic one resolves last', async () => {
+    const { recap, container } = await triggerAutoRecap();
+
+    // The user asks for a recap while the automatic request is still in flight.
+    const manual = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValueOnce(manual.promise);
+    testState.prompt = '/recap';
+    await clickSubmit(container);
+    await act(async () => {
+      manual.resolve({ sessionId: 'session-1', recap: 'Manual recap' });
+      await manual.promise;
+    });
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Manual recap'),
+    ]);
+
+    // The older automatic answer must not replace the newer manual recap.
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Automatic recap' });
+      await recap.promise;
+    });
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Manual recap'),
+    ]);
+  });
+
+  it('does not strand the manual recap placeholder when a newer request supersedes it', async () => {
+    const manual = deferred<{ sessionId: string; recap: string | null }>();
+    const auto = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession
+      .mockReturnValueOnce(manual.promise)
+      .mockReturnValueOnce(auto.promise);
+
+    let hidden = false;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const { container } = renderApp();
+    await flush();
+
+    // The manual recap starts and shows its placeholder.
+    testState.prompt = '/recap';
+    await clickSubmit(container);
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Generating recap'),
+    ]);
+
+    // The user leaves and returns, so a newer automatic request supersedes it.
+    testState.blocks = [{}, {}, {}, {}];
+    hidden = true;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).toHaveBeenCalledTimes(2);
+
+    // The superseded manual answer must not leave its placeholder behind...
+    await act(async () => {
+      manual.resolve({ sessionId: 'session-1', recap: 'Manual recap' });
+      await manual.promise;
+    });
+    expect(visibleRecapTexts()).toEqual([]);
+
+    // ...and the newer automatic answer still lands.
+    await act(async () => {
+      auto.resolve({ sessionId: 'session-1', recap: 'Automatic recap' });
+      await auto.promise;
+    });
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Automatic recap'),
+    ]);
+  });
+
+  it('clears a displayed automatic recap when the screen is cleared', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Automatic recap' });
+      await recap.promise;
+    });
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Automatic recap'),
+    ]);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'l',
+        }),
+      );
+    });
+
+    expect(mockStore.reset).toHaveBeenCalled();
+    expect(visibleRecapTexts()).toEqual([]);
   });
 
   it('focuses the composer after starting a new session', async () => {
