@@ -361,6 +361,11 @@ import type {
   ChildHeapPolicySnapshot,
 } from '@qwen-code/acp-bridge/childHeapPolicy';
 import type { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import {
+  createIdleAcpReclaimer,
+  type IdleAcpReclaimer,
+} from './idle-acp-reclamation.js';
+import { readWorkspaceActivity } from './workspace-activity.js';
 import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
@@ -598,6 +603,7 @@ export interface ServeAppDeps {
   managedChildProcesses?: {
     registry: ProcessRegistry;
     policy: ChildHeapPolicy;
+    ownsBridge?: (bridge: AcpSessionBridge) => boolean;
   };
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
@@ -1165,6 +1171,7 @@ export function createServeApp(
     createDaemonStatusProvider(
       primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
     );
+  let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
   const totalSessionAdmission =
     !deps.bridge && !injectedWorkspaceRegistry
@@ -1215,6 +1222,16 @@ export function createServeApp(
             channelFactory: createSpawnChannelFactory({
               processRegistry: deps.managedChildProcesses?.registry,
               childHeapPolicy: deps.managedChildProcesses?.policy,
+              ...(deps.managedChildProcesses
+                ? {
+                    reclaimIdleChild: async (signal?: AbortSignal) => {
+                      await reclaimIdleAcp?.(
+                        hashDaemonWorkspace(boundWorkspace),
+                        signal,
+                      );
+                    },
+                  }
+                : {}),
               extraArgs: acpChildArgs,
             }),
           }
@@ -3482,6 +3499,30 @@ export function createServeApp(
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
+  }
+  if (deps.managedChildProcesses) {
+    reclaimIdleAcp = createIdleAcpReclaimer({
+      registry: workspaceRegistry,
+      processes: deps.managedChildProcesses.registry,
+      policy: deps.managedChildProcesses.policy,
+      ownsBridge:
+        deps.managedChildProcesses.ownsBridge ??
+        ((candidate) => candidate === defaultBridgeForAdmission),
+      getActivity: (runtime) => {
+        if (
+          !deps.workspaceRuntimeRemoval ||
+          !acpHandleRef.current ||
+          !supportsWorkspaceRuntimeLifecycle(runtime.bridge)
+        )
+          return undefined;
+        return readWorkspaceActivity(
+          runtime,
+          deps.workspaceRuntimeRemoval.getActivity(runtime),
+          acpHandleRef.current.getWorkspaceActivity(runtime.workspaceId),
+        );
+      },
+    });
+    app.locals['reclaimIdleAcp'] = reclaimIdleAcp;
   }
 
   // Local Control: the LAN listener serves THIS app, so the service is built

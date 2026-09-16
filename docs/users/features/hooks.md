@@ -1501,6 +1501,14 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 }
 ```
 
+### Browsing your hooks
+
+Run `/hooks` to browse the configured hooks. Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
+
+Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
+
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `hooks.disableAllHooks`, `hooks.stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected.
+
 ## Hook Execution
 
 ### Parallel vs Sequential Execution
@@ -1733,6 +1741,8 @@ sys.exit(0)
    - `[HTTP_HOOK_RUNNER]`, `[URL_VALIDATOR]`, `[PROMPT_HOOK_RUNNER]`, `[FUNCTION_HOOK_RUNNER]`, `[SKILL_HOOKS]`, `[SESSION_HOOKS_MANAGER]`, `[ASYNC_HOOK_REGISTRY]` and `[HOOK_AGGREGATOR]`: details from the individual runners and registries
 
    Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
+
+6. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls and HTTP security settings require a restart.
 
 ### Other checks
 

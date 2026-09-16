@@ -175,6 +175,8 @@ import {
   logStartSession,
   logSessionEnd,
   logRipgrepFallback,
+  logGoalState,
+  goalStateEventFromSnapshot,
   RipgrepFallbackEvent,
   StartSessionEvent,
   type TelemetryTarget,
@@ -2941,11 +2943,11 @@ export class Config {
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
-  private readonly userHooks?: Record<string, unknown>;
+  private userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
-  private readonly projectHooks?: Record<string, unknown>;
+  private projectHooks?: Record<string, unknown>;
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
-  private readonly hooks?: Record<string, unknown>;
+  private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
@@ -9356,6 +9358,24 @@ export class Config {
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
+  /**
+   * Replaces the settings-derived hook maps captured at construction. The CLI
+   * calls this after re-reading the settings files so that
+   * `HookSystem.reload()` sees edits made since startup. All three fields are
+   * replaced together, as at construction, so a stale legacy `hooks` snapshot
+   * can never resurface through the fallback in the getters. The bare, safe
+   * mode and folder trust gates in the getters still apply.
+   */
+  setHooksFromSettings(hooks: {
+    userHooks?: Record<string, unknown>;
+    projectHooks?: Record<string, unknown>;
+    hooks?: Record<string, unknown>;
+  }): void {
+    this.userHooks = hooks.userHooks;
+    this.projectHooks = hooks.projectHooks;
+    this.hooks = hooks.hooks;
+  }
+
   getExtensions(): Extension[] {
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
@@ -9843,6 +9863,16 @@ export class Config {
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
+    });
+    // Every committed transition reaches telemetry from here, the one place
+    // that holds both the runtime and the Config its loggers need. Subscribed
+    // before the restore below starts, so the broadcast that republishes a
+    // resumed session's Goal is seen and skipped rather than missed and then
+    // mistaken for the next live transition.
+    runtime.subscribe((snapshot, cause, meta) => {
+      if (meta?.replayed) return;
+      const event = goalStateEventFromSnapshot(snapshot, cause);
+      if (event) logGoalState(this, event);
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

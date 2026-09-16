@@ -81,11 +81,18 @@ async function runRequest<T>(
 
 export function createDirectoryHandleStore(
   idb: IDBFactory,
+  baseUrl: string,
+  pageOrigin: string,
 ): DirectoryHandleStore {
+  const daemonOrigin = new URL(baseUrl, pageOrigin).origin;
+  const key =
+    daemonOrigin === new URL(pageOrigin).origin
+      ? KEY
+      : `${KEY}:${daemonOrigin}`;
   return {
     async save(handle) {
       try {
-        await runRequest(idb, 'readwrite', (store) => store.put(handle, KEY));
+        await runRequest(idb, 'readwrite', (store) => store.put(handle, key));
         return true;
       } catch {
         return false;
@@ -94,7 +101,7 @@ export function createDirectoryHandleStore(
     async load() {
       try {
         const stored = await runRequest(idb, 'readonly', (store) =>
-          store.get(KEY),
+          store.get(key),
         );
         // Only a directory handle is a valid stored grant; anything else (a
         // stale value from another feature, a corrupted record) is a miss.
@@ -107,7 +114,7 @@ export function createDirectoryHandleStore(
     },
     async clear() {
       try {
-        await runRequest(idb, 'readwrite', (store) => store.delete(KEY));
+        await runRequest(idb, 'readwrite', (store) => store.delete(key));
         return true;
       } catch {
         return false;

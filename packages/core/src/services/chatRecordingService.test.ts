@@ -1557,6 +1557,48 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordGoalTurnEnd', () => {
+    it('waits for the durable system record and copies the Goal permit', async () => {
+      let resolveWrite!: () => void;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveWrite = resolve;
+          }),
+      );
+      const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+      const pending = chatRecordingService.recordGoalTurnEnd('finish', permit);
+      permit.turnId = 'changed';
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      resolveWrite();
+      await pending;
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0]![1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'goal_turn_end',
+        goalContext: { goalId: 'goal', revision: 1, turnId: 'turn' },
+        systemPayload: { toolCallId: 'finish' },
+      });
+      expect(record.message).toBeUndefined();
+    });
+
+    it('rejects a failed append instead of reporting a persisted boundary', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      await expect(
+        chatRecordingService.recordGoalTurnEnd('finish', {
+          goalId: 'goal',
+          revision: 1,
+          turnId: 'turn',
+        }),
+      ).rejects.toThrow('disk full');
+    });
+  });
+
   describe('recordTurnResult', () => {
     it('normalizes hostile and oversized error fields without throwing', () => {
       const hostile = Object.create(null, {

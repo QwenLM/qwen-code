@@ -851,6 +851,12 @@ export interface BridgePendingUserQuestionInteraction {
   options: BridgePendingInteractionOption[];
 }
 
+export interface BridgeIdleChannelCandidate {
+  channelId: string;
+  runtimeEpoch: number;
+  lastUsedAt: number;
+}
+
 export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
   runtimeLive: boolean;
@@ -2612,6 +2618,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * workspace runtime control when it is absent.
    */
   getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
+
+  getIdleChannelCandidate?(): BridgeIdleChannelCandidate | undefined;
+  reclaimIdleChannel?(
+    candidate: BridgeIdleChannelCandidate,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
