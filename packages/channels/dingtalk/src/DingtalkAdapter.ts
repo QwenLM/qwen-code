@@ -619,6 +619,11 @@ function formatChatRecord(
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** The charset ChannelBase's own slash classifier requires of a leading
+ * `/token`. Slash-prefixed prose — a path, a `//` or block comment — fails it
+ * and stays prose. */
+const SLASH_COMMAND_TOKEN_RE = /^[a-zA-Z0-9_:-]+$/;
+
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
@@ -3682,19 +3687,22 @@ export class DingtalkChannel extends ChannelBase {
       // this. metadata is appended AFTER command parsing, so locally dispatched
       // DM commands and `!` shell never see it; an agent-exposed command does,
       // and its parser sweeps everything past the command path into `args`, so
-      // command-shaped text is skipped (base suppresses its own prefix for
-      // recognized commands likewise). It stays one line because that append
-      // folds CR/LF to spaces. The nick is attacker-controlled and the ID is
-      // platform-opaque, so both go through the shared name sanitizer. The ID is
-      // spelled out only next to a nick, otherwise the same value reads twice.
+      // a DM opening on a bare command token gets no identity line. trimStart
+      // because the audio and chat-record branches hand back untrimmed text. It
+      // stays one line because that append folds CR/LF to spaces. The nick is
+      // attacker-controlled and the ID is platform-opaque, so both go through
+      // the shared name sanitizer. The ID is spelled out only next to a nick,
+      // otherwise the same value reads twice.
       const dmSenderId =
         senderNick && senderId
           ? ` (sender ID: ${sanitizeSenderName(senderId)})`
           : '';
+      const dmCommandToken =
+        content.text.trimStart().match(/^\/(\S+)/)?.[1] ?? '';
       const dmSenderMetadata =
         !isGroup &&
         this.config.sessionScope !== 'single' &&
-        !content.text.trimStart().startsWith('/')
+        !SLASH_COMMAND_TOKEN_RE.test(dmCommandToken)
           ? `Direct message from ${sanitizeSenderName(senderNick || senderId)}${dmSenderId}`
           : undefined;
 

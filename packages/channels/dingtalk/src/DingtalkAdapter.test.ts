@@ -8369,6 +8369,36 @@ describe('DingtalkChannel direct-message sender metadata', () => {
     expect(envelope).not.toHaveProperty('metadata');
   });
 
+  it('keeps attribution for slash-prefixed prose', () => {
+    const attributed = 'Direct message from Alice (sender ID: staff-1)';
+    const pathTurn = inboundEnvelope(
+      createChannel(),
+      dmPayload({ text: { content: '/tmp/build.log 里报错了，帮我看下' } }),
+    );
+    const commentTurn = inboundEnvelope(
+      createChannel(),
+      dmPayload({ text: { content: '// TODO: 这行为什么被跳过' } }),
+    );
+
+    expect(pathTurn?.metadata).toBe(attributed);
+    expect(commentTurn?.metadata).toBe(attributed);
+  });
+
+  it('omits the metadata when an untrimmed audio transcript opens on a command', () => {
+    const envelope = inboundEnvelope(
+      createChannel(),
+      dmPayload({
+        msgtype: 'audio',
+        content: { recognition: '  /summarize the call' },
+      }),
+    );
+
+    // The audio branch hands back the transcript untrimmed, so the guard has to
+    // look past the leading whitespace itself.
+    expect(envelope?.text).toBe('  /summarize the call');
+    expect(envelope).not.toHaveProperty('metadata');
+  });
+
   it('neutralizes a crafted nick before embedding it', () => {
     const envelope = inboundEnvelope(
       createChannel(),
