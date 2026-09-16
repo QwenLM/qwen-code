@@ -733,11 +733,21 @@ export function describeGoalCard(
   if (!lifecycle) return { state: 'hidden' };
   const stats: string[] = [];
   const turnCount = goal.turnCount ?? 0;
-  if (turnCount > 0)
-    stats.push(`${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`);
+  if (turnCount > 0) {
+    const turns = goal.turnBudget ?? turnCount;
+    stats.push(
+      `${turnCount}${goal.turnBudget === undefined ? '' : `/${goal.turnBudget}`} ${turns === 1 ? 'turn' : 'turns'}`,
+    );
+  }
   const activeTimeMs = goal.activeTimeMs ?? 0;
-  if (activeTimeMs > 0)
-    stats.push(formatDuration(activeTimeMs, { hideTrailingZeros: true }));
+  if (activeTimeMs > 0) {
+    const used = formatDuration(activeTimeMs, { hideTrailingZeros: true });
+    stats.push(
+      goal.activeTimeBudgetMs === undefined
+        ? used
+        : `${used}/${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })}`,
+    );
+  }
   const tokensUsed = goal.tokensUsed ?? 0;
   if (tokensUsed > 0) {
     const used = formatTokenCount(tokensUsed);
