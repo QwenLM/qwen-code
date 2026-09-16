@@ -2533,11 +2533,11 @@ jobs:
           BODY="$(printf '%s\n' \
             "<!-- qwen-review-salvaged ${EXPECTED_HEAD_SHA} -->" \
             '' \
-            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor; if that delta leaves the PR's own diff against its base byte-identical to the head reviewed here, the unchanged-diff skip suppresses it. Full log in the [workflow run](${RUN_URL})." \
+            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor and always runs in full — a salvaged head is deliberately not recorded as an unchanged-diff skip anchor, so nothing suppresses that review. Full log in the [workflow run](${RUN_URL})." \
             '' \
             '<details><summary>中文说明</summary>' \
             '' \
-            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量；但若该增量使 PR 相对 base 自身的 diff 与本次评审的 head 逐字节相同，则会被 unchanged-diff 跳过。完整日志见 [workflow 运行](${RUN_URL})。" \
+            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量，且始终完整运行 —— 被 salvage 的 head 有意不被记录为 unchanged-diff 跳过锚点，因此那次评审不会被抑制。完整日志见 [workflow 运行](${RUN_URL})。" \
             '' \
             '</details>')"
           gh pr comment "$PR_NUMBER" \

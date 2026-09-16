@@ -7461,11 +7461,32 @@ describe('qwen pr review unchanged-diff anchor', () => {
     expect(step.run).toContain("-f context='qwen-review/reviewed'");
   });
 
+  // R2-6. A prefix-only pin let the call's arguments move with every lane
+  // green: hardcoding the base to `main` computes the fingerprint from the
+  // wrong merge base (the comment above the call calls that "a FALSE SKIP"),
+  // swapping the last two arguments makes the script reject `main` at its
+  // head-sha guard so the feature dies silently, and dropping the `||` arm
+  // turns a degradable check failure into a dead step under the caller's
+  // `set -euo pipefail`. Pin the four arguments in the order the script's own
+  // `# Usage:` line documents, pin that line so a fifth argument cannot
+  // arrive unpinned, and pin the arm that degrades to a full review.
   it('checks for an unchanged diff on automatic synchronize runs only', () => {
     const run = anchorDoc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Run review',
     ).run;
-    expect(run).toContain('bash .github/scripts/review-unchanged-diff.sh');
+    const usageArgs =
+      skipScript.match(/^# Usage: review-unchanged-diff\.sh (.+)$/m)?.[1] ?? '';
+    expect(usageArgs.split(/\s+/)).toEqual([
+      '<owner/repo>',
+      '<pr-number>',
+      '<head-sha>',
+      '<base-ref>',
+    ]);
+    expect(run).toContain(
+      'bash .github/scripts/review-unchanged-diff.sh "$REPO" "$PR_NUMBER"' +
+        ' "$EXPECTED_HEAD_SHA" "$BASE_REF_NAME")"' +
+        ' || skip_verdict="changed check-failed"',
+    );
     expect(run).toContain('[ "${EVENT_ACTION:-}" = "synchronize" ]');
   });
 
@@ -7509,6 +7530,17 @@ describe('qwen pr review unchanged-diff anchor', () => {
     // never see — the skip would go dead without any test noticing.
     expect(creator).toBe('github-actions[bot]');
     expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
+    // R2-8. `state` is the third field of the same contract and the one the
+    // reader's jq filter actually requires, yet it was hardcoded on both
+    // sides with nothing joining them: flipping the writer to any other
+    // in-enum value (`pending`, `error`) still POSTs successfully and still
+    // prints "Recorded qwen-review/reviewed", while the reader matches
+    // nothing again — every walk ends at `changed no-reviewed-ancestor` and
+    // the skip is permanently dead with no lane red. Derive it from the
+    // reader like the other two rather than restating the spelling.
+    const state = skipScript.match(/\.state == "([^"]+)"/)?.[1];
+    expect(state).toBeTruthy();
+    expect(step.run).toContain(`-f state=${state}`);
   });
 
   // R2-2 / R3-1. record-reviewed's stamp gate has TWO arms and both read an
@@ -7572,14 +7604,30 @@ describe('qwen pr review unchanged-diff anchor', () => {
   // main that leaves the diff identical is unchanged' / 'main editing a file
   // the PR touches changes the diff even without conflict'); this pins the
   // words to them, so the wider promise cannot come back unremarked.
+  // R2-7. Both phrases live inside `#`-prefixed comment blocks hard-wrapped
+  // at ~76 columns, so a word-identical rewrap can move a word onto the next
+  // line and leave a `#` standing inside the phrase. Strip the per-line
+  // comment marker and collapse whitespace before matching, the way the
+  // `if`-gate assertion above normalizes: the wrap is formatting, not the
+  // contract, and reddening `test:scripts` on it would force an author to
+  // edit a test to land a comment edit. Normalizing must not weaken the
+  // negative halves — the wider promise still has to redden here.
   it('describes the skip as the PR own diff, never as the merged tree', () => {
     const run = anchorDoc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Run review',
     ).run;
-    expect(run).not.toContain('has nothing new to review');
-    expect(run).toContain('has nothing new IN THAT DIFF to review');
-    expect(skipScript).not.toContain('that is the case a merge can break');
-    expect(skipScript).toContain(
+    const prose = (s) =>
+      s
+        .split('\n')
+        .map((line) => line.replace(/^\s*#\s?/, ''))
+        .join(' ')
+        .replace(/\s+/g, ' ');
+    expect(prose(run)).not.toContain('has nothing new to review');
+    expect(prose(run)).toContain('has nothing new IN THAT DIFF to review');
+    expect(prose(skipScript)).not.toContain(
+      'that is the case a merge can break',
+    );
+    expect(prose(skipScript)).toContain(
       "main's delta in a file the PR never touches is excluded",
     );
   });
