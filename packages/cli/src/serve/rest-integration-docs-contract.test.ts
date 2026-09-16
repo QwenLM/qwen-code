@@ -369,7 +369,8 @@ describe('REST integration documentation contract', () => {
   });
 
   it('links every guide operation to its own protocol section', () => {
-    const links = guideRouteRows(readFileSync(GUIDE, 'utf8')).flatMap((row) => [
+    const guide = readFileSync(GUIDE, 'utf8');
+    const links = guideRouteRows(guide).flatMap((row) => [
       ...routeCell(row).matchAll(/\[`([^`]+)`\]\(([^)\s]+)\)/g),
     ]);
     expect(
@@ -381,12 +382,20 @@ describe('REST integration documentation contract', () => {
     );
 
     const headings = protocolHeadings();
-    for (const link of links) {
+    const routeLinks = [
+      ...guide.matchAll(
+        /\[`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`\]\(([^)\s]+)\)/g,
+      ),
+    ];
+    for (const link of routeLinks) {
       const operation = link[1];
       const ownHeadings = headings.filter((heading) =>
         heading.startsWith(`\`${operation}\``),
       );
-      expect(ownHeadings).toHaveLength(1);
+      expect(
+        ownHeadings,
+        `${operation} must have exactly one heading in qwen-serve-protocol.md`,
+      ).toHaveLength(1);
       expect(link[2]).toBe(`./qwen-serve-protocol.md#${slug(ownHeadings[0])}`);
     }
   });
