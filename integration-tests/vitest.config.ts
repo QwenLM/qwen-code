@@ -20,6 +20,7 @@ export default defineConfig({
     reporters: ['default'],
     include: ['**/*.test.ts'],
     exclude: [
+      '**/sandbox-bwrap/**',
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
       '**/qwen-daemon-loadtest*',

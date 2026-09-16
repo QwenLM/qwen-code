@@ -516,7 +516,7 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
    `sandbox-exec` 自动候选），前提是评审 § 已核实的兼容性影响 并有现场数据支撑
    ——不只是机制清单，还要有真实工作流命中每一行的频率。
    `QWEN_SANDBOX=false` 是文档化的逃生舱。
-3. CI：新增 `test:integration:sandbox:bwrap` 与
+3. CI：保留跟进新增的 `test:integration:sandbox:bwrap`，新增
    `test:integration:sandbox:landlock` 通道；保留 `sandbox:none` 通道（无约束
    路径仍受支持），但它不再是唯一被演练的 Linux 配置。
 
@@ -625,9 +625,9 @@ seccomp 钩子，而用那个就意味着要分发一个编译好的 BPF 程序�
 - `packages/cli/src/commands/sandbox.test.ts`：检查输出、最终 positional 与 `--` 命令的顺序、执行失败，以及缺少 loopback 等验证谓词的失败场景。
 - `packages/cli/src/commands/sandbox-command-runtime.test.ts`：真实 handler/执行器配合 mock 进程，验证标记、display 移除、继承的 stdio/argv/退出码、代理变量统一/启动/就绪/失败/清理，以及只诊断的检查模式。这些测试不证明 Linux 挂载约束。
 
-**P0 —— 集成跟进，本 PR 未交付**
+**P0 —— 集成跟进**
 
-本 PR 不包含计划中的 `test:integration:sandbox:bwrap` 脚本及在 Ubuntu workflow 中安装 `bubblewrap` 的配置。后续应在真实约束内运行 fake-LLM-server 测试（工作区写入、到 fake server 的连接）。§ 证据中带日期的 Linux 手动观测不能替代该 CI 通道；本地 mock 测试也不增加新的 Linux 约束证据。
+PR #11614 延后了真实 Linux 通道。[bwrap 集成跟进](2026-09-16-bwrap-integration-ci.zh-CN.md)新增 `test:integration:sandbox:bwrap` 和安装 `bubblewrap` 的独立 Ubuntu workflow，覆盖构建后的 CLI、文件系统与网络边界、linked worktree 提交、fake model 工具回合、进程清理以及跨边界 writer lease 恢复。套件使用真实 bwrap，前置条件不可用时失败。writer lease 覆盖属于服务级集成，不是完整 ACP/daemon 交接测试。§ 证据中带日期的观测仍是历史记录；hosted CI 结果与本地 Linux 运行结果必须分别报告。
 
 **P1 —— 单元测试**
 
