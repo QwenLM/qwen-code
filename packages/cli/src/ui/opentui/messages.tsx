@@ -108,18 +108,248 @@ export function hiddenLinesLabel(hiddenCount: number): string {
 }
 
 /**
+ * opentui findWrapBreaks' break-opportunity sets (the renderer's default
+ * WrapMode.word): a row wraps AFTER the last fitting delimiter.
+ */
+const WORD_WRAP_BREAK_ASCII = new Set(' -\t/\\.,;:!?()[]{}'.split(''));
+const WORD_WRAP_BREAK_UNICODE = new Set<number>([
+  0x00a0,
+  0x00ad,
+  0x1680,
+  0x200b,
+  0x2010,
+  0x202f,
+  0x205f,
+  0x3000,
+  0x3001,
+  0x3002,
+  0xff01,
+  0xff0c,
+  0xff1a,
+  0xff1f,
+  ...Array.from({ length: 0xb }, (_, i) => 0x2000 + i),
+]);
+
+/** findWrapBreaks' word classes — a break opens between CJK and ASCII runs. */
+const WORD_WRAP_CJK_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff],
+  [0xf900, 0xfaff],
+  [0x20000, 0x2a6df],
+  [0x2a700, 0x2b73f],
+  [0x2b740, 0x2b81f],
+  [0x2b820, 0x2ceaf],
+  [0x2ceb0, 0x2ebef],
+  [0x2ebf0, 0x2ee5d],
+  [0x2f800, 0x2fa1f],
+  [0x3040, 0x309f],
+  [0x30a0, 0x30ff],
+  [0x31f0, 0x31ff],
+  [0xff66, 0xff9d],
+  [0x1100, 0x11ff],
+  [0x3130, 0x318f],
+  [0xa960, 0xa97f],
+  [0xac00, 0xd7af],
+  [0xd7b0, 0xd7ff],
+];
+const wordWrapClass = (cp: number): 0 | 1 | 2 => {
+  if (cp <= 0x7f) {
+    return (cp >= 0x61 && cp <= 0x7a) ||
+      (cp >= 0x41 && cp <= 0x5a) ||
+      (cp >= 0x30 && cp <= 0x39) ||
+      cp === 0x5f
+      ? 1
+      : 0;
+  }
+  for (const [lo, hi] of WORD_WRAP_CJK_RANGES) {
+    if (cp >= lo && cp <= hi) return 2;
+  }
+  return 0;
+};
+
+/**
  * Physical rows a logical row occupies when soft-wrapped to `cols` columns.
  * String widths count TAB as 0 columns while the renderer advances it
  * exactly 2 (the detab convention dialogs-confirm's TextBody paints), so
  * the row is measured detabbed — this is the single measuring site the
  * window helpers, the dialog-body price and the transcript's painted-row
  * model all share, and the convention cannot drift between them (R11-2).
+ *
+ * The renderer's <text> rows word-wrap (WrapMode.word is the default; the
+ * codebase opts into char wrap explicitly where it wants it), and a
+ * character-wrap estimate under-counts long unbroken tokens: 4x54-column
+ * tokens at 106 columns wrap to one row PER token (a second token never
+ * fits), not the ceil(219/106) = 3 the estimate priced (R10-1). This ports
+ * the native virtual-line count for a single logical row
+ * (calculateVirtualLinesGeneric's word mode + findWrapBreaks +
+ * findWrapPosByWidthWCWidth): a row ends after its last fitting delimiter,
+ * commits when the next piece has no fitting break, and hard-splits at the
+ * column boundary only where no break fits at all — with the hard-split
+ * byte cursor advancing only on hard splits, the way the native keeps it.
+ * Verified against the native TextBufferView's virtual-line count on
+ * ASCII/CJK/mixed text; a few codepoints (emoji clusters, soft hyphen)
+ * follow the repo's string-width convention, which can differ from the
+ * native wcwidth measure by a row.
  */
 function physicalRowCount(row: string, cols: number): number {
-  return Math.max(
-    1,
-    Math.ceil(getCachedStringWidth(row.replace(/\t/g, '  ')) / cols),
-  );
+  const text = row.replace(/\t/g, '  ');
+  const cps = toCodePoints(text);
+  const n = cps.length;
+  const allAscii = /^[\x20-\x7e]*$/.test(text);
+  // Widths are per codepoint so the counted total and the simulation agree:
+  // a whole-string measure of an emoji cluster disagrees with the native
+  // per-codepoint count.
+  const widths = allAscii
+    ? new Array<number>(n).fill(1)
+    : cps.map((cp) => getCachedStringWidth(cp));
+  const total = widths.reduce((a, b) => a + b, 0);
+  if (total <= cols) return 1;
+
+  const gcol = new Array<number>(n);
+  const gbrk = new Array<boolean>(n).fill(false);
+  let col = 0;
+  let prevClass: 0 | 1 | 2 = 0;
+  for (let i = 0; i < n; i++) {
+    const cp = cps[i].codePointAt(0)!;
+    const cls = wordWrapClass(cp);
+    if (
+      i > 0 &&
+      ((prevClass === 1 && cls === 2) || (prevClass === 2 && cls === 1))
+    ) {
+      gbrk[i - 1] = true;
+    }
+    if (
+      cp <= 0x7f
+        ? WORD_WRAP_BREAK_ASCII.has(cps[i])
+        : WORD_WRAP_BREAK_UNICODE.has(cp)
+    ) {
+      gbrk[i] = true;
+    }
+    gcol[i] = col;
+    col += widths[i];
+    prevClass = cls;
+  }
+
+  // The native hard-split cursor is a byte offset advanced only by hard
+  // splits (wrap adds move columns only) and realigned from the column on
+  // the commit-and-split branch; keep the same bookkeeping.
+  const gbyte = cps.map((s) => {
+    const cp = s.codePointAt(0)!;
+    return cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  });
+  const byteStart = new Array<number>(n);
+  {
+    let b = 0;
+    for (let i = 0; i < n; i++) {
+      byteStart[i] = b;
+      b += gbyte[i];
+    }
+  }
+  const totalBytes = n > 0 ? byteStart[n - 1] + gbyte[n - 1] : 0;
+  const idxOfByte = (b: number): number => {
+    let lo = 0;
+    let hi = n - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (byteStart[mid] === b) return mid;
+      if (byteStart[mid] < b) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  // findWrapPosByWidthWCWidth from byte b: whole codepoints while
+  // used + width <= limit; returns [columns, bytes].
+  const fitFromByte = (b: number, limit: number): [number, number] => {
+    const i0 = idxOfByte(b);
+    if (i0 >= n) return [0, 0];
+    const start = byteStart[i0];
+    let used = 0;
+    let i = i0;
+    while (i < n && used + widths[i] <= limit) {
+      used += widths[i];
+      i++;
+    }
+    return [used, (i < n ? byteStart[i] : totalBytes) - start];
+  };
+  // findPosByWidth(include_start_before=false): bytes of codepoints whose
+  // end column is <= c (a mid-codepoint column snaps back).
+  const byteOfCol = (c: number): number => {
+    let lo = 0;
+    let hi = n - 1;
+    let ans = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (gcol[mid] + widths[mid] <= c) {
+        ans = mid + 1;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return ans < n ? byteStart[ans] : totalBytes;
+  };
+
+  let rows = 1;
+  let pos = 0;
+  let line = 0;
+  let armed = false;
+  let bytePos = 0;
+  let bi = 0;
+  while (pos < total) {
+    const remainingIn = total - pos;
+    const remainingOn = cols - line;
+    let lastFits = 0;
+    let hasFits = false;
+    while (bi < n) {
+      if (!gbrk[bi] || gcol[bi] < pos) {
+        bi++;
+        continue;
+      }
+      const wtb = gcol[bi] - pos + widths[bi];
+      if (wtb > remainingOn || wtb > remainingIn) break;
+      hasFits = true;
+      lastFits = wtb;
+      bi++;
+    }
+    if (remainingIn <= remainingOn) {
+      pos = total;
+    } else if (hasFits) {
+      pos += lastFits;
+      line += lastFits;
+      armed = true;
+      if (line >= cols) {
+        rows++;
+        line = 0;
+        armed = false;
+      }
+    } else if (line === 0) {
+      let [used, bytes] = fitFromByte(bytePos, remainingOn);
+      if (used === 0) {
+        bytes = fitFromByte(bytePos, 1)[1];
+        used = 1;
+      }
+      pos += used;
+      bytePos += bytes;
+      line += used;
+    } else if (armed) {
+      rows++;
+      line = 0;
+      armed = false;
+    } else {
+      rows++;
+      line = 0;
+      bytePos = byteOfCol(pos);
+      let [used, bytes] = fitFromByte(bytePos, cols);
+      if (used === 0) {
+        bytes = fitFromByte(bytePos, 1)[1];
+        used = 1;
+      }
+      pos += used;
+      bytePos += bytes;
+      line = used;
+    }
+  }
+  return rows;
 }
 
 /**

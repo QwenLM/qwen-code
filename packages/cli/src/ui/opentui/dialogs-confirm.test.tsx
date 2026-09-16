@@ -482,9 +482,10 @@ describe('OpenTuiToolConfirmation', () => {
   it('offers ctrl-s for a tab-indented body that overflows once painted (R5-1)', () => {
     // String widths count TAB as 0 columns while the renderer advances it
     // exactly 2: 15 lines of TAB + 107 columns measure 15 rows (fitting the
-    // 20-row collapsed window) but paint 30, so the window must count the
-    // detabbed rows or no hidden-tail label / ctrl-s affordance appears
-    // while rows sit off the viewport.
+    // 20-row collapsed window) but paint 45 (the detabbed indent ends the
+    // first word-wrapped row and the 107-column token takes two more), so
+    // the window must count the detabbed rows or no hidden-tail label /
+    // ctrl-s affordance appears while rows sit off the viewport.
     const prompt = Array.from(
       { length: 15 },
       () => '\t' + 'x'.repeat(107),
@@ -506,7 +507,7 @@ describe('OpenTuiToolConfirmation', () => {
       />,
     );
     const text = container.textContent ?? '';
-    expect(text).toContain('... last 11 lines hidden ...');
+    expect(text).toContain('... last 26 lines hidden ...');
     expect(text).toContain('Press ctrl-s to show more lines');
   });
 

@@ -464,24 +464,31 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
   });
 
   it('prices an edit dialog body by the windowed diff’s painted rows (R10-1)', () => {
-    // DiffBody tail-windows the diff's LOGICAL lines and those lines wrap:
-    // 40 added 200-column lines keep 19 windowed lines that paint 38 rows
-    // at the dialog's 106 columns (plus the hidden-lines label), not the
-    // flat 20 the collapsed window charges sight-unseen — so the wrapping
-    // diff must leave the card a strictly smaller budget than one whose
-    // windowed lines each paint a single row.
+    // DiffBody tail-windows the diff's LOGICAL lines and those lines wrap —
+    // WORD-wrapped: the renderer breaks after the last fitting delimiter,
+    // so a rendered '1 xxxx …' line of four 54-column tokens paints 4 rows
+    // (one per token: the prefix and first token share a row, each later
+    // token moves whole to its own) where the character estimate priced
+    // ceil(221/106) = 3 — so the wrapping diff must leave the card a
+    // strictly smaller budget than one whose windowed lines each paint a
+    // single row.
     const wrapping =
-      '@@ -0,0 +1,40 @@\n' +
-      Array.from({ length: 40 }, () => '+' + 'x'.repeat(199)).join('\n');
+      '@@ -0,0 +1,8 @@\n' +
+      Array.from(
+        { length: 8 },
+        () => '+' + Array.from({ length: 4 }, () => 'x'.repeat(54)).join(' '),
+      ).join('\n');
     const fitting =
       '@@ -0,0 +1,20 @@\n' +
       Array.from({ length: 20 }, () => '+' + 'x'.repeat(60)).join('\n');
     const budget = (body: string) =>
       pendingCardMaxRows(80, 0, 106, { type: 'edit', body, extra: 'a.ts' }, 2);
     expect(budget(wrapping)).toBeLessThan(budget(fitting));
-    // The exact pins: (80-26-40-2)*0.7/2 floors to 4 against
+    // The exact pins: 8 windowed lines at 4 painted rows charge 32 plus the
+    // 'a.ts' fileName row — (80-26-33-2)*0.7/2 floors to 6 (the character
+    // estimate would charge 8*3+1 = 25 rows and hand back 9) — against
     // (80-26-21-2)*0.7/2 = 10.
-    expect(budget(wrapping)).toBe(4);
+    expect(budget(wrapping)).toBe(6);
     expect(budget(fitting)).toBe(10);
   });
 
@@ -489,6 +496,122 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // String widths count TAB as 0 columns, so a raw measure under-counts a
     // tabbed line: 60 TABs + 60 columns paint 180 columns — 2 rows at 108.
     expect(physicalRowsTotal(['\t'.repeat(60) + 'x'.repeat(60)], 108)).toBe(2);
+  });
+
+  describe('physicalRowsTotal word wrap (R10-1)', () => {
+    // The renderer's <text> rows word-wrap (opentui's default WrapMode.word):
+    // a row breaks after its last fitting delimiter and hard-splits only
+    // where no break fits, so long unbroken tokens paint one row PER token
+    // where the character estimate priced one row per `cols` columns. Every
+    // count below was verified against the native TextBufferView's
+    // virtual-line count (setWrapWidth / setWrapMode('word') /
+    // getVirtualLineCount); the character estimate is noted where it
+    // diverges.
+    it('prices long unbroken tokens one row per token', () => {
+      // 6 lines x 4 x 54-column tokens (219 columns a line): the character
+      // estimate charged 18 rows; the word wrap paints 24.
+      const tokens54 = Array.from({ length: 6 }, () =>
+        Array.from({ length: 4 }, () => 'a'.repeat(54)).join(' '),
+      );
+      expect(physicalRowsTotal(tokens54, 106)).toBe(24);
+      // 30-column words pack 3 to a 106-column row (a fourth never fits):
+      // the estimate charged 18, the word wrap paints 24.
+      const words30 = Array.from({ length: 6 }, () =>
+        Array.from({ length: 10 }, () => 'w'.repeat(30)).join(' '),
+      );
+      expect(physicalRowsTotal(words30, 106)).toBe(24);
+      // Hex digests (a plan section, a hook reason payload): the estimate
+      // charged 12, the word wrap paints 18.
+      const hex = Array.from({ length: 6 }, () =>
+        Array.from({ length: 3 }, () => '0123456789abcdef'.repeat(4)).join(' '),
+      );
+      expect(physicalRowsTotal(hex, 106)).toBe(18);
+    });
+
+    it('keeps the character count for prose, paths, URLs and snake_case', () => {
+      // Dense break opportunities (space, '/', '.', '-' ...) let the word
+      // wrap fill every row — the two measures agree exactly.
+      expect(
+        physicalRowsTotal(
+          Array.from(
+            { length: 6 },
+            () => 'the quick brown fox jumps over the lazy dog and runs',
+          ),
+          106,
+        ),
+      ).toBe(6);
+      expect(
+        physicalRowsTotal(
+          Array.from(
+            { length: 6 },
+            () => '/home/user/some/deeply/nested/path/to/a/file/name.txt',
+          ),
+          40,
+        ),
+      ).toBe(12);
+      expect(
+        physicalRowsTotal(
+          Array.from(
+            { length: 4 },
+            () => 'https://example.com/some/path?query=value&other=123#frag',
+          ),
+          40,
+        ),
+      ).toBe(8);
+      expect(
+        physicalRowsTotal(
+          Array.from({ length: 6 }, () =>
+            Array.from({ length: 5 }, () => 'foo_bar_baz').join('_'),
+          ),
+          40,
+        ),
+      ).toBe(12);
+    });
+
+    it('treats dash but not underscore as a break opportunity', () => {
+      // '_' joins the word (snake_case stays one token): 3x60 hard-split.
+      expect(
+        physicalRowsTotal(
+          [Array.from({ length: 3 }, () => 'a'.repeat(60)).join('_')],
+          106,
+        ),
+      ).toBe(2);
+      // '-' breaks: 3x60 + 2 dashes paint one row per token.
+      expect(
+        physicalRowsTotal(
+          [Array.from({ length: 3 }, () => 'a'.repeat(60)).join('-')],
+          106,
+        ),
+      ).toBe(3);
+    });
+
+    it('hard-splits only where no break fits', () => {
+      // A single unbroken 250-column token char-splits: ceil(250/106) = 3.
+      expect(physicalRowsTotal(['a'.repeat(250)], 106)).toBe(3);
+      // An exact fill stays one row whether or not it carries a break.
+      expect(physicalRowsTotal(['ab cd'], 5)).toBe(1);
+      expect(physicalRowsTotal(['abcde'], 5)).toBe(1);
+      // One column over: 'ab ' + 'cde'.
+      expect(physicalRowsTotal(['ab cde'], 5)).toBe(2);
+    });
+
+    it('breaks between CJK and ASCII word runs', () => {
+      // 3 + 30 + 3 = 36 columns: the character estimate charged 2 rows, the
+      // word wrap paints 3 (the CJK run moves whole past the break).
+      expect(physicalRowsTotal(['abc' + '你'.repeat(15) + 'def'], 20)).toBe(3);
+    });
+
+    it('windows the dialog body by the word-wrapped height', () => {
+      // The R10-1 chain: a 24-row body against the 20-row collapsed window
+      // must surface the hidden-rows label and the ctrl-s hint — the
+      // character estimate priced 18 rows and painted all 24 with neither.
+      const rows = Array.from({ length: 6 }, () =>
+        Array.from({ length: 4 }, () => 'a'.repeat(54)).join(' '),
+      );
+      const win = headWindowPhysical(rows, 108, 20);
+      expect(win.hiddenRows).toBe(5);
+      expect(win.visible).toHaveLength(5);
+    });
   });
 
   it('keeps the sibling sum inside the shared region when the divided bound drops below the settled cap (R4-8, R4-1)', () => {
