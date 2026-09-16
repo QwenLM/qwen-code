@@ -397,6 +397,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   native_directory_picker: { since: 'v1' },
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
+  workspace_runtime_stop: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -565,6 +566,7 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  workspaceRuntimeStopAvailable?: boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   /**
@@ -717,6 +719,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'native_directory_picker',
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
+    'workspace_runtime_stop',
+    (toggles) => toggles.workspaceRuntimeStopAvailable === true,
   ],
   [
     'workspace_runtime',

@@ -81,7 +81,9 @@ const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
+const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  loadSession,
   sendPrompt,
   submitPermission,
   respondToPermission,
@@ -3685,4 +3687,23 @@ describe('ChatPane continuation errors', () => {
       }
     },
   );
+});
+
+it('requires an explicit resume for a stopped pane', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  connectionState.sessionId = 'stopped';
+  connectionState.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+  loadSession.mockClear();
+  render();
+  expect(testid('workspace-runtime-stopped')).not.toBeNull();
+  expect(loadSession).not.toHaveBeenCalled();
+  await act(async () => {
+    [...container!.querySelectorAll('button')]
+      .find((node) => node.textContent === 'Resume conversation')!
+      .click();
+  });
+  expect(loadSession).toHaveBeenCalledWith('stopped', {
+    sessionContext: { kind: 'workspace', cwd: '/workspace' },
+  });
 });

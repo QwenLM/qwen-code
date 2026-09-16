@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
+import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
 import {
   useCallback,
   useEffect,
@@ -297,6 +299,12 @@ export function ChatPane({
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const capacityRecovery = useCapacityRecovery(
+    workspace.client,
+    workspace.capabilities?.features,
+    connection,
+    actions,
+  );
   const attachmentWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
@@ -676,6 +684,8 @@ export function ChatPane({
     clearQueuedPrompts,
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
+    writeBlocked: connection.runtimeStopped,
+    runtimeStopped: connection.runtimeStopped,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
@@ -1740,7 +1750,38 @@ export function ChatPane({
             />
           </div>
         )}
+        {capacityRecovery.intent && (
+          <CapacityRecoveryDialog
+            intent={capacityRecovery.intent}
+            onClose={capacityRecovery.dismiss}
+          />
+        )}
         <div className={approvalActive ? styles.composerHidden : undefined}>
+          {connection.runtimeStopped && (
+            <div role="status" data-testid="workspace-runtime-stopped">
+              <span>
+                {t('capacityChoice.stopped')}{' '}
+                {connection.runtimeStopPersistenceUnconfirmed
+                  ? t('capacityChoice.persistenceUnconfirmed')
+                  : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (connection.sessionId)
+                    void actions
+                      .loadSession(connection.sessionId, {
+                        sessionContext: connection.sessionContext,
+                      })
+                      .catch((error: unknown) =>
+                        reportError(error, 'Failed to resume session'),
+                      );
+                }}
+              >
+                {t('capacityChoice.resume')}
+              </button>
+            </div>
+          )}
           {/* Panes keep the composer status compact: spinner + elapsed time +
               token count + cancel hint, but no rotating "witty" loading
               phrase. */}

@@ -143,7 +143,10 @@ type ChatEditorTestProps = {
     images?: { data: string; media_type: string }[],
     files?: { name: string; media_type: string; text: string }[],
     commitAccepted?: () => void,
-    metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
+    metadata?: {
+      inputAnnotations?: DaemonInputAnnotation[];
+      isCurrentDraft?: () => boolean;
+    },
   ) => boolean | void;
   onCancel?: () => void;
   onAttachmentPreview?: (file: {
@@ -318,7 +321,9 @@ const {
   const rootWorkspaceVoice = vi.fn();
   const qualifiedWorkspaceVoice = vi.fn();
   const qualifiedSetWorkspaceSetting = vi.fn();
+  const runtimeStop = vi.fn();
   const workspaceClient = {
+    runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
       .fn()
       .mockResolvedValue({ enabled: false, install: { state: 'missing' } }),
@@ -335,6 +340,7 @@ const {
     })),
     workspaceVoice: rootWorkspaceVoice,
     workspaceById: vi.fn(() => ({
+      stopRuntime: runtimeStop,
       workspaceSettings: qualifiedWorkspaceSettings,
       workspaceVoice: qualifiedWorkspaceVoice,
       setWorkspaceSetting: qualifiedSetWorkspaceSetting,
@@ -37749,6 +37755,86 @@ describe('App /goal command', () => {
       pendingControl.resolve({ snapshot: activeGoalSnapshot('ship it') });
       await flush();
     });
+  });
+
+  it('continues a capacity-rejected prepared draft once after a confirmed workspace stop', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['workspace_runtime_stop'],
+    };
+    const stopRuntime =
+      mockWorkspace.client.workspaceById('victim').stopRuntime;
+    stopRuntime.mockResolvedValue({
+      state: 'stopped',
+      stopped: true,
+      released: true,
+      closedSessionIds: ['old'],
+      remainingSessionIds: [],
+      interruptedSessionIds: ['old'],
+      affectedSessionIds: ['old'],
+    });
+    mockWorkspace.client.runtimeStopOptions.mockResolvedValue({
+      committedAcpChildren: 1,
+      maxConcurrentChildren: 1,
+      workspaces: [
+        {
+          workspaceId: 'victim',
+          cwd: '/other',
+          canStop: true,
+          blockedReasons: [],
+          channelId: 'child',
+          runtimeEpoch: 1,
+          stopToken: 'token',
+          sessions: [{ sessionId: 'old', queuedPrompts: 0 }],
+        },
+      ],
+    });
+    mockSessionActions.createSession.mockRejectedValueOnce(
+      new DaemonHttpError(
+        503,
+        { code: 'acp_child_capacity_exhausted' },
+        'full',
+      ),
+    );
+    const prepareSubmit = vi.fn(async () => ({ prompt: 'prepared hello' }));
+    const onSubmitBefore = vi.fn();
+    renderApp({ language: 'en', prepareSubmit, onSubmitBefore });
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+        { isCurrentDraft: () => true },
+      );
+    });
+    await flush();
+    expect(
+      document.querySelector('[data-testid="capacity-recovery-dialog"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      (document.querySelector('[role="radio"]') as HTMLElement).click();
+    });
+    await act(async () => {
+      [...document.querySelectorAll('button')]
+        .find(
+          (node) => node.textContent === 'Stop these sessions and continue',
+        )!
+        .click();
+    });
+    await flush();
+    expect(stopRuntime).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendPrompt.mock.calls[0][0]).toBe(
+      'prepared hello',
+    );
+    expect(prepareSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmitBefore).toHaveBeenCalledTimes(1);
+    expect(editorCommit).toHaveBeenCalledTimes(1);
   });
 
   it.each(['/goal set first objective', 'hello', '!pwd'])(

@@ -57,6 +57,7 @@ interface RefBox<T> {
 interface UseQueuedPromptsArgs {
   connected: boolean;
   writeBlocked?: boolean;
+  runtimeStopped?: boolean;
   sessionId?: string;
   workspaceCwd?: string;
   clientId?: string;
@@ -500,6 +501,7 @@ export interface UseQueuedPromptsResult {
 export function useQueuedPrompts({
   connected,
   writeBlocked = false,
+  runtimeStopped = false,
   sessionId,
   workspaceCwd,
   clientId,
@@ -524,9 +526,11 @@ export function useQueuedPrompts({
   const ownerTokenRef = useRef({
     sessionId,
     workspaceCwd,
+    runtimeStopped,
     snapshot: sessionOwnerGuard.capture(),
   });
   if (
+    ownerTokenRef.current.runtimeStopped !== runtimeStopped ||
     ownerTokenRef.current.sessionId !== sessionId ||
     ownerTokenRef.current.workspaceCwd !== workspaceCwd ||
     !ownerTokenRef.current.snapshot.isCurrent()
@@ -534,6 +538,7 @@ export function useQueuedPrompts({
     ownerTokenRef.current = {
       sessionId,
       workspaceCwd,
+      runtimeStopped,
       snapshot: sessionOwnerGuard.capture(),
     };
   }
@@ -1698,6 +1703,14 @@ export function useQueuedPrompts({
       previousOwner.workspaceCwd,
       previousOwner.sessionId,
     );
+    if (runtimeStopped) {
+      if (previousOwnerKey)
+        heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+      // Nothing queued before an explicit runtime stop may auto-run on resume.
+      queuedPromptsRef.current = [];
+      pendingMidTurnAdmissionsRef.current.clear();
+      clearedUnconfirmedPromptIdsRef.current.clear();
+    }
     if (previousOwnerKey) {
       const heldPrompts = queuedPromptsRef.current
         .filter(
@@ -1822,7 +1835,7 @@ export function useQueuedPrompts({
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
-  }, [ownerToken, sessionId, workspaceCwd]);
+  }, [ownerToken, sessionId, workspaceCwd, runtimeStopped]);
 
   const pendingPromptVersion = useSyncExternalStore(
     subscribePendingPromptVersion,

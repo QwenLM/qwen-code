@@ -451,7 +451,10 @@ describe('useComposerCore history and drafts', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1100,7 +1103,10 @@ describe('useComposerCore paste', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1210,7 +1216,10 @@ describe('useComposerCore paste', () => {
       [expect.objectContaining({ media_type: 'image/png' })],
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1252,7 +1261,10 @@ describe('useComposerCore paste', () => {
         expect.objectContaining({ name: 'my app (1).log' }),
       ],
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1585,7 +1597,11 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      { inputAnnotations },
+      {
+        inputAnnotations,
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1622,6 +1638,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({ start: 0, end: 2, text: '@b' }),
           expect.objectContaining({ start: 7, end: 9, text: '@a' }),
@@ -1656,6 +1674,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 7,
@@ -1692,7 +1712,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2022,6 +2045,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           {
             end: 9,
@@ -2083,6 +2108,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2263,6 +2290,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2324,6 +2353,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2361,7 +2392,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2406,7 +2440,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2443,6 +2480,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2456,4 +2495,47 @@ describe('useComposerCore tags', () => {
     expect(editor.textContent).toContain('orders');
     expect(editor.textContent).not.toContain(serialized);
   });
+});
+
+it('invalidates a pending capacity continuation when the composer draft changes', async () => {
+  const onSubmit = vi.fn(() => false);
+  await mount({ onSubmit });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const metadata = onSubmit.mock.calls[0]?.[4] as unknown as {
+    isCurrentDraft(): boolean;
+  };
+  expect(metadata.isCurrentDraft()).toBe(true);
+  act(() => latest!.setText('new draft'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+  act(() => latest!.setText('original'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+});
+
+it('retains the guarded retry draft across its initial session allocation and clears it only on acceptance', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('created-session', '/work/b');
+    await act(async () => {});
+    expect(latest!.getText()).toBe('original');
+    expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+      true,
+    );
+    act(() => call[3]());
+  });
+  expect(latest!.getText()).toBe('');
 });

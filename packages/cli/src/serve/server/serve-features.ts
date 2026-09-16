@@ -61,6 +61,7 @@ interface CreateServeFeaturesDeps {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable: () => boolean;
+  workspaceRuntimeStopAvailable?: () => boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
@@ -101,6 +102,7 @@ export function createServeFeatures(
     workspaceRuntimeRemovalAvailable,
     nativeDirectoryPickerAvailable,
     workspaceRuntimeAvailable,
+    workspaceRuntimeStopAvailable,
     localPathOpenAvailable,
     localTerminalOpenAvailable,
     workspaceTrustHotReloadAvailable,
@@ -158,6 +160,8 @@ export function createServeFeatures(
         workspaceRuntimeRemovalAvailable,
         nativeDirectoryPickerAvailable,
         workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
+        workspaceRuntimeStopAvailable:
+          workspaceRuntimeStopAvailable?.() === true,
         localPathOpenAvailable,
         localTerminalOpenAvailable,
         workspaceTrustHotReloadAvailable,

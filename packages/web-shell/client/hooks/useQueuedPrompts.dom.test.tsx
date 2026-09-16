@@ -107,16 +107,19 @@ function mount(
     blocked,
     hold,
     cwd,
+    stopped,
   }: {
     state: typeof streamingState;
     activeSessionId: string;
     blocked: boolean;
     hold: boolean;
     cwd: string | null;
+    stopped: boolean;
   }) {
     latest = useQueuedPrompts({
       connected,
-      writeBlocked: blocked,
+      writeBlocked: blocked || stopped,
+      runtimeStopped: stopped,
       sessionId: activeSessionId,
       workspaceCwd: cwd ?? undefined,
       clientId: 'client-1',
@@ -139,6 +142,7 @@ function mount(
   let blocked = writeBlocked;
   let held = holdQueuedPromptsLocally;
   let cwd = workspaceCwd;
+  let stopped = false;
   const render = (
     state: typeof streamingState,
     nextSessionId = activeSessionId,
@@ -146,12 +150,14 @@ function mount(
     nextWriteBlocked = blocked,
     nextHold = held,
     nextCwd: string | null = cwd,
+    nextStopped = stopped,
   ) => {
     if (replaceOwner) sdk.ownerVersion += 1;
     activeSessionId = nextSessionId;
     blocked = nextWriteBlocked;
     held = nextHold;
     cwd = nextCwd;
+    stopped = nextStopped;
     act(() =>
       root.render(
         <Harness
@@ -160,6 +166,7 @@ function mount(
           blocked={blocked}
           hold={held}
           cwd={cwd}
+          stopped={stopped}
         />,
       ),
     );
@@ -2216,4 +2223,17 @@ describe('useQueuedPrompts writer-blocked recovery', () => {
     render('idle', 'session-1', true, false);
     expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
+});
+
+it('does not resubmit locally held prompts after an explicit runtime stop and resume', () => {
+  const { actions } = createActions();
+  const { render } = mount('idle', actions, true, true, false, true);
+  act(() => latest.enqueuePrompt('do not silently rerun'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  render('idle', 'session-1', true, false, true, '/workspace', true);
+  expect(latest.queuedPrompts).toHaveLength(0);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+  expect(actions.removePendingPrompt).not.toHaveBeenCalled();
 });

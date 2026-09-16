@@ -146,6 +146,7 @@ import {
 import {
   mapRestoredInputAnnotationsAfterTextChange,
   type ComposerSubmitCommit,
+  type ComposerSubmitMetadata,
   type EditorHandle,
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
@@ -299,6 +300,8 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from './i18n';
+import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
+import { useCapacityRecovery } from './hooks/useCapacityRecovery';
 import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
@@ -3529,6 +3532,16 @@ export function App({
     [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
   const sessionActions = useActions();
+  const {
+    intent: capacityRecovery,
+    offer: offerCapacityRecovery,
+    dismiss: dismissCapacityRecovery,
+  } = useCapacityRecovery(
+    workspace.client,
+    workspace.capabilities?.features,
+    connection,
+    sessionActions,
+  );
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
@@ -7558,6 +7571,11 @@ export function App({
   // not cancel the command.
   const queuedShellCommandsRef = useRef<string[]>([]);
   const drainGenerationRef = useRef(0);
+  useEffect(() => {
+    if (!connection.runtimeStopped) return;
+    queuedShellCommandsRef.current = [];
+    drainGenerationRef.current++;
+  }, [connection.runtimeStopped]);
   const shellSubmitInFlightRef = useRef(false);
   const isDrainingRef = useRef(false);
   const localStreamingStartedAtRef = useRef(Date.now());
@@ -7983,7 +8001,7 @@ export function App({
       const request = ++loadedSkillsRequestRef.current;
       setSkillsLoading(true);
       setSkillsLoadError(false);
-      const load = async () => {
+      const load = async (recovering = false) => {
         try {
           if (
             forNewSession &&
@@ -8053,6 +8071,19 @@ export function App({
         } catch (error) {
           if (request === loadedSkillsRequestRef.current)
             setSkillsLoadError(true);
+          if (recovering) throw error;
+          if (
+            (notifyOnError || skillsLoadRef.current?.notifyOnError) &&
+            forNewSession &&
+            offerCapacityRecovery(error, {
+              requesterCwd: workspaceCwd,
+              isCurrent: () =>
+                request === loadedSkillsRequestRef.current &&
+                key === skillsCatalogKeyRef.current,
+              resume: () => load(true),
+            })
+          )
+            return false as const;
           if (
             notifyOnError ||
             (skillsLoadRef.current?.request === request &&
@@ -8082,6 +8113,7 @@ export function App({
       return promise;
     },
     [
+      offerCapacityRecovery,
       pushToast,
       skillsConfigRuntimeSupported,
       skillsAcpPreheatSupported,
@@ -9952,6 +9984,7 @@ export function App({
         // by the failed-prompt retry, whose user message was never
         // recorded.
         skipPrepareSubmit?: boolean;
+        skipSubmitBefore?: boolean;
         submittedPrompt?: string;
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
@@ -9991,7 +10024,9 @@ export function App({
         opts?.retry || opts?.skipPrepareSubmit
           ? undefined
           : prepareSubmitRef.current;
-      const submitBefore = onSubmitBeforeRef.current;
+      const submitBefore = opts?.skipSubmitBefore
+        ? undefined
+        : onSubmitBeforeRef.current;
       const hasAsyncPreflight = Boolean(
         prepare || submitBefore || opts?.beforeAdmission,
       );
@@ -10693,7 +10728,11 @@ export function App({
     clearQueuedPrompts,
   } = useQueuedPrompts({
     connected,
-    writeBlocked: sessionWriteBlocked || standaloneWriterBlocked,
+    writeBlocked:
+      sessionWriteBlocked ||
+      standaloneWriterBlocked ||
+      connection.runtimeStopped,
+    runtimeStopped: connection.runtimeStopped,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
@@ -14766,7 +14805,7 @@ export function App({
       images?: PromptImage[],
       files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
-      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
+      metadata?: ComposerSubmitMetadata,
     ) => {
       if (sessionWriteBlockedRef.current) return false;
       if (
@@ -14897,6 +14936,43 @@ export function App({
             : {}),
         }).catch((error: unknown) => {
           if (!admissionOwnerIsCurrent()) return;
+          if (
+            !admissionStarted &&
+            !admitted &&
+            metadata?.isCurrentDraft &&
+            offerCapacityRecovery(error, {
+              requesterCwd: admissionOwner.workspaceCwd,
+              isCurrent: () =>
+                admissionOwnerIsCurrent() && metadata.isCurrentDraft!(),
+              resume: () => {
+                const retry = () =>
+                  sendPrompt(submittedPromptText, promptImages, promptFiles, {
+                    ...sendOptions,
+                    submittedPrompt: text,
+                    inputAnnotations: submittedInputAnnotations,
+                    skipPrepareSubmit: true,
+                    skipSubmitBefore: true,
+                    clearComposerOnPromptStart: true,
+                    commitComposerAccepted,
+                    beforeAdmission: async () => {
+                      if (
+                        !metadata.isCurrentDraft!({
+                          allowSessionAssignment: startedWithoutSession,
+                        })
+                      )
+                        throw new DOMException(
+                          'Composer draft changed',
+                          'AbortError',
+                        );
+                    },
+                  });
+                return metadata.retainDraftDuringSessionCreation
+                  ? metadata.retainDraftDuringSessionCreation(retry)
+                  : retry();
+              },
+            })
+          )
+            return;
           const failedMessage = optimisticUserMessage;
           const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
           if (admissionStarted && !admitted && !definitelyRejected) {
@@ -15980,6 +16056,7 @@ export function App({
       }
     },
     [
+      offerCapacityRecovery,
       beginPromptPreparation,
       sendPrompt,
       sessionActions,
@@ -16048,7 +16125,7 @@ export function App({
       images?: PromptImage[],
       files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
-      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
+      metadata?: ComposerSubmitMetadata,
     ) => {
       const accepted = handleSubmitRef.current(
         text,
@@ -17810,6 +17887,7 @@ export function App({
           data-web-shell-shadcn
           lang={selectedLanguage}
         >
+          {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
             <ToastHost
               toasts={toasts}
@@ -19639,6 +19717,17 @@ export function App({
                             : styles.composer
                         }
                       >
+                        {connection.runtimeStopped && (
+                          <div className={styles.composerActionTip} role="status" data-testid="workspace-runtime-stopped">
+                            <span className={styles.composerActionTipText}>{t('capacityChoice.stopped')}
+                              {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
+                            </span>
+                            <button type="button" className={styles.composerActionTipButton}
+                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                              {t('capacityChoice.resume')}
+                            </button>
+                          </div>
+                        )}
                         {standaloneWriterBlocked && (
                           <div
                             className={styles.composerActionTip}
