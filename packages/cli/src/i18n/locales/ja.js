@@ -512,6 +512,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 件のフックが設定されています',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、Qwen Code に尋ねてください。',
+  'Reopen this menu to reload hook definitions.':
+    'このメニューを再度開くと、フック定義を再読み込みできます。',
+  'Hook controls and HTTP security settings require a restart.':
+    'フックの制御設定と HTTP セキュリティ設定の変更には再起動が必要です。',
+  'Failed to reload hook definitions: {{error}}':
+    'フック定義の再読み込みに失敗しました: {{error}}',
   'Enter to select · Esc to cancel': 'Enter で選択 · Esc でキャンセル',
   // Hooks - Detail Step
   'Exit codes:': '終了コード：',
@@ -974,6 +980,11 @@ export default {
   'No tasks currently running': '現在実行中のタスクはありません',
   'No entry to show.': '表示するエントリはありません。',
   'needs approval': '承認待ち',
+  'Large workflow': '大規模なワークフロー',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大規模なワークフロー：{{agents}} 個のエージェントを予定（警告しきい値 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大規模なワークフロー：出力トークン ~{{tokens}} の見込み（警告しきい値 {{cap}}）。',
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
