@@ -551,15 +551,18 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(pendingCardMaxRows(80, 3900, 110, undefined, 1, 6, 200)).toBe(
       TOOL_CARD_DESCRIPTION_ROWS,
     );
-    // ...unless the lone card's dialog is mcp: that dialog shows only the
-    // server and tool names and is off the alt screen past saturation
-    // whatever the card yields, so dropping the card to the settled cap
-    // only deletes the head of the payload being approved (R12-1). The mcp
-    // floor is the args-surface minimum — at rowsAbove 48 the region price
-    // is already floor((80-26-5-43)*0.7) = 4, so both pins below ARE the
-    // floor.
+    // ...unless the lone card's dialog is mcp AND the collapsed bound has
+    // bottomed out: that dialog shows only the server and tool names and is
+    // off the alt screen past saturation whatever the card yields, so
+    // dropping the card to the settled cap only deletes the head of the
+    // payload being approved (R12-1). At rowsAbove 48 the region price
+    // floor((80-26-5-43)*0.7) = 4 is still POSITIVE — yielding still buys
+    // the dialog rows — so the settled cap, not the mcp floor, binds:
+    // max(5, 4) = 5. Only once the bound goes non-positive
+    // (floor((80-26-5-195)*0.7) = -103 at rowsAbove 200) does the
+    // args-surface floor lift.
     expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 48)).toBe(
-      MCP_PENDING_CARD_MIN_ROWS,
+      TOOL_CARD_DESCRIPTION_ROWS,
     );
     expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 200)).toBe(
       MCP_PENDING_CARD_MIN_ROWS,
@@ -569,6 +572,14 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
   it('falls back to the settled cap on short terminals', () => {
     expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
     expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    // An mcp card whose collapsed bound is still POSITIVE keeps that bound:
+    // the floor keys on saturation (bound <= 0), not the dialog type alone
+    // (R12-1) — (40-26-5)*0.7 = 6 budget rows against the 9-row region,
+    // where the ungated floor's 11 would paint the mounted dialog's
+    // outcome list off the alt screen.
+    expect(pendingCardMaxRows(40, 3900, 110, { type: 'mcp' }, 1, 20, 0)).toBe(
+      6,
+    );
   });
 
   it('keeps everything when the content fits', () => {

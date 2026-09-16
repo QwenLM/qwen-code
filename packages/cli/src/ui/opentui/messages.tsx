@@ -526,10 +526,15 @@ function dialogBodyMeasure(
  * below the settled cap (the short-terminal fallback) — unless its dialog
  * is mcp: that dialog shows only the server and tool names, so the card is
  * the only surface carrying the call's arguments (R5-9), and past
- * transcript saturation the fixed-body dialog is off the alt screen
- * whatever the card yields, so the floor lifts to MCP_PENDING_CARD_MIN_ROWS
- * — yielding further stops buying the dialog rows and only deletes the
- * head of the payload being approved (R12-1). Once siblings
+ * transcript saturation — a non-positive collapsed dialog bound — the
+ * fixed-body dialog is off the alt screen whatever the card yields, so the
+ * floor lifts to MCP_PENDING_CARD_MIN_ROWS — yielding further stops buying
+ * the dialog rows and only deletes the head of the payload being approved
+ * (R12-1). While the bound is still positive the card's yield DOES buy the
+ * dialog rows, so the settled cap stands: keying the floor on the dialog
+ * type alone would budget the card past the region the collapsed bound
+ * certifies and push the mounted dialog's outcome list off the alt screen
+ * (R12-1). Once siblings
  * share the region the floor drops to one row — a floor at the settled cap
  * would lift the divided bound back up from the batch size where it falls
  * below it, and N cards at the cap grow the region linearly past the
@@ -621,7 +626,7 @@ export function pendingCardMaxRows(
   return Math.max(
     pendingCount > 1
       ? 1
-      : dialog?.type === 'mcp'
+      : dialog?.type === 'mcp' && collapsedDialogBound <= 0
         ? MCP_PENDING_CARD_MIN_ROWS
         : TOOL_CARD_DESCRIPTION_ROWS,
     Math.min(
