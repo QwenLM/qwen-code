@@ -4129,6 +4129,74 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('adds the validated ?daemon= origin to the shell CSP connect-src', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170')
+        .set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+    });
+
+    // `createSendIndex` reads `?daemon=` from the raw query with the client's
+    // parser, so the header cannot depend on how Express was configured to
+    // parse queries. That is only observable under `'extended'`: the shipped
+    // default is `'simple'` (Node `querystring`, Express 5) and nothing in this
+    // repo sets it, and under `simple` a bracket key never reaches
+    // `req.query.daemon` at all — so the old `req.query` read and this one
+    // behave identically there and a test on the default parser cannot
+    // discriminate the change. Forcing `extended` is what makes this case bite:
+    // `qs` folds `?daemon[]=X` into `{ daemon: ['X'] }`, which the old read
+    // granted and the client never parsed.
+    it('grants connect-src from the client parser whatever the Express query parser is', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      app.set('query parser', 'extended');
+      expect(app.get('query parser')).toBe('extended');
+
+      const repeated = await request(app)
+        .get(
+          '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
+        )
+        .set('Host', host);
+      expect(repeated.status).toBe(200);
+      expect(repeated.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+      expect(repeated.headers['content-security-policy']).not.toContain(
+        'other.example',
+      );
+
+      const bracketed = await request(app)
+        .get('/?daemon%5B%5D=https%3A%2F%2Fevil.example')
+        .set('Host', host);
+      expect(bracketed.status).toBe(200);
+      expect(bracketed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(bracketed.headers['content-security-policy']).toContain(
+        "connect-src 'self';",
+      );
+
+      // The mixed shape is the one that broke functionally, not just by
+      // widening: `qs` yields `['evil', 'daemon.example.com:4170']`, so the old
+      // read granted the bracketed origin while the client connected to the
+      // plain one and found its own target CSP-blocked.
+      const mixed = await request(app)
+        .get(
+          '/?daemon%5B%5D=https%3A%2F%2Fevil.example&daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+        )
+        .set('Host', host);
+      expect(mixed.status).toBe(200);
+      expect(mixed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(mixed.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+    });
+
     it('rejects cross-origin requests for the pre-auth shell page (CORS wall runs first)', async () => {
       // Re-pins the contract the deleted `/demo` CORS test carried: the
       // pre-auth page surface sits behind the Origin wall, so a future
