@@ -18,7 +18,9 @@ import {
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
+import { parseDaemonBackgroundTurn } from './types.js';
 import type {
+  DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
   DaemonRewindResult,
@@ -254,6 +256,8 @@ export class DaemonSessionClient {
   readonly replayPartial: boolean;
   readonly replayError: string | undefined;
   readonly hasActivePrompt: boolean;
+  readonly backgroundTurn?: DaemonBackgroundTurn;
+  readonly hasRunningBackgroundTasks?: boolean;
   readonly historyHasMore: boolean;
   /**
    * Fallback pagination anchor from the daemon load response (see
@@ -306,6 +310,10 @@ export class DaemonSessionClient {
         : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
+    this.backgroundTurn = parseDaemonBackgroundTurn(
+      opts.session.backgroundTurn,
+    );
+    this.hasRunningBackgroundTasks = opts.session.hasRunningBackgroundTasks;
     this.historyHasMore = opts.historyHasMore ?? false;
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayDegraded = opts.replayDegraded ?? false;
@@ -997,12 +1005,16 @@ export class DaemonSessionClient {
     message: string,
     opts?: {
       signal?: AbortSignal;
+      eventDetailMode?: 'full' | 'summary';
       messageId?: string;
       content?: PromptContentBlock[];
     },
   ): Promise<DaemonMidTurnMessageResult> {
     return this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.eventDetailMode !== undefined
+        ? { eventDetailMode: opts.eventDetailMode }
+        : {}),
       ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(opts?.content && opts.content.length > 0
         ? { content: opts.content }
