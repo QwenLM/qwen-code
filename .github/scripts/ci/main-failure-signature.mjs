@@ -44,12 +44,26 @@ const VITEST_FAIL_PATTERN = /^FAIL\s+(.+)$/;
 const PYTEST_FAIL_PATTERN = /^FAILED\s+(.+?)(?:\s+-\s.*)?$/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 
+/**
+ * Strip what the log transport added — Actions' RFC3339 line prefix and the
+ * SGR escapes vitest and pytest colourise with — and leave the runner's own
+ * text. Exported because `classify-infra-flake.mjs` reads the same fetched logs
+ * and anchors its patterns on line starts (`/^npm error path …/`): when the
+ * transport changes, both readers have to change, and a second
+ * character-identical copy of these two replaces lets one of them keep passing
+ * its own stale
+ * fixture while silently stopping to match production logs.
+ *
+ * Deliberately not the whitespace collapse and trim `cleanLine` adds — those
+ * are `extractFailingTests`'s business, and they would destroy the indentation
+ * an anchored caller depends on.
+ */
+export function stripLogDecoration(line) {
+  return line.replace(ANSI_PATTERN, '').replace(LOG_TIMESTAMP_PATTERN, '');
+}
+
 function cleanLine(line) {
-  return line
-    .replace(ANSI_PATTERN, '')
-    .replace(LOG_TIMESTAMP_PATTERN, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return stripLogDecoration(line).replace(/\s+/g, ' ').trim();
 }
 
 /**
