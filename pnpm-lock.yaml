@@ -1122,6 +1122,9 @@ importers:
       web-tree-sitter:
         specifier: ^0.24.7
         version: 0.24.7
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.3
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -1129,6 +1132,9 @@ importers:
       '@types/node':
         specifier: ^22.13.10
         version: 22.20.1
+      '@types/ws':
+        specifier: ^8.5.0
+        version: 8.18.1
       typescript:
         specifier: 5.8.3
         version: 5.8.3
