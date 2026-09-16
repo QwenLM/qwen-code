@@ -361,6 +361,115 @@ describe('Storage – getPlansDir', () => {
   });
 });
 
+describe('Storage – getTodosDir', () => {
+  const projectRoot = path.resolve('workspace', 'project');
+  const originalRuntimeEnv = process.env['QWEN_RUNTIME_DIR'];
+
+  beforeEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    delete process.env['QWEN_RUNTIME_DIR'];
+    mockRealpathSync.mockImplementation((pathToResolve) =>
+      actualFs.realpathSync(pathToResolve),
+    );
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    if (originalRuntimeEnv !== undefined) {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
+    } else {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    }
+    mockRealpathSync.mockReset();
+  });
+
+  it('defaults to the runtime base todos directory when todosDirectory is not configured', () => {
+    const runtimeDir = path.resolve('custom', 'runtime');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    expect(Storage.getTodosDir(projectRoot)).toBe(
+      path.join(Storage.getRuntimeBaseDir(), 'todos'),
+    );
+  });
+
+  it('resolves relative todosDirectory values against the project root', () => {
+    expect(Storage.getTodosDir(projectRoot, './.qwen/todos')).toBe(
+      path.join(projectRoot, '.qwen', 'todos'),
+    );
+  });
+
+  it('rejects todosDirectory values that escape the project root', () => {
+    expect(() => Storage.getTodosDir(projectRoot, '../todos')).toThrow(
+      FatalConfigError,
+    );
+    expect(() => Storage.getTodosDir(projectRoot, '../todos')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('requires projectRoot when todosDirectory is configured', () => {
+    expect(() => Storage.getTodosDir(undefined, './todos')).toThrow(
+      FatalConfigError,
+    );
+    expect(() => Storage.getTodosDir(undefined, './todos')).toThrow(
+      'projectRoot is required when todosDirectory is configured',
+    );
+    expect(() => Storage.getTodosDir(null, './todos')).toThrow(
+      'projectRoot is required when todosDirectory is configured',
+    );
+  });
+
+  it('rejects symlink pointing outside the project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const outside = path.resolve('tmp', 'outside');
+    const symlink = path.join(project, 'escape-link');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [symlink, outside],
+      ]),
+    );
+
+    expect(() => Storage.getTodosDir(project, './escape-link')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('allows legitimate symlink that stays within project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const target = path.join(project, 'todos-target');
+    const symlink = path.join(project, 'todos-link');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [symlink, target],
+      ]),
+    );
+
+    const result = Storage.getTodosDir(project, './todos-link');
+    expect(result).toBe(symlink);
+  });
+
+  it('rejects missing nested path under symlink that escapes project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const outside = path.resolve('tmp', 'outside');
+    const dataSymlink = path.join(project, 'data');
+    const missingSubdir = path.join(dataSymlink, 'subdir');
+    const missingTodos = path.join(missingSubdir, 'todos');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [dataSymlink, outside],
+      ]),
+      new Set([missingTodos, missingSubdir]),
+    );
+
+    expect(() => Storage.getTodosDir(project, './data/subdir/todos')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+});
+
 describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
   const originalEnv = process.env['QWEN_RUNTIME_DIR'];
 
