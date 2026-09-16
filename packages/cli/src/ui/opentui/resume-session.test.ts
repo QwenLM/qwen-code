@@ -16,7 +16,12 @@ import { describe, it, expect } from 'vitest';
 import {
   resumeEventsFromConfig,
   resumeEventsFromSession,
+  seedLivePromptCountFromResume,
 } from './resume-session.js';
+import {
+  nextLivePromptId,
+  resetPromptCountForTesting,
+} from './live-session.js';
 import { foldLiveEvent } from './live-session-model.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -243,5 +248,44 @@ describe('opentui resume mapping', () => {
     const events = resumeEventsFromConfig(config);
     expect(events?.[0]).toEqual({ type: 'user', text: '读一下 README' });
     expect(events?.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('seeds the live prompt counter past the startup-resumed claims (R39-1)', () => {
+    resetPromptCountForTesting();
+    try {
+      const config = {
+        getSessionId: () => 'S',
+        getResumedSessionData: () => ({
+          conversation: {
+            messages: [0, 1, 2].map((turn) => ({
+              type: 'user',
+              message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
+              promptId: `S########${turn}`,
+            })),
+          },
+        }),
+      } as unknown as Config;
+      // The startup --resume replay never passes through a session switch,
+      // so an unseeded counter would mint S########0 on the first submit —
+      // an id the resumed first turn still wears.
+      seedLivePromptCountFromResume(config);
+      expect(nextLivePromptId(config)).toBe('S########3');
+    } finally {
+      resetPromptCountForTesting();
+    }
+  });
+
+  it('leaves the live prompt counter untouched without a resumed session', () => {
+    resetPromptCountForTesting();
+    try {
+      const config = {
+        getSessionId: () => 'S',
+        getResumedSessionData: () => undefined,
+      } as unknown as Config;
+      seedLivePromptCountFromResume(config);
+      expect(nextLivePromptId(config)).toBe('S########0');
+    } finally {
+      resetPromptCountForTesting();
+    }
   });
 });

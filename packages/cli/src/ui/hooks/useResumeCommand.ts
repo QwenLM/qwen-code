@@ -15,6 +15,7 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -25,6 +26,10 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import {
+  getPromptCountFloor,
+  recordPromptCountFloor,
+} from '../utils/prompt-count-floor.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -41,6 +46,11 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
+  /**
+   * Seeds the UI prompt counter past the ids the resumed transcript claims.
+   * Must run AFTER startNewSession (the reset would erase an earlier seed).
+   */
+  seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -91,6 +101,7 @@ export function useResumeCommand(
     historyManager,
     loadHistory: loadHistoryOverride,
     startNewSession,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -207,6 +218,21 @@ export function useResumeCommand(
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
+        // Record the incoming session's prompt-count floor BEFORE the core
+        // swap: from here until the UI re-key + seed below, the composer is
+        // live (the dialog closed above), config.getSessionId() answers the
+        // incoming session, and the provider's promptCount still holds the
+        // outgoing session's count — a submit in that window would mint an
+        // id the incoming transcript already claims (R43-1). The
+        // provider-side seed below must still run after the reset, which
+        // would erase an earlier one.
+        recordPromptCountFloor(
+          sessionId,
+          computeResumedPromptCountSeed(
+            sessionData.conversation.messages,
+            sessionId,
+          ),
+        );
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -233,6 +259,22 @@ export function useResumeCommand(
         //    The remaining steps (name, history items, notice) are display
         //    state for a swap that has already committed.
         startNewSession(sessionId);
+        // Seed the prompt counter past the ids the resumed transcript
+        // claims before any new prompt can mint one (R38-1): the reset
+        // above reinstalls promptCount 0, and the seed is monotonic (0 is
+        // a no-op), so this ordering is load-bearing. The floor may have
+        // advanced past the transcript-derived seed while the swap window
+        // was open — an in-window mint spends its ordinal onto this
+        // transcript — so seed from the higher of the two (R45-1).
+        seedPromptCount(
+          Math.max(
+            computeResumedPromptCountSeed(
+              sessionData.conversation.messages,
+              sessionId,
+            ),
+            getPromptCountFloor(sessionId),
+          ),
+        );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
         setSessionName?.(customTitle ?? null);
@@ -345,6 +387,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

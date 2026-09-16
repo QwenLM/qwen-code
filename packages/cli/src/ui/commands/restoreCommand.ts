@@ -13,6 +13,7 @@ import {
   CommandKind,
 } from './types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 async function restoreAction(
@@ -145,7 +146,25 @@ async function restoreAction(
         };
       }
       context.ui.clearPendingState?.();
-      loadHistory(toolCallData.history);
+      // A checkpoint is JSON, so the model-facing `clientHistory`
+      // restored below carries no prompt identities (they live on
+      // non-serializable Symbol metadata). The UI items keep their
+      // `promptId`s — file restore and the rewind selector's turn-diff
+      // previews key on them, and stripping them made every `code`/`both`
+      // rewind after `/restore` fail with the false "created before file
+      // checkpointing" error while `both` also skipped the conversation
+      // truncation (R24-1 fix-induced) — but each is flagged so the rewind
+      // mapping never resolves those ids: a later prompt can re-mint one,
+      // and a unique mark match would then resolve a restored turn onto the
+      // wrong model entry (R24-1). Flagged turns map positionally, as they
+      // did before identities existed.
+      loadHistory(
+        toolCallData.history.map((item: HistoryItem) =>
+          item.type === 'user' && item.promptId
+            ? { ...item, promptIdFileKeyOnly: true }
+            : item,
+        ),
+      );
     }
 
     if (toolCallData.clientHistory) {

@@ -18,6 +18,8 @@ import {
   type TranscriptResult,
 } from './transcript-adapter.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import { seedLivePromptCount } from './live-session.js';
+import { computeResumedPromptCountSeed } from '../utils/resumeHistoryUtils.js';
 
 export interface ResumableSession {
   conversation: { messages: readonly unknown[] };
@@ -60,6 +62,28 @@ export function resumeUserPromptsFromSession(
   config?: Config,
 ): string[] {
   return transcribe(sessionData, config).prompts;
+}
+
+/**
+ * Seeds the live prompt counter for a startup `--resume` / `--continue` /
+ * `--fork-session` replay (R39-1): the startup path never passes through a
+ * session switch, so without this seed the first submit re-mints an id a
+ * resumed turn still wears and the duplicate is persisted into the shared
+ * session JSONL. Keyed on `config.getSessionId()` — the id the mint uses
+ * (a fork remaps record ids to the new session id before this runs). The
+ * value passes through unadjusted: `computeResumedPromptCountSeed` already
+ * returns highest-claim + 1 and `nextLivePromptId` reads then increments,
+ * and the seed itself is monotonic.
+ */
+export function seedLivePromptCountFromResume(config: Config): void {
+  const sessionData = config.getResumedSessionData();
+  if (!sessionData) return;
+  seedLivePromptCount(
+    computeResumedPromptCountSeed(
+      sessionData.conversation.messages,
+      config.getSessionId(),
+    ),
+  );
 }
 
 /** Neutral resume events for the config's resumed session, if any. */

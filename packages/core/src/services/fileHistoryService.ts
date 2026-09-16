@@ -831,6 +831,21 @@ export class FileHistoryService {
   ): Promise<RewindResult> {
     if (!this.enabled) return { filesChanged: [], filesFailed: [] };
 
+    // Prompt ids are minted by entrances whose counters restart
+    // independently (resume, headless chains), so two snapshots can wear
+    // one id. `findSnapshotIndex` would resolve the LAST occurrence and
+    // truncation would prune the newer turn's backups for a target the
+    // caller may not have meant — refuse a shared key loudly instead.
+    let matches = 0;
+    for (const snapshot of this.state.snapshots) {
+      if (snapshot.promptId === promptId) matches++;
+    }
+    if (matches > 1) {
+      throw new Error(
+        'The selected snapshot shares its checkpoint identity with another turn',
+      );
+    }
+
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) {
       throw new Error('The selected snapshot was not found');

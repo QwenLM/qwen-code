@@ -5976,6 +5976,7 @@ export class Session implements SessionContext {
                       ...(attachmentReferences ? { attachmentReferences } : {}),
                     }
                   : undefined,
+                promptId,
                 daemonPromptId,
               );
             }
@@ -6063,6 +6064,7 @@ export class Session implements SessionContext {
                   promptDisplayText !== undefined
                     ? { displayText: promptDisplayText, hookContext: '' }
                     : undefined,
+                  promptId,
                   daemonPromptId,
                 );
               }
