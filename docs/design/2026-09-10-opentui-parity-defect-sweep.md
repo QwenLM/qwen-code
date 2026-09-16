@@ -1838,9 +1838,13 @@ What was verified, and how far the verification reaches:
 - A dialog field ports the one-line slice of ink's buffer, not all of it. Four
   key families ink's text input binds are not ported: word jumps
   (ctrl/alt+←/→, alt+b/f), delete-word-right (alt+d, ctrl/alt+Delete), kill-line
-  (ctrl+k/ctrl+u) and undo/redo (ctrl+z). Every operation they need already exists
-  in this model, so it is one change over the line editor and its tests rather
-  than a per-dialog one.
+  (ctrl+k/ctrl+u) and undo/redo (ctrl+z). The first three need only operations
+  this model already holds, so they are one change over the line editor and its
+  tests rather than a per-dialog one; undo/redo also needs a history the model
+  does not keep, so it adds a store before it adds a binding. Two further ink
+  bindings are absent on purpose rather than missing: clear-input (ctrl+C), a key
+  the app-wide exit handler already acts on wherever a dialog owns the screen, and
+  open-external-editor (ctrl+X), which nothing in this renderer binds.
 - A dialog field's row windows its lines and not its columns. ink's field shows
   the line under the caret and, along it, the columns around the caret, so a
   value wider than the row scrolls sideways. This row hides the lines off the
@@ -1862,9 +1866,15 @@ What was verified, and how far the verification reaches:
 - The two app-wide handlers disagree about claiming their key. The thought-toggle
   handler marks the keystroke consumed; the exit handler for ctrl+C and ctrl+D
   does not, so those keys also reach whatever else is mounted in the same read.
-  At this head nothing else acts on them — the shared line reducer hands ctrl+D
-  back unhandled — but that is a fact about the bindings that exist today, not a
-  guarantee the exit handler keeps.
+  On ctrl+D nothing else acts — the shared line reducer hands it back unhandled.
+  On ctrl+C the shell's five branches are exclusive — MCP approval, tool
+  confirmation, modal, dialog, composer — so only the one on screen joins the exit
+  handler in that read. The composer clears a non-empty buffer and claims the key
+  when it does; the settings dialog resets the row it is on and does not claim it,
+  so there one ctrl+C both resets that row and arms the exit window, and the next
+  one quits. A rewind overlay binds the same key but no file in the renderer
+  imports it. Giving the exit handler the claim the thought-toggle handler makes
+  is its own change.
 - Seven further pins were measured by review as not holding, and this pass did not
   re-run them. Deleting the shell's mount of the waiting row leaves every unit test
   green, because the indicator's own suite renders it directly; moving the queue
