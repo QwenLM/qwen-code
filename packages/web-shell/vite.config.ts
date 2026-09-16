@@ -1,9 +1,10 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { ProxyOptions } from 'vite';
+import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
+import { getAllowedDaemonOrigin } from './client/config/daemon';
 
 const daemonProxy: ProxyOptions = {
   target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
@@ -64,9 +65,52 @@ export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 // xterm for npm hosts.
 export const WEB_SHELL_BUILD_TARGET = 'es2021';
 
+// Development permits same-origin ancestors; production denies them by default.
+function developmentCsp(requestUrl: string): string {
+  const queryStart = requestUrl.indexOf('?');
+  const raw = new URLSearchParams(
+    queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
+  ).get('daemon');
+  const origin = getAllowedDaemonOrigin(raw || '');
+  const connectOrigins: string[] = [];
+  if (origin) {
+    const websocket = new URL(origin);
+    websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
+    connectOrigins.push(origin, websocket.origin);
+  }
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data:",
+    `connect-src 'self' ${connectOrigins.join(' ')}`.trim(),
+    "worker-src 'self' blob:",
+    "base-uri 'none'",
+    'frame-src http: https: blob:',
+    "frame-ancestors 'self'",
+  ].join('; ');
+}
+
+function configureCsp(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    next();
+  });
+}
+
 export default defineConfig(({ command }) => ({
-  root: resolve(__dirname, 'client'),
-  plugins: [react(), tailwindcss()],
+  root: 'client',
+  plugins: [
+    react(),
+    tailwindcss(),
+    {
+      name: 'web-shell-development-csp',
+      configureServer: configureCsp,
+      configurePreviewServer: configureCsp,
+    },
+  ],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -96,23 +140,18 @@ export default defineConfig(({ command }) => ({
   build: {
     // Avoid esbuild lowering xterm's logical assignments into invalid code.
     target: WEB_SHELL_BUILD_TARGET,
-    outDir: resolve(__dirname, 'dist'),
+    outDir: '../dist',
     emptyOutDir: true,
     rollupOptions: {
       input: {
         index: resolve(__dirname, 'client/index.html'),
-        // This entry deliberately has no imports or exports: the resulting
-        // root-scoped worker is registered as a classic script.
+        // This import-free worker must remain at the origin root so it can
+        // control all Web Shell navigation.
         sw: resolve(__dirname, 'client/sw.js'),
       },
       output: {
-        // Keep sw.js at the root (no hash) — the browser byte-compares the file
-        // on each load to detect updates. All other entry chunks get the standard
-        // hashed name under assets/.
         entryFileNames: (chunk) =>
           chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
-        // Vite's IIFE format cannot have multiple inputs. The worker's
-        // import-free entry still emits as a classic script with ES output.
         format: 'es',
       },
     },
@@ -122,22 +161,7 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     cors: false,
-    // Mirrors buildWebShellCsp() in packages/cli/src/serve/web-shell-static.ts;
-    // dev intentionally permits same-origin ancestors instead of denying all.
     headers: {
-      'Content-Security-Policy': [
-        "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-        "style-src 'self' 'unsafe-inline'",
-        "font-src 'self' data:",
-        "img-src 'self' data: blob:",
-        "media-src 'self' data:",
-        "connect-src 'self'",
-        "worker-src 'self' blob:",
-        "base-uri 'none'",
-        'frame-src http: https: blob:',
-        "frame-ancestors 'self'",
-      ].join('; '),
       'Referrer-Policy': 'no-referrer',
     },
     port: 5173,

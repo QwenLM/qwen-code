@@ -24,6 +24,12 @@ The WebView navigates to the daemon origin, so direct same-origin HTTP API behav
 
 A static daemon token (`--token` or `QWEN_SERVER_TOKEN`) avoids restart invalidation during development. SharedPreferences storage is a temporary development mechanism, not Keystore-backed production security. HTTPS is the intended remote connection path. Additional HTTP LAN hosts require explicit network-security entries.
 
+`adb reverse` makes a host loopback daemon reachable from the device loopback
+port. It must never forward a token-less daemon to a physical device: any app
+on that device can reach the port and act as the daemon user. Physical-device
+testing requires `--require-auth` with a bearer token saved as `daemon_token`;
+for example, `QWEN_SERVER_TOKEN=$(openssl rand -hex 32) qwen serve --require-auth`.
+
 No foreground service starts in this spike. A service with no SSE connection would merely consume resources and show a misleading persistent notification, so its placeholder and permissions are deferred.
 
 ## Constraints and Production Prerequisites

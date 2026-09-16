@@ -170,6 +170,8 @@ describe('bundled workflow-authoring skill', () => {
     ['`node:vm` sandbox'],
     // meta: the full contract, including the field the approval dialog prints.
     ['optionally `whenToUse` and `phases: [{ title, detail? }]`'],
+    // whenToUse: what it does for a workflow an extension ships.
+    ['`whenToUse` also lists the workflow for the model to start'],
     // parallel(): the eager form is refused, after the dispatches were spent.
     ['`parallel([() => agent(...)])`'],
     ['a non-function element rejects the whole batch'],

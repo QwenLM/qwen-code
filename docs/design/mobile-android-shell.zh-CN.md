@@ -24,6 +24,8 @@ WebView 直接导航到 daemon origin，因此沿用同源 API 行为，直接�
 
 开发时静态 daemon 令牌（`--token` 或 `QWEN_SERVER_TOKEN`）避免重启后失效。SharedPreferences 只是临时开发方案，并不具备 Keystore 支持的生产凭据保护。远程连接应使用 HTTPS；额外的 HTTP 局域网主机需要显式网络安全配置。
 
+`adb reverse` 会让宿主机的回环 daemon 可从设备回环端口访问。绝不能把无 token 的 daemon 转发到真机：设备上的任何 app 都可以连接该端口，并以 daemon 用户身份执行操作。真机测试必须使用 `--require-auth`，并把 bearer token 保存为 `daemon_token`；例如：`QWEN_SERVER_TOKEN=$(openssl rand -hex 32) qwen serve --require-auth`。
+
 本技术验证不启动前台服务。没有 SSE 连接的服务只会消耗资源并显示误导性的持续通知，因此占位服务及其权限推迟到后续阶段。
 
 ## 约束与生产前提

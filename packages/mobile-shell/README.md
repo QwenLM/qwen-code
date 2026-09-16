@@ -36,7 +36,12 @@ Use HTTPS for remote daemons. Cleartext is disabled except for explicit loopback
 
 An emulator's localhost is the emulator itself. For a host daemon on port 4170,
 run `adb reverse tcp:4170 tcp:4170` and use `http://127.0.0.1:4170` in the
-profile. The app trusts system certificate authorities; a host-only or
+profile. **Never use a token-less daemon through this tunnel on a physical
+device:** every app that can reach the device loopback port can then use the
+host daemon as you. Start it with bearer authentication, for example
+`QWEN_SERVER_TOKEN=$(openssl rand -hex 32) qwen serve --require-auth`, and save
+the same value as `daemon_token` in the development profile. The app trusts
+system certificate authorities; a host-only or
 user-installed development CA is not automatically trusted by this WebView.
 Use a certificate chain trusted by the device. Certificate errors are not bypassed.
 The first Gradle build needs network access; offline builds require a populated

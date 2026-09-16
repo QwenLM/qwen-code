@@ -326,6 +326,7 @@ export interface ChatRecord {
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
+    | 'goal_turn_end'
     | 'realtime_message'
     | 'turn_result';
   /** Explicit source classification used by Goal evidence validation. */
@@ -392,6 +393,7 @@ export interface ChatRecord {
     | SessionSourcesSnapshot
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
+    | GoalTurnEndRecordPayload
     | TurnResultRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -518,6 +520,11 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  completedToolCallIds?: string[];
+}
+
+export interface GoalTurnEndRecordPayload {
+  toolCallId: string;
 }
 
 export interface SlashCommandRecordPayload {
@@ -1953,6 +1960,18 @@ export class ChatRecordingService {
     }
   }
 
+  async recordGoalTurnEnd(
+    toolCallId: string,
+    goalContext: GoalTurnPermit,
+  ): Promise<void> {
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'goal_turn_end',
+      goalContext: copyGoalContext(goalContext),
+      systemPayload: { toolCallId },
+    });
+  }
+
   /**
    * Records a user message drained while tool results are being submitted.
    *
@@ -2112,7 +2131,10 @@ export class ChatRecordingService {
     turnId: string,
     usage: GenerateContentResponseUsageMetadata,
   ): void {
-    const total = usage.totalTokenCount;
+    this.billGoalTurnTokens(turnId, usage.totalTokenCount ?? 0);
+  }
+
+  billGoalTurnTokens(turnId: string, total: number): void {
     if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
       return;
     }

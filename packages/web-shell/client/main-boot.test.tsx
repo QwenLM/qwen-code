@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const testState = vi.hoisted(() => ({
   containers: [] as Array<Element | null>,
   resolveToken: undefined as ((token: string) => void) | undefined,
-  removeTokenFromUrl: vi.fn(),
+  removeToken: vi.fn(),
 }));
 
 vi.mock('react-dom/client', async (importOriginal) => ({
@@ -31,11 +31,15 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getAllowedDaemonOrigin: (value: string) => value,
+  confirmDaemonTarget: vi.fn(),
+  isKnownDaemonTarget: () => false,
   // No token in the URL, so boot blocks on the postMessage handshake — the
   // window in which the watchdog's grace period can expire.
   getDaemonToken: () => null,
+  navigateToDaemon: vi.fn(),
   persistDaemonToken: vi.fn(),
-  removeDaemonTokenFromUrl: testState.removeTokenFromUrl,
+  removeDaemonTokenFromUrl: testState.removeToken,
   waitForDaemonTokenMessage: () =>
     new Promise<string>((resolve) => {
       testState.resolveToken = resolve;
@@ -46,7 +50,7 @@ describe('web shell boot', () => {
   beforeEach(() => {
     testState.containers = [];
     testState.resolveToken = undefined;
-    testState.removeTokenFromUrl.mockClear();
+    testState.removeToken.mockClear();
     vi.resetModules();
   });
 
@@ -55,6 +59,7 @@ describe('web shell boot', () => {
     document.documentElement.removeAttribute(
       'data-web-shell-unsupported-browser',
     );
+    window.history.replaceState(null, '', '/');
   });
 
   it('keeps the native HTML update message on unsupported browsers', async () => {
@@ -67,10 +72,25 @@ describe('web shell boot', () => {
     await import('./main');
     expect(testState.containers).toHaveLength(0);
     expect(testState.resolveToken).toBeUndefined();
-    expect(testState.removeTokenFromUrl).toHaveBeenCalledOnce();
+    expect(testState.removeToken).toHaveBeenCalledOnce();
     expect(document.querySelector('[data-boot-fallback]')?.textContent).toBe(
       'Update required',
     );
+  });
+
+  it('keeps only the fragment token when the daemon target is invalid', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=invalid&token=query-token#token=fragment-token',
+    );
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.containers).toHaveLength(1));
+    expect(new URL(window.location.href).searchParams.has('token')).toBe(false);
+    expect(window.location.hash).toBe('#token=fragment-token');
+    expect(testState.removeToken).not.toHaveBeenCalled();
+    expect(testState.resolveToken).toBeUndefined();
   });
 
   it('clears the boot fallback when the app mounts after the grace period', async () => {
@@ -100,6 +120,5 @@ describe('web shell boot', () => {
     await vi.waitFor(() => expect(testState.containers).toHaveLength(1));
 
     expect(testState.containers[0]).toBe(root);
-    expect(testState.removeTokenFromUrl).toHaveBeenCalledOnce();
   });
 });

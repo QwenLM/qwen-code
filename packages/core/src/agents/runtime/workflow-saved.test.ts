@@ -774,6 +774,21 @@ describe('workflow-saved — extension tier', () => {
       description: 'Runs audit',
       scriptPath: path.join(extensionRoot, 'workflows', 'audit.js'),
     });
+    expect('whenToUse' in entries[0]).toBe(false);
+  });
+
+  it('carries the whenToUse of an extension workflow onto its entry', async () => {
+    await writeWorkflow(
+      path.join(extensionRoot, 'workflows'),
+      'audit',
+      `export const meta = { name: 'audit', description: 'Runs audit', whenToUse: 'When the user asks for a dependency audit' };\nreturn 1;\n`,
+    );
+    const [entry] = await listSavedWorkflows(configWith(await loadGcp()));
+
+    expect(entry).toMatchObject({
+      name: 'gcp:audit',
+      whenToUse: 'When the user asks for a dependency audit',
+    });
   });
 
   it('resolves an extension workflow by its qualified name', async () => {

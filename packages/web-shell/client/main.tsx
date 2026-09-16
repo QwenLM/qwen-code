@@ -1,8 +1,10 @@
 // Load resets before any component can import CSS modules.
 import './styles/globals.css';
 import React from 'react';
-import ReactDOM from 'react-dom/client';
 import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
+import { StandaloneContext } from './config/standalone';
+import { isKnownDaemonTarget } from './config/daemon';
+import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
   DaemonWorkspaceProvider,
@@ -28,6 +30,14 @@ import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
+const REQUESTED_DAEMON_TARGET =
+  new URLSearchParams(window.location.search).get('daemon') || '';
+const INVALID_DAEMON_TARGET =
+  Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
+// A `?daemon=` link can name any origin; one this browser has never connected
+// to is shown for confirmation instead of being probed on load.
+const UNCONFIRMED_DAEMON_TARGET =
+  Boolean(DAEMON_BASE_URL) && !isKnownDaemonTarget(DAEMON_BASE_URL);
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
@@ -182,12 +192,10 @@ function replaceStandaloneSessionUrl(
   url.searchParams.delete('theme');
   url.searchParams.delete('language');
   url.searchParams.delete('lang');
-  // Boot already scrubbed ?token= (dev included), so drop it here too; dev
-  // keeps ?daemon= so a reload still targets the same local daemon.
+  // Boot already scrubbed ?token= (dev included), so drop it here too.
+  // `daemon` is connection identity, not a one-shot preference: keep it so
+  // session navigation and refresh stay on the selected remote daemon.
   url.searchParams.delete('token');
-  if (!import.meta.env.DEV) {
-    url.searchParams.delete('daemon');
-  }
   window.history.replaceState(null, '', url);
 }
 
@@ -308,64 +316,83 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         language={language}
         options={{ defaultEnabled: true }}
       >
-        <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-          <WorkspaceSessionProvider
-            sessionId={sessionId}
-            workspaceId={workspaceId}
-            sessionContext={sessionContext}
-            webShellProps={{
-              theme,
-              onThemeChange: handleThemeChange,
-              language,
-              onLanguageChange: handleLanguageChange,
-              onBrandResolved: handleBrandResolved,
-              onSessionIdChange: handleSessionIdChange,
-              sidebar: { enabled: true, showLive: true },
-              header: {
-                items: [
-                  'title',
-                  'environment',
-                  'rightPanel',
-                  'tokenUsage',
-                  'contextUsage',
-                ],
-              },
-              rightPanel: {
-                items: ['review', 'sideTask', 'terminal', 'webPreview'],
-              },
-              environmentPanel: {
-                items: [
-                  'environment',
-                  'sources',
-                  'subagents',
-                  'backgroundTasks',
-                  'attachments',
-                  'artifacts',
-                ],
-              },
-              compactThinking: true,
-              markdownTableMode: 'advanced',
-              composerToolbarAdditionalActions:
-                STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-            }}
-          />
-        </DaemonWorkspaceProvider>
+        <StandaloneContext.Provider value={true}>
+          <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
+            <WorkspaceSessionProvider
+              sessionId={sessionId}
+              workspaceId={workspaceId}
+              sessionContext={sessionContext}
+              webShellProps={{
+                theme,
+                onThemeChange: handleThemeChange,
+                language,
+                onLanguageChange: handleLanguageChange,
+                onBrandResolved: handleBrandResolved,
+                onSessionIdChange: handleSessionIdChange,
+                sidebar: { enabled: true, showLive: true },
+                header: {
+                  items: [
+                    'title',
+                    'environment',
+                    'rightPanel',
+                    'tokenUsage',
+                    'contextUsage',
+                  ],
+                },
+                rightPanel: {
+                  items: ['review', 'sideTask', 'terminal', 'webPreview'],
+                },
+                environmentPanel: {
+                  items: [
+                    'environment',
+                    'sources',
+                    'subagents',
+                    'backgroundTasks',
+                    'attachments',
+                    'artifacts',
+                  ],
+                },
+                compactThinking: true,
+                markdownTableMode: 'advanced',
+                composerToolbarAdditionalActions:
+                  STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+              }}
+            />
+          </DaemonWorkspaceProvider>
+        </StandaloneContext.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>
   );
 }
 
 async function main() {
-  // Persist a URL token before removing it. The URL is scrubbed even when the
-  // browser floor rejects boot, so credentials never remain in the address bar.
-  const daemonToken = getDaemonToken();
-  removeDaemonTokenFromUrl();
+  const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  const storedToken = INVALID_DAEMON_TARGET
+    ? undefined
+    : getDaemonToken(baseUrl);
+  if (INVALID_DAEMON_TARGET) {
+    // Keep a fragment token for recovery, but never leave a server-visible
+    // query token in the address bar or history.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('token')) {
+      url.searchParams.delete('token');
+      window.history.replaceState(null, '', url);
+    }
+  } else {
+    removeDaemonTokenFromUrl();
+  }
+  // The native bootstrap may declare the WebView unsupported. Scrub a URL
+  // token first, but leave its update message in place instead of mounting
+  // React or waiting for the daemon-token handshake.
   if (
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
-  const resolvedDaemonToken =
-    daemonToken ?? (await waitForDaemonTokenMessage());
+  const daemonToken =
+    storedToken ??
+    (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
+      ? await waitForDaemonTokenMessage()
+      : undefined);
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -378,10 +405,13 @@ async function main() {
   ReactDOM.createRoot(container!).render(
     <React.StrictMode>
       <StandaloneAuth
-        baseUrl={DAEMON_BASE_URL || window.location.origin}
-        initialToken={resolvedDaemonToken}
+        baseUrl={baseUrl}
+        initialToken={daemonToken}
+        initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         language={getInitialLanguage()}
         theme={getInitialTheme()}
+        invalidTarget={INVALID_DAEMON_TARGET}
+        unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
         {(token) => <StandaloneApp daemonToken={token} />}
       </StandaloneAuth>
@@ -391,13 +421,6 @@ async function main() {
 
 void main();
 
-// Register the PWA service worker.
-//
-// Deferred to `load` so the SW registration does not compete with the React
-// module graph during initial load. `navigator.serviceWorker` is only defined
-// in secure contexts (HTTPS or localhost) — the check also guards against
-// environments where SW is intentionally disabled.
-//
-// The SW is served at /sw.js by the daemon's static handler (pre-auth, no-cache)
-// with `Service-Worker-Allowed: /` so its scope covers the whole origin.
+// Deferred to `load` so registration does not compete with the initial module
+// graph. The helper also guards secure-context and service-worker support.
 scheduleServiceWorkerRegistration({ production: import.meta.env.PROD });

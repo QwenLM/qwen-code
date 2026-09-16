@@ -17,6 +17,45 @@ const reminder = (text: string) => ({
 });
 
 describe('detectTurnInterruption', () => {
+  it('recovers only input after a recorded tool boundary', () => {
+    const result: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: { id: 'ended', name: 'update_goal', response: {} },
+        },
+      ],
+    };
+    expect(detectTurnInterruption([result], ['ended'])).toEqual({
+      kind: 'none',
+    });
+    const input: Content = { role: 'user', parts: [{ text: 'next request' }] };
+    expect(detectTurnInterruption([result, input], ['ended'])).toEqual({
+      kind: 'interrupted_prompt',
+      parts: input.parts,
+    });
+    expect(detectTurnInterruption([result, input], ['missing']).kind).toBe(
+      'interrupted_prompt',
+    );
+    expect(
+      detectTurnInterruption([result, input, result], ['ended']).kind,
+    ).toBe('interrupted_prompt');
+    expect(
+      detectTurnInterruption(
+        [
+          result,
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'pending', name: 'read_file' } }],
+          },
+        ],
+        ['ended'],
+      ),
+    ).toEqual({
+      kind: 'interrupted_turn',
+      danglingCalls: [{ callId: 'pending', name: 'read_file' }],
+    });
+  });
   it('uses a bounded history tail count for continuation detection callers', () => {
     expect(TURN_INTERRUPTION_HISTORY_TAIL_COUNT).toBe(50);
   });
