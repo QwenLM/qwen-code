@@ -44,7 +44,11 @@ export function hookProgressToRow(msg: HookProgress): HookProgressRow | null {
       level = msg.exitCode !== undefined ? 'warning' : 'error';
       break;
     case 'blocked':
-      if (msg.eventName === 'Stop' || msg.eventName === 'UserPromptSubmit')
+      if (
+        msg.eventName === 'Stop' ||
+        msg.eventName === 'UserPromptSubmit' ||
+        msg.eventName === 'PreToolUse'
+      )
         return null;
       text = `Hook ${hookName} blocked ${msg.eventName}: ${msg.blockedReason ?? 'no reason given'}`;
       level = 'warning';

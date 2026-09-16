@@ -1517,7 +1517,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 
 ### Seeing what your hooks do
 
-In the Ink UI, the loading line shows `Running <Event> hooks…` while a hook runs, or its configured `statusMessage`. Synchronous hook failures, timeouts, and blocking decisions produce a visible result without enabling debug logging. Stop and UserPromptSubmit blocks keep their existing messages. Successful hook system messages appear as informational text; plain-text stdout from successful command hooks is not a warning. Diagnostics identify hooks by type and position in the event batch, without copying their command or URL. Timeout messages suggest raising the hook's `timeout`.
+In the Ink UI, the loading line shows `Running <Event> hooks…` while a hook runs, or its configured `statusMessage`. Synchronous hook failures, timeouts, and blocking decisions produce a visible result without enabling debug logging. Stop, UserPromptSubmit and PreToolUse blocks keep their existing messages. Successful hook system messages appear as informational text; plain-text stdout from successful command hooks is not a warning. Diagnostics identify hooks by type and position in the event batch, without copying their command or URL. Timeout messages suggest raising the hook's `timeout`.
 
 In headless text mode, warnings and errors from hooks fired after initialization go to stderr once per event, hook name, and outcome combination. Startup hooks run before this subscriber attaches. PreToolUse denials keep their existing tool-denial message. JSON output modes do not emit these diagnostics. Hooks cancelled with Esc do not produce a result message. Async hook output is not delivered to the conversation yet; see [Async Hooks](#async-hooks).
 

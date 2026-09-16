@@ -946,7 +946,6 @@ export async function runNonInteractive(
     const hookBus =
       outputFormat === OutputFormat.TEXT ? config.getMessageBus() : undefined;
     const onHookProgress = (msg: HookProgress) => {
-      if (msg.eventName === 'PreToolUse' && msg.outcome === 'blocked') return;
       const row = hookProgressToRow(msg);
       if (!row || row.level === 'info') return;
       const key = `${msg.eventName}\0${msg.hookName}\0${msg.outcome}`;

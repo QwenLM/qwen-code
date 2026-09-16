@@ -187,9 +187,9 @@ describe('hookProgressToRow', () => {
       'failed: spawn failed',
     ],
     [
-      { outcome: 'blocked', blockedReason: 'Denied' },
+      { outcome: 'blocked', eventName: 'PostToolUse', blockedReason: 'Denied' },
       'warning',
-      'blocked PreToolUse: Denied',
+      'blocked PostToolUse: Denied',
     ],
     [{ outcome: 'success', systemMessage: 'done' }, 'info', 'done'],
     [
@@ -217,6 +217,7 @@ describe('hookProgressToRow', () => {
     { outcome: 'error', async: true },
     { outcome: 'blocked', eventName: 'Stop' },
     { outcome: 'blocked', eventName: 'UserPromptSubmit' },
+    { outcome: 'blocked', eventName: 'PreToolUse' },
     { outcome: 'success', eventName: 'Stop', systemMessage: 'stop' },
     { outcome: 'success' },
   ] satisfies Array<Partial<HookProgress>>)('suppresses %j', (msg) => {
@@ -235,6 +236,7 @@ describe('hookProgressToRow', () => {
       const row = hookProgressToRow(
         progress({
           hookType,
+          eventName: 'PostToolUse',
           hookName: 'https://user:FAKE_SECRET@example.com?token=FAKE_SECRET',
           outcome,
           exitCode: 1,
