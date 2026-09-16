@@ -928,6 +928,68 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('setHooksFromSettings', () => {
+    const userHooks = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    const projectHooks = {
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'echo project' }] }],
+    };
+
+    it('replaces the user hooks captured at construction', () => {
+      const config = new Config({
+        ...baseParams,
+        userHooks: { Stop: [] },
+      });
+
+      config.setHooksFromSettings({ userHooks });
+
+      expect(config.getUserHooks()).toBe(userHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('replaces project hooks without leaking them into user hooks', () => {
+      const config = new Config({ ...baseParams });
+
+      config.setHooksFromSettings({ projectHooks });
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBeUndefined();
+    });
+
+    it('replaces the legacy merged hooks so a removed hook cannot return through the fallback', () => {
+      const config = new Config({ ...baseParams, hooks: userHooks });
+      expect(config.getUserHooks()).toBe(userHooks);
+
+      config.setHooksFromSettings({});
+
+      expect(config.getUserHooks()).toBeUndefined();
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('keeps the safe mode gate after replacing hooks', () => {
+      const config = new Config({ ...baseParams, safeMode: true });
+
+      config.setHooksFromSettings({
+        userHooks,
+        projectHooks,
+        hooks: userHooks,
+      });
+
+      expect(config.getUserHooks()).toBeUndefined();
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('keeps the folder trust gate for project hooks after replacing hooks', () => {
+      const config = new Config({ ...baseParams, trustedFolder: false });
+
+      config.setHooksFromSettings({ userHooks, projectHooks });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBe(userHooks);
+    });
+  });
+
   describe('skill settings migration warnings at initialize', () => {
     // The pure generators are unit-tested above; these pin the wiring —
     // initialize() must consume the provider and surface its warnings, or a
