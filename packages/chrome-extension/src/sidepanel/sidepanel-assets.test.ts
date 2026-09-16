@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,26 @@ const packageRoot = path.resolve(
 // The panel scripts below are executed through Function(script)(), which only
 // accepts classic scripts: an import/export statement added to a public/*.js
 // file surfaces here as a SyntaxError in a test, not as a build error.
+
+// The panel verifies its stored pairing credential against the daemon on every
+// tick before it reveals the shell, so the fixtures answer the challenge the
+// way a paired daemon does.
+const PAIRING_CREDENTIAL_ID = 'test-credential';
+const PAIRING_SECRET = 'test-secret';
+
+function pairingVerifyResponse(init?: RequestInit): {
+  ok: boolean;
+  json: () => Promise<{ proof: string }>;
+} {
+  const { challenge } = JSON.parse(String(init?.body ?? '{}')) as {
+    challenge: string;
+  };
+  const key = createHash('sha256').update(PAIRING_SECRET).digest();
+  const proof = createHmac('sha256', key)
+    .update(`qwen-extension-daemon:${challenge}`)
+    .digest('base64url');
+  return { ok: true, json: async () => ({ proof }) };
+}
 
 describe('side panel capability status assets', () => {
   afterEach(() => {
@@ -68,20 +89,36 @@ describe('side panel capability status assets', () => {
       <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
       <code id="cmd"></code><button id="cmd-row"></button>
       <button id="copy"></button><span id="copy-label"></span>
+      <form id="pair-form" class="pair hidden"><input id="pair-code" /></form>
+      <span class="status__text"></span>
       <div id="capability-warning" class="hidden"></div>
     `;
     vi.stubGlobal('chrome', {
-      runtime: { id: 'test-extension' },
-      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+      runtime: {
+        id: 'test-extension',
+        sendMessage: vi.fn(async () => undefined),
+      },
+      storage: {
+        local: {
+          get: vi.fn().mockResolvedValue({
+            'qwen.daemon': {
+              extensionPairingCredential: `${PAIRING_CREDENTIAL_ID}.${PAIRING_SECRET}`,
+            },
+          }),
+        },
+      },
     });
     vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
 
     let daemonState: 'down' | 'chat-only' = 'down';
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         if (daemonState === 'down') throw new Error('daemon unavailable');
         const url = String(input);
+        if (url.endsWith('/extension/pairing/verify')) {
+          return pairingVerifyResponse(init);
+        }
         return {
           ok: true,
           json: async () =>
@@ -137,11 +174,24 @@ describe('side panel capability status assets', () => {
       <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
       <code id="cmd"></code><button id="cmd-row"></button>
       <button id="copy"></button><span id="copy-label"></span>
+      <form id="pair-form" class="pair hidden"><input id="pair-code" /></form>
+      <span class="status__text"></span>
       <div id="capability-warning" class="hidden"></div>
     `;
     vi.stubGlobal('chrome', {
-      runtime: { id: 'test-extension' },
-      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+      runtime: {
+        id: 'test-extension',
+        sendMessage: vi.fn(async () => undefined),
+      },
+      storage: {
+        local: {
+          get: vi.fn().mockResolvedValue({
+            'qwen.daemon': {
+              extensionPairingCredential: `${PAIRING_CREDENTIAL_ID}.${PAIRING_SECRET}`,
+            },
+          }),
+        },
+      },
     });
     const deriveSpy = vi.fn(deriveCapabilityStatus);
     vi.stubGlobal('QwenCapabilityStatus', {
@@ -150,8 +200,11 @@ describe('side panel capability status assets', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith('/extension/pairing/verify')) {
+          return pairingVerifyResponse(init);
+        }
         return {
           ok: true,
           json: async () =>
@@ -208,11 +261,24 @@ describe('side panel capability status assets', () => {
       <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
       <code id="cmd"></code><button id="cmd-row"></button>
       <button id="copy"></button><span id="copy-label"></span>
+      <form id="pair-form" class="pair hidden"><input id="pair-code" /></form>
+      <span class="status__text"></span>
       <div id="capability-warning" class="hidden"></div>
     `;
     vi.stubGlobal('chrome', {
-      runtime: { id: 'test-extension' },
-      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+      runtime: {
+        id: 'test-extension',
+        sendMessage: vi.fn(async () => undefined),
+      },
+      storage: {
+        local: {
+          get: vi.fn().mockResolvedValue({
+            'qwen.daemon': {
+              extensionPairingCredential: `${PAIRING_CREDENTIAL_ID}.${PAIRING_SECRET}`,
+            },
+          }),
+        },
+      },
     });
     vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
 
@@ -221,8 +287,11 @@ describe('side panel capability status assets', () => {
       | { ok: true; value: Record<string, unknown> } = { ok: false };
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith('/extension/pairing/verify')) {
+          return pairingVerifyResponse(init);
+        }
         if (url.endsWith('/capabilities')) {
           return {
             ok: true,
@@ -333,10 +402,15 @@ describe('side panel capability status assets', () => {
       <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
       <code id="cmd"></code><button id="cmd-row"></button>
       <button id="copy"></button><span id="copy-label"></span>
+      <form id="pair-form" class="pair hidden"><input id="pair-code" /></form>
+      <span class="status__text"></span>
       <div id="capability-warning" class="hidden"></div>
     `;
     vi.stubGlobal('chrome', {
-      runtime: { id: 'test-extension' },
+      runtime: {
+        id: 'test-extension',
+        sendMessage: vi.fn(async () => undefined),
+      },
       storage: { local: { get: vi.fn().mockResolvedValue({}) } },
     });
     vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
@@ -371,19 +445,35 @@ describe('side panel capability status assets', () => {
       <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
       <code id="cmd"></code><button id="cmd-row"></button>
       <button id="copy"></button><span id="copy-label"></span>
+      <form id="pair-form" class="pair hidden"><input id="pair-code" /></form>
+      <span class="status__text"></span>
       <div id="capability-warning" class="hidden"></div>
     `;
     vi.stubGlobal('chrome', {
-      runtime: { id: 'test-extension' },
-      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+      runtime: {
+        id: 'test-extension',
+        sendMessage: vi.fn(async () => undefined),
+      },
+      storage: {
+        local: {
+          get: vi.fn().mockResolvedValue({
+            'qwen.daemon': {
+              extensionPairingCredential: `${PAIRING_CREDENTIAL_ID}.${PAIRING_SECRET}`,
+            },
+          }),
+        },
+      },
     });
     vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
 
     let mcpOk = true;
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith('/extension/pairing/verify')) {
+          return pairingVerifyResponse(init);
+        }
         if (url.endsWith('/capabilities')) {
           return {
             ok: true,
@@ -437,15 +527,23 @@ describe('side panel capability status assets', () => {
       <main id="welcome"><h1 id="welcome-title"></h1><p id="welcome-desc"></p></main>
       <code id="cmd"></code><button id="cmd-row"></button>
       <button id="copy"></button><span id="copy-label"></span>
+      <form id="pair-form" class="pair hidden"><input id="pair-code" /></form>
+      <span class="status__text"></span>
       <div id="capability-warning" class="hidden"></div>
     `;
     let storedBaseUrl = 'http://127.0.0.1:4170';
     vi.stubGlobal('chrome', {
-      runtime: { id: 'test-extension' },
+      runtime: {
+        id: 'test-extension',
+        sendMessage: vi.fn(async () => undefined),
+      },
       storage: {
         local: {
           get: vi.fn().mockImplementation(async () => ({
-            'qwen.daemon': { baseUrl: storedBaseUrl },
+            'qwen.daemon': {
+              baseUrl: storedBaseUrl,
+              extensionPairingCredential: `${PAIRING_CREDENTIAL_ID}.${PAIRING_SECRET}`,
+            },
           })),
         },
       },
@@ -454,8 +552,11 @@ describe('side panel capability status assets', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith('/extension/pairing/verify')) {
+          return pairingVerifyResponse(init);
+        }
         if (url.endsWith('/capabilities')) {
           return {
             ok: true,

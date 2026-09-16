@@ -30,6 +30,7 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getExtensionPairingCredential: () => undefined,
   // No token in the URL, so boot blocks on the postMessage handshake — the
   // window in which the watchdog's grace period can expire.
   getDaemonToken: () => null,

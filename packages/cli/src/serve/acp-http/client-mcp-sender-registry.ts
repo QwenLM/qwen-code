@@ -31,7 +31,7 @@
  *
  * Wire (full round-trip):
  *   extension --WS--> daemon: mcp_register{server}
- *   provider: registry.set(server, wsRegistrar.sendSdkMcpMessage)
+ *   provider: registry.claim(server, wsRegistrar.sendSdkMcpMessage)
  *   provider: bridge.addRuntimeMcpServer(server, {type:'sdk', __clientMcpOverWs}, clientId)
  *     -> parent->child ext: workspaceMcpRuntimeAdd
  *     -> child: addRuntimeMcpServer(sdk-type) -> SdkControlClientTransport
@@ -59,23 +59,26 @@ export type WsClientMcpSender = (
   message: JSONRPCMessage,
 ) => Promise<JSONRPCMessage>;
 
+function runtimeConfig(): ClientMcpOverWsRuntimeConfig {
+  return {
+    type: 'sdk',
+    [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+  };
+}
+
 /**
  * Process-scoped registry mapping an advertised client-hosted MCP server name
  * to the WS connection's `sendSdkMcpMessage`. One instance per daemon, shared
  * by the bridge (read side, via {@link ClientMcpSenderRegistry.lookup}) and the
  * WS provider (write side).
  *
- * Server names are unique per daemon: the WS layer rejects a second
- * `mcp_register` for a name on the same connection (`already_registered`), and
- * the bridge's `addRuntimeMcpServer` reconciles a cross-connection collision by
- * replacing the runtime server. `set` therefore last-writer-wins; the matching
- * `addRuntimeMcpServer` already tore down the prior server's transport.
+ * Server names are unique per daemon. The WS layer rejects a second
+ * `mcp_register` on the same connection, and `claim` rejects a duplicate from
+ * another connection before either registration can mutate the ACP child.
  *
  * Each entry remembers its OWNER (the registering connection's stable client
- * id). `delete` is ownership-scoped: a disconnecting connection only removes
- * the entry if it still owns it. Otherwise connection A's teardown could delete
- * a same-named entry that connection B re-registered after A — silently
- * breaking B's live tools.
+ * id). `delete` is ownership-scoped so one connection cannot remove another
+ * connection's live tools.
  */
 export class ClientMcpSenderRegistry {
   private readonly senders = new Map<
@@ -96,18 +99,18 @@ export class ClientMcpSenderRegistry {
   private readonly sessionScopedServerNames = new Set<string>();
 
   /**
-   * Record a server's WS sender, owned by `owner` (the registering
-   * connection's stable client id). Idempotent; last writer wins and takes
-   * ownership, so the new owner's `delete` is the one that takes effect.
+   * Atomically reserve a server name for one WS connection.
    */
-  set(serverName: string, sender: WsClientMcpSender, owner: string): void {
+  claim(serverName: string, sender: WsClientMcpSender, owner: string): boolean {
+    if (this.senders.has(serverName)) return false;
     this.senders.set(serverName, { sender, owner });
+    return true;
   }
 
   /**
    * Forget a server's WS sender — but only when `owner` still owns the entry.
-   * Idempotent. The ownership guard stops a disconnecting connection from
-   * clobbering an entry a later connection re-registered under the same name.
+   * Idempotent. The ownership guard stops a connection from clobbering a
+   * same-named entry owned by a peer.
    */
   delete(serverName: string, owner: string): void {
     if (this.senders.get(serverName)?.owner === owner) {
@@ -177,6 +180,18 @@ export class ClientMcpSenderRegistry {
     return [...this.senders.keys()];
   }
 
+  runtimeRegistrations(): Array<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
+  }> {
+    return [...this.senders].map(([name, { owner }]) => ({
+      name,
+      config: runtimeConfig(),
+      originatorClientId: owner,
+    }));
+  }
+
   /**
    * The {@link ClientMcpMessageSender} the bridge consumes. Returns a
    * `(payload) => Promise<payload>` bound to the named server, or `undefined`
@@ -227,6 +242,7 @@ export class ClientMcpSenderRegistry {
  * bridge surface (and easy to fake in tests).
  */
 export interface ClientMcpBridge {
+  preheat(): Promise<void>;
   addRuntimeMcpServer(
     name: string,
     config: Record<string, unknown>,
@@ -399,22 +415,23 @@ export function createClientMcpServerProvider(
           scope.sessionId,
         );
       }
+      // A browser extension can connect before the daemon's ACP child is warm.
+      // Runtime MCP mutation requires that live channel, so establish it here
+      // instead of relying on a Web Shell request to race ahead of registration.
+      await bridge.preheat();
       // Record the sender FIRST so the child's discovery handshake — which the
       // bridge add triggers synchronously — can route `client_mcp/message`
-      // frames back to this WS. Owned by this connection's client id so a peer
-      // re-registering the same name can't be deleted by our teardown.
-      registry.set(serverName, sendSdkMcpMessage, originatorClientId);
+      // frames back to this WS. The atomic claim also prevents concurrent
+      // connections from mutating the same child-side runtime server.
+      if (!registry.claim(serverName, sendSdkMcpMessage, originatorClientId)) {
+        throw new Error(
+          `client MCP server '${serverName}' is already registered`,
+        );
+      }
       try {
-        const runtimeConfig: ClientMcpOverWsRuntimeConfig = {
-          // SDK-type so the child binds `SdkControlClientTransport`
-          // (`isSdkMcpServerConfig`); the flag tells the child to KEEP the
-          // type and bind `sendSdkMcpMessage` to the reverse ext-method.
-          type: 'sdk',
-          [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
-        };
         const result = await bridge.addRuntimeMcpServer(
           serverName,
-          runtimeConfig,
+          runtimeConfig(),
           originatorClientId,
         );
         if ((result as { skipped?: boolean }).skipped) {

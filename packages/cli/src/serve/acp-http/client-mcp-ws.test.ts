@@ -186,10 +186,17 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
   let provider: AgentSideProvider;
 
   function startServer(
-    opts: { clientMcpOverWs?: boolean; withProvider?: boolean } = {},
+    opts: {
+      clientMcpOverWs?: boolean;
+      allowUnpairedClientMcp?: boolean;
+      withProvider?: boolean;
+      verifyExtensionPairingCredential?: (
+        credential: string | undefined,
+      ) => boolean;
+    } = {},
   ): Promise<void> {
     provider = new AgentSideProvider();
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
@@ -199,6 +206,8 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
         enabled: true,
         workspaceRememberLane: new WorkspaceRememberTaskLane(fakeBridge),
         clientMcpOverWs: opts.clientMcpOverWs ?? true,
+        allowUnpairedClientMcp: opts.allowUnpairedClientMcp,
+        verifyExtensionPairingCredential: opts.verifyExtensionPairingCredential,
         ...(opts.withProvider === false ? {} : { clientMcpProvider: provider }),
         archiveCoordinator,
         requestedSessionIdAdmission: createRequestedSessionIdAdmission({
@@ -212,11 +221,13 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
           ],
         }),
       });
-      server = app.listen(0, '127.0.0.1', () => {
-        port = (server.address() as AddressInfo).port;
-        handle?.attachServer(server);
+      const listeningServer = app.listen(0, '127.0.0.1', () => {
+        port = (listeningServer.address() as AddressInfo).port;
+        handle?.attachServer(listeningServer);
         resolve();
       });
+      listeningServer.once('error', reject);
+      server = listeningServer;
     });
   }
 
@@ -234,15 +245,20 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
   }
 
   /** Initialize the ACP connection and resolve once the init reply lands. */
-  function initialize(ws: WebSocket): Promise<void> {
+  function initialize(
+    ws: WebSocket,
+    params: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
     return new Promise((resolve) => {
-      ws.once('message', () => resolve());
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
       ws.send(
         JSON.stringify({
           jsonrpc: '2.0',
           id: 1,
           method: 'initialize',
-          params: {},
+          params,
         }),
       );
     });
@@ -356,6 +372,124 @@ describe('client_mcp_over_ws reverse channel (serve layer)', () => {
     });
     expect(reply['type']).toBe('mcp_error');
     expect(reply['code']).toBe('not_initialized');
+    ws.close();
+  });
+
+  it('rejects the Chrome extension bridge initialize before daemon pairing', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: (credential) => credential === 'paired',
+    });
+    const ws = await wsConnect();
+
+    const reply = await new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+      ws.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { clientInfo: { name: 'qwen-cdp-bridge' } },
+        }),
+      );
+    });
+
+    expect(reply).toMatchObject({
+      id: 1,
+      error: { message: 'Chrome extension is not paired with this daemon' },
+    });
+    ws.close();
+  });
+
+  it('rejects the Chrome extension bridge when no pairing verifier is wired', async () => {
+    await startServer();
+    const ws = await wsConnect();
+
+    const reply = await initialize(ws, {
+      clientInfo: { name: 'qwen-cdp-bridge' },
+    });
+
+    expect(reply).toMatchObject({
+      id: 1,
+      error: { message: 'Chrome extension is not paired with this daemon' },
+    });
+    ws.close();
+  });
+
+  it('rejects reverse MCP from ordinary ACP clients by default', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: () => false,
+      withProvider: false,
+    });
+    const ws = await wsConnect();
+
+    const initReply = await initialize(ws, {
+      clientInfo: { name: 'ordinary-acp-client' },
+    });
+    expect(initReply['result']).toBeDefined();
+
+    const mcpReply = new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    ws.send(JSON.stringify({ type: 'mcp_register', server: 'chrome-tools' }));
+    await expect(mcpReply).resolves.toMatchObject({
+      type: 'mcp_error',
+      code: 'not_authorized',
+    });
+    ws.close();
+  });
+
+  it('allows ordinary reverse MCP after explicit operator opt-in', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: () => false,
+      allowUnpairedClientMcp: true,
+      withProvider: false,
+    });
+    const ws = await wsConnect();
+
+    const initReply = await initialize(ws, {
+      clientInfo: { name: 'ordinary-acp-client' },
+    });
+    expect(initReply['result']).toBeDefined();
+
+    const mcpReply = new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) =>
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>),
+      );
+    });
+    ws.send(JSON.stringify({ type: 'mcp_register', server: 'chrome-tools' }));
+    await expect(mcpReply).resolves.toMatchObject({
+      type: 'mcp_error',
+      code: 'not_wired',
+    });
+    ws.close();
+  });
+
+  it('accepts the Chrome extension bridge initialize after daemon pairing', async () => {
+    await startServer({
+      verifyExtensionPairingCredential: (credential) => credential === 'paired',
+    });
+    const ws = await wsConnect();
+
+    await new Promise<void>((resolve) => {
+      ws.once('message', () => resolve());
+      ws.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: {
+              name: 'qwen-cdp-bridge',
+              extensionPairingCredential: 'paired',
+            },
+          },
+        }),
+      );
+    });
     ws.close();
   });
 
@@ -611,5 +745,27 @@ describe('client_mcp_over_ws connection-level register rollback', () => {
     await conn.handleFrame({ type: 'mcp_unregister', server: 'lf' });
     expect(unregisterCalls).toEqual([['lf', { sessionId: 'S' }]]);
     expect(conn.registeredServers()).toEqual([]);
+  });
+
+  it('tears down a registration that lands after an unregister frame', async () => {
+    const { provider, unregisterCalls, resolveFirstAdd } =
+      controllableProvider();
+    const { conn } = makeConnection(provider);
+
+    const first = conn.handleFrame({
+      type: 'mcp_register',
+      server: 'lf',
+      sessionId: 'S',
+    });
+    await Promise.resolve();
+    // The unregister frame cannot wait for the in-flight add, so the add lands
+    // afterwards; it must clean up the provider entry it just created.
+    await conn.handleFrame({ type: 'mcp_unregister', server: 'lf' });
+    resolveFirstAdd();
+    expect(await first).toMatchObject({ kind: 'error', code: 'closed' });
+    expect(unregisterCalls).toEqual([
+      ['lf', { sessionId: 'S' }],
+      ['lf', { sessionId: 'S' }],
+    ]);
   });
 });
