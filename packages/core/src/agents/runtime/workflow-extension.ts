@@ -45,10 +45,10 @@ export const EXTENSION_WORKFLOWS_DIR = 'workflows';
 export const MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES = 256 * 1024;
 
 /**
- * Longest `meta.description` kept from an extension workflow. The text is
- * third-party and reaches the install consent prompt, the command list and
- * the approval dialog, where an unbounded value would push the path being
- * approved out of view.
+ * Longest `meta.description`, and `meta.whenToUse`, kept from an extension
+ * workflow. The text is third-party and reaches the install consent prompt,
+ * the command list, the model's skill listing and the approval dialog, where
+ * an unbounded value would push the path being approved out of view.
  */
 export const MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS = 500;
 
@@ -65,6 +65,13 @@ export interface ExtensionWorkflowDefinition {
    * {@link MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS}; the script never ran.
    */
   description: string;
+  /**
+   * `meta.whenToUse`, shortened like `description`; absent when the script
+   * declares none or only whitespace. Its presence is what lists the workflow
+   * for the model to start on its own — an author who writes no condition
+   * leaves the workflow to the user and to other workflows.
+   */
+  whenToUse?: string;
   /**
    * {@link computeWorkflowScriptDigest} of the script as discovered. Install
    * consent compares it, so an update that only changes a script's code
@@ -315,6 +322,7 @@ async function collectFile(
     return;
   }
   const name = qualifyExtensionWorkflowName(owner.name, meta.name);
+  const whenToUse = meta.whenToUse?.trim();
   if (found.has(name)) {
     debugLogger.warn(
       `skipping duplicate workflow "${name}" of extension "${owner.name}": ${filePath}`,
@@ -326,15 +334,16 @@ async function collectFile(
     extensionName: owner.name,
     ...(owner.displayName ? { extensionDisplayName: owner.displayName } : {}),
     scriptPath: filePath,
-    description: clampDescription(meta.description),
+    description: clampMetaText(meta.description),
+    ...(whenToUse ? { whenToUse: clampMetaText(whenToUse) } : {}),
     contentDigest: computeWorkflowScriptDigest(source),
   });
 }
 
 /** Shortens by code point, so a surrogate pair is never split. */
-function clampDescription(description: string): string {
-  const chars = Array.from(description);
+function clampMetaText(text: string): string {
+  const chars = Array.from(text);
   return chars.length > MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS
     ? `${chars.slice(0, MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS - 1).join('')}…`
-    : description;
+    : text;
 }
