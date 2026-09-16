@@ -366,6 +366,18 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                             |
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
 
+宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
+详情的打开操作：
+
+```tsx
+<WebShell onContextUsageOpen={(sessionId) => openContextDetails(sessionId)} />
+```
+
+此参数也适用于 `WebShellWithProviders`。提供回调后，composer hover 弹层的
+「查看明细」及页头上下文详情入口会将来源会话 ID 交给宿主，不再打开内置右侧
+面板或自动读取详情；分屏传入对应分屏的会话 ID。不提供回调则保留默认行为。
+直接点击上下文圆环生成 `/context` 快照、压缩操作和已保存面板的恢复不受影响。
+
 宿主可以监听命令，也可以返回 `true` 接管对应操作：
 
 ```tsx
