@@ -1445,7 +1445,10 @@ function worktreeEvidenceBlock(
       '',
       `**Repository source root:** \`${sourceRoot}\`. Read every repository source ` +
         `file from this exact root. The diff artifact's directory is evidence storage, ` +
-        'not a source-tree root; do not resolve source paths relative to it.',
+        'not a source-tree root; do not resolve source paths relative to ' +
+        'it. This name is flattened for display if it carried control or ' +
+        'invisible characters; `git rev-parse --show-toplevel` in your ' +
+        'working directory has the exact bytes.',
     );
   }
   if (residue?.unmeasured) {
