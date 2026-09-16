@@ -71,6 +71,7 @@ export const EVENT_SPECULATION = 'qwen-code.speculation';
 // Workflow Events (#4721)
 export const EVENT_WORKFLOW_KEYWORD = 'qwen-code.workflow_keyword';
 export const EVENT_WORKFLOW_RUN = 'qwen-code.workflow_run';
+export const EVENT_WORKFLOW_SIZE_WARNING = 'qwen-code.workflow_size_warning';
 
 // Arena Events
 export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';

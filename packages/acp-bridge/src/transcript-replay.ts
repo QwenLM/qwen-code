@@ -979,7 +979,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       const usage = usageFromTaskExecution(resultDisplay);
       if (Object.keys(usage).length > 0) {
         this.addUsage(usage);
-        yield emit(createTranscriptUsageUpdate(usage, meta));
+        yield emit(
+          createTranscriptUsageUpdate(usage, {
+            ...meta,
+            extra: { ...meta.extra, parentToolCallId: callId },
+          }),
+        );
       }
     }
   }
