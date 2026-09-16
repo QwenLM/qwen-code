@@ -293,9 +293,10 @@ export async function backfillWorkspaceSessionPrs(
     // Full-directory enumeration via listAllProjectSessionIds: backfill
     // sweeps every session in one pass rather than paginate, so a run never
     // waits on page turns for thousands of bindings. The sweep itself stops
-    // at MAX_FILES_TO_PROCESS per archive state ? directories past that cap
-    // get partial coverage either way. (listSessions paginates losslessly
-    // across mtime ties since the composite-cursor fix.)
+    // at MAX_FILES_TO_PROCESS per archive state with no continuation ?
+    // past that cap the paginated listSessions is the route that still
+    // reaches further, losslessly across mtime ties since the
+    // composite-cursor fix.
     const sessionIds =
       await sessionService.listAllProjectSessionIds(archiveState);
     for (const sessionId of sessionIds) {

@@ -355,6 +355,41 @@ describe('QwenAgentManager.getSessionListPaged', () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it('still serves valid rows when a legacy row has no sessionId or timestamps', async () => {
+    // A legacy session-*.json row can lack sessionId/lastUpdated entirely.
+    // The fallback must drop it at ingestion rather than throw inside the
+    // comparator (which would empty every valid session behind the catch).
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const valid = (sessionId: string, lastUpdated: string) => ({
+      sessionId,
+      projectHash: 'p',
+      startTime: lastUpdated,
+      lastUpdated,
+      messages: [],
+    });
+    const stored = [
+      { projectHash: 'p', messages: [] }, // no sessionId, no timestamps
+      { projectHash: 'p', messages: [] }, // a second one to force a tie at 0
+      valid('550e8400-e29b-41d4-a716-446655440000', '2026-08-17T00:01:00.000Z'),
+      valid('550e8400-e29b-41d4-a716-446655440001', '2026-08-17T00:02:00.000Z'),
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    const page = await manager.getSessionListPaged({ size: 10 });
+
+    expect(page.sessions.map((session) => session.sessionId)).toEqual([
+      '550e8400-e29b-41d4-a716-446655440001',
+      '550e8400-e29b-41d4-a716-446655440000',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
   it('still fails closed on a malformed cursor in the filesystem fallback', async () => {
     // Garbage that parses as neither legacy numeric nor composite:
     // re-serving page one would duplicate rows in the webview, so the

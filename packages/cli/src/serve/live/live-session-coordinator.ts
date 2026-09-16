@@ -64,9 +64,11 @@ const SESSION_SCAN_SIZE = 100;
 // matches the file budget one listSessions pass guarantees
 // (MAX_FILES_TO_PROCESS 10000 / SESSION_SCAN_SIZE 100) ? but each page costs
 // a full directory re-scan (listSessions carries nothing across pages), so
-// the true worst case is ~100x that budget; the cap exists so a candidate
-// buried past the 10,000 most recent sessions does not stall a voice call
-// indefinitely, not because the walk is cheap.
+// the true worst case is ~100x that budget. Note the walk is keyset-ordered,
+// not recency-ordered: inside an mtime tie group it advances in file-name
+// order, and a page can hold fewer than SESSION_SCAN_SIZE rows of this
+// project when the directory is shared, so the cap bounds pages walked, not
+// "the N most recent sessions".
 const MAX_SESSION_SCAN_PAGES = 100;
 const MAX_LIVE_CAPTION_CHARS = 8_192;
 
@@ -659,16 +661,20 @@ export class LiveSessionCoordinator {
     }
     // Fell out of the page cap with a live cursor: the scan is incomplete,
     // so the "no compatible session" outcome below is really "gave up".
+    // Name the boundary cursor so a log reader can tell "died inside a tie
+    // group at mtime M" from "died after 10,000 genuinely older sessions".
     writeLiveDiagnostic('resume_scan_truncated', {
       pages: MAX_SESSION_SCAN_PAGES,
       workspaceCwd: runtime.workspaceCwd,
+      cursorMtime: cursor?.mtime,
+      cursorSessionId: cursor?.sessionId,
     });
     // Unlike the JSON diagnostic above (QWEN_LIVE_DIAGNOSTICS-gated), this
     // line is unconditional and names the workspace, so an oncall grepping
     // the daemon log can tell "gave up" from "does not exist", and two
     // workspaces hitting the cap in one run stay distinguishable.
     writeStderrLineSafe(
-      `qwen serve: live resume scan truncated at ${MAX_SESSION_SCAN_PAGES} pages for ${runtime.workspaceCwd}`,
+      `qwen serve: live resume scan truncated at ${MAX_SESSION_SCAN_PAGES} pages for ${runtime.workspaceCwd} at cursor ${cursor ? encodeSessionListCursor(cursor) : 'none'}`,
     );
     return undefined;
   }

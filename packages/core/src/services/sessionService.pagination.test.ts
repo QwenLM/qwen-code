@@ -9,12 +9,28 @@
  * the equal-mtime tie-break that keeps page turns lossless. Real-filesystem
  * based (same rationale as sessionService.search.test.ts): the bug only
  * manifests through real stat mtimes flowing through the paginated scan.
+ *
+ * Ordering pins: the tie-break comparator is also covered against a mocked
+ * descending readdir order in sessionService.test.ts ("orders an mtime tie
+ * group by file name regardless of readdir order"), the deterministic pin;
+ * the ordering cases here stub only the directory listing with readdirSpy so
+ * the real statSync/utimesSync/JSONL path stays in play.
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from 'vitest';
 import {
   decodeSessionListCursor,
   encodeSessionListCursor,
@@ -38,12 +54,30 @@ afterAll(() => {
   // The tie-break cap test leaves 10k files behind; Windows deletion is slow.
 }, 120_000);
 
+let readdirSpy: MockInstance<typeof fs.readdirSync> | undefined;
+
 beforeEach(() => {
   runtimeBaseDir = fs.mkdtempSync(path.join(tmpRoot, 'runtime-'));
   cwd = path.join(runtimeBaseDir, 'workspace');
   fs.mkdirSync(cwd, { recursive: true });
   service = new SessionService(cwd, { runtimeBaseDir });
 });
+
+afterEach(() => {
+  readdirSpy?.mockRestore();
+  readdirSpy = undefined;
+});
+
+/**
+ * Stubs only the directory listing so the ordering under test cannot be
+ * masked by the host readdir order (tmpfs/ext4-htree/APFS/NTFS differ).
+ * Everything else (statSync mtimes, JSONL reads) stays real.
+ */
+function stubReaddirOrder(names: string[]): void {
+  readdirSpy = vi
+    .spyOn(fs, 'readdirSync')
+    .mockReturnValue(names as unknown as ReturnType<typeof fs.readdirSync>);
+}
 
 /** Sequential ids that sort the same way under `localeCompare`. */
 function sessionIdAt(index: number): string {
@@ -108,6 +142,15 @@ describe('listSessions pagination with equal mtimes', () => {
       writeSession(sessionIdAt(i), shared);
     }
 
+    // Shuffle the directory listing: the drained order must come from the
+    // sort, never from the host readdir order.
+    stubReaddirOrder(
+      Array.from(
+        { length: total },
+        (_, i) => `${sessionIdAt(total - 1 - i)}.jsonl`,
+      ),
+    );
+
     const ids = await drainAll(10);
 
     expect(ids).toHaveLength(total);
@@ -125,6 +168,16 @@ describe('listSessions pagination with equal mtimes', () => {
     }
     writeSession(sessionIdAt(5), older);
     writeSession(sessionIdAt(6), older);
+
+    stubReaddirOrder([
+      `${sessionIdAt(6)}.jsonl`,
+      `${sessionIdAt(3)}.jsonl`,
+      `${sessionIdAt(0)}.jsonl`,
+      `${sessionIdAt(5)}.jsonl`,
+      `${sessionIdAt(1)}.jsonl`,
+      `${sessionIdAt(4)}.jsonl`,
+      `${sessionIdAt(2)}.jsonl`,
+    ]);
 
     const ids = await drainAll(3);
 
@@ -209,10 +262,12 @@ describe('listSessions pagination with equal mtimes', () => {
   it('orders an mtime tie group by file name regardless of creation order', async () => {
     const shared = new Date('2026-08-17T00:00:00.000Z').getTime() + 0.467;
     // Descending creation order on purpose: the ordering must come from the
-    // sort, never from readdir order.
+    // sort, never from readdir order. The listing is stubbed because on a
+    // name-ordered mount the creation order alone would not show through.
     for (const i of [4, 3, 2, 1, 0]) {
       writeSession(sessionIdAt(i), shared);
     }
+    stubReaddirOrder([4, 3, 2, 1, 0].map((i) => `${sessionIdAt(i)}.jsonl`));
 
     expect(await drainAll(1)).toEqual(
       Array.from({ length: 5 }, (_, i) => sessionIdAt(i)),
@@ -260,6 +315,23 @@ describe('listSessions pagination with equal mtimes', () => {
     expect(page3.items.map((item) => item.sessionId)).toEqual([ownB]);
     expect(page3.hasMore).toBe(false);
   }, 60_000);
+});
+
+describe('listSessions tie-break ordering', () => {
+  it('orders a mixed-case tie group in code-unit order, not ICU locale order', async () => {
+    // "B" (0x42) sorts before "a" (0x61) in code units; localeCompare orders
+    // them a-first at primary strength. The cursor is a keyset evaluated on
+    // every page turn, so the order must be locale-independent. The ids
+    // differ beyond case so the files coexist on case-insensitive NTFS.
+    const shared = new Date('2026-08-17T00:00:00.000Z').getTime() + 0.467;
+    const upper = 'B0000000-0000-4000-8000-000000000000';
+    const lower = 'a0000000-0000-4000-8000-000000000000';
+    writeSession(lower, shared);
+    writeSession(upper, shared);
+    stubReaddirOrder([`${lower}.jsonl`, `${upper}.jsonl`]);
+
+    expect(await drainAll(1)).toEqual([upper, lower]);
+  });
 });
 
 describe('session-list cursor codec', () => {

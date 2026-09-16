@@ -19,8 +19,11 @@ import type {
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
+import * as path from 'path';
 import {
+  compareSessionFileNames,
   decodeSessionListCursor,
+  encodeSessionListCursor,
   type SessionListCursor,
 } from '@qwen-code/qwen-code-core';
 import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
@@ -669,16 +672,33 @@ export class QwenAgentManager {
       );
       // Full-precision mtimeMs: lastUpdated round-trips through an ISO
       // string and loses sub-millisecond precision, while the daemon's
-      // composite cursor compares mtime with exact equality ? a truncated
+      // composite cursor compares mtime with exact equality, so a truncated
       // boundary would drop the unserved members of a tie group on the
       // ACP<->disk handover.
-      const allWithMtime = all.map((s) => {
+      // Rows without a usable session id cannot be paged at all — a cursor
+      // minted from one is rejected by core's decoder — and a missing id
+      // would throw inside the comparator mid-scan, emptying every valid
+      // session behind the fallback's catch. Drop them here instead.
+      const pageable = all.filter(
+        (s) => typeof s.sessionId === 'string' && s.sessionId !== '',
+      );
+      if (pageable.length !== all.length) {
+        logger.warn(
+          '[QwenAgentManager] Dropping session rows with a missing/invalid sessionId from the paged list:',
+          all.length - pageable.length,
+        );
+      }
+      const allWithMtime = pageable.map((s) => {
         const mtime = s.mtimeMs ?? new Date(s.lastUpdated).getTime();
         return {
           raw: s,
           // A legacy session row can lack both timestamps; NaN here would
           // poison the sort and mint a "NaN:<id>" cursor downstream.
           mtime: Number.isFinite(mtime) ? mtime : 0,
+          // Core's tie-break compares the file name ("<id>.jsonl") in
+          // code-unit order; derive the same key so the daemon and this
+          // fallback order identically across the ACP<->disk handover.
+          key: s.filePath ? path.basename(s.filePath) : `${s.sessionId}.jsonl`,
         };
       });
       // The daemon wire cursor is the composite "<mtimeMs>:<sessionId>" form
@@ -703,8 +723,7 @@ export class QwenAgentManager {
         return { sessions: [], hasMore: false };
       }
       const ordered = [...allWithMtime].sort(
-        (a, b) =>
-          b.mtime - a.mtime || a.raw.sessionId.localeCompare(b.raw.sessionId),
+        (a, b) => b.mtime - a.mtime || compareSessionFileNames(a.key, b.key),
       );
       const filtered =
         parsedCursor === undefined
@@ -719,7 +738,8 @@ export class QwenAgentManager {
               }
               return (
                 boundary.sessionId !== undefined &&
-                x.raw.sessionId.localeCompare(boundary.sessionId) > 0
+                compareSessionFileNames(x.key, `${boundary.sessionId}.jsonl`) >
+                  0
               );
             });
       const page = filtered.slice(0, size);
@@ -736,11 +756,17 @@ export class QwenAgentManager {
         cwd: x.raw.cwd,
       }));
       const lastRow = page.at(-1);
+      // Mint with core's encoder, and only from a key its decoder accepts —
+      // a cursor this side rejects on the next turn kills pagination.
+      const mintId = lastRow?.key.replace(/\.jsonl$/, '');
       const nextCursorVal =
-        lastRow === undefined
+        lastRow === undefined || !/^[0-9a-fA-F-]{32,36}$/.test(mintId ?? '')
           ? undefined
-          : `${lastRow.mtime}:${lastRow.raw.sessionId}`;
-      const hasMore = filtered.length > size;
+          : encodeSessionListCursor({
+              mtime: lastRow.mtime,
+              sessionId: mintId as string,
+            });
+      const hasMore = nextCursorVal !== undefined && filtered.length > size;
       return { sessions, nextCursor: nextCursorVal, hasMore };
     } catch (error) {
       logger.error('[QwenAgentManager] File system paged list failed:', error);

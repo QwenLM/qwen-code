@@ -524,7 +524,7 @@ const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
  * on the process's ambient ICU locale and can flip between two page fetches.
  * Plain relational comparison is identical in every JS process.
  */
-function compareSessionFileNames(a: string, b: string): number {
+export function compareSessionFileNames(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
@@ -2964,11 +2964,11 @@ export class SessionService {
    * Enumerates every persisted session id of this project for one archive
    * state by reading the chats dir directly, in deterministic filename
    * order. Unlike {@link listSessions} there is no cursor and no page size:
-   * an exhaustive sweep is one pass, with no pagination state to carry.
-   * (listSessions paginates losslessly across mtime ties since the
-   * composite-cursor fix; this direct scan predates it and stays because a
-   * sweep is still cheaper than paging here.) Membership is checked the same
-   * way as {@link listSessions}.
+   * the sweep is one pass, with no pagination state to carry. That makes it
+   * cheaper for full enumeration, but the pass is bounded by
+   * MAX_FILES_TO_PROCESS with no continuation — past that cap the paginated
+   * listSessions is the one that still reaches further, losslessly.
+   * Membership is checked the same way as {@link listSessions}.
    */
   async listAllProjectSessionIds(
     archiveState: SessionArchiveState,
@@ -4446,11 +4446,11 @@ export class SessionService {
 
     // Scan all session files directly rather than paging through
     // listSessions(): title search needs a full sweep anyway, and the
-    // paginated path offers no filter hook. Note the sweep is itself bounded
-    // by MAX_FILES_TO_PROCESS, so sessions past that cap are not
-    // title-searchable either. (listSessions has paginated losslessly across
-    // mtime ties since the composite-cursor fix; whether to route this back
-    // through it is separate cleanup.)
+    // paginated path offers no filter hook. Note the sweep is bounded by
+    // MAX_FILES_TO_PROCESS with no continuation — sessions past the cap are
+    // not title-searchable, while the paginated listSessions does reach
+    // them, losslessly. (Whether to route this back through it is separate
+    // cleanup.)
     let fileNames: string[];
     try {
       fileNames = fs.readdirSync(chatsDir);
