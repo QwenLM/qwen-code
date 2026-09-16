@@ -36,6 +36,7 @@ import type {
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
+  GoalStateEvent,
   ExtensionInstallEvent,
   ExtensionUninstallEvent,
   ToolOutputTruncatedEvent,
@@ -613,6 +614,35 @@ export class QwenLogger {
           ? { execution_summary: event.execution_summary }
           : {}),
       }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logGoalStateEvent(event: GoalStateEvent): void {
+    // The Goal id is left out: this sink aggregates by installation, where a
+    // per-Goal identifier only adds a unique value to every row.
+    const properties: Record<string, unknown> = {
+      cause: event.cause,
+      revision: event.revision,
+    };
+    for (const key of [
+      'status',
+      'limit_kind',
+      'turn_count',
+      'tokens_used',
+      'no_progress_turns',
+      'token_budget',
+      'turn_budget',
+      'active_time_ms',
+      'active_time_budget_ms',
+      'objective_length',
+    ] as const) {
+      if (event[key] !== undefined) properties[key] = event[key];
+    }
+    const rumEvent = this.createActionEvent('goal', 'goal_state', {
+      properties,
     });
 
     this.enqueueLogEvent(rumEvent);
