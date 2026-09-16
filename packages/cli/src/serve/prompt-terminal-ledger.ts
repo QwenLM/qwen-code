@@ -7,7 +7,7 @@
 import type { Content } from '@google/genai';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import {
-  buildApiHistoryFromConversation,
+  buildSessionHistoryFromConversation,
   detectTurnInterruption,
   SessionService,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
@@ -258,9 +258,10 @@ export async function reconcileDanglingPromptTerminals(
   ) {
     return;
   }
-  const apiHistory = buildApiHistoryFromConversation(resumed.conversation);
+  const { apiHistory, completedToolCallIds } =
+    buildSessionHistoryFromConversation(resumed.conversation);
   const historyTail = apiHistory.slice(-TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
-  const verdict = detectTurnInterruption(historyTail);
+  const verdict = detectTurnInterruption(historyTail, completedToolCallIds);
   // Id-less tool-call guard: `detectTurnInterruption` ignores functionCalls
   // without an id (they cannot be paired on the wire), but reconciliation
   // needs no wire pairing — a model tail holding ANY functionCall means the

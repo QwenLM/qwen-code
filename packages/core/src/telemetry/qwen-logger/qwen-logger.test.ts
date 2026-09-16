@@ -28,6 +28,7 @@ import {
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
   SubagentExecutionEvent,
+  makeGoalStateEvent,
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -454,6 +455,108 @@ describe('QwenLogger', () => {
           }),
         }),
       );
+    });
+
+    it('journals a Goal transition without its Goal id or absent figures', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'blocked',
+          goal_id: 'g-1',
+          revision: 4,
+          status: 'blocked',
+          turn_count: 7,
+          tokens_used: 9_000,
+          no_progress_turns: 3,
+        }),
+      );
+
+      const rumEvent = enqueueSpy.mock.calls[0]![0];
+      expect(rumEvent).toMatchObject({
+        event_type: 'action',
+        type: 'goal',
+        name: 'goal_state',
+        properties: {
+          cause: 'blocked',
+          revision: 4,
+          status: 'blocked',
+          turn_count: 7,
+          tokens_used: 9_000,
+          no_progress_turns: 3,
+        },
+      });
+      const keys = Object.keys(rumEvent.properties ?? {});
+      expect(keys).not.toContain('goal_id');
+      expect(keys).not.toContain('limit_kind');
+      expect(keys).not.toContain('token_budget');
+    });
+
+    it('journals every allowed Goal property without the Goal id', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'usage_limited',
+          goal_id: 'g-1',
+          revision: 4,
+          status: 'usage_limited',
+          limit_kind: 'time_budget',
+          turn_count: 7,
+          tokens_used: 9_000,
+          no_progress_turns: 3,
+          token_budget: 80_000,
+          turn_budget: 50,
+          active_time_ms: 60_000,
+          active_time_budget_ms: 60_000,
+          objective_length: 22,
+        }),
+      );
+
+      const rumEvent = enqueueSpy.mock.calls[0]![0];
+      expect(rumEvent.properties).toEqual({
+        cause: 'usage_limited',
+        revision: 4,
+        status: 'usage_limited',
+        limit_kind: 'time_budget',
+        turn_count: 7,
+        tokens_used: 9_000,
+        no_progress_turns: 3,
+        token_budget: 80_000,
+        turn_budget: 50,
+        active_time_ms: 60_000,
+        active_time_budget_ms: 60_000,
+        objective_length: 22,
+      });
+      expect(Object.keys(rumEvent.properties ?? {})).not.toContain('goal_id');
+    });
+
+    it('preserves zero Goal figures in analytics', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'create',
+          goal_id: 'g-1',
+          revision: 1,
+          status: 'active',
+          turn_count: 0,
+          tokens_used: 0,
+          active_time_ms: 0,
+        }),
+      );
+
+      expect(enqueueSpy.mock.calls[0]![0].properties).toEqual({
+        cause: 'create',
+        revision: 1,
+        status: 'active',
+        turn_count: 0,
+        tokens_used: 0,
+        active_time_ms: 0,
+      });
     });
 
     it('logs protocol tag sanitization without model content', () => {

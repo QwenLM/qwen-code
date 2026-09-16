@@ -228,6 +228,63 @@ describe('WorkspaceSessionProvider targets', () => {
     },
   );
 
+  it('keeps the dark palette and English fallback when an embedder passes no opinion', async () => {
+    const originalLanguage = navigator.language;
+    Object.defineProperty(navigator, 'language', {
+      value: 'zh-CN',
+      configurable: true,
+    });
+    try {
+      mocks.workspace = {
+        ...mocks.workspace,
+        status: 'error',
+        capabilities: undefined,
+        error: new Error('502 Daemon restarting'),
+      };
+      await act(async () => {
+        root.render(
+          <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
+        );
+      });
+
+      const surface = container.querySelector('[data-web-shell-root]');
+      expect(surface?.className).toContain('dark');
+      expect(container.textContent).toContain(
+        'The workspace service could not be reached. Check the daemon and try again.',
+      );
+    } finally {
+      Object.defineProperty(navigator, 'language', {
+        value: originalLanguage,
+        configurable: true,
+      });
+    }
+  });
+
+  it('keeps resolved document chrome on later error surfaces (#11955)', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'error',
+      capabilities: undefined,
+      error: new Error('502 Daemon restarting'),
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-a"
+          chromeTheme="light"
+          chromeLanguage="zh-CN"
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    const surface = container.querySelector('[data-web-shell-root]');
+    expect(surface?.className).not.toContain('dark');
+    expect(container.textContent).toContain(
+      '无法连接工作区服务，请检查守护进程后重试。',
+    );
+  });
+
   it('keeps the app mounted when opening a standalone session from a workspace', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     const app = container.querySelector('output');

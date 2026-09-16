@@ -548,11 +548,12 @@ export function SettingsMessage({
   }, [error, settings, status, t]);
 
   const handleSetValue = useCallback(
-    (key: string, value: unknown) => {
+    (key: string, value: unknown, onSaved?: () => void) => {
       if (!restartPending) setMessage(null);
       setBusyKey(key);
       setValue(scope, key, value)
         .then(async (result) => {
+          onSaved?.();
           try {
             await reload();
           } catch {
@@ -623,8 +624,11 @@ export function SettingsMessage({
         themeSettingToWebShellTheme(value) ?? selectedTheme,
         (next) => {
           const theme = next as WebShellTheme;
-          onThemeChange(theme);
-          handleSetValue(THEME_SETTING_KEY, webShellThemeToSettingValue(theme));
+          handleSetValue(
+            THEME_SETTING_KEY,
+            webShellThemeToSettingValue(theme),
+            scope === 'user' ? () => onThemeChange(theme) : undefined,
+          );
         },
         WEB_SHELL_THEMES.map((theme) => ({
           value: theme,
