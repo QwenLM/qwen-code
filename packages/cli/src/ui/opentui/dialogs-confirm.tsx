@@ -62,8 +62,6 @@ import {
 } from './dialogs-shared.js';
 import { renderDiffBody } from './diff-render.js';
 import {
-  CONFIRMATION_BODY_MAX_ROWS,
-  DIALOG_EXPANDED_BODY_RESERVE_ROWS,
   headWindowPhysical,
   hiddenLinesLabel,
   hiddenTailLinesLabel,
@@ -82,6 +80,18 @@ export interface PendingToolConfirmation {
   name: string;
   confirmationDetails: ToolCallConfirmationDetails;
 }
+
+/** Max body rows before the tail window truncates (keeps dialogs bounded). */
+const MAX_BODY_ROWS = 20;
+
+/**
+ * Rows reserved above/below an EXPANDED body: dialog chrome (frame, title,
+ * options, footer) plus the transcript region that keeps its place above the
+ * dialog. The expanded tail window is budgeted as terminal height minus this
+ * reserve, so the end of the content — where the options still are — stays on
+ * screen (ink reaches the same visible outcome through terminal scrollback).
+ */
+const EXPANDED_BODY_RESERVE_ROWS = 20;
 
 interface OutcomeOption {
   label: string;
@@ -266,7 +276,7 @@ export function buildConfirmationPrompt(
 /** Renders a colored diff body within a bounded row window. */
 function DiffBody({ fileDiff }: { fileDiff: string }) {
   const lines = useMemo(() => renderDiffBody(fileDiff), [fileDiff]);
-  const window = tailWindow(lines, CONFIRMATION_BODY_MAX_ROWS);
+  const window = tailWindow(lines, MAX_BODY_ROWS);
   return (
     <box flexDirection="column">
       {window.hiddenCount > 0 ? (
@@ -288,36 +298,61 @@ function DiffBody({ fileDiff }: { fileDiff: string }) {
 }
 
 /**
- * Exec confirmation body: the command in accent, windowed to the same
- * reserve the expanded text body uses — an uncapped command (a 50-line
- * heredoc) painted the question row and outcome list off the viewport
- * (R5-1). The tail window keeps the end of the command, nearest the outcome
- * list, and labels the hidden head.
+ * Exec confirmation body: the command in accent, windowed with TextBody's
+ * two-stage shape (duplicated rather than shared so the command keeps its
+ * accent styling). An uncapped command — a long heredoc — painted the
+ * question row and outcome list off the viewport. The collapsed window keeps
+ * the command's HEAD, where the irreversible part of an install script sits
+ * (`curl … | sh`, `rm -rf`, the heredoc body); ctrl-s expands to the tail,
+ * so the head is what the user sees first and the tail is one keystroke away.
  */
 function ExecBody({ details }: { details: ToolExecuteConfirmationDetails }) {
+  const [expanded, setExpanded] = useState(false);
   const { width, height } = useTerminalDimensions();
   const rows = useMemo(
     () => sanitizeTerminalText(details.command).split('\n'),
     [details.command],
   );
   const window = useMemo(
+    () => headWindowPhysical(rows, width, MAX_BODY_ROWS),
+    [rows, width],
+  );
+  const expandedWindow = useMemo(
     () =>
       tailWindowPhysical(
         rows,
         width,
-        Math.max(height - DIALOG_EXPANDED_BODY_RESERVE_ROWS, 1),
+        Math.max(height - EXPANDED_BODY_RESERVE_ROWS, 1),
       ),
     [rows, width, height],
   );
+  // TextBody's honesty guard: the ctrl-s promise is "show more lines", so
+  // offer and honor it only when the expanded tail window actually reveals
+  // rows the collapsed head window hides.
+  const canExpand =
+    window.hiddenRows > 0 && expandedWindow.hiddenRows < window.hiddenRows;
+
+  useKeyboard((key) => {
+    if (key.ctrl && toOriginalKey(key).name === 's' && canExpand) {
+      setExpanded(true);
+    }
+  });
+
   return (
     <box flexDirection="column">
-      {window.visible.map((row, i) => (
+      {(expanded ? expandedWindow.visible : window.visible).map((row, i) => (
         <text key={`${i}`} fg={C.accent} attributes={1}>
           {row}
         </text>
       ))}
-      {window.hiddenRows > 0 ? (
-        <text fg={C.dim}>{hiddenLinesLabel(window.hiddenRows)}</text>
+      {expanded && expandedWindow.hiddenRows > 0 ? (
+        <text fg={C.dim}>{hiddenLinesLabel(expandedWindow.hiddenRows)}</text>
+      ) : null}
+      {!expanded && window.hiddenRows > 0 ? (
+        <text fg={C.dim}>{hiddenTailLinesLabel(window.hiddenRows)}</text>
+      ) : null}
+      {!expanded && canExpand ? (
+        <text fg={C.dim}>Press ctrl-s to show more lines</text>
       ) : null}
       {details.warnings?.map((warning, i) => (
         <text key={`${i}`} fg={C.yellow}>
@@ -340,7 +375,7 @@ function TextBody({ text }: { text: string }) {
   const { width, height } = useTerminalDimensions();
   const rows = useMemo(() => sanitizeTerminalText(text).split('\n'), [text]);
   const window = useMemo(
-    () => headWindowPhysical(rows, width, CONFIRMATION_BODY_MAX_ROWS),
+    () => headWindowPhysical(rows, width, MAX_BODY_ROWS),
     [rows, width],
   );
   const expandedWindow = useMemo(
@@ -348,7 +383,7 @@ function TextBody({ text }: { text: string }) {
       tailWindowPhysical(
         rows,
         width,
-        Math.max(height - DIALOG_EXPANDED_BODY_RESERVE_ROWS, 1),
+        Math.max(height - EXPANDED_BODY_RESERVE_ROWS, 1),
       ),
     [rows, width, height],
   );

@@ -53,7 +53,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import {
-  confirmationDialogBody,
   createEventMapper,
   extractStructuredResult,
   renderResultDisplay,
@@ -926,7 +925,6 @@ export async function* livePromptEvents(
             id: callId,
             tool: c.request.name,
             title: c.confirmationDetails.title,
-            confirmBody: confirmationDialogBody(c.confirmationDetails),
           });
           options?.onWaitingCall?.({
             callId,
