@@ -1916,20 +1916,21 @@ function readCoreSettingValues(
  * normalized exactly the way boot accepts them (parseApprovalModeValue
  * trims, lowercases, and maps the legacy `auto_edit`/`autoedit` aliases), so
  * reload convergence agrees with the settings file for every boot-accepted
- * spelling. A MISSING or falsy key folds to AUTO — the same default
- * loadCliConfig derives in either case — so a key deletion reaches live
+ * spelling. A MISSING or falsy key folds to DEFAULT — the same default
+ * loadCliConfig derives for ACP sessions — so a key deletion reaches live
  * sessions on reload instead of pinning a stale privileged mode until daemon
- * restart.
+ * restart. AUTO would auto-approve in-workspace writes with no
+ * session/request_permission, which is not the ACP boot default.
  * A PRESENT but unparseable value returns undefined: boot rejects that file
  * outright (loadCliConfig has no catch around parseApprovalModeValue), so
- * folding it to AUTO would silently escalate the approval gate for every
+ * folding it to DEFAULT would silently change the approval gate for every
  * live session; the reload loop keeps sessions on their current modes until
  * the file is corrected. Restricted (safe/bare) sessions ignore the file at
  * boot entirely; the reload loop converges them on DEFAULT separately.
  */
 function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
   if (!raw) {
-    return ApprovalMode.AUTO;
+    return ApprovalMode.DEFAULT;
   }
   if (typeof raw === 'string') {
     try {
@@ -14062,13 +14063,12 @@ class QwenAgent implements Agent {
           reloadedSessionWorkflow,
         );
 
-        // Fold a missing key to the fresh-session default (AUTO for
-        // unrestricted sessions; restricted sessions converge on DEFAULT per
-        // session below) so a key deletion reaches live sessions too. A
-        // present-but-invalid value folds to undefined instead: boot rejects
-        // that file, so reload must not converge live sessions on it either
-        // (folding it to AUTO would silently escalate the approval gate),
-        // and the undefined is never recorded as converged.
+        // Fold a missing key to the fresh-session default (DEFAULT for ACP;
+        // restricted sessions also converge on DEFAULT per session below) so
+        // a key deletion reaches live sessions too. A present-but-invalid
+        // value folds to undefined instead: boot rejects that file, so
+        // reload must not converge live sessions on it either, and the
+        // undefined is never recorded as converged.
         const reloadedApprovalMode = foldReloadApprovalMode(
           newMerged.tools?.approvalMode,
         );
@@ -14211,9 +14211,9 @@ class QwenAgent implements Agent {
             // recorded, so no session converges on a value boot would
             // reject. Restricted sessions ignore the file at boot
             // (loadCliConfig pins them to DEFAULT), so reload must converge
-            // them on DEFAULT too — pushing the file value (or the AUTO fold
-            // of a missing key) into a safe-mode session would silently
-            // strip its approval restriction.
+            // them on DEFAULT too — pushing a privileged file value into a
+            // safe-mode session would silently strip its approval
+            // restriction.
             const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
               ? ApprovalMode.DEFAULT
               : reloadedApprovalMode;

@@ -1696,6 +1696,7 @@ export async function loadCliConfig(
         : OutputFormat.TEXT
       : (outputFormat as OutputFormat);
   const includePartialMessages = Boolean(argv.includePartialMessages);
+  const isAcpMode = Boolean(argv.acp || argv.experimentalAcp);
 
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
@@ -1709,6 +1710,12 @@ export async function loadCliConfig(
     // Restricted modes strip permissions/allowlists and are meant to be
     // maximally restrictive, so they keep manual approval rather than the
     // AUTO default that normal sessions now get.
+    approvalMode = ApprovalMode.DEFAULT;
+  } else if (isAcpMode) {
+    // ACP hosts a client that answers `session/request_permission`. AUTO
+    // auto-approves in-workspace writes (and read-only shell) with no
+    // round-trip, which looks like YOLO to the client. Default to ask so
+    // restrictive ACP sessions actually emit permission requests.
     approvalMode = ApprovalMode.DEFAULT;
   } else {
     approvalMode = ApprovalMode.AUTO;
@@ -1743,24 +1750,28 @@ export async function loadCliConfig(
   }
 
   // Interactive mode determination with priority:
-  // 1. If promptInteractive (-i flag) is provided, it is explicitly interactive
-  // 2. If outputFormat is stream-json or json (no matter input-format) along with query or prompt, it is non-interactive
-  // 3. If no query or prompt is provided, check isTTY: TTY means interactive, non-TTY means non-interactive
+  // 1. ACP: the client answers session/request_permission over JSON-RPC.
+  //    Piped stdio is not a TTY, but the session is still interactive.
+  // 2. If promptInteractive (-i flag) is provided, it is explicitly interactive
+  // 3. If outputFormat is stream-json or json (no matter input-format) along with query or prompt, it is non-interactive
+  // 4. If no query or prompt is provided, check isTTY: TTY means interactive, non-TTY means non-interactive
   const hasQuery = !!argv.query;
   const hasPrompt = !!argv.prompt;
   let interactive: boolean;
-  if (argv.promptInteractive) {
-    // Priority 1: Explicit -i flag means interactive
+  if (isAcpMode) {
+    interactive = true;
+  } else if (argv.promptInteractive) {
+    // Priority 2: Explicit -i flag means interactive
     interactive = true;
   } else if (
     (outputFormat === OutputFormat.STREAM_JSON ||
       outputFormat === OutputFormat.JSON) &&
     (hasQuery || hasPrompt)
   ) {
-    // Priority 2: JSON/stream-json output with query/prompt means non-interactive
+    // Priority 3: JSON/stream-json output with query/prompt means non-interactive
     interactive = false;
   } else if (!hasQuery && !hasPrompt) {
-    // Priority 3: No query or prompt means interactive only if TTY (format arguments ignored)
+    // Priority 4: No query or prompt means interactive only if TTY (format arguments ignored)
     interactive = process.stdin.isTTY ?? false;
   } else {
     // Default: If we have query/prompt but output format is TEXT, assume non-interactive
@@ -1915,7 +1926,6 @@ export async function loadCliConfig(
   // In non-interactive mode, tools that require a user prompt are denied unless
   // the caller has explicitly allowed them. Stream-JSON input is excluded from
   // this logic because approval can be sent programmatically via JSON messages.
-  const isAcpMode = argv.acp || argv.experimentalAcp;
   if (
     !bareMode &&
     !interactive &&
