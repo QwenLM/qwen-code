@@ -250,6 +250,15 @@ export class LocatorProxy implements BrowserLocator {
       throw new TypeError(
         `${label} expects a Locator from the same tab and browser session`,
       );
+    const frames = this.steps.filter((step) => step.kind === 'frame');
+    const otherFrames = other.steps.filter((step) => step.kind === 'frame');
+    if (
+      frames.length !== otherFrames.length ||
+      frames.some(
+        (frame, index) => frame.selector !== otherFrames[index]?.selector,
+      )
+    )
+      throw new TypeError(`${label} expects a Locator from the same frame`);
     return [...other.steps];
   }
   locator(selector: string, options?: LocatorLocatorOptions): BrowserLocator {

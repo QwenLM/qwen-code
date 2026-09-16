@@ -199,6 +199,73 @@ describe('Browser SDK in the existing Node REPL', () => {
     }
   });
 
+  it.each(['and', 'or', 'has', 'hasNot'] as const)(
+    'rejects %s composition across frames before dispatch',
+    async (method) => {
+      const agent = await setupBrowserRuntime();
+      const browser = await agent.browsers.get('chrome');
+      const tab = await browser.tabs.new();
+      const locator = tab.playwright.frameLocator('#pay').locator('button');
+      for (const other of [
+        tab.playwright.locator('button'),
+        tab.playwright.frameLocator('#other').locator('button'),
+        tab.playwright
+          .frameLocator('#pay')
+          .frameLocator('#inner')
+          .locator('button'),
+      ]) {
+        const dispatchCount = backend.dispatch.mock.calls.length;
+        for (const [left, right] of [
+          [locator, other],
+          [other, locator],
+        ]) {
+          expect(() =>
+            method === 'and' || method === 'or'
+              ? left[method](right)
+              : left.filter({ [method]: right }),
+          ).toThrow('expects a Locator from the same frame');
+        }
+        expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+      }
+    },
+  );
+
+  it.each(['and', 'or', 'has', 'hasNot'] as const)(
+    'preserves %s composition within the same nested frame',
+    async (method) => {
+      const agent = await setupBrowserRuntime();
+      const browser = await agent.browsers.get('chrome');
+      const tab = await browser.tabs.new();
+      const scope = () =>
+        tab.playwright.frameLocator('#pay').frameLocator('#inner');
+      const locator = scope().locator('button');
+      const other = scope().getByText('Submit');
+      const otherSteps = [
+        { kind: 'frame', selector: '#pay' },
+        { kind: 'frame', selector: '#inner' },
+        { kind: 'getByText', text: 'Submit' },
+      ];
+      const combined =
+        method === 'and' || method === 'or'
+          ? locator[method](other)
+          : locator.filter({ [method]: other });
+      await combined.click();
+      expect(backend.calls.at(-1)).toMatchObject({
+        method: 'locator.click',
+        args: {
+          steps: [
+            { kind: 'frame', selector: '#pay' },
+            { kind: 'frame', selector: '#inner' },
+            { kind: 'locator', selector: 'button' },
+            method === 'and' || method === 'or'
+              ? { kind: method, steps: otherSteps }
+              : { kind: 'filter', [method]: otherSteps },
+          ],
+        },
+      });
+    },
+  );
+
   it('serializes History and locator requests without a Host Call bridge', async () => {
     const agent = await setupBrowserRuntime();
     const browser = await agent.browsers.get('extension');

@@ -1141,6 +1141,7 @@ export async function runNonInteractive(
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
           apiHistory: llmClient.getChat().getHistory(),
+          completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -2115,6 +2116,7 @@ export async function runNonInteractive(
               typeof toolResponse.resultDisplay === 'string'
                 ? toolResponse.resultDisplay
                 : undefined,
+              { approvalRequired: toolResponse.approvalRequired === true },
             );
           }
 

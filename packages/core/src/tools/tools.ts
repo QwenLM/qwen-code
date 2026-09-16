@@ -63,6 +63,16 @@ export interface ToolInvocation<
   requiresUserInteraction?(): boolean;
 
   /**
+   * Parameters that permission rules match against, when they differ from
+   * `params`. Called after {@link getDefaultPermission} resolves, so an
+   * invocation can derive values from work done there, such as the digest of
+   * the file a name resolves to. A derived key must overwrite any value the
+   * model supplied under it: a rule scoped by that key must never match a
+   * value the model chose.
+   */
+  getPermissionMatchParams?(): Record<string, unknown>;
+
+  /**
    * Whether a host-level allow decision may be confirmed without forwarding
    * an interaction payload. Tools that collect data through their approval
    * surface should return false so the host-provided payload is preserved.
@@ -512,6 +522,19 @@ export interface ToolResult {
    * later.
    */
   persistedOutputFiles?: string[];
+
+  /**
+   * Internal runtime marker: the producer already sized `llmContent` against
+   * its own declared character budget, whether or not anything was cut. Records
+   * the size decision, where `persistedOutputFiles` records the persistence
+   * one. Set it only on paths that ran that check, never by tool identity: the
+   * scheduler's generic single-result gate stands down for a marked body. On
+   * the success path the per-tool budget still applies, and a timed-out call's
+   * detail is re-bounded at the producer's declared budget; the ordinary
+   * failure path has no per-tool pass, so a producer that marks a body there
+   * is bounding it alone. The aggregate batch budget applies on every path.
+   */
+  outputBudgetApplied?: boolean;
 
   /**
    * Markdown string for user display.

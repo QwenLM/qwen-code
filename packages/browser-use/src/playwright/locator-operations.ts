@@ -39,7 +39,9 @@ export async function executeLocatorOperation(
   const options = { timeout };
   switch (method) {
     case 'locator.count':
-      return await locator.count();
+      // count accepts no timeout and a dead renderer never answers it, so
+      // bound the read by the caller's budget.
+      return await withTimeout(locator.count(), timeout);
     case 'locator.evaluate':
       return jsonResult(
         await evaluateLocator(
@@ -61,15 +63,26 @@ export async function executeLocatorOperation(
     case 'locator.allTextContents': {
       // Playwright's allTextContents takes no options and never waits, so
       // honor the caller's budget with an attach wait on the first match; a
-      // locator that never attaches still resolves [].
-      await locator
+      // locator that never attaches still resolves []. The read accepts no
+      // timeout either and a dead renderer never answers it, so race it
+      // against the same deadline — a second window would double the
+      // documented read budget. A wait that consumed the budget settled the
+      // outcome already: [] without reading.
+      const deadline = Date.now() + timeout;
+      const attached = await locator
         .first()
         .waitFor({ state: 'attached', timeout })
+        .then(() => true)
         .catch((error: unknown) => {
-          if (error instanceof Error && error.name === 'TimeoutError') return;
+          if (error instanceof Error && error.name === 'TimeoutError')
+            return false;
           throw error;
         });
-      return await locator.allTextContents();
+      if (!attached) return [];
+      return await withTimeout(
+        locator.allTextContents(),
+        deadline - Date.now(),
+      );
     }
     case 'locator.innerText':
       return await locator.innerText(options);
@@ -96,7 +109,17 @@ export async function executeLocatorOperation(
       // ship the deadline into the page to stop the fetch as well.
       await withTimeout(
         locator.evaluate(
-          async (element, budgetMs) => {
+          async (element, deadline) => {
+            const remainingMs = () => {
+              const remaining = deadline - Date.now();
+              if (remaining <= 0)
+                throw new DOMException(
+                  'Media download timed out',
+                  'TimeoutError',
+                );
+              return remaining;
+            };
+            const signal = AbortSignal.timeout(remainingMs());
             element.scrollIntoView({ block: 'center', inline: 'nearest' });
             // A located wrapper (picture/figure) must resolve to the media it
             // contains: media properties are probed across every candidate
@@ -134,11 +157,10 @@ export async function executeLocatorOperation(
             // away instead; fetch the resource and download a same-origin
             // object URL, failing loudly when the fetch yields no body.
             const fetchMedia = async (target: string): Promise<Response> => {
+              remainingMs();
               let fetched: Response;
               try {
-                fetched = await fetch(target, {
-                  signal: AbortSignal.timeout(budgetMs),
-                });
+                fetched = await fetch(target, { signal });
               } catch (error) {
                 // A CORS rejection surfaces as an opaque TypeError; name the
                 // actual cause so the model stops retrying the same read.
@@ -157,29 +179,29 @@ export async function executeLocatorOperation(
             let picked: { url: string; response: Response } | null = null;
             // A located anchor names the file it links to, so its own href is
             // fetched before the contained media and kept unless the server
-            // answers an HTML page (a card link, whose media still wins); a
-            // failed probe falls through to the candidate scan.
+            // answers an HTML page (a card link, whose media still wins).
             const ownHref = readString(element, 'href');
             if (ownHref !== null && /^(?:https?|blob|data):/.test(ownHref)) {
-              const probe = await fetchMedia(ownHref).catch(() => null);
-              if (probe !== null) {
-                const type = probe.headers.get('content-type') ?? '';
-                if (type.toLowerCase().startsWith('text/html')) {
-                  void probe.body?.cancel().catch(() => undefined);
-                } else {
-                  picked = { url: ownHref, response: probe };
-                }
+              const probe = await fetchMedia(ownHref);
+              const type = probe.headers.get('content-type') ?? '';
+              if (type.toLowerCase().startsWith('text/html')) {
+                void probe.body?.cancel().catch(() => undefined);
+              } else {
+                picked = { url: ownHref, response: probe };
               }
             }
             if (picked === null) {
               let scanned: string | null = null;
               for (const candidate of candidates) {
-                scanned =
-                  readString(candidate, 'currentSrc') ??
-                  readString(candidate, 'src') ??
-                  readSrcset(candidate);
+                scanned = readString(candidate, 'currentSrc');
                 if (scanned !== null) break;
               }
+              if (scanned === null)
+                for (const candidate of candidates) {
+                  scanned =
+                    readString(candidate, 'src') ?? readSrcset(candidate);
+                  if (scanned !== null) break;
+                }
               if (scanned === null)
                 for (const candidate of candidates) {
                   scanned = readString(candidate, 'href');
@@ -196,7 +218,9 @@ export async function executeLocatorOperation(
               picked = { url: scanned, response: await fetchMedia(scanned) };
             }
             const { url, response } = picked;
-            const objectUrl = URL.createObjectURL(await response.blob());
+            const blob = await response.blob();
+            remainingMs();
+            const objectUrl = URL.createObjectURL(blob);
             const anchor = document.createElement('a');
             anchor.href = objectUrl;
             // Only an http(s) path carries a usable file name; a blob: or
@@ -208,12 +232,16 @@ export async function executeLocatorOperation(
               : '';
             anchor.rel = 'noopener';
             anchor.style.display = 'none';
-            document.body.append(anchor);
-            anchor.click();
-            anchor.remove();
-            setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+            try {
+              document.body.append(anchor);
+              remainingMs();
+              anchor.click();
+            } finally {
+              anchor.remove();
+              setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+            }
           },
-          timeout,
+          Date.now() + timeout,
           options,
         ),
         timeout,

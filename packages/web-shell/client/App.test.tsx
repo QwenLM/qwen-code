@@ -9,6 +9,10 @@ import {
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+import type {
+  ContextUsageControls,
+  RegisterContextUsageControls,
+} from './hooks/useContextUsageControls';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import * as browserNotifications from './browser-turn-notifications';
 import {
@@ -205,6 +209,8 @@ type ChatEditorTestProps = {
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
+  onOpenContextUsage?: () => void;
+  contextUsageControls?: ContextUsageControls;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
 };
 
@@ -592,6 +598,7 @@ const {
     },
     testState: {
       ownerVersion: 0,
+      recoveryVersion: 0,
       prompt: 'hello',
       inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
       promptImages: undefined as
@@ -618,6 +625,9 @@ const {
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
+      backgroundDetails: undefined as
+        | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
+        | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         messages?: Array<{
@@ -723,6 +733,12 @@ const {
         settings: DaemonSettingDescriptor[];
       } | null,
       latestSplitViewProps: null as {
+        registerContextUsageControls?: RegisterContextUsageControls;
+        onBeforeContextCompress?: (sessionId: string) => void;
+        onOpenContextUsage?: (
+          sessionId: string,
+          actions: typeof mockPaneSessionActions,
+        ) => void;
         onPendingPanesChange?: (ids: string[]) => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
@@ -797,9 +813,15 @@ const {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
   const ownerGuard = {
-    capture: () => {
+    capture: (options?: { includeRecovery?: boolean }) => {
       const ownerVersion = testState.ownerVersion;
-      return { isCurrent: () => testState.ownerVersion === ownerVersion };
+      const recoveryVersion = testState.recoveryVersion;
+      return {
+        isCurrent: () =>
+          testState.ownerVersion === ownerVersion &&
+          (!options?.includeRecovery ||
+            testState.recoveryVersion === recoveryVersion),
+      };
     },
   };
   return {
@@ -1124,6 +1146,7 @@ vi.mock('./components/ChatEditor', async () => {
 vi.mock('./components/TranscriptViewport', async () => {
   const React = await import('react');
   const { useInteractionBlocker } = await import('./interactionBlockContext');
+  const { useSubagentDetails } = await import('./subagentDetailsContext');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
     const releaseRef = React.useRef<(() => void) | null>(null);
@@ -1171,6 +1194,7 @@ vi.mock('./components/TranscriptViewport', async () => {
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
       testState.latestMessageListProps = props;
+      testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
       React.useImperativeHandle(ref, () => ({
         scrollToBottom: notificationScrollToBottom,
       }));
@@ -3658,6 +3682,111 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  it.each(['transcript', 'task snapshot'])(
+    'loads background task details from %s when its pending panel first opens',
+    async (source) => {
+      mockWorkspace.client.resolveSubagentSession.mockResolvedValue({
+        sessionId: 'subagent-session',
+        status: 'completed',
+      });
+      mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        hasMore: false,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'background-agent',
+              title: 'Explore source',
+              status: 'completed',
+              rawInput: {
+                description: 'Loaded background task description',
+                subagent_type: 'Explore',
+              },
+              rawOutput: { result: 'Background findings are available' },
+              _meta: { toolName: 'Task' },
+            },
+          },
+        ],
+      });
+      if (source === 'task snapshot') {
+        mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
+          v: 1,
+          sessionId: 'session-1',
+          hasMore: false,
+          events: [],
+        });
+        mockWorkspace.client.sessionTasks.mockResolvedValue({
+          v: 1,
+          sessionId: 'session-1',
+          tasks: [
+            {
+              kind: 'agent',
+              id: 'task-1',
+              label: 'Fallback agent recovered',
+              description: 'Loaded background task description',
+              subagentType: 'Explore',
+              toolUseId: 'background-agent',
+              status: 'completed',
+              isBackgrounded: true,
+              startTime: 100,
+              endTime: 200,
+              runtimeMs: 100,
+            },
+          ],
+        });
+      }
+      const { container } = renderApp();
+      await flush();
+      await flush();
+      act(() =>
+        testState.backgroundDetails?.({
+          turnId: 'background-turn',
+          taskId: 'task-1',
+          kind: 'agent',
+          toolUseId: 'background-agent',
+          label: 'Explore source',
+          startedAt: 100,
+        }),
+      );
+      await flush();
+      await flush();
+      expect(
+        mockWorkspace.client.getSessionTranscriptPage,
+      ).toHaveBeenCalledWith('session-1', {
+        direction: 'backward',
+        limit: 250,
+      });
+      await vi.waitFor(async () => {
+        await flush();
+        expect(
+          container.querySelector('aside[aria-label="Right panel"]')
+            ?.textContent,
+        ).toContain(
+          source === 'transcript'
+            ? 'Loaded background task description'
+            : 'Fallback agent recovered',
+        );
+      });
+      if (source === 'task snapshot')
+        expect(mockWorkspace.client.sessionTasks).toHaveBeenCalledWith(
+          'session-1',
+        );
+      expect(mockWorkspace.client.resolveSubagentSession).toHaveBeenCalledWith(
+        'session-1',
+        'background-agent',
+      );
+      expect(
+        container.querySelector(
+          'aside[aria-label="Right panel"] [data-status="completed"]',
+        ),
+      ).not.toBeNull();
+    },
+  );
+
   it('restores a subagent tab without its transcript tool call', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
@@ -5182,11 +5311,9 @@ describe('task activity key', () => {
   });
 
   it('keeps pane-bound usage tabs restored through the sessionStorage split', async () => {
-    // The uncontrolled reload path: per-tab split storage, not the prop.
-    sessionStorage.setItem(
-      'qwen-webshell-split-sessions',
-      JSON.stringify(['pane-session']),
-    );
+    // The uncontrolled reload path: per-tab split storage, not the prop. Seeded
+    // through the real save path, so the set carries its daemon-target owner.
+    saveSplitSessions(['pane-session']);
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
       JSON.stringify({
@@ -10358,6 +10485,7 @@ beforeEach(() => {
   mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
   mockConnection.standaloneSession = undefined;
   testState.ownerVersion = 0;
+  testState.recoveryVersion = 0;
   testState.workspaceEventSignals = {
     artifactsVersion: 0,
     sourcesVersion: 0,
@@ -10518,6 +10646,7 @@ beforeEach(() => {
   testState.latestStatusBarHideSettings = false;
   testState.latestStatusBarOnSelectModel = null;
   testState.latestMessageListProps = null;
+  testState.backgroundDetails = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
@@ -14916,6 +15045,81 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('opens details and compresses through the composer with the header entry hidden', async () => {
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    renderApp({ header: { items: [] } });
+    await flush();
+    expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+    await act(async () =>
+      testState.latestChatEditorProps!.onOpenContextUsage!(),
+    );
+    await flush();
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    let finish!: (result: { stopReason: string }) => void;
+    mockSessionActions.sendPrompt.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    let compression!: Promise<void>;
+    act(() => {
+      compression =
+        testState.latestChatEditorProps!.contextUsageControls!.compress();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
+      '/compress',
+    );
+    expect(testState.latestChatEditorProps!.contextUsageControls).toMatchObject(
+      { canCompress: false, compressing: true },
+    );
+    const panelButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((button) => button.textContent === 'Compressing…')!;
+    expect(panelButton.disabled).toBe(true);
+    await act(async () => {
+      finish({ stopReason: 'end_turn' });
+      await compression;
+    });
+    expect(
+      testState.latestChatEditorProps!.contextUsageControls?.result?.kind,
+    ).toBe('completed');
+    expect(document.body.textContent).toContain(
+      'Compression completed. Context usage refreshed.',
+    );
+  });
+
+  it('keeps composer controls stable when an unrelated pane registers or leaves', async () => {
+    renderApp({ splitSessionIds: ['s1'] });
+    await flush();
+    const before = testState.latestChatEditorProps!.contextUsageControls;
+    expect(before).toBeDefined();
+    let unregister!: () => void;
+    act(() => {
+      unregister = testState.latestSplitViewProps!
+        .registerContextUsageControls!({
+        sessionId: 's1',
+        canCompress: false,
+        compressing: false,
+        compress: vi.fn().mockResolvedValue(undefined),
+        captureOwner: () => ({ isCurrent: () => true }),
+        getContextUsage: mockPaneSessionActions.getContextUsage,
+      });
+    });
+    expect(testState.latestChatEditorProps!.contextUsageControls).toBe(before);
+    act(() => unregister());
+    expect(testState.latestChatEditorProps!.contextUsageControls).toBe(before);
+  });
+
   it('suppresses stale composer context usage on error and restores it on reconnect', async () => {
     const usageConnection = mockConnection as typeof mockConnection & {
       tokenCount?: number;
@@ -16875,8 +17079,8 @@ describe('App session callbacks', () => {
       true,
     );
     const sidebar = container.querySelector('[data-testid="sidebar"]');
-    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('false');
-    expect(sidebar?.getAttribute('data-has-commit')).toBe('false');
+    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('true');
+    expect(sidebar?.getAttribute('data-has-commit')).toBe('true');
     expect(sidebar?.getAttribute('data-can-open-sessions-overview')).toBe(
       'true',
     );
@@ -18288,8 +18492,8 @@ describe('App session callbacks', () => {
     await flush();
 
     const sidebar = container.querySelector('[data-testid="sidebar"]');
-    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('false');
-    expect(sidebar?.getAttribute('data-has-commit')).toBe('false');
+    expect(sidebar?.getAttribute('data-has-git-diff')).toBe('true');
+    expect(sidebar?.getAttribute('data-has-commit')).toBe('true');
     expect(testState.latestChatEditorProps?.onOpenGitDiff).toBeUndefined();
     expect(workspaceGit).not.toHaveBeenCalled();
 
@@ -23200,9 +23404,31 @@ describe('App session callbacks', () => {
         };
       },
     );
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'live-session-current',
+    });
     const onSessionIdChange = vi.fn();
-    const { container, rerender } = renderApp({ onSessionIdChange });
+    const props: React.ComponentProps<typeof App> = {
+      onSessionIdChange,
+      header: { items: ['contextUsage'] },
+    };
+    const { container, rerender } = renderApp(props);
     await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+        )!
+        .click();
+    });
+    const compressButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((button) => button.textContent === 'Compress context')!;
+    expect(compressButton.disabled).toBe(false);
 
     act(() => {
       testState.latestChatEditorProps?.onInputTextChange?.(testState.prompt);
@@ -23226,6 +23452,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
+    expect(compressButton.disabled).toBe(true);
     expect(mockWorkspace.client.startLive).toHaveBeenCalledWith('new');
     expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
@@ -23233,7 +23460,7 @@ describe('App session callbacks', () => {
 
     act(() => {
       mockConnection.sessionId = 'live-session-next';
-      rerender({ onSessionIdChange });
+      rerender(props);
     });
     await flush();
     act(() => {
@@ -26803,6 +27030,51 @@ describe('App session callbacks', () => {
     expect(container.querySelector('button[title="Side task"]')).toBeNull();
   });
 
+  it.each([false, true])(
+    'preserves a settled btw answer for context-card keys with an empty composer (shadow: %s)',
+    async (shadow) => {
+      const { container } = renderApp();
+      await flush();
+      testState.prompt = '/btw keep this answer';
+      await clickSubmit(container);
+      await flush();
+      testState.prompt = '';
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      const btw = () => container.querySelector('[class*="btwPanel"]');
+      expect(btw()).not.toBeNull();
+
+      const host = document.createElement('div');
+      const parent = shadow ? host.attachShadow({ mode: 'open' }) : host;
+      const card = document.createElement('div');
+      card.setAttribute('data-web-shell-context-popover', '');
+      const action = document.createElement('button');
+      card.append(action);
+      parent.append(card);
+      container.append(host);
+      for (const key of ['Enter', ' ', 'Escape']) {
+        const event = new KeyboardEvent('keydown', {
+          key,
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+        });
+        act(() => action.dispatchEvent(event));
+        expect(event.defaultPrevented).toBe(false);
+        expect(btw()).not.toBeNull();
+      }
+      act(() =>
+        container.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      expect(btw()).toBeNull();
+    },
+  );
+
   it('settles visible recap after a same-id attachment replacement', async () => {
     const recap = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
@@ -29900,62 +30172,787 @@ describe('App session callbacks', () => {
     expect(document.body.textContent).not.toContain('qwen-plus::hybrid');
   });
 
-  it('opens context usage from a split pane and closes it when the pane is removed', async () => {
-    mockPaneSessionActions.getContextUsage.mockClear();
-    const { container } = renderApp({
-      sidebar: false,
-      splitSessionIds: ['s1'],
-      header: { items: ['contextUsage'] },
+  it.each(['header', 'composer'] as const)(
+    'opens context usage from a split pane %s and closes it when the pane is removed',
+    async (entry) => {
+      mockPaneSessionActions.getContextUsage.mockClear();
+      const { container } = renderApp({
+        sidebar: false,
+        splitSessionIds: ['s1'],
+        header: { items: entry === 'header' ? ['contextUsage'] : [] },
+      });
+      await flush();
+      await act(async () => {
+        if (entry === 'composer') {
+          testState.latestSplitViewProps!.onOpenContextUsage!(
+            's1',
+            mockPaneSessionActions,
+          );
+          return;
+        }
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="split-header-actions"] [aria-label="Context Usage"]',
+          )!
+          .click();
+      });
+      await flush();
+      // The pane opener must bind the pane's own session actions, not the
+      // main session's: only the pane mock resolves a renderable payload.
+      expect(mockPaneSessionActions.getContextUsage).toHaveBeenCalledWith({
+        detail: true,
+        silent: true,
+      });
+      expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain('pane-only-model');
+      const compressionButton = () =>
+        Array.from(document.body.querySelectorAll('button')).find(
+          (button) => button.textContent === 'Compress context',
+        )!;
+      expect(compressionButton().disabled).toBe(true);
+      const compress = vi.fn().mockResolvedValue(undefined);
+      const controls = {
+        sessionId: 's1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage: mockPaneSessionActions.getContextUsage,
+      };
+      let unregister!: () => void;
+      act(() => {
+        unregister =
+          testState.latestSplitViewProps!.registerContextUsageControls!(
+            controls,
+          );
+      });
+      expect(compressionButton().disabled).toBe(false);
+      await act(async () => compressionButton().click());
+      expect(compress).toHaveBeenCalledOnce();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      const replacementCompress = vi.fn().mockResolvedValue(undefined);
+      let unregisterReplacement!: () => void;
+      act(() => {
+        unregisterReplacement = testState.latestSplitViewProps!
+          .registerContextUsageControls!({
+          ...controls,
+          compress: replacementCompress,
+        });
+      });
+      act(() => unregister());
+      expect(compressionButton().disabled).toBe(false);
+      await act(async () => compressionButton().click());
+      expect(replacementCompress).toHaveBeenCalledOnce();
+      act(() => unregisterReplacement());
+      expect(compressionButton().disabled).toBe(true);
+
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('web-shell:context-usage:v1:'),
+        }),
+      ]);
+      expect(
+        document.body.querySelector('button[aria-label="Close Context Usage"]'),
+      ).not.toBeNull();
+      // The pane-bound flag must survive serialization, or the reclaim
+      // machinery can never recognize the tab after a refresh.
+      const persisted = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      );
+      expect(persisted['/tmp/project\0session-1'].tabs).toContainEqual({
+        id: 'context-usage:s1',
+        kind: 'context_usage',
+        title: 'Context Usage',
+        sessionId: 's1',
+        closeWithPane: true,
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="split-remove-panes"]',
+          )!
+          .click();
+      });
+      expect(
+        document.body.querySelector('button[aria-label="Close Context Usage"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('blocks context compression while the main approval overlay is open', async () => {
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
     });
+    const props: React.ComponentProps<typeof App> = {
+      header: { items: ['contextUsage'] },
+    };
+    const { container, rerender } = renderApp(props);
     await flush();
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="split-header-actions"] [aria-label="Context Usage"]',
+          '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
         )!
         .click();
     });
     await flush();
-    // The pane opener must bind the pane's own session actions, not the
-    // main session's: only the pane mock resolves a renderable payload.
-    expect(mockPaneSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: true,
-      silent: true,
+    const compress = () =>
+      Array.from(document.body.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Compress context',
+      )!;
+    expect(compress().disabled).toBe(false);
+    act(() => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender(props);
     });
-    expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain('pane-only-model');
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        text: expect.stringContaining('web-shell:context-usage:v1:'),
-      }),
-    ]);
     expect(
-      document.body.querySelector('button[aria-label="Close Context Usage"]'),
+      container.querySelector('[data-testid="approval-overlay"]'),
     ).not.toBeNull();
-    // The pane-bound flag must survive serialization, or the reclaim
-    // machinery can never recognize the tab after a refresh.
-    const persisted = JSON.parse(
-      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
-        '{}',
-    );
-    expect(persisted['/tmp/project\0session-1'].tabs).toContainEqual({
-      id: 'context-usage:s1',
-      kind: 'context_usage',
-      title: 'Context Usage',
-      sessionId: 's1',
-      closeWithPane: true,
+    expect(compress().disabled).toBe(true);
+    act(() => {
+      testState.blocks = [];
+      rerender(props);
     });
+    expect(compress().disabled).toBe(false);
+  });
+
+  it.each(['main', 'pane'])(
+    'does not retry the previous prompt after %s context compression fails',
+    async (owner) => {
+      mockConnection.commands = [
+        { name: 'compress', description: '', source: 'builtin-command' },
+      ];
+      mockSessionActions.getContextUsage.mockResolvedValue({
+        ...paneContextFixture,
+        sessionId: 'session-1',
+      });
+      mockSessionActions.sendPrompt.mockResolvedValue({
+        stopReason: 'end_turn',
+      });
+      const props: React.ComponentProps<typeof App> = {
+        header: { items: ['contextUsage'] },
+      };
+      const { container, rerender } = renderApp(props);
+      await flush();
+      const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+      const files = [
+        { name: 'app.log', media_type: 'text/plain', text: 'log' },
+      ];
+      await act(async () => {
+        testState.latestChatEditorProps!.onSubmit(
+          'previous successful prompt',
+          images,
+          files,
+          editorCommit,
+        );
+      });
+      await flush();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+        'previous successful prompt',
+        expect.objectContaining({ images, files }),
+      );
+      testState.prompt = 'Keep this draft';
+      editorClear.mockClear();
+      editorCommit.mockClear();
+      mockFollowup.clear.mockClear();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+          )!
+          .click();
+      });
+      await flush();
+      mockSessionActions.sendPrompt.mockRejectedValueOnce(
+        Object.assign(new Error('compression failed'), {
+          _daemonTurnError: true,
+        }),
+      );
+      if (owner === 'pane') {
+        rerender({ ...props, splitSessionIds: ['session-1'] });
+        await flush();
+        act(() => {
+          testState.latestSplitViewProps!.registerContextUsageControls!({
+            sessionId: 'session-1',
+            captureOwner: () => ({ isCurrent: () => true }),
+            canCompress: true,
+            compressing: false,
+            getContextUsage: mockSessionActions.getContextUsage,
+            compress: async () => {
+              testState.latestSplitViewProps!.onBeforeContextCompress!(
+                'session-1',
+              );
+              await mockSessionActions
+                .sendPrompt('/compress')
+                .catch(() => undefined);
+            },
+          });
+        });
+      }
+      const compress = Array.from(
+        document.body.querySelectorAll('button'),
+      ).find((button) => button.textContent === 'Compress context')!;
+      expect(compress.disabled).toBe(false);
+      await act(async () => compress.click());
+      expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+        '/compress',
+      );
+      if (owner === 'pane') {
+        await act(async () => {
+          container
+            .querySelector<HTMLButtonElement>(
+              '[data-testid="select-current-session"]',
+            )!
+            .click();
+        });
+        await flush();
+        expect(
+          container
+            .querySelector('[data-testid="messages"]')!
+            .closest('[aria-hidden="true"]'),
+        ).toBeNull();
+      }
+      act(() => {
+        testState.blocks = [
+          {
+            kind: 'error',
+            source: 'turn_error',
+            id: 'compression-error',
+            errorKind: 'internal_error',
+            text: 'compression failed',
+          },
+        ];
+        rerender(props);
+      });
+      expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+      expect(mockFollowup.clear).toHaveBeenCalledOnce();
+      expect(editorClear).not.toHaveBeenCalled();
+      expect(editorCommit).not.toHaveBeenCalled();
+      expect(testState.prompt).toBe('Keep this draft');
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('keeps the primary context owner when split panes contain other sessions', async () => {
+    mockPaneSessionActions.getContextUsage.mockClear();
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    mockSessionActions.sendPrompt.mockResolvedValue({ stopReason: 'end_turn' });
+    const props: React.ComponentProps<typeof App> = {
+      header: { items: ['contextUsage'] },
+    };
+    const { container, rerender } = renderApp(props);
+    await flush();
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('[data-testid="split-remove-panes"]')!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+        )!
         .click();
     });
+    await flush();
+    rerender({ ...props, splitSessionIds: ['s1', 's2'] });
+    await flush();
     expect(
-      document.body.querySelector('button[aria-label="Close Context Usage"]'),
-    ).toBeNull();
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('s1,s2');
+    const compress = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compress.disabled).toBe(false);
+    await act(async () => compress.click());
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledExactlyOnceWith(
+      '/compress',
+    );
+    expect(mockSessionActions.getContextUsage).toHaveBeenLastCalledWith({
+      detail: true,
+      silent: true,
+      syncCounters: true,
+    });
+    expect(mockPaneSessionActions.getContextUsage).not.toHaveBeenCalled();
+    rerender({ ...props, splitSessionIds: ['session-1'] });
+    await flush();
+    expect(
+      Array.from(document.body.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Compress context',
+      )!.disabled,
+    ).toBe(true);
   });
+
+  it.each(['failed', 'refreshFailed'] as const)(
+    'keeps a newer panel reading when a second compression is %s',
+    async (outcome) => {
+      mockConnection.commands = [
+        { name: 'compress', description: '', source: 'builtin-command' },
+      ];
+      const initial = { ...paneContextFixture, sessionId: 'session-1' };
+      const reading = (tokens: number) => ({
+        ...initial,
+        usage: {
+          ...initial.usage,
+          totalTokens: tokens,
+          breakdown: {
+            ...initial.usage.breakdown,
+            messages: tokens - 20,
+            freeSpace: 90 - tokens,
+          },
+        },
+      });
+      mockSessionActions.getContextUsage.mockResolvedValue(initial);
+      mockSessionActions.sendPrompt.mockResolvedValue({
+        stopReason: 'end_turn',
+      });
+      const { container } = renderApp({ header: { items: ['contextUsage'] } });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+          )!
+          .click();
+      });
+      await flush();
+      const compress = Array.from(
+        document.body.querySelectorAll('button'),
+      ).find((button) => button.textContent === 'Compress context')!;
+      mockSessionActions.getContextUsage.mockResolvedValueOnce(reading(30));
+      await act(async () => compress.click());
+      const panel = document.body.querySelector('[aria-busy][class*="panel"]')!;
+      expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
+        '30.0%',
+      );
+      mockSessionActions.getContextUsage.mockResolvedValueOnce(reading(90));
+      await act(async () => {
+        panel
+          .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+          .click();
+      });
+      expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
+        '90.0%',
+      );
+      const second = deferred<{ stopReason: 'end_turn' }>();
+      mockSessionActions.sendPrompt.mockReturnValueOnce(second.promise);
+      await act(async () => compress.click());
+      expect(panel.textContent).toContain('Compressing…');
+      expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
+        '90.0%',
+      );
+      await act(async () => {
+        if (outcome === 'failed')
+          second.reject(new Error('second compression failed'));
+        else {
+          mockSessionActions.getContextUsage.mockRejectedValueOnce(
+            new TypeError('fetch failed'),
+          );
+          second.resolve({ stopReason: 'end_turn' });
+        }
+      });
+      expect(panel.isConnected).toBe(true);
+      expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
+        '90.0%',
+      );
+      expect(panel.querySelector('[role="alert"]')?.textContent).toContain(
+        outcome === 'failed'
+          ? 'Compression failed. You can try again.'
+          : 'Compression completed, but usage could not be refreshed.',
+      );
+      expect(
+        mockSessionActions.sendPrompt.mock.calls.map(([prompt]) => prompt),
+      ).toEqual(['/compress', '/compress']);
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledTimes(
+        outcome === 'failed' ? 3 : 4,
+      );
+      const retry = deferred<{ stopReason: 'cancelled' }>();
+      mockSessionActions.sendPrompt.mockReturnValueOnce(retry.promise);
+      await act(async () => compress.click());
+      expect(panel.querySelector('[role="alert"]')).toBeNull();
+      expect(panel.querySelector('[role="status"]')?.textContent).toBe(
+        'Compressing…',
+      );
+      await act(async () => retry.resolve({ stopReason: 'cancelled' }));
+      expect(panel.querySelector('[role="status"]')?.textContent).toBe(
+        'Cancellation requested. Refresh to check current usage.',
+      );
+      expect(panel.querySelector('[role="alert"]')).toBeNull();
+      expect(panel.querySelector('[class*="percentage"]')?.textContent).toBe(
+        '90.0%',
+      );
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledTimes(
+        outcome === 'failed' ? 3 : 4,
+      );
+    },
+  );
+
+  it('preserves the primary prompt retry when another pane compresses', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+    await act(async () => {
+      testState.latestChatEditorProps!.onSubmit('retry this prompt', images);
+    });
+    await flush();
+    act(() => {
+      testState.blocks = [
+        { kind: 'error', source: 'turn_error', id: 'primary-error' },
+      ];
+      rerender();
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+    mockFollowup.clear.mockClear();
+    rerender({ splitSessionIds: ['other'] });
+    await flush();
+    act(() =>
+      testState.latestSplitViewProps!.onBeforeContextCompress!('other'),
+    );
+    expect(mockFollowup.clear).not.toHaveBeenCalled();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="select-current-session"]',
+        )!
+        .click();
+    });
+    await flush();
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="retry"]',
+    );
+    expect(retry).not.toBeNull();
+    await act(async () => retry!.click());
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'retry this prompt',
+      expect.objectContaining({ retry: true, images }),
+    );
+  });
+  it.each(
+    ['session switch', 'same-session recovery'].flatMap((transition) =>
+      ['completed', 'failed', 'cancelled'].map((outcome) => [
+        transition,
+        outcome,
+      ]),
+    ),
+  )(
+    'reconciles a reused reader after %s with the context panel closed (outcome=%s)',
+    async (transition, outcome) => {
+      mockConnection.commands = [
+        { name: 'compress', description: '', source: 'builtin-command' },
+      ];
+      const initial = { ...paneContextFixture, sessionId: 'session-1' };
+      const updated = {
+        ...initial,
+        usage: {
+          ...initial.usage,
+          totalTokens: 30,
+          breakdown: {
+            ...initial.usage.breakdown,
+            messages: 10,
+            freeSpace: 60,
+          },
+        },
+      };
+      mockSessionActions.getContextUsage
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValue(updated);
+      mockSessionActions.sendPrompt.mockResolvedValue({
+        stopReason: outcome === 'cancelled' ? 'cancelled' : 'end_turn',
+      });
+      if (outcome === 'failed')
+        mockSessionActions.sendPrompt.mockRejectedValueOnce(
+          new Error('compression failed'),
+        );
+      const props: React.ComponentProps<typeof App> = {
+        header: { items: ['contextUsage'] },
+      };
+      const { container, rerender } = renderApp(props);
+      await flush();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+          )!
+          .click(),
+      );
+      await flush();
+      await act(async () =>
+        Array.from(document.body.querySelectorAll('button'))
+          .find((button) => button.textContent === 'Compress context')!
+          .click(),
+      );
+      expect(document.body.textContent).toContain(
+        outcome === 'failed'
+          ? 'Compression failed.'
+          : outcome === 'cancelled'
+            ? 'Cancellation requested. Refresh to check current usage.'
+            : '30.0%',
+      );
+      await act(async () =>
+        document.body
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Close Context Usage"]',
+          )!
+          .click(),
+      );
+      await flush();
+      mockSessionActions.getContextUsage.mockClear();
+      if (transition === 'session switch') {
+        testState.ownerVersion++;
+        mockConnection.sessionId = 'other';
+        rerender(props);
+        await flush();
+        expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      }
+      if (transition === 'session switch') testState.ownerVersion++;
+      else testState.recoveryVersion++;
+      mockConnection.sessionId = 'session-1';
+      mockConnection.loadingTranscript = true;
+      rerender(props);
+      await flush();
+      expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      mockConnection.loadingTranscript = false;
+      rerender(props);
+      await flush();
+      if (outcome === 'failed')
+        expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      else
+        expect(
+          mockSessionActions.getContextUsage,
+        ).toHaveBeenCalledExactlyOnceWith({
+          silent: true,
+          syncCounters: true,
+        });
+      expect(
+        document.body.querySelector('button[aria-label="Close Context Usage"]'),
+      ).toBeNull();
+      rerender(props);
+      await flush();
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledTimes(
+        outcome === 'failed' ? 0 : 1,
+      );
+      if (outcome === 'cancelled') {
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>(
+              '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+            )!
+            .click(),
+        );
+        await flush();
+        expect(mockSessionActions.getContextUsage).toHaveBeenLastCalledWith({
+          detail: true,
+          silent: true,
+          syncCounters: true,
+        });
+        expect(document.body.textContent).not.toContain('Compression failed.');
+      }
+    },
+  );
+
+  it.each(['failed', 'refreshFailed'])(
+    'retains the latest compression across owners and reconciles each provider once after %s',
+    async (outcome) => {
+      mockConnection.commands = [
+        { name: 'compress', description: '', source: 'builtin-command' },
+      ];
+      const initial = { ...paneContextFixture, sessionId: 'session-1' };
+      const updated = {
+        ...initial,
+        usage: {
+          ...initial.usage,
+          totalTokens: 30,
+          breakdown: {
+            ...initial.usage.breakdown,
+            messages: 10,
+            freeSpace: 60,
+          },
+        },
+      };
+      mockSessionActions.getContextUsage.mockResolvedValue(initial);
+      mockSessionActions.sendPrompt.mockResolvedValue({
+        stopReason: 'end_turn',
+      });
+      const props: React.ComponentProps<typeof App> = {
+        header: { items: ['contextUsage'] },
+      };
+      const { container, rerender } = renderApp(props);
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+          )!
+          .click();
+      });
+      await flush();
+      if (outcome === 'failed') {
+        mockSessionActions.sendPrompt.mockRejectedValueOnce(
+          new Error('compression failed'),
+        );
+      } else {
+        mockSessionActions.getContextUsage.mockRejectedValueOnce(
+          new TypeError('fetch failed'),
+        );
+      }
+      await act(async () => {
+        Array.from(document.body.querySelectorAll('button'))
+          .find((button) => button.textContent === 'Compress context')!
+          .click();
+      });
+      expect(document.body.textContent).toContain(
+        outcome === 'failed'
+          ? 'Compression failed.'
+          : 'Compression completed, but usage could not be refreshed.',
+      );
+      const splitProps = { ...props, splitSessionIds: ['session-1'] };
+      rerender(splitProps);
+      await flush();
+      const getContextUsage = vi.fn().mockResolvedValue(updated);
+      const pane = {
+        sessionId: 'session-1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress: vi.fn(),
+        getContextUsage,
+      };
+      let unregister!: () => void;
+      act(() => {
+        unregister =
+          testState.latestSplitViewProps!.registerContextUsageControls!(pane);
+      });
+      await flush();
+      if (outcome === 'failed')
+        expect(getContextUsage).not.toHaveBeenCalledWith({
+          silent: true,
+          syncCounters: true,
+        });
+      else
+        expect(getContextUsage).toHaveBeenCalledWith({
+          silent: true,
+          syncCounters: true,
+        });
+      await act(async () => {
+        document.body
+          .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+          .click();
+      });
+      expect(getContextUsage).toHaveBeenLastCalledWith({
+        detail: true,
+        silent: true,
+        syncCounters: true,
+      });
+      mockSessionActions.getContextUsage.mockClear();
+      mockSessionActions.getContextUsage.mockResolvedValue(updated);
+      mockConnection.commands = [];
+      rerender(splitProps);
+      await flush();
+      act(() => {
+        testState.latestSplitViewProps!.registerContextUsageControls!({
+          ...pane,
+          result: { kind: 'completed', usage: updated },
+        });
+      });
+      await flush();
+      expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      mockConnection.commands = [
+        { name: 'compress', description: '', source: 'builtin-command' },
+      ];
+      rerender(splitProps);
+      await flush();
+      expect(
+        mockSessionActions.getContextUsage,
+      ).toHaveBeenCalledExactlyOnceWith({
+        silent: true,
+        syncCounters: true,
+      });
+      expect(document.body.textContent).toContain('30.0%');
+      act(() => unregister());
+      rerender(splitProps);
+      await flush();
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledOnce();
+      const replacementRead = vi.fn().mockResolvedValue(updated);
+      act(() => {
+        testState.latestSplitViewProps!.registerContextUsageControls!({
+          ...pane,
+          getContextUsage: replacementRead,
+        });
+      });
+      await flush();
+      expect(replacementRead).toHaveBeenCalledWith({
+        silent: true,
+        syncCounters: true,
+      });
+      expect(document.body.textContent).toContain('30.0%');
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledOnce();
+      const foreignUsage = {
+        ...updated,
+        sessionId: 'other',
+        usage: {
+          ...updated.usage,
+          totalTokens: 45,
+          breakdown: {
+            ...updated.usage.breakdown,
+            messages: 25,
+            freeSpace: 45,
+          },
+        },
+      };
+      const foreignRead = vi.fn().mockResolvedValue(foreignUsage);
+      act(() => {
+        testState.latestSplitViewProps!.registerContextUsageControls!({
+          ...pane,
+          sessionId: 'other',
+          getContextUsage: foreignRead,
+          result: {
+            kind: 'completed',
+            usage: foreignUsage,
+          },
+        });
+      });
+      await flush();
+      expect(document.body.textContent).toContain('30.0%');
+      expect(document.body.textContent).not.toContain('45.0%');
+      expect(foreignRead).not.toHaveBeenCalled();
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledOnce();
+      await act(async () => {
+        document.body
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Close Context Usage"]',
+          )!
+          .click();
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="select-current-session"]',
+          )!
+          .click();
+      });
+      await flush();
+      mockSessionActions.getContextUsage.mockRejectedValueOnce(
+        new TypeError('fetch failed'),
+      );
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+          )!
+          .click();
+      });
+      await flush();
+      expect(document.body.textContent).toContain('30.0%');
+      expect(document.body.textContent).not.toContain('45.0%');
+      expect(foreignRead).not.toHaveBeenCalled();
+    },
+  );
 
   it('replaces a header-opened context tab with the pane-bound binding', async () => {
     // Sequential ordering: header open in chat view, enter split (seeded with
@@ -34721,8 +35718,28 @@ describe('App prompt send failure retry', () => {
       options?.onAdmissionStarted?.();
       return firstSend.promise;
     });
-    const { rerender } = renderApp();
+    mockConnection.commands = [
+      { name: 'compress', description: '', source: 'builtin-command' },
+    ];
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    const { container, rerender } = renderApp({
+      header: { items: ['contextUsage'] },
+    });
     await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="chat-context-header"] [aria-label="Context Usage"]',
+        )!
+        .click();
+    });
+    const compressButton = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((button) => button.textContent === 'Compress context')!;
+    expect(compressButton.disabled).toBe(false);
 
     act(() => {
       testState.latestChatEditorProps?.onSubmit('hello');
@@ -34736,6 +35753,7 @@ describe('App prompt send failure retry', () => {
       '[data-testid="prompt-admission-unknown"]',
     );
     expect(notice).not.toBeNull();
+    expect(compressButton.disabled).toBe(true);
     expect(
       document.querySelector('[data-testid="failed-prompt-retry"]'),
     ).toBeNull();
@@ -36732,6 +37750,42 @@ describe('App /goal command', () => {
       await flush();
     });
   });
+
+  it.each(['/goal set first objective', 'hello', '!pwd'])(
+    'preserves a cold-session draft when capacity rejects %s',
+    async (prompt) => {
+      mockConnection.sessionId = undefined;
+      mockSessionActions.createSession.mockRejectedValueOnce(
+        new DaemonHttpError(
+          503,
+          { code: 'acp_child_capacity_exhausted' },
+          'capacity reached',
+        ),
+      );
+      const onToast = vi.fn();
+      renderApp({ language: 'zh-CN', onToast });
+      await flush();
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = testState.latestChatEditorProps?.onSubmit(
+          prompt,
+          undefined,
+          undefined,
+          editorCommit,
+        );
+      });
+      await flush();
+      expect(accepted).toBe(false);
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
+      );
+      expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      expect(editorCommit).not.toHaveBeenCalled();
+      expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('creates a goal as the first command while the new session is still committing', async () => {
     mockConnection.sessionId = undefined;

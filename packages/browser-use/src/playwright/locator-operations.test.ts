@@ -446,6 +446,20 @@ describe('buildLocator', () => {
   });
 });
 
+describe('locator.count', () => {
+  it('bounds the read by the caller deadline when the page stops answering', async () => {
+    const locator = { count: vi.fn(() => new Promise<number>(() => {})) };
+    const tab = { page: { locator: () => locator } } as unknown as TabState;
+    await expect(
+      executeLocatorOperation(
+        'locator.count',
+        { steps: [{ kind: 'locator', selector: '.row' }], timeoutMs: 50 },
+        tab,
+      ),
+    ).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' });
+  });
+});
+
 describe('locator.allTextContents', () => {
   function textsFixture() {
     const handle = { waitFor: vi.fn(async () => undefined) };
@@ -489,6 +503,42 @@ describe('locator.allTextContents', () => {
     await expect(
       executeLocatorOperation('locator.allTextContents', f.args, f.tab),
     ).rejects.toThrow('Target crashed');
+  });
+
+  it('bounds the read by the caller deadline when the page stops answering', async () => {
+    const f = textsFixture();
+    f.locator.allTextContents.mockReturnValue(new Promise<string[]>(() => {}));
+    await expect(
+      executeLocatorOperation('locator.allTextContents', f.args, f.tab),
+    ).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' });
+  });
+
+  it('resolves [] without reading once the attach wait consumes the budget', async () => {
+    const f = textsFixture();
+    f.handle.waitFor.mockImplementation(
+      () =>
+        new Promise<undefined>((_resolve, reject) =>
+          setTimeout(() => {
+            const timeout = new Error('Timeout 30ms exceeded');
+            timeout.name = 'TimeoutError';
+            reject(timeout);
+          }, 30),
+        ),
+    );
+    f.locator.allTextContents.mockImplementation(
+      () =>
+        new Promise<string[]>((resolve) =>
+          setTimeout(() => resolve(['late']), 5),
+        ),
+    );
+    await expect(
+      executeLocatorOperation(
+        'locator.allTextContents',
+        { ...f.args, timeoutMs: 30 },
+        f.tab,
+      ),
+    ).resolves.toEqual([]);
+    expect(f.locator.allTextContents).not.toHaveBeenCalled();
   });
 });
 
@@ -620,9 +670,9 @@ describe('locator.downloadMedia', () => {
     const locator = {
       evaluate: vi.fn(
         async (
-          read: (element: unknown, budgetMs: number) => unknown,
-          budgetMs?: number,
-        ) => read(element, budgetMs ?? 100),
+          read: (element: unknown, deadline: number) => unknown,
+          deadline?: number,
+        ) => read(element, deadline ?? Date.now() + 100),
       ),
     };
     const tab = { page: { locator: () => locator } } as unknown as TabState;
@@ -808,6 +858,100 @@ describe('locator.downloadMedia', () => {
       'https://cdn.example.com/hero.webp',
       { signal: expect.any(AbortSignal) },
     );
+  });
+
+  it('prefers the rendered currentSrc over an earlier source candidate', async () => {
+    const f = downloadFixture({});
+    f.element.querySelectorAll.mockImplementation((selector: string) =>
+      selector === 'img, video, source'
+        ? [
+            { src: '', srcset: '/hero-small.webp 600w' },
+            {
+              src: '/hero.png',
+              currentSrc: 'https://cdn.example.com/hero-large.webp',
+            },
+          ]
+        : [],
+    );
+    await executeLocatorOperation('locator.downloadMedia', f.args, f.tab);
+    expect(f.fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://cdn.example.com/hero-large.webp',
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it.each(['HTTP 500', 'cross-origin without CORS'])(
+    'reports %s on a file link instead of downloading its icon',
+    async (message) => {
+      const f = downloadFixture({});
+      Object.assign(f.element, { href: 'https://example.com/report.pdf' });
+      f.element.querySelectorAll.mockReturnValue([
+        { src: 'https://example.com/pdf-icon.png' },
+      ]);
+      if (message === 'HTTP 500') {
+        f.fetchMock.mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          headers: new Headers(),
+          blob: async () => new Blob(),
+        });
+      } else {
+        f.fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      }
+      await expect(
+        executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+      ).rejects.toThrow(message);
+      expect(f.fetchMock).toHaveBeenCalledOnce();
+      expect(f.anchor.click).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['locator resolution', 0],
+    ['HTML probe', 1],
+    ['response body', 1],
+    ['anchor insertion', 1],
+  ] as const)('stops an expired download after %s', async (stage, fetches) => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    try {
+      const f = downloadFixture({});
+      Object.assign(f.element, { href: 'https://example.com/file' });
+      f.element.querySelectorAll.mockReturnValue([
+        { src: 'https://example.com/photo.jpg' },
+      ]);
+      f.locator.evaluate.mockImplementationOnce(async (read, deadline) => {
+        if (stage === 'locator resolution') now.mockReturnValue(1_101);
+        return read(f.element, deadline ?? 0);
+      });
+      f.fetchMock.mockImplementationOnce(async () => {
+        if (stage === 'HTML probe') now.mockReturnValue(1_101);
+        return {
+          ok: true,
+          headers: new Headers({
+            'content-type': stage === 'HTML probe' ? 'text/html' : 'image/jpeg',
+          }),
+          blob: async () => {
+            if (stage === 'response body') now.mockReturnValue(1_101);
+            return new Blob(['bytes']);
+          },
+        };
+      });
+      if (stage === 'anchor insertion') {
+        vi.mocked(document.body.append).mockImplementationOnce(() => {
+          now.mockReturnValue(1_101);
+        });
+      }
+      await expect(
+        executeLocatorOperation('locator.downloadMedia', f.args, f.tab),
+      ).rejects.toThrow('timed out');
+      expect(f.fetchMock).toHaveBeenCalledTimes(fetches);
+      expect(f.anchor.click).not.toHaveBeenCalled();
+      if (stage === 'anchor insertion') {
+        expect(f.anchor.remove).toHaveBeenCalledOnce();
+      }
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('resolves a relative srcset candidate against the document base', async () => {

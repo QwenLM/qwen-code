@@ -103,6 +103,8 @@ function describeThrown(error) {
     let name = 'Error';
     let message = '';
     let stack;
+    let code;
+    let details;
     try {
       if (typeof error.name === 'string') name = error.name;
     } catch {
@@ -119,10 +121,33 @@ function describeThrown(error) {
     } catch {
       // Stack is optional.
     }
+    try {
+      const value = Object.getOwnPropertyDescriptor(error, 'code')?.value;
+      if (typeof value === 'string') code = capText(value, 256);
+      const detail = Object.getOwnPropertyDescriptor(error, 'details')?.value;
+      if (detail !== undefined) {
+        details = capText(
+          inspect(detail, {
+            depth: 4,
+            maxArrayLength: 10,
+            maxStringLength: 256,
+            customInspect: false,
+            getters: false,
+            breakLength: Infinity,
+            compact: true,
+          }),
+          4096,
+        );
+      }
+    } catch {
+      // Optional diagnostics must not replace the original failure.
+    }
     return {
       name: capText(name, 1024),
       message: capText(message, MAX_ERROR_CHARS),
       stack: stack ? capText(stack, MAX_ERROR_CHARS) : undefined,
+      code,
+      details,
     };
   }
   return {
@@ -832,7 +857,12 @@ function readPartialSnapshot(module, exportName, kinds) {
     const next = new Map();
     for (const name of Object.keys(snapshot)) {
       const kind = kinds.get(name);
-      if (kind) next.set(name, { value: snapshot[name], kind });
+      if (kind)
+        next.set(name, {
+          value: snapshot[name].value,
+          reference: snapshot[name].binding,
+          kind,
+        });
     }
     return next;
   } catch {
@@ -844,11 +874,19 @@ function readSuccessfulBindings(module, bindingExports) {
   const next = new Map();
   for (const { bindingName, bindingKind, exportName } of bindingExports) {
     next.set(bindingName, {
-      value: module.namespace[exportName],
+      value: module.namespace[exportName].value,
+      reference: module.namespace[exportName],
       kind: bindingKind,
     });
   }
   return next;
+}
+
+function restoreBindings(checkpoint) {
+  for (const binding of checkpoint.values()) {
+    if (binding.kind !== 'const') binding.reference.value = binding.value;
+  }
+  bindings = checkpoint;
 }
 
 async function handleExec(message) {
@@ -862,6 +900,12 @@ async function handleExec(message) {
     throw new Error('host and kernel binding snapshots are out of sync');
   }
   const nextBindingKinds = bindingKinds(message.bindingExports);
+  const entryBindings = new Map(
+    [...bindings].map(([name, binding]) => [
+      name,
+      { ...binding, value: binding.reference.value },
+    ]),
+  );
 
   const exec = {
     execId: message.execId,
@@ -944,10 +988,11 @@ async function handleExec(message) {
       imagesDropped: activeExec.imagesDropped,
     });
   } catch (error) {
+    const described = describeThrown(error);
     const status =
       error instanceof CellCancelledError
         ? 'cancelled'
-        : error?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'
+        : described.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'
           ? 'timeout'
           : 'error';
     if (status === 'cancelled' || status === 'timeout') {
@@ -966,9 +1011,10 @@ async function handleExec(message) {
         message.snapshotExportName,
         nextBindingKinds,
       );
-      if (partial) bindings = partial;
+      restoreBindings(partial ?? entryBindings);
+    } else {
+      restoreBindings(entryBindings);
     }
-    const described = describeThrown(error);
     send({
       type: 'execResult',
       execId: message.execId,
@@ -979,6 +1025,8 @@ async function handleExec(message) {
       errorName: described.name,
       errorMessage: described.message,
       ...(described.stack ? { errorStack: described.stack } : {}),
+      ...(described.code ? { errorCode: described.code } : {}),
+      ...(described.details ? { errorDetails: described.details } : {}),
     });
   } finally {
     activeExec = null;

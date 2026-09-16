@@ -169,6 +169,7 @@ npm run preflight  # Full check: clean → install → format → lint → build
   2-space indent, 80-char width
 - **Linting**: No `any` types, consistent type imports, no relative imports
   between packages
+- **Core imports in cli**: production code in `packages/cli/src` imports core values from the module that defines them (`@qwen-code/qwen-code-core/utils/debugLogger.js`), not the package root, which evaluates all of core in every test that reaches the file. Type-only imports are exempt. Files that predate the rule are allowlisted in `eslint.legacy-core-barrel-imports.mjs`; drop an entry when you move its file off the root, never add one.
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
 - **File naming**: `PascalCase.tsx` for React components, `kebab-case.ts` for

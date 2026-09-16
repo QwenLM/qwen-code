@@ -27,6 +27,7 @@ import {
   createNonInteractivePromptId,
   main,
   registerLspHotReload,
+  setupUncaughtExceptionHandler,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
@@ -36,7 +37,7 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -3608,6 +3609,99 @@ describe('validateDnsResolutionOrder', () => {
   });
 });
 
+describe('setupUncaughtExceptionHandler', () => {
+  let tmpDir: string;
+  let installedHandler: ((error: unknown) => void) | undefined;
+  let exitSpy: MockInstance;
+  let debugLogPathSpy: MockInstance;
+
+  const makeConfig = (abortAll: () => void, running: unknown[] = []) =>
+    ({
+      ...sessionRegistryConfigStub,
+      getSessionId: () => 'uncaught-test-session',
+      getMonitorRegistry: () => ({ abortAll, getRunning: () => running }),
+    }) as unknown as Config;
+
+  const installHandler = (config: Config): ((error: unknown) => void) => {
+    const before = new Set(process.listeners('uncaughtException'));
+    setupUncaughtExceptionHandler(config);
+    const installed = process
+      .listeners('uncaughtException')
+      .filter((listener) => !before.has(listener))
+      .pop();
+    if (!installed) {
+      throw new Error('uncaughtException handler was not installed');
+    }
+    installedHandler = installed as (error: unknown) => void;
+    return installedHandler;
+  };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'qwen-uncaught-'));
+    debugLogPathSpy = vi
+      .spyOn(Storage, 'getDebugLogPath')
+      .mockReturnValue(join(tmpDir, 'debug.txt'));
+    exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as typeof process.exit);
+  });
+
+  afterEach(() => {
+    if (installedHandler) {
+      process.removeListener('uncaughtException', installedHandler);
+      installedHandler = undefined;
+    }
+    exitSpy.mockRestore();
+    debugLogPathSpy.mockRestore();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reaps running monitors before exiting on an uncaught exception', () => {
+    const abortAll = vi.fn();
+    const handler = installHandler(makeConfig(abortAll, [{}, {}]));
+
+    handler(new Error('boom'));
+
+    expect(abortAll).toHaveBeenCalledWith({ notify: false });
+    // The reap must land before exit: a reordering that exits first would
+    // silently skip it, and a mocked no-op exit cannot catch that by itself.
+    expect(abortAll.mock.invocationCallOrder[0]).toBeLessThan(
+      (exitSpy.mock.invocationCallOrder[0] as number) ?? 0,
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const log = readFileSync(join(tmpDir, 'debug.txt'), 'utf8');
+    expect(log).toContain('[UNCAUGHT_EXCEPTION] boom');
+    // A successful reap also leaves a synchronous record — without it a crash
+    // log cannot tell "reap skipped a monitor" from "signalled but ignored".
+    expect(log).toContain('[MONITOR_REAP] reaped=2');
+  });
+
+  it('leaves monitors alone for expected PTY teardown races', () => {
+    const abortAll = vi.fn();
+    const handler = installHandler(makeConfig(abortAll));
+
+    handler(new Error('read EIO'));
+
+    expect(abortAll).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('still exits when the monitor registry throws during reap', () => {
+    const abortAll = vi.fn(() => {
+      throw new Error('registry broken');
+    });
+    const handler = installHandler(makeConfig(abortAll));
+
+    expect(() => handler(new Error('boom'))).not.toThrow();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    // A failed reap means monitors still leak; that fact must be recorded,
+    // not swallowed (the crash line above cannot contain it).
+    const log = readFileSync(join(tmpDir, 'debug.txt'), 'utf8');
+    expect(log).toContain('[MONITOR_REAP_FAILED]');
+    expect(log).toContain('registry broken');
+  });
+});
+
 describe('startInteractiveUI', () => {
   // Mock dependencies
   const mockConfig = {
@@ -3623,6 +3717,10 @@ describe('startInteractiveUI', () => {
       ui: {
         hideWindowTitle: false,
       },
+      // Messaging is on by default, and on it binds an inbox and arms its
+      // own exit cleanup. These tests are about startup order and render
+      // options; the messaging path is covered in startInteractiveUI.test.
+      agents: { crossSessionMessaging: false },
     },
     getUserHooks: () => undefined,
     getProjectHooks: () => undefined,
@@ -3955,6 +4053,8 @@ describe('startInteractiveUI', () => {
         ui: {
           hideWindowTitle: false,
         },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        agents: { crossSessionMessaging: false },
       },
     } as LoadedSettings;
 
@@ -4303,7 +4403,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
 
       await startInteractiveUI(
@@ -4334,7 +4438,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
       // An earlier describe's vi.restoreAllMocks() wipes the shared ink
       // render mock's return value in the full run, so re-arm it here.

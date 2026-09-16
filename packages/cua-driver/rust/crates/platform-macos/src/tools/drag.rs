@@ -33,6 +33,58 @@ impl DragTool {
     }
 }
 
+fn prepare_foreground_drag(pid: i32, window_id: u32, x: f64, y: f64) -> anyhow::Result<()> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    use std::time::{Duration, Instant};
+
+    // An app can be frontmost and AX-focused while its window stays occluded.
+    // Global HID needs the exact window raised and the starting point verified.
+    super::bring_to_front::raise_exact_ax_window(pid, window_id);
+    let system = unsafe { AXUIElementCreateSystemWide() };
+    if system.is_null() {
+        anyhow::bail!("could not verify the foreground drag target");
+    }
+    unsafe { AXUIElementSetMessagingTimeout(system, 0.1) };
+    let deadline = Instant::now() + Duration::from_millis(900);
+    let mut stable_since = None;
+    let ready = loop {
+        let mut hit = std::ptr::null_mut();
+        let mut owner = 0;
+        let matches = unsafe {
+            let status = AXUIElementCopyElementAtPosition(system, x as f32, y as f32, &mut hit);
+            let matches = status == kAXErrorSuccess
+                && !hit.is_null()
+                && AXUIElementGetPid(hit, &mut owner) == kAXErrorSuccess
+                && owner == pid
+                && crate::ax::exact_target::element_window_id(hit) == Some(window_id);
+            if !hit.is_null() {
+                CFRelease(hit as CFTypeRef);
+            }
+            matches
+        } && crate::input::skylight::front_process_matches(pid, window_id)
+            == Some(true);
+        let now = Instant::now();
+        if matches {
+            let since = stable_since.get_or_insert(now);
+            if now.duration_since(*since) >= Duration::from_millis(100) {
+                break true;
+            }
+        } else {
+            stable_since = None;
+        }
+        if now >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    unsafe { CFRelease(system as CFTypeRef) };
+    if !ready {
+        anyhow::bail!("foreground drag start did not belong to the exact target window; no mouse input was sent");
+    }
+    Ok(())
+}
+
 static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 
 fn def() -> &'static ToolDef {
@@ -58,6 +110,7 @@ fn def() -> &'static ToolDef {
             "properties": {
                 "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "pid": { "type": "integer", "description": "Target process ID." },
+                "app_context": { "type": "boolean", "description": "Let the app workflow choose the supported native drag route before dispatch." },
                 "window_id": {
                     "type": "integer",
                     "description": "CGWindowID for the window the pixel coordinates were measured against. Optional only when pid owns exactly one eligible top-level window; otherwise the action refuses with ambiguous_window_target."
@@ -187,7 +240,11 @@ impl Tool for DragTool {
         // press-drag-release gesture (the explicit last resort for surfaces
         // that drop background CGEvents), via the same skylight assist click
         // uses. Requires a window_id to have a window to front.
-        let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
+        let delivery_mode = if args.bool_or("app_context", false) {
+            super::DeliveryMode::Foreground
+        } else {
+            super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref())
+        };
         if !delivery_mode.is_foreground() {
             return ToolResult::error(
                 "Background drag is unavailable on macOS; use delivery_mode:\"foreground\"."
@@ -293,11 +350,15 @@ impl Tool for DragTool {
         // mouseDown half-event alone can activate the target app on some
         // Chromium builds. Wrap to catch + report both.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let fg = delivery_mode.is_foreground() && window_id.is_some();
+        let snapshot = if fg {
+            WindowChangeDetector::snapshot_without_suppression(prior_front)
+        } else {
+            WindowChangeDetector::snapshot(prior_front)
+        };
 
         // Dispatch blocking drag synthesis.
         let mods_owned = modifiers.clone();
-        let fg = delivery_mode.is_foreground() && window_id.is_some();
         let cursor_for_drag = cursor_key.clone();
         crate::cursor::overlay::send_command(
             cursor_key.clone(),
@@ -316,13 +377,12 @@ impl Tool for DragTool {
                     let do_it = move || -> anyhow::Result<()> {
                         let m: Vec<&str> = mods_owned.iter().map(String::as_str).collect();
                         if fg {
-                            // HID delivery is global, so foreground mode must
-                            // establish a real active application before the
-                            // gesture begins. The SkyLight flash can be
-                            // unavailable for Electron child windows; the
-                            // documented Cocoa activation is the fallback.
-                            apps::activate_pid(pid);
-                            std::thread::sleep(std::time::Duration::from_millis(40));
+                            prepare_foreground_drag(
+                                pid,
+                                window_id.expect("foreground window drag"),
+                                from_sx,
+                                from_sy,
+                            )?;
                             let observed_cursor = cursor_for_drag.clone();
                             return crate::input::mouse::drag_at_xy_foreground_observed(
                                 from_sx,
@@ -366,16 +426,8 @@ impl Tool for DragTool {
                     // Foreground rung: activate for the complete HID gesture,
                     // then restore the prior app after pointer capture settles.
                     match (fg, window_id) {
-                        (true, Some(_wid)) => {
-                            let result = do_it();
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            if let Some(previous_pid) = prior_front {
-                                if previous_pid != pid {
-                                    apps::activate_pid(previous_pid);
-                                }
-                            }
-                            result?;
-                            Ok(())
+                        (true, Some(wid)) => {
+                            crate::input::skylight::with_foreground_hid_activation(pid, wid, do_it)
                         }
                         _ => do_it(),
                     }

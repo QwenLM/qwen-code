@@ -48,6 +48,7 @@ import {
   numberArg,
   pageTitle,
   record,
+  staleTabError,
   stringArg,
   stringArray,
   timeoutArg,
@@ -140,6 +141,14 @@ export class PlaywrightRuntime {
       return result;
     } catch (error) {
       if (tab?.stale === 'session') throw staleSessionError();
+      if (error instanceof BrowserRuntimeError) throw error;
+      // The pinned playwright-core client renders a closed target as a plain
+      // Error (only TimeoutError sets `name`), and evaluate-channel text
+      // fails closed by design, so a tab that closed or crashed while the
+      // command ran cannot be classified from the error itself. Decide it
+      // from the tab's own state, which the page observers keep current.
+      if (tab !== undefined && (tab.stale === 'tab' || tab.page.isClosed()))
+        throw staleTabError();
       throw sanitizeOperationError(method, error);
     }
   }

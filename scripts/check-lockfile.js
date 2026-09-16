@@ -289,11 +289,37 @@ function npmPackageName(location, details) {
   return location.slice(location.lastIndexOf(marker) + marker.length);
 }
 
-// pnpm keys are `name@version` (allowBuilds also accepts `name@spec`); a
-// scoped name starts with its own `@`.
-function pnpmPackageName(key) {
-  const at = key.indexOf('@', 1);
-  return at === -1 ? key : key.slice(0, at);
+// pnpm decides a build from the whole allowBuilds key, not from its name
+// alone: a bare name covers every version, `name@1.2.3` — or a `||` union of
+// exact versions — covers only those, and a source-like key such as
+// `name@file:packages/core` is an exact-instance rule no registry dependency
+// can match. A range is not a scope at all: pnpm's parseVersionPolicyRule
+// throws INVALID_VERSION_UNION ('Use exact versions only') on
+// `esbuild@^0.25.0` and refuses to install, so counting such a key as no
+// decision keeps this gate red for a tree pnpm would not build either.
+// Reducing a key to its name would let an approval scoped to one version
+// silently cover the next version npm installs.
+function allowBuildDecisions(allowBuilds) {
+  const names = new Set();
+  const versions = new Set();
+  for (const [key, decision] of Object.entries(allowBuilds ?? {})) {
+    // pnpm records an undecided entry as the string 'set this to true or
+    // false'; only a boolean runs or skips a build.
+    if (typeof decision !== 'boolean') continue;
+    const at = key.indexOf('@', 1);
+    if (at === -1) {
+      names.add(key);
+      continue;
+    }
+    const name = key.slice(0, at);
+    for (const spec of key.slice(at + 1).split('||')) {
+      const version = spec.trim();
+      if (/^\d+\.\d+\.\d+[\w.+-]*$/.test(version)) {
+        versions.add(`${name}@${version}`);
+      }
+    }
+  }
+  return { names, versions };
 }
 
 console.log('Checking pnpm lockfile against package-lock.json...');
@@ -326,10 +352,16 @@ for (const [location, details] of Object.entries(packages)) {
 // 1.52.0 or form-data moves off mime-types@2.
 const knownNpmLockGaps = new Set(['mime-db@1.52.0']);
 
-// pnpm dedupes where npm keeps nested copies (npm locks esbuild 0.25.6 at the
-// root and 0.25.12 nested; pnpm uses 0.25.12 for both), so the two graphs are
-// never equal. The direction that matters is this one: a pnpm worktree must
-// not run a dependency version that CI's npm install has not locked.
+// The two graphs are never equal, because pnpm dedupes where npm keeps nested
+// copies: npm locks esbuild 0.25.6 at the root and 0.25.12 nested, and pnpm
+// uses 0.25.12 for both. Read that as an accepted parity gap rather than
+// harmless deduplication — a pnpm worktree bundles with a different esbuild
+// than CI does, bounded only by npm staying authoritative for build,
+// packaging and release. What this gate enforces is the direction that stays
+// safe under that gap: a pnpm worktree must not run a dependency version that
+// CI's npm install has never locked. Closing the gap itself is what the
+// hoisted-parity measurement in docs/verification/pnpm-stage2-evidence/
+// exists to settle.
 const pnpmVersions = Object.keys(pnpmLockfile?.packages ?? {});
 if (pnpmVersions.length === 0) {
   console.error(
@@ -379,13 +411,12 @@ try {
 // npm runs every dependency install script; pnpm runs one only when
 // allowBuilds approves it. Requiring an entry for each script npm runs keeps
 // that difference a reviewed decision instead of a silent one.
-const decidedBuilds = new Set(
-  Object.entries(pnpmWorkspace?.allowBuilds ?? {})
-    // pnpm itself records an undecided entry as the string 'set this to true
-    // or false'; only a boolean runs or skips a build.
-    .filter(([, decision]) => typeof decision === 'boolean')
-    .map(([key]) => pnpmPackageName(key)),
-);
+const decidedBuilds = allowBuildDecisions(pnpmWorkspace?.allowBuilds);
+// A bare name decides name-wide here, while pnpm honours that only for a
+// registry-shaped depPath and wants a git-repo key for a git dependency. No
+// install-script entry in package-lock.json resolves from git or a tarball
+// today, so the two agree; the first one that does needs that key shape
+// modelled here as well.
 const undecidedBuilds = new Set();
 for (const [location, details] of Object.entries(packages)) {
   if (
@@ -395,14 +426,14 @@ for (const [location, details] of Object.entries(packages)) {
     continue;
   }
   const name = npmPackageName(location, details);
-  if (!decidedBuilds.has(name)) {
-    undecidedBuilds.add(name);
-  }
+  if (decidedBuilds.names.has(name)) continue;
+  if (decidedBuilds.versions.has(`${name}@${details.version}`)) continue;
+  undecidedBuilds.add(`${name}@${details.version}`);
 }
 
 if (undecidedBuilds.size > 0) {
   console.error(
-    '\nError: these dependencies have install scripts but no allowBuilds entry in pnpm-workspace.yaml; add each with true (run it) or false (skip it):',
+    '\nError: these dependencies have install scripts but no allowBuilds entry in pnpm-workspace.yaml covering the version npm locks; add each with true (run it) or false (skip it):',
   );
   [...undecidedBuilds].sort().forEach((name) => console.error(`- ${name}`));
   process.exitCode = 1;

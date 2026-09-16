@@ -447,14 +447,14 @@ describe('buildHigherDisabled', () => {
 });
 
 describe('skillToggleBlockForName', () => {
-  it('derives the authored spelling from a qualified request name', () => {
+  it('uses the resolved authored spelling for a qualified request name', () => {
     expect(
       skillToggleBlockForName(
         fakeSettings({
           merged: {},
           workspace: { disabled: ['pdf'] },
         }),
-        'demo:pdf',
+        { name: 'demo:pdf', authoredName: 'pdf' },
       ),
     ).toEqual({
       reason: 'hard',
@@ -473,7 +473,7 @@ describe('skillToggleBlockForName', () => {
           merged: {},
           workspace: { disabled: ['demo:pdf'] },
         }),
-        'pdf',
+        { name: 'pdf' },
       ),
     ).toBeNull();
   });

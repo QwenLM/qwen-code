@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
@@ -22,6 +26,40 @@ function loadConfig(): UserConfig {
     isPreview: false,
   });
 }
+
+it('serves preview documents with CSP scoped to the selected daemon', async ({
+  onTestFinished,
+}) => {
+  const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
+  onTestFinished(() => rm(dist, { recursive: true, force: true }));
+  await writeFile(
+    join(dist, 'index.html'),
+    '<!doctype html><title>Preview</title>',
+  );
+  const server = await preview({
+    ...loadConfig(),
+    configFile: false,
+    build: { outDir: dist },
+    preview: { host: '127.0.0.1', port: 0 },
+  });
+  onTestFinished(() => server.close());
+  const baseUrl = server.resolvedUrls!.local[0];
+  for (const [query, expected] of [
+    [
+      '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+    ],
+    ['//', "connect-src 'self'"],
+    ['', "connect-src 'self'"],
+  ]) {
+    const response = await fetch(`${baseUrl}${query}`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('<title>Preview</title>');
+    expect(
+      response.headers.get('Content-Security-Policy')?.split('; '),
+    ).toContain(expected);
+  }
+});
 
 describe('Web Shell Voice development proxy', () => {
   it('proxies only qualified Voice stream upgrades', () => {

@@ -104,12 +104,30 @@ describe('operation error classification', () => {
     ).toMatchObject({ code: 'STALE_TAB' });
   });
 
-  it('prefers Playwright error names over page-influenced message text', () => {
-    const closed = new Error('locator.click: watch out, no selector here');
-    closed.name = 'TargetClosedError';
+  it('classifies a closed target from its text, never from a client name', () => {
+    // playwright-core's client-side TargetClosedError extends a base that
+    // never assigns `name` (only TimeoutError does), so a closed target
+    // arrives as a plain Error. Off the evaluate channel the message still
+    // classifies it; on the evaluate channel text fails closed and the
+    // dispatcher decides tab-gone from the tab's own state instead.
+    const closed = new Error(
+      'locator.click: Target page, context or browser has been closed',
+    );
+    expect(closed.name).toBe('Error');
     expect(sanitizeOperationError('locator.click', closed)).toMatchObject({
       code: 'STALE_TAB',
     });
+    expect(
+      sanitizeOperationError(
+        'playwright.evaluate',
+        new Error(
+          'page.evaluate: Target page, context or browser has been closed',
+        ),
+      ),
+    ).toMatchObject({ code: 'OPERATION_FAILED' });
+  });
+
+  it('prefers Playwright error names over page-influenced message text', () => {
     const timeout = new Error('locator.click: waiting for selector "button"');
     timeout.name = 'TimeoutError';
     expect(sanitizeOperationError('locator.click', timeout)).toMatchObject({

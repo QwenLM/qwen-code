@@ -2738,6 +2738,7 @@ describe('DaemonClient', () => {
 
       await expect(
         client.getSessionTranscriptPage('with/slash', {
+          compactedReplayMode: 'summary',
           cursor: 'cur 1',
           limit: 2,
           clientId: 'client-1',
@@ -2745,7 +2746,7 @@ describe('DaemonClient', () => {
       ).resolves.toEqual(body);
 
       expect(calls[0]).toMatchObject({
-        url: 'http://daemon/session/with%2Fslash/transcript?cursor=cur+1&limit=2',
+        url: 'http://daemon/session/with%2Fslash/transcript?compactedReplayMode=summary&cursor=cur+1&limit=2',
         method: 'GET',
         headers: {
           authorization: 'Bearer secret',
@@ -4051,6 +4052,7 @@ describe('DaemonClient', () => {
       const session = await client.loadSession('s-1', {
         workspaceCwd: '/work/a',
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
         timeoutMs: 0,
       });
 
@@ -4060,6 +4062,7 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         cwd: '/work/a',
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
       });
       expect(calls[0]?.signal).toBeNull();
     });
@@ -4112,6 +4115,7 @@ describe('DaemonClient', () => {
         workspaceCwd: '/w',
         historyPageSize: 100,
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
       });
 
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/resume');
@@ -6273,12 +6277,13 @@ describe('DaemonClient', () => {
       const result = await client.enqueueMidTurnMessage(
         's-1',
         'also check tests',
-        { messageId: 'client-mid-1' },
+        { messageId: 'client-mid-1', eventDetailMode: 'summary' },
       );
       expect(result).toEqual({ accepted: true, messageId: 'mid-1' });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        eventDetailMode: 'summary',
         message: 'also check tests',
         messageId: 'client-mid-1',
       });
@@ -6291,6 +6296,15 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const result = await client.enqueueMidTurnMessage('s-1', 'late');
       expect(result.accepted).toBe(false);
+    });
+
+    it('returns the idle rejection reason verbatim', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { accepted: false, reason: 'session_idle' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.enqueueMidTurnMessage('s-1', 'late');
+      expect(result).toEqual({ accepted: false, reason: 'session_idle' });
     });
 
     it('includes media content blocks in the POST body when provided', async () => {

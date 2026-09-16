@@ -69,6 +69,49 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
 
+## Override reasoning capabilities
+
+Set `capabilities.reasoning` on a model entry to override its reasoning format,
+offered effort tiers and default. Known models inherit omitted fields from the
+provider catalog at the selected endpoint; for example,
+`"capabilities": { "reasoning": { "defaultEffort": "medium" } }` makes a
+DashScope `qwen3.8-max` route use medium when no explicit effort is selected.
+For an unknown alias, declare all three fields:
+
+```json
+{
+  "id": "company-model-v2",
+  "baseUrl": "https://gateway.example.com/v1",
+  "envKey": "COMPANY_MODEL_API_KEY",
+  "capabilities": {
+    "reasoning": {
+      "profile": "openai-effort",
+      "efforts": ["low", "medium", "high"],
+      "defaultEffort": "medium"
+    }
+  }
+}
+```
+
+`efforts` replaces the supported subset of `low/medium/high/xhigh/max`.
+An explicit default must belong to that subset. Profiles reuse existing formats:
+Chat accepts `openai-effort`, `openai-reasoning`, `deepseek-openai`,
+`dashscope-effort`, `dashscope-thinking` and `qwen-chat-template`;
+Responses accepts `openai-reasoning`; Anthropic accepts `anthropic-manual`,
+`anthropic-adaptive` and `deepseek-anthropic`; Gemini/Vertex uses `gemini`.
+The two toggle-only profiles omit `efforts` and `defaultEffort`. Gemini uses
+low/medium/high. An adaptive profile selects adaptive thinking even when a
+legacy manual budget is configured. Existing complete capability declarations
+continue to work.
+
+Reasoning changes apply before the next user prompt. Its requests, retries and
+child agents share the captured reasoning configuration. Invalid updates retain
+the previous configuration and log the model/field error. Invalid declarations
+in fresh sessions safely fall back to the existing model behavior. Explicit user choices
+and provider-native overrides in `reasoning`, `samplingParams` and `extra_body`
+retain their existing precedence; a model default is not saved as a user choice.
+This mechanism does not change endpoint, credential or image-model lifecycles.
+
 ## Configuration Examples by Auth Type
 
 Below are comprehensive configuration examples for different authentication types, showing the available parameters and their combinations.

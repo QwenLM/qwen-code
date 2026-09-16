@@ -379,6 +379,41 @@ describe('PlaywrightRuntime command contracts', () => {
     ).toHaveLength(2);
   });
 
+  it.each([
+    ['the page reports itself closed', 'isClosed'],
+    ['the close event already released the tab', 'close'],
+  ] as const)(
+    'reports STALE_TAB when %s while a page command runs',
+    async (_label, signal) => {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+      // The pinned playwright-core client renders a closed target as a plain
+      // Error (only TimeoutError sets `name`), and evaluate-channel text
+      // fails closed, so the dispatcher must decide from the tab's own state.
+      fixture.page.evaluate.mockImplementation(async () => {
+        if (signal === 'isClosed') {
+          fixture.page.isClosed.mockReturnValue(true);
+        } else {
+          const onClose = fixture.page.on.mock.calls.find(
+            ([event]) => event === 'close',
+          )?.[1] as (() => void) | undefined;
+          expect(onClose).toBeDefined();
+          onClose!();
+        }
+        throw new Error(
+          'page.evaluate: Target page, context or browser has been closed',
+        );
+      });
+      await expect(
+        fixture.runtime.dispatch('playwright.evaluate', {
+          tabId: tab.id,
+          script: 'return 1;',
+        }),
+      ).rejects.toMatchObject({ code: 'STALE_TAB' });
+      fixture.page.isClosed.mockReturnValue(false);
+    },
+  );
+
   it('builds locator plans and delegates read and input operations', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -660,19 +695,50 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.page.bringToFront).not.toHaveBeenCalled();
   });
 
+  it.each(['playwright.domSnapshot', 'dom_cua.get_visible_dom'] as const)(
+    'preserves the full Playwright snapshot through %s',
+    async (method) => {
+      const fixture = await runtimeFixture();
+      const raw = [
+        '- generic [active] [ref=e1]:',
+        '  - grid [ref=e6]:',
+        '    - rowgroup [ref=e7]:',
+        '      - row [ref=e8]:',
+        '        - gridcell "Acme Corp" [ref=e9]',
+        '  - table [ref=e10]:',
+        '    - rowgroup [ref=e11]:',
+        '      - row [ref=e12]:',
+        '        - cell "Native Cell" [ref=e13]',
+        '  - generic "pointer container" [ref=e14] [cursor=pointer]:',
+        '    - img "Nested Image" [ref=e15]',
+        '  - button "Control Button" [ref=e17]',
+        '  - paragraph [ref=e18]: Static paragraph',
+        '  - heading "Static heading" [level=2] [ref=e19]',
+        '  - iframe [ref=e20]:',
+        '    - cell "Frame cell" [ref=f1e2]',
+      ].join('\n');
+      fixture.page.ariaSnapshot.mockResolvedValue(raw);
+      const tab = await createTab(fixture.runtime);
+
+      await expect(
+        fixture.runtime.dispatch(method, { tabId: tab.id }),
+      ).resolves.toBe(raw);
+      expect(fixture.page.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+    },
+  );
+
   it('delegates snapshot ref actions to Playwright aria-ref locators', async () => {
     const fixture = await runtimeFixture();
     fixture.locator.count.mockResolvedValue(1);
-    fixture.page.ariaSnapshot.mockResolvedValueOnce(
-      '- heading "Settings" [level=1]\n- button "Save" [ref=e1]',
-    );
+    const raw = '- heading "Settings" [level=1]\n- button "Save" [ref=e1]';
+    fixture.page.ariaSnapshot.mockResolvedValueOnce(raw);
     const tab = await createTab(fixture.runtime);
 
     await expect(
       fixture.runtime.dispatch('dom_cua.get_visible_dom', {
         tabId: tab.id,
       }),
-    ).resolves.toBe('- button "Save" [ref=e1]');
+    ).resolves.toBe(raw);
     await fixture.runtime.dispatch('dom_cua.click', {
       tabId: tab.id,
       node_id: 'f1e2',
@@ -917,11 +983,13 @@ describe('PlaywrightRuntime command contracts', () => {
       value: 'value',
       timeoutMs: 12,
     });
+    const downloadStartedAt = Date.now();
     await fixture.runtime.dispatch('locator.downloadMedia', {
       tabId: tab.id,
       steps,
       timeoutMs: 16,
     });
+    const downloadFinishedAt = Date.now();
     await expect(
       fixture.runtime.dispatch('locator.selectOption', {
         tabId: tab.id,
@@ -952,9 +1020,12 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.locator.dispatchEvent).not.toHaveBeenCalled();
     expect(fixture.locator.evaluate).toHaveBeenCalledWith(
       expect.any(Function),
-      16,
+      expect.any(Number),
       { timeout: 16 },
     );
+    const deadline = fixture.locator.evaluate.mock.calls[0]?.[1];
+    expect(deadline).toBeGreaterThanOrEqual(downloadStartedAt + 16);
+    expect(deadline).toBeLessThanOrEqual(downloadFinishedAt + 16);
     expect(fixture.locator.selectOption).toHaveBeenCalledWith(
       { label: 'Choice' },
       { timeout: 13 },

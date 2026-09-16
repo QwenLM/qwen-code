@@ -91,6 +91,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { TurnBudget } from './turn-budget.js';
 import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
@@ -729,8 +730,126 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('keeps the restored tool boundary through startup reminder refresh', async () => {
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+        apiHistory: [result],
+        completedToolCallIds: ['ended'],
+        uiTelemetryEvents: [],
+      } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      await resumedClient.refreshStartupContextReminder();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
+    it('restores a completed tool boundary from the legacy transcript', async () => {
+      const base = {
+        sessionId: 'session',
+        timestamp: new Date(0).toISOString(),
+        cwd: '/test/project',
+        version: 'test',
+        goalContext: { goalId: 'goal', revision: 1, turnId: 'turn' },
+      };
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'session',
+          projectHash: 'project',
+          startTime: base.timestamp,
+          lastUpdated: base.timestamp,
+          messages: [
+            {
+              ...base,
+              uuid: 'call',
+              parentUuid: null,
+              type: 'assistant',
+              message: {
+                role: 'model',
+                parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+              },
+            },
+            {
+              ...base,
+              uuid: 'result',
+              parentUuid: 'call',
+              type: 'tool_result',
+              message: result,
+            },
+            {
+              ...base,
+              uuid: 'end',
+              parentUuid: 'result',
+              type: 'system',
+              subtype: 'goal_turn_end',
+              systemPayload: { toolCallId: 'ended' },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: 'end',
+      });
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getChat().getCompletedToolCallIds()).toEqual([
+        'ended',
+      ]);
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
     it('initializes from the selective runtime projection without the full transcript', async () => {
-      const restoreLoadedSkillsFromHistory = vi.fn();
+      // Crossing a macrotask boundary is what makes this an oracle for the
+      // `await`: a mock that returns `undefined` (or resolves in the same
+      // tick) leaves a bare call indistinguishable from an awaited one, and
+      // the restored skills' hooks and allow rules have to be in force
+      // before the resumed session takes its first turn.
+      let skillsRestored = false;
+      const restoreLoadedSkillsFromHistory = vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        skillsRestored = true;
+      });
       vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
         (name: string) =>
           name === ToolNames.SKILL
@@ -775,29 +894,56 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
       expect(restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(apiHistory);
+      expect(skillsRestored).toBe(true);
     });
 
-    it('seeds resumed chat with replayed prompt token count', async () => {
-      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
-        conversation: {
-          sessionId: 'resumed-session-id',
-          projectHash: 'project-hash',
-          startTime: new Date(0).toISOString(),
-          lastUpdated: new Date(0).toISOString(),
-          messages: [],
-        },
-        filePath: '/test/session.jsonl',
-        lastCompletedUuid: null,
-      });
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        123_456,
-      );
+    it.each(['selective', 'legacy'])(
+      'does not borrow another session token count during %s restore without usage',
+      async (restore) => {
+        // Both call sites must finish restoring skills before initialize()
+        // resolves.
+        let skillsRestored = false;
+        const restoreLoadedSkillsFromHistory = vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          skillsRestored = true;
+        });
+        vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
+          (name: string) =>
+            name === ToolNames.SKILL
+              ? ({ restoreLoadedSkillsFromHistory } as never)
+              : undefined,
+        );
+        if (restore === 'selective') {
+          vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+            apiHistory: [
+              { role: 'model', parts: [{ text: 'Saved reply without usage' }] },
+            ],
+            uiTelemetryEvents: [],
+          } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+        }
+        vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+          conversation: {
+            sessionId: 'resumed-session-id',
+            projectHash: 'project-hash',
+            startTime: new Date(0).toISOString(),
+            lastUpdated: new Date(0).toISOString(),
+            messages: [],
+          },
+          filePath: '/test/session.jsonl',
+          lastCompletedUuid: null,
+        });
+        vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+          123_456,
+        );
 
-      const resumedClient = new LlmClient(mockConfig);
-      await resumedClient.initialize();
+        const resumedClient = new LlmClient(mockConfig);
+        await resumedClient.initialize();
 
-      expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
-    });
+        expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(0);
+        expect(resumedClient.getChat().getLastOutputTokenCount()).toBe(0);
+        expect(skillsRestored).toBe(true);
+      },
+    );
 
     it('seeds resumed chat with previous response output token count', async () => {
       const seedResumeTokenCountsSpy = vi.spyOn(
@@ -1876,6 +2022,7 @@ describe('Gemini Client (client.ts)', () => {
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1884,7 +2031,10 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.refreshStartupContextReminder();
 
-      expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        currentHistory.slice(1),
+        undefined,
+      );
     });
 
     it('removes the full legacy 2-entry prelude, not just the first entry', async () => {
@@ -1914,6 +2064,7 @@ describe('Gemini Client (client.ts)', () => {
         ],
       };
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1926,10 +2077,10 @@ describe('Gemini Client (client.ts)', () => {
       await client.refreshStartupContextReminder();
 
       // slice(2) drops BOTH legacy entries; slice(1) would have left legacyAck.
-      expect(mockChat.setHistory).toHaveBeenCalledWith([
-        newPrelude,
-        ...currentHistory.slice(2),
-      ]);
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        [newPrelude, ...currentHistory.slice(2)],
+        undefined,
+      );
     });
   });
 
@@ -2132,6 +2283,110 @@ describe('Gemini Client (client.ts)', () => {
         h.parts?.some((p) => p.functionResponse),
       );
       expect(hasAnyFunctionResponse).toBe(false);
+    });
+  });
+
+  // The turn a workflow's `+500k` budget measures against starts here, in the
+  // one place every front end's turns go through.
+  describe('turn token budget', () => {
+    let turns: TurnBudget;
+    const sessionTokens = vi.fn(() => 1_234);
+
+    beforeEach(() => {
+      turns = new TurnBudget();
+      Object.assign(mockConfig, { getTurnBudget: () => turns });
+      sessionTokens.mockReturnValue(1_234);
+      Object.assign(mockUiTelemetryService, {
+        getTotalOutputTokens: sessionTokens,
+      });
+    });
+
+    async function send(
+      request: Parameters<typeof client.sendMessageStream>[0],
+      promptId: string,
+      options?: Parameters<typeof client.sendMessageStream>[3],
+    ): Promise<void> {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        request,
+        new AbortController().signal,
+        promptId,
+        options,
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+    }
+
+    it('opens the turn with the directive the user typed, not the reminder in front of it', async () => {
+      await send(
+        [
+          {
+            text: '<system-reminder>\nbudget +900k\n</system-reminder>\n\nsweep every package +500k',
+          },
+        ],
+        'p1',
+      );
+
+      expect(turns.current('test-session-id')).toEqual({
+        promptId: 'p1',
+        sessionId: 'test-session-id',
+        budget: 500_000,
+        directiveText: '+500k',
+        outputTokensAtTurnStart: 1_234,
+      });
+      expect(sessionTokens).toHaveBeenCalledWith('test-session-id');
+    });
+
+    it('opens a cron turn with no target, whatever its text says', async () => {
+      await send([{ text: 'nightly sweep +500k' }], 'cron-1', {
+        type: SendMessageType.Cron,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'cron-1',
+        budget: null,
+      });
+    });
+
+    it('leaves the turn alone for a tool result and for a side question', async () => {
+      await send([{ text: 'fan out +500k' }], 'p1');
+      sessionTokens.mockReturnValue(9_999);
+
+      await send([{ text: 'tool output mentions +1m' }], 'p1', {
+        type: SendMessageType.ToolResult,
+      });
+      await send([{ text: 'quick question +2m' }], 'side-1', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'p1',
+        budget: 500_000,
+        outputTokensAtTurnStart: 1_234,
+      });
+    });
+
+    // A retry replaces a failed attempt of the same prompt; what that attempt
+    // spent is still this turn's spend.
+    it('keeps the starting point when the same prompt is retried', async () => {
+      await send([{ text: 'fan out +500k' }], 'p1');
+      sessionTokens.mockReturnValue(9_999);
+
+      await send([{ text: 'fan out +500k' }], 'p1', {
+        type: SendMessageType.Retry,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'p1',
+        budget: 500_000,
+        outputTokensAtTurnStart: 1_234,
+      });
     });
   });
 
@@ -3940,6 +4195,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(['mc-call-0']),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -3955,7 +4211,7 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalled();
+      expect(setHistory).toHaveBeenCalledWith(expect.any(Array), ['mc-call-0']);
       // The blanket wipe is gone — read-before-write state is preserved.
       expect(clear).not.toHaveBeenCalled();
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
@@ -3972,6 +4228,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4000,6 +4257,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4036,6 +4294,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4073,6 +4332,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4122,6 +4382,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4153,6 +4414,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4181,6 +4443,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4240,6 +4503,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(idless),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4299,6 +4563,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4370,6 +4635,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4402,6 +4668,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4428,6 +4695,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4454,6 +4722,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4480,6 +4749,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4507,6 +4777,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4564,6 +4835,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4614,6 +4886,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4660,6 +4933,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4685,6 +4959,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4714,6 +4989,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         getHistoryLength: vi.fn().mockReturnValue(history.length),
         stripOrphanedUserEntriesFromHistory: vi.fn(),
@@ -4743,6 +5019,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4970,6 +5247,7 @@ describe('Gemini Client (client.ts)', () => {
           compressionStatus: CompressionStatus.COMPRESSED,
         }),
         isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
@@ -4984,11 +5262,29 @@ describe('Gemini Client (client.ts)', () => {
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'completed-call', name: 'update_goal' } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'completed-call',
+                name: 'update_goal',
+                response: { readyForVerification: true },
+              },
+            },
+          ],
+        },
       ];
       const originalChat = client.getChat();
       originalChat.setLastPromptTokenCount(200, true);
       vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
-        originalChat.setHistory(compressedHistory);
+        originalChat.setHistory(compressedHistory, ['completed-call']);
         return {
           originalTokenCount: 1000,
           newTokenCount: 200,
@@ -5014,6 +5310,10 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
       expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
+      expect(client.getChat().getCompletedToolCallIds()).toEqual([
+        'completed-call',
+      ]);
+      expect(client.getChat().getHistoryForRecovery()).toEqual([]);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -5450,6 +5750,7 @@ describe('Gemini Client (client.ts)', () => {
       );
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
       } as unknown as LlmChat;
@@ -5464,17 +5765,20 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalledWith([
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nMocked env context\n</system-reminder>',
-            },
-          ],
-        },
-        ...compactedHistory,
-      ]);
+      expect(setHistory).toHaveBeenCalledWith(
+        [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nMocked env context\n</system-reminder>',
+              },
+            ],
+          },
+          ...compactedHistory,
+        ],
+        undefined,
+      );
     });
   });
 

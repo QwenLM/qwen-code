@@ -30,6 +30,7 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 
 const READY_TIMEOUT_MS = 15_000;
 const ADD_ROOT_TIMEOUT_MS = 10_000;
+const CANCEL_GRACE_MS = 5_000;
 const TERMINATE_GRACE_MS = 500;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
@@ -70,7 +71,13 @@ export interface NodeReplExecOutcome {
   events: NodeReplOutputEvent[];
   rawTextTruncated: boolean;
   imagesDropped: number;
-  error?: { name: string; message: string; stack?: string };
+  error?: {
+    name: string;
+    message: string;
+    stack?: string;
+    code?: string;
+    details?: string;
+  };
   stats: {
     durationMs: number;
     generation: number;
@@ -392,10 +399,26 @@ export class NodeReplKernelManager {
 
     let stopStarted = false;
     let requestedStopStatus: 'timeout' | 'cancelled' | null = null;
+    let cancelTimeout: NodeJS.Timeout | undefined;
     const stop = (status: 'timeout' | 'cancelled', message: string) => {
       if (stopStarted || inflight.settled) return;
       stopStarted = true;
       requestedStopStatus = status;
+      // Native cancellation barriers and a blocked kernel event loop cannot
+      // enforce their own deadline. Only the host can bound this wait.
+      cancelTimeout = setTimeout(() => {
+        if (inflight.settled || this.kernel !== handle) return;
+        void this.invalidateKernel(status)
+          .catch(() => undefined)
+          .finally(() => {
+            inflight.settle({
+              hostStatus: status,
+              message:
+                `${message} The kernel did not stop within ${CANCEL_GRACE_MS}ms after cancellation and was terminated; all bindings were lost. ` +
+                'External actions may have completed; verify external state before retrying.',
+            });
+          });
+      }, CANCEL_GRACE_MS);
       try {
         handle.toKernel.write(encodeFrame({ type: 'cancel', execId }));
       } catch (error) {
@@ -431,6 +454,7 @@ export class NodeReplKernelManager {
       handle.toKernel.write(execFrame);
     } catch (error) {
       clearTimeout(timeout);
+      clearTimeout(cancelTimeout);
       request.signal?.removeEventListener('abort', onAbort);
       await this.invalidateKernel('crashed');
       if (this.inflight === inflight) this.inflight = null;
@@ -445,6 +469,7 @@ export class NodeReplKernelManager {
 
     const terminal = await settled;
     clearTimeout(timeout);
+    clearTimeout(cancelTimeout);
     request.signal?.removeEventListener('abort', onAbort);
     if (this.inflight === inflight) this.inflight = null;
     // Flush any partial multi-byte sequence still held by the raw stream
@@ -506,6 +531,10 @@ export class NodeReplKernelManager {
                   ? `Execution exceeded the ${effectiveTimeout}ms timeout.`
                   : 'JavaScript execution failed.'),
             ...(terminal.errorStack ? { stack: terminal.errorStack } : {}),
+            ...(terminal.errorCode ? { code: terminal.errorCode } : {}),
+            ...(terminal.errorDetails
+              ? { details: terminal.errorDetails }
+              : {}),
           }
         : undefined;
     return this.outcomeFromInflight(inflight, status, startedAt, error, false);
@@ -769,6 +798,13 @@ export class NodeReplKernelManager {
       !(
         message.errorStack === undefined ||
         typeof message.errorStack === 'string'
+      ) ||
+      !(
+        message.errorCode === undefined || typeof message.errorCode === 'string'
+      ) ||
+      !(
+        message.errorDetails === undefined ||
+        typeof message.errorDetails === 'string'
       )
     ) {
       this.handleProtocolError(handle, new Error('invalid exec result'));
@@ -1088,7 +1124,7 @@ export class NodeReplKernelManager {
     inflight: InflightExec | undefined,
     status: NodeReplExecStatus,
     startedAt: number,
-    error?: { name: string; message: string; stack?: string },
+    error?: NodeReplExecOutcome['error'],
     kernelReplaced = false,
   ): NodeReplExecOutcome {
     const outcome: NodeReplExecOutcome = {
