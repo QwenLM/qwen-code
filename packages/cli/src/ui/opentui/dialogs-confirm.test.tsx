@@ -622,20 +622,23 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     const expanded = container.textContent ?? '';
     expect(expanded).toContain('TAIL_MARKER');
-    // The expanded tail window (52 rows at height 80: 80 minus the 23 chrome
-    // rows around the body, the 4 outcome rows, and the label row) drops the
-    // head rows; the label is their only trace on the alt screen.
-    expect(expanded).toContain('... first 48 lines hidden ...');
+    // The expanded tail window (24 rows at height 80: 80 minus the 20 fixed
+    // chrome rows, the pending card's 30, the question row, the 4 outcome
+    // rows, and the label row) drops the head rows; the label is their only
+    // trace on the alt screen.
+    expect(expanded).toContain('... first 76 lines hidden ...');
     expect(expanded).not.toContain('HEAD_MARKER');
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
     // The approval surface must survive expansion: the windowed body plus the
     // label row, the dialog chrome (frame 4, title 1, margins 2, question 1,
-    // outcomes 4, footer 2 = 14), and the 13 transcript rows above the dialog
-    // must fit the 80-row viewport — otherwise ctrl-s pushes the question and
-    // the outcome rows off screen while Enter still commits (R7-1).
+    // outcomes 4, footer 2 = 14), the 11 transcript rows above the dialog,
+    // and the pending card's 30 rows (its pendingCardMaxRows budget of 28 at
+    // these dimensions plus the hidden-tail and awaiting rows) must fit the
+    // 80-row viewport — otherwise ctrl-s pushes the question and the outcome
+    // rows off screen while Enter still commits (R7-1).
     const hidden = Number(/first (\d+) lines hidden/.exec(expanded)?.[1]);
     const visibleRows = 100 - hidden; // every fixture row is one physical row
-    expect(visibleRows + 1 + 14 + 13).toBeLessThanOrEqual(80);
+    expect(visibleRows + 1 + 14 + 11 + 30).toBeLessThanOrEqual(80);
     expect(expanded).toContain("Allow execution of: 'ls'?");
     expect(expanded).toContain('No, suggest changes (esc)');
   });
@@ -698,5 +701,119 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     expect(container.textContent).toContain('EXEC_HEAD');
     expect(container.textContent).toContain('... last 11 lines hidden ...');
+  });
+
+  it('measures exec body wrapping at the frame content width', () => {
+    // The DialogFrame's border and padding leave the body 106 columns at a
+    // 110-column terminal, so a 107-column command row paints 2 rows. The
+    // window used to measure wrapping at the raw terminal width (108 columns
+    // after the helper's own margin), counted such a row as 1, and the
+    // painted body overflowed its budget (R13-10).
+    mocks.state.dimensions = { width: 110, height: 80 };
+    const command = Array.from({ length: 40 }, () => 'x'.repeat(107)).join(
+      '\n',
+    );
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { ...execDetails(), command },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const bodyRows = [...container.querySelectorAll('span')]
+      .map((span) => span.textContent ?? '')
+      .filter((text) => /^x+$/.test(text));
+    expect(bodyRows.length).toBeGreaterThan(0);
+    const paintedRows = bodyRows.reduce(
+      (count, row) => count + Math.ceil(row.length / 106),
+      0,
+    );
+    // The collapsed window may keep at most MAX_BODY_ROWS - 1 = 19 painted
+    // rows of body; the last row of the budget belongs to the label.
+    expect(paintedRows).toBeLessThanOrEqual(19);
+  });
+
+  it('charges a wrapping exec warning at its painted height in the expanded budget', () => {
+    // The plan-mode UNKNOWN_WARNING is 188 display columns with its ⚠ prefix
+    // and paints 2 rows at the body's 106 columns, but the budget charged it
+    // as one logical row (R13-1).
+    mocks.state.dimensions = { width: 110, height: 80 };
+    const command = [
+      'HEAD_MARKER=$(whoami)',
+      ...Array.from(
+        { length: 98 },
+        (_, i) => `echo line-${i.toString().padStart(2, '0')}`,
+      ),
+      'echo TAIL_MARKER',
+    ].join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: {
+            ...execDetails(),
+            command,
+            warnings: [
+              'Plan mode could not determine whether this shell command is read-only. Approval applies only to this exact invocation once; it may modify system state, and Plan mode will remain active.',
+            ],
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    press({ name: 's', ctrl: true });
+    const expanded = container.textContent ?? '';
+    // Budget: 80 - 20 fixed chrome - 30 card - 1 question - 4 outcomes - 1
+    // label - 2 warning rows = 22 visible of 100.
+    expect(expanded).toContain('... first 78 lines hidden ...');
+    expect(expanded).toContain('Plan mode could not determine');
+    expect(expanded).toContain("Allow execution of: 'ls'?");
+    expect(expanded).toContain('No, suggest changes (esc)');
+  });
+
+  it('charges wrapping always-allow labels at their painted height in the expanded budget', () => {
+    // The scoped always-allow labels are 77 and 75 display columns and wrap
+    // to 2 rows each in the select list's 71-column label box at width 80, so
+    // the outcome list paints 6 rows while a logical count charges 4 (R13-1).
+    mocks.state.dimensions = { width: 80, height: 80 };
+    const command = [
+      'HEAD_MARKER=$(whoami)',
+      ...Array.from(
+        { length: 98 },
+        (_, i) => `echo line-${i.toString().padStart(2, '0')}`,
+      ),
+      'echo TAIL_MARKER',
+    ].join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: {
+            ...execDetails(),
+            command,
+            permissionRules: ['Bash(npm install --save-dev @scope/pkg)'],
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    press({ name: 's', ctrl: true });
+    const expanded = container.textContent ?? '';
+    // Budget: 80 - 20 fixed chrome - 27 card (pendingCardMaxRows is 25 at
+    // this width, plus the hidden-tail and awaiting rows) - 1 question - 6
+    // outcomes - 1 label = 25 visible of 100.
+    expect(expanded).toContain('... first 75 lines hidden ...');
+    expect(expanded).toContain(
+      "Always allow run 'npm install --save-dev @scope/pkg' commands in this project",
+    );
+    expect(expanded).toContain('No, suggest changes (esc)');
   });
 });
