@@ -105,18 +105,26 @@ describe('e2e workflow', () => {
       // ${HOME}/.cache spelling too, so only the full line pins the lock to
       // the resolved directory.
       expect(e2eRunScript).toContain(
-        'exec 8>"${ci_lock_dir}/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"',
+        'exec 8>"${ci_build_lock_dir}/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"',
       );
       expect(e2eRunScript).toContain('flock --wait 1800 8');
+      // The daemon coordination channel resolves alone: with one combined
+      // probe, a root-owned leftover on a BUILD-family lock would move the
+      // daemon lock to a job-private dir too, and the prune step — which
+      // probes only the daemon lock — would keep resolving the shared dir
+      // and prune against a daemon whose legs abandoned it.
       expect(e2eRunScript).toContain(
-        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock docker-sandbox-build.lock "docker-sandbox-build-e2e-${GITHUB_SHA}.lock")"',
+        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)"',
+      );
+      expect(e2eRunScript).toContain(
+        'ci_build_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-build.lock "docker-sandbox-build-e2e-${GITHUB_SHA}.lock")"',
       );
       expect(e2eRunScript).toContain(
         'exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"',
       );
       expect(e2eRunScript).toContain('flock --shared --wait 1800 9');
       expect(e2eRunScript).toContain(
-        'exec 7>"${ci_lock_dir}/docker-sandbox-build.lock"',
+        'exec 7>"${ci_build_lock_dir}/docker-sandbox-build.lock"',
       );
       expect(e2eRunScript).toContain('flock --wait 1800 7');
       expect(e2eRunScript).toContain(
@@ -371,7 +379,7 @@ describe('e2e workflow', () => {
     it('resolves the lock dir through the shared helper on both call sites', () => {
       expect(existsSync('.github/scripts/resolve-ci-lock-dir.sh')).toBe(true);
       expect(e2eRunScript).toContain(
-        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock docker-sandbox-build.lock "docker-sandbox-build-e2e-${GITHUB_SHA}.lock")"',
+        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)"',
       );
       expect(prune.run).toContain(
         'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)"',
@@ -390,15 +398,48 @@ describe('e2e workflow', () => {
       // The prune step is always()-gated, so it also runs when Checkout
       // failed and the resolver is not on disk; without the guard the step
       // aborts at 127 under `bash -e` and the host gets no prune at all.
-      // The guard is for this step only — the test leg keeps failing
-      // loudly, because there the leg genuinely cannot run.
+      // The fallback probes the SHARED dir inline — it needs no checked-out
+      // file — because a lock taken in a job-private dir excludes nothing:
+      // no other process on the host opens it, so `flock --nonblock` always
+      // "wins" and the labelled prune would race sibling legs' in-flight
+      // docker work. The guard is for this step only — the test leg keeps
+      // failing loudly, because there the leg genuinely cannot run.
       expect(prune.run).toContain(
         'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)" || {',
       );
-      expect(prune.run).toContain(
-        'ci_lock_dir="${RUNNER_TEMP:-/tmp}/qwen-code-ci-locks"',
-      );
+      expect(prune.run).toContain('ci_lock_dir="${HOME}/.cache/qwen-code-ci"');
       expect(prune.run).toContain('mkdir -p "${ci_lock_dir}"');
+    });
+
+    it('skips the labelled prune unless the daemon lock lands on the shared dir', () => {
+      // The shared daemon lock is the only cross-job exclusion the labelled
+      // prune has: the legs hold it shared through their docker work and
+      // this step takes it exclusively, non-blocking. Taken in any other
+      // directory the flock certifies nothing, so the prune skips to its
+      // own else branch instead. The dangling prune stays unconditional —
+      // dangling images are untagged and unreferenced, so no running leg
+      // can lose its image to it.
+      expect(prune.run).toContain(
+        '[ "${ci_lock_dir}" = "${HOME}/.cache/qwen-code-ci" ] || ci_lock_dir=',
+      );
+      expect(prune.run).toContain(
+        'if [ -n "${ci_lock_dir}" ] && exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock" && flock --nonblock 9; then',
+      );
+    });
+
+    it('keeps the test leg failing loudly when no lock dir can be created', () => {
+      // The 127 softening above belongs to the prune step only: the leg
+      // genuinely cannot run without a lock dir, so its resolver calls stay
+      // unguarded and `set -e` turns the resolver's exit 1 into the leg's
+      // failure. Copying the prune step's `||` guard into the leg "for
+      // symmetry" would route `exec 9>` to a lock at the filesystem root —
+      // a path no sibling job, the host cleanup timer, or the prune step
+      // ever opens. The bash-driven witness (exit status and ::error::) is
+      // in resolve-ci-lock-dir.test.js.
+      expect(e2eRunScript).toMatch(/^set -euo pipefail$/m);
+      expect(e2eRunScript).not.toMatch(
+        /resolve-ci-lock-dir\.sh[^\n]*\)"\s*\|\|/,
+      );
     });
 
     it('resolves the lock dir before any descriptor is opened', () => {
@@ -411,9 +452,18 @@ describe('e2e workflow', () => {
           'exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"',
         ),
       );
-      expect(resolveIndex).toBeLessThan(
+      const buildResolveIndex = e2eRunScript.indexOf(
+        'ci_build_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh',
+      );
+      expect(buildResolveIndex).toBeGreaterThanOrEqual(0);
+      expect(buildResolveIndex).toBeLessThan(
         e2eRunScript.indexOf(
-          'exec 7>"${ci_lock_dir}/docker-sandbox-build.lock"',
+          'exec 8>"${ci_build_lock_dir}/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"',
+        ),
+      );
+      expect(buildResolveIndex).toBeLessThan(
+        e2eRunScript.indexOf(
+          'exec 7>"${ci_build_lock_dir}/docker-sandbox-build.lock"',
         ),
       );
       expect(prune.run.indexOf('resolve-ci-lock-dir.sh')).toBeLessThan(

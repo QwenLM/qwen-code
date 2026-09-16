@@ -17,6 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 // Executes the CI lock-dir resolver and the docker branch of the E2E runner
 // against a poisoned ${HOME}/.cache/qwen-code-ci, so the #12006 fallback is
@@ -129,6 +130,50 @@ describe('CI docker lock dir resolution', () => {
     }
   });
 
+  // The `cannot create` cause is the only probe message that distinguishes
+  // an unwritable $HOME, a .cache that is a regular file, ENOSPC and EROFS
+  // from the unwritable-dir and unwritable-lock causes pinned above — and
+  // it is the only signal an operator gets on a pool host, so the message
+  // itself is pinned, not just the branch.
+  it('names the cause when the shared dir cannot be created', () => {
+    const world = makeWorld();
+    try {
+      // HOME under a regular file fails `mkdir -p` with ENOTDIR for root
+      // too, so this case needs no isRoot skip.
+      const notADir = join(world.dir, 'not-a-dir');
+      writeFileSync(notADir, '');
+      const result = runResolver({ ...world, home: join(notADir, 'home') });
+      expect(result.stdout.trim()).toBe(
+        join(world.runnerTemp, 'qwen-code-ci-locks'),
+      );
+      expect(result.stderr).toContain('cannot create');
+    } finally {
+      rmSync(world.dir, { recursive: true, force: true });
+    }
+  });
+
+  // The prune step, the host cleanup timer and the release lane all
+  // coordinate on the shared daemon-lock path, so a poisoned BUILD-family
+  // lock must not move the daemon lock off it.
+  it.skipIf(isRoot)(
+    'resolves the daemon lock to the shared dir when only a build lock is poisoned',
+    () => {
+      const world = makeWorld();
+      try {
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        mkdirSync(shared, { recursive: true });
+        const buildLock = join(shared, 'docker-sandbox-build.lock');
+        writeFileSync(buildLock, '');
+        chmodSync(buildLock, 0o400);
+        const result = runResolver(world, ['docker-sandbox-daemon.lock']);
+        expect(result.stdout.trim()).toBe(shared);
+        expect(result.stderr).toBe('');
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(isRoot)(
     'falls back when the shared dir itself is not writable',
     () => {
@@ -211,7 +256,7 @@ describe('CI docker lock dir resolution', () => {
     },
   );
 
-  function runDockerLeg(world, { imagePresent = true } = {}) {
+  function runDockerLeg(world, { imagePresent = true, home, runnerTemp } = {}) {
     const dockerStub = join(world.bin, 'docker');
     writeFileSync(
       dockerStub,
@@ -248,8 +293,8 @@ describe('CI docker lock dir resolution', () => {
     const result = spawnSync('bash', [scriptFile, 'sandbox:docker', '1/1'], {
       env: {
         PATH: `${world.bin}:${process.env.PATH}`,
-        HOME: world.home,
-        RUNNER_TEMP: world.runnerTemp,
+        HOME: home ?? world.home,
+        RUNNER_TEMP: runnerTemp ?? world.runnerTemp,
         RUNNER_ENVIRONMENT: 'self-hosted',
         GITHUB_SHA: 'testsha12006',
         E2E_CONTAINER_OWNER: 'test-owner',
@@ -344,4 +389,164 @@ describe('CI docker lock dir resolution', () => {
       }
     },
   );
+
+  // The leg resolves the daemon lock independently of the build-family
+  // locks: with only docker-sandbox-build.lock poisoned, the daemon lock
+  // must stay on the shared dir (the prune step, the host cleanup timer
+  // and the release lane all hardcode that path) while the build locks
+  // fall back. The build mutex only opens on the image-build path, so the
+  // docker stub reports the image absent.
+  it.skipIf(isRoot)(
+    'keeps the daemon lock shared when only a build lock is poisoned',
+    () => {
+      const world = makeWorld();
+      try {
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        mkdirSync(shared, { recursive: true });
+        const buildLock = join(shared, 'docker-sandbox-build.lock');
+        writeFileSync(buildLock, '');
+        chmodSync(buildLock, 0o400);
+        const { exitCode } = runDockerLeg(world, { imagePresent: false });
+        expect(exitCode).toBe(0);
+        expect(existsSync(join(shared, 'docker-sandbox-daemon.lock'))).toBe(
+          true,
+        );
+        const fallback = join(world.runnerTemp, 'qwen-code-ci-locks');
+        expect(existsSync(join(fallback, 'docker-sandbox-daemon.lock'))).toBe(
+          false,
+        );
+        for (const name of [
+          'docker-sandbox-build.lock',
+          'docker-sandbox-build-e2e-testsha12006.lock',
+        ]) {
+          expect(existsSync(join(fallback, name)), name).toBe(true);
+        }
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The 127 softening belongs to the prune step only: when NO lock
+  // directory can be created the leg genuinely cannot run, and it must die
+  // loudly. A silent `|| ci_lock_dir=''` fallthrough would instead route
+  // `exec 9>` to a daemon lock at the filesystem root — a path nothing else
+  // on the host coordinates on.
+  it('fails loudly when no lock directory can be created', () => {
+    const world = makeWorld();
+    try {
+      // ENOTDIR poisoning (a regular file in the path), not a mode bit:
+      // `mkdir -p` fails it for root too, so this case needs no isRoot skip.
+      const notADir = join(world.dir, 'not-a-dir');
+      writeFileSync(notADir, '');
+      const { exitCode, output } = runDockerLeg(world, {
+        home: join(notADir, 'home'),
+        runnerTemp: join(notADir, 'rt'),
+      });
+      expect(exitCode).not.toBe(0);
+      expect(output).toContain('::error::');
+      // The failure must come from the resolver, before any lock opens.
+      expect(output).not.toContain('/docker-sandbox-daemon.lock');
+    } finally {
+      rmSync(world.dir, { recursive: true, force: true });
+    }
+  });
+
+  describe('prune step daemon lock discipline', () => {
+    // Drives the real 'Prune dangling docker images' step body from e2e.yml
+    // under `bash -e` (GitHub's default shell for run steps) with stubbed
+    // docker and flock. The step resolves the resolver by repo-relative
+    // path, so the cwd decides whether the resolver is on disk.
+    const e2eYml = parse(readFileSync('.github/workflows/e2e.yml', 'utf8'));
+    const pruneRun = e2eYml.jobs['e2e-test-linux'].steps.find(
+      (step) => step.name === 'Prune dangling docker images',
+    ).run;
+
+    function runPruneStep(world, { withResolver }) {
+      writeFileSync(
+        join(world.bin, 'docker'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "${DOCKER_LOG}"',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(world.bin, 'docker'), 0o755);
+      // flock(1) is util-linux and absent on macOS. The witness here is
+      // WHERE the step locks — asserted through the file `exec 9>` creates,
+      // which a flock stub cannot see portably — not lock semantics.
+      writeFileSync(join(world.bin, 'flock'), '#!/usr/bin/env bash\nexit 0\n');
+      chmodSync(join(world.bin, 'flock'), 0o755);
+      const cwd = join(world.dir, 'cwd');
+      mkdirSync(cwd, { recursive: true });
+      if (withResolver) {
+        const scriptsDir = join(cwd, '.github', 'scripts');
+        mkdirSync(scriptsDir, { recursive: true });
+        writeFileSync(
+          join(scriptsDir, 'resolve-ci-lock-dir.sh'),
+          readFileSync('.github/scripts/resolve-ci-lock-dir.sh', 'utf8'),
+        );
+      }
+      const dockerLog = join(world.dir, 'docker.log');
+      const stepFile = join(world.dir, 'prune-step.sh');
+      writeFileSync(stepFile, pruneRun);
+      const result = spawnSync('bash', ['-e', stepFile], {
+        cwd,
+        env: {
+          PATH: `${world.bin}:${process.env.PATH}`,
+          HOME: world.home,
+          RUNNER_TEMP: world.runnerTemp,
+          DOCKER_LOG: dockerLog,
+        },
+        encoding: 'utf8',
+      });
+      return {
+        exitCode: result.status ?? 1,
+        output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+        dockerArgv: existsSync(dockerLog)
+          ? readFileSync(dockerLog, 'utf8')
+          : '',
+      };
+    }
+
+    it('locks the shared dir and prunes when the resolver itself cannot run', () => {
+      const world = makeWorld();
+      try {
+        const { exitCode, dockerArgv } = runPruneStep(world, {
+          withResolver: false,
+        });
+        expect(exitCode).toBe(0);
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        expect(existsSync(join(shared, 'docker-sandbox-daemon.lock'))).toBe(
+          true,
+        );
+        expect(dockerArgv).toContain('image prune --all');
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(isRoot)(
+      'skips the labelled prune when the shared dir is poisoned',
+      () => {
+        const world = makeWorld();
+        try {
+          const shared = join(world.home, '.cache', 'qwen-code-ci');
+          mkdirSync(shared, { recursive: true });
+          chmodSync(shared, 0o555);
+          const { exitCode, output, dockerArgv } = runPruneStep(world, {
+            withResolver: true,
+          });
+          expect(exitCode).toBe(0);
+          expect(output).toContain('Docker cleanup skipped');
+          // The resolver returns the job-private fallback here; only the
+          // dangling prune (which needs no exclusion) may still run.
+          expect(dockerArgv).not.toContain('image prune --all');
+          expect(dockerArgv).toContain('image prune --force');
+        } finally {
+          rmSync(world.dir, { recursive: true, force: true });
+        }
+      },
+    );
+  });
 });
