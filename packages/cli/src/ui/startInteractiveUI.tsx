@@ -294,13 +294,6 @@ export async function startInteractiveUI(
     );
   };
 
-  const stdoutMaxListeners = process.stdout.getMaxListeners();
-  if (useVP) {
-    // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
-    // Node's default warning writes into the alternate screen and shifts mouse
-    // coordinates even though these listeners are owned and cleaned up.
-    process.stdout.setMaxListeners(0);
-  }
   const appTree = (
     <ErrorBoundary
       recordForExitEcho
@@ -398,9 +391,6 @@ export async function startInteractiveUI(
     // flags stay set — the user's shell keeps receiving kitty escape codes
     // (e.g. "9;5u" on Ctrl-C) after exit.
     disableKittyProtocol();
-    if (useVP) {
-      process.stdout.setMaxListeners(stdoutMaxListeners);
-    }
     // Unwind the stdout.write wrapper stack in LIFO order (resizeReflow is
     // installed last / outermost); the identity-guarded restores silently
     // no-op and leak wrappers otherwise.
