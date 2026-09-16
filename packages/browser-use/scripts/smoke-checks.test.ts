@@ -75,7 +75,9 @@ describe('smoke observation claims', () => {
       calls: [{ code }],
       joinedCode: code,
       joinedOutput: 'Total: $36.69',
-      browserRuntimeEntry: '/runtime/index.js',
+      browserRuntimeEntry: '/skill/runtime/index.js',
+      browserRuntimeRoot: '/skill/runtime',
+      builtinSkillRoot: '/skill',
       events: [],
       browserModuleRoot: '/runtime/node_modules',
       successfulModuleRootRegistered: () => true,
@@ -90,6 +92,135 @@ describe('smoke observation claims', () => {
     expect(result.browserSdkImported).toBe(false);
     expect(result.checkoutCompletionObserved).toBe(true);
     expect(result.reportedTotalIsExpected).toBe(true);
+  });
+
+  it.each([
+    [
+      'a literal entry path',
+      "await (await import('/skill/runtime/index.js')).setupBrowserRuntime();",
+      true,
+    ],
+    [
+      'an entry built from the staged runtime directory',
+      "const SKILL_BASE = '/skill/runtime';\nawait (await import(SKILL_BASE + '/index.js')).setupBrowserRuntime();",
+      true,
+    ],
+    [
+      'an entry built from the skill root',
+      "const base = '/skill';\nglobalThis.SKILL_BASE = base;\nawait (await import(SKILL_BASE + '/runtime/index.js')).setupBrowserRuntime();",
+      true,
+    ],
+    [
+      'a runtime loaded from somewhere else',
+      "await (await import('/elsewhere/runtime/index.js')).setupBrowserRuntime();",
+      false,
+    ],
+    [
+      'the skill root without setup',
+      "import('/skill/runtime/index.js');",
+      false,
+    ],
+  ])('reports SDK setup for %s', (_label, code, expected) => {
+    const result = runInNewContext(checks + '\nchecks;', {
+      calls: [{ code }],
+      joinedCode: code,
+      joinedOutput: 'Total: $36.69',
+      browserRuntimeEntry: '/skill/runtime/index.js',
+      browserRuntimeRoot: '/skill/runtime',
+      builtinSkillRoot: '/skill',
+      events: [],
+      browserModuleRoot: '/runtime/node_modules',
+      successfulModuleRootRegistered: () => true,
+      completion: {
+        url: 'https://www.saucedemo.com/checkout-complete.html',
+        snapshot: 'Thank you for your order!',
+      },
+      cartMatchesLowestThree: true,
+      finalAnswer: '$36.69',
+    }) as Record<string, boolean>;
+    expect(result.browserSdkImported).toBe(expected);
+  });
+});
+
+describe('smoke price reads', () => {
+  const smoke = readFileSync(
+    new URL('./smoke-qwen-saucedemo.ts', import.meta.url),
+    'utf8',
+  );
+  const start = smoke.indexOf('function pricesFromCall(');
+  const end = smoke.indexOf('\n}\n', start) + 3;
+  assert.ok(start >= 0 && end > start, 'pricesFromCall must be exercised');
+  const pricesFromCall = runInNewContext(
+    transformSync(smoke.slice(start, end), { loader: 'ts', target: 'node22' })
+      .code + '\npricesFromCall;',
+    {},
+  ) as (
+    calls: Array<{ code: string; output: string }>,
+    selector: string,
+    expectedCount: number,
+    pick?: 'first' | 'last',
+  ) => number[] | null;
+  const inventory = {
+    code: "tab.playwright.locator('.inventory_item_price').allTextContents()",
+    output: "[ '$29.99', '$9.99', '$15.99', '$49.99', '$7.99', '$15.99' ]",
+  };
+  const cart = {
+    code: "tab.playwright.locator('.cart_item .inventory_item_price').allTextContents()",
+    output: "[ '$7.99', '$9.99', '$15.99' ]",
+  };
+
+  it('accepts the price class with or without a row scope and tells pages apart by count', () => {
+    expect(
+      pricesFromCall([inventory, cart], '.inventory_item_price', 6),
+    ).toEqual([29.99, 9.99, 15.99, 49.99, 7.99, 15.99]);
+    expect(
+      pricesFromCall([inventory, cart], '.inventory_item_price', 3),
+    ).toEqual([7.99, 9.99, 15.99]);
+  });
+
+  it('takes the leading prices when the same cell echoes a selection afterwards', () => {
+    const inventoryWithEcho = {
+      code: "const prices = await tab.playwright.locator('.inventory_item_price').allTextContents(); nodeRepl.write(JSON.stringify(prices)); nodeRepl.write(JSON.stringify(cheapest));",
+      output:
+        '["$29.99","$9.99","$15.99","$49.99","$7.99","$15.99"]["$7.99","$9.99","$15.99"]',
+    };
+    expect(
+      pricesFromCall([inventoryWithEcho], '.inventory_item_price', 6),
+    ).toEqual([29.99, 9.99, 15.99, 49.99, 7.99, 15.99]);
+    expect(
+      pricesFromCall([inventoryWithEcho], '.inventory_item_price', 3),
+    ).toEqual([29.99, 9.99, 15.99]);
+    // The cart is read after the inventory, so the last exact-count read
+    // wins over an earlier, longer inventory read.
+    const cart = {
+      code: "const cartPrices = await tab.playwright.locator('.inventory_item_price').allTextContents(); nodeRepl.write(JSON.stringify(cartPrices));",
+      output: '["$7.99","$9.99","$15.99"]',
+    };
+    expect(
+      pricesFromCall(
+        [inventoryWithEcho, cart],
+        '.inventory_item_price',
+        3,
+        'last',
+      ),
+    ).toEqual([7.99, 9.99, 15.99]);
+    expect(
+      pricesFromCall([inventoryWithEcho], '.inventory_item_price', 3, 'last'),
+    ).toEqual([29.99, 9.99, 15.99]);
+  });
+
+  it('ignores reads that did not use allTextContents on the price class', () => {
+    const names = {
+      code: "tab.playwright.locator('.inventory_item_name').allTextContents()",
+      output: "[ '$1.00', '$2.00', '$3.00' ]",
+    };
+    const text = {
+      code: "tab.playwright.locator('.inventory_item_price').innerText()",
+      output: '$7.99 $9.99 $15.99',
+    };
+    expect(
+      pricesFromCall([names, text], '.inventory_item_price', 3),
+    ).toBeNull();
   });
 });
 

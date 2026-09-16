@@ -198,15 +198,17 @@ await withManagedChrome('sauce', async (chrome) => {
     );
     const finalAnswer = collectAssistantReport(events);
     const calls = collectSuccessfulNodeReplCalls(events);
-    const inventoryPrices = pricesFromCall(
-      calls,
-      '.inventory_item .inventory_item_price',
-      6,
-    );
+    // Inventory and cart both render prices under `.inventory_item_price`;
+    // the model may or may not scope the selector to the row, so match the
+    // price class and tell the pages apart by the count each read returns.
+    const inventoryPrices = pricesFromCall(calls, '.inventory_item_price', 6);
+    // The prompt has the cart read after tab.url() confirms cart.html, so the
+    // cart is the last price read; the inventory is the first.
     const cartPrices = pricesFromCall(
       calls,
-      '.cart_item .inventory_item_price',
+      '.inventory_item_price',
       3,
+      'last',
     );
     const lowestThreePrices = inventoryPrices
       ? [...inventoryPrices].sort((left, right) => left - right).slice(0, 3)
@@ -220,9 +222,14 @@ await withManagedChrome('sauce', async (chrome) => {
     const joinedOutput = calls.map((call) => call.output).join('\n');
     const checks = {
       existingNodeReplUsed: calls.length > 0,
+      // The model may spell the entry as one literal or assemble it from the
+      // skill root across cells; what every spelling shares is the built-in
+      // skill root the CLI substituted into SKILL.md, the entry file name and
+      // the setup call, which together show the staged runtime was loaded.
       browserSdkImported:
-        joinedCode.includes(browserRuntimeEntry) &&
-        joinedCode.includes('setupBrowserRuntime()'),
+        joinedCode.includes('setupBrowserRuntime()') &&
+        joinedCode.includes(builtinSkillRoot) &&
+        joinedCode.includes('index.js'),
       builtinModuleRootRegistered: successfulModuleRootRegistered(
         events,
         browserModuleRoot,
@@ -451,18 +458,30 @@ function pricesFromCall(
   calls: NodeReplCall[],
   selector: string,
   expectedCount: number,
+  pick: 'first' | 'last' = 'first',
 ): number[] | null {
-  for (const call of calls) {
-    if (!call.code.includes(selector) || !call.code.includes('allTextContents'))
-      continue;
-    const prices = [...call.output.matchAll(/\$(\d+(?:\.\d{2})?)/g)].map(
-      (match) => Number(match[1]),
+  const candidates = calls
+    .filter(
+      (call) =>
+        call.code.includes(selector) && call.code.includes('allTextContents'),
+    )
+    .map((call) =>
+      [...call.output.matchAll(/\$(\d+(?:\.\d{2})?)/g)].map((match) =>
+        Number(match[1]),
+      ),
+    )
+    .filter(
+      (prices) =>
+        prices.length >= expectedCount && prices.every(Number.isFinite),
     );
-    if (prices.length === expectedCount && prices.every(Number.isFinite)) {
-      return prices;
-    }
-  }
-  return null;
+  const ordered = pick === 'last' ? [...candidates].reverse() : candidates;
+  // A read that printed exactly the expected number of prices is the page
+  // itself; otherwise the read's own values come first and a model may echo
+  // its selection or a subtotal after them in the same cell, so take the
+  // leading set.
+  const chosen =
+    ordered.find((prices) => prices.length === expectedCount) ?? ordered[0];
+  return chosen ? chosen.slice(0, expectedCount) : null;
 }
 
 async function verifySauceCompletion(socketPath: string): Promise<{
