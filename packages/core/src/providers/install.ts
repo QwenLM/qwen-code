@@ -235,11 +235,20 @@ export async function applyProviderInstallPlan(
     }
   }
   for (const patch of plan.modelProviders ?? []) {
+    // Route-aware view: every bucket resolving to the patch's protocol. Only
+    // the purpose-change guard may use it — the legacy-bucket cleanup below
+    // can delete an identity match from a sibling bucket, so a purpose change
+    // there is a real removal.
     const existingModels = getModelsForProviderProtocol(
       previousRuntimeProviders,
       patch.authType,
       mapping,
     );
+    // The removal guards must look only at the bucket the patch rewrites
+    // (applyModelProvidersPatch): an owned model in a sibling bucket is never
+    // dropped by this install, so counting it would reject installs that
+    // remove nothing.
+    const ownBucketModels = previousRuntimeProviders[patch.authType] ?? [];
     const changesRole = existingModels.some((existing) =>
       patch.models.some(
         (model) =>
@@ -255,7 +264,7 @@ export async function applyProviderInstallPlan(
     );
     const removesConversation =
       preserveSelection &&
-      existingModels.some(
+      ownBucketModels.some(
         (existing) =>
           !existing.imageOnly &&
           !existing.voiceOnly &&
@@ -265,7 +274,7 @@ export async function applyProviderInstallPlan(
     const removesService =
       !preserveSelection &&
       patch.mergeStrategy !== 'append' &&
-      existingModels.some(
+      ownBucketModels.some(
         (existing) =>
           (existing.imageOnly || existing.voiceOnly) &&
           patch.ownsModel?.(existing) &&
@@ -407,6 +416,13 @@ export async function applyProviderInstallPlan(
         settings.getModelProviders();
       for (const [providerId, models] of Object.entries(ownProviders)) {
         if (providerId === patch.authType || !Array.isArray(models)) continue;
+        // Both settings adapters treat `modelProviders.<id>` as a bucket
+        // write only when the key has exactly two segments; a dotted bucket
+        // id would be walked as a nested path instead (corrupting settings
+        // and bypassing placeholder preservation). Leave such buckets alone —
+        // if the stale entry still wins, the post-write verification below
+        // fails the install loudly rather than corrupting the file.
+        if (providerId.includes('.')) continue;
         if (
           providerId !== AuthType.USE_OPENAI_RESPONSES &&
           resolveProviderProtocol(providerId, writeMapping) !==

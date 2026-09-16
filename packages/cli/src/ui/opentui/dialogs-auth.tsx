@@ -753,7 +753,11 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }) {
         {t('The following JSON will be saved to settings.json:')}
       </text>
       <box marginTop={1}>
-        <text fg={C.text}>{flow.state.previewJson}</text>
+        {flow.state.previewError ? (
+          <text fg={C.red}>{flow.state.previewError}</text>
+        ) : (
+          <text fg={C.text}>{flow.state.previewJson}</text>
+        )}
       </box>
       <box marginTop={1}>
         <text fg={C.dim}>{t('Enter to save, Esc to go back')}</text>
@@ -949,10 +953,13 @@ function AuthDialogFlow({
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
+  // The saved route and ids the wizard reopens with. Both must come from the
+  // same lookup: seeding the ids of a Responses install while the API step
+  // defaults to Chat Completions would restamp them onto the other wire.
+  const findSavedModels = (providerConfig: ProviderConfig) =>
+    findExistingProviderModels(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.modelProviders,
       settings.merged.providerProtocol,
       {
         authType: settings.merged.security?.auth?.selectedType,
@@ -960,6 +967,9 @@ function AuthDialogFlow({
         baseUrl: settings.merged.model?.baseUrl,
       },
     );
+
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findSavedModels(providerConfig);
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
     return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
@@ -972,16 +982,7 @@ function AuthDialogFlow({
       if (!providerConfig) return;
       setupFlow.start(
         providerConfig,
-        findExistingProviderModels(
-          providerConfig,
-          settings.merged.modelProviders,
-          settings.merged.providerProtocol,
-          {
-            authType: settings.merged.security?.auth?.selectedType,
-            id: settings.merged.model?.name,
-            baseUrl: settings.merged.model?.baseUrl,
-          },
-        )?.protocol,
+        findSavedModels(providerConfig)?.protocol,
         existingEnv,
         getExistingModelIds(providerConfig),
       );
@@ -1026,7 +1027,7 @@ function AuthDialogFlow({
         case 'CUSTOM_PROVIDER':
           setupFlow.start(
             customProvider,
-            undefined,
+            findSavedModels(customProvider)?.protocol,
             existingEnv,
             getExistingModelIds(customProvider),
           );

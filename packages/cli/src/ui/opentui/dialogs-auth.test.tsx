@@ -199,9 +199,11 @@ function createMockConfig(authType?: AuthType): Config {
   } as unknown as Config;
 }
 
-function createMockSettings(): LoadedSettings {
+function createMockSettings(
+  merged: Record<string, unknown> = {},
+): LoadedSettings {
   return {
-    merged: { env: {}, modelProviders: {} },
+    merged: { env: {}, modelProviders: {}, ...merged },
     forScope: () => ({ settings: {}, path: '', originalSettings: {} }),
   } as unknown as LoadedSettings;
 }
@@ -209,11 +211,12 @@ function createMockSettings(): LoadedSettings {
 function renderDialog(overrides?: {
   authType?: AuthType;
   initialError?: string;
+  merged?: Record<string, unknown>;
 }) {
   const onClose = vi.fn();
   const notify = vi.fn();
   const config = createMockConfig(overrides?.authType);
-  const settings = createMockSettings();
+  const settings = createMockSettings(overrides?.merged);
   render(
     <OpenTuiAuthDialog
       config={config}
@@ -385,6 +388,52 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('return');
     expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     await press('return');
+    await vi.waitFor(() => {
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
+    });
+    expect(core.applyProviderInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+      expect.anything(),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('reopens a saved Responses install with the API step on Responses', async () => {
+    // Custom Provider prefills the saved ids, so the API step must open on
+    // the saved wire or Save restamps them onto Chat Completions (ink parity).
+    const { onClose } = renderDialog({
+      merged: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'm1',
+              baseUrl: 'https://gw.example/v1',
+              envKey: 'QWEN_CUSTOM_API_KEY_X',
+              wireApi: 'responses',
+            },
+          ],
+        },
+      },
+    });
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → API
+    // RadioList marks the cursor row with '› '.
+    expect(
+      screen.getByText('Responses').previousElementSibling?.textContent,
+    ).toBe('› ');
+    expect(
+      screen.getByText('Chat Completions').previousElementSibling?.textContent,
+    ).toBe('  ');
+    await press('return'); // API: keep the saved Responses route → baseUrl
+    await typeText('https://gw.example/v1');
+    await press('return'); // baseUrl → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models (prefilled with m1)
+    await press('return'); // models → advancedConfig
+    await press('return'); // advancedConfig → review
+    await press('return'); // save
     await vi.waitFor(() => {
       expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
     });

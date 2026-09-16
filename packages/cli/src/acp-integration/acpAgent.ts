@@ -1754,7 +1754,7 @@ function resolveExistingProviderApiKey(
   const ownsModel = resolveOwnsModel(config);
   const canonicalProtocol =
     protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
-  const matched = getModelsForProviderProtocol(
+  const candidates = getModelsForProviderProtocol(
     settings.merged.modelProviders,
     canonicalProtocol,
     settings.merged.providerProtocol,
@@ -1765,6 +1765,12 @@ function resolveExistingProviderApiKey(
       (ownsModel?.(model) || config.mergeModelsByIdentity) &&
       modelIds.includes(model.id) &&
       tryResolveModelProtocol(canonicalProtocol, model) === protocol,
+  );
+  // Keep the first entry per model id (scan order) so this resolver agrees
+  // with buildInstallPlan's first-wins identity match.
+  const matched = candidates.filter(
+    (model, index) =>
+      candidates.findIndex((entry) => entry.id === model.id) === index,
   );
   // Service-role models (imageOnly/voiceOnly) carry their own suffixed env key,
   // so a reconnect reads the key of the conversation model being connected and

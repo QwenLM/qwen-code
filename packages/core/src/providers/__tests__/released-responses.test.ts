@@ -188,6 +188,51 @@ describe('released Responses configuration', () => {
     ).toBe('RELEASED_KEY');
   });
 
+  it.each([true, false])(
+    'leaves a dotted legacy bucket id alone instead of writing a nested settings path (legacy matches install=%s)',
+    async (matches) => {
+      vi.stubEnv('RELEASED_KEY', 'test-only-old');
+      // The display name is what buildInstallPlan adds on top of a stored
+      // entry, so a legacy entry without it differs from the install.
+      const legacy = {
+        id: 'same',
+        baseUrl,
+        envKey: 'RELEASED_KEY',
+        ...(matches ? { name: 'same' } : {}),
+      };
+      const initial = { 'my.gateway': [legacy] };
+      const mapping = { 'my.gateway': 'openai-responses' };
+      const { adapter, writes } = adapterFor(initial, mapping);
+      const plan = buildInstallPlan(
+        customProvider,
+        inputs,
+        getModelsForProviderProtocol(initial, AuthType.USE_OPENAI, mapping),
+      );
+      const install = applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+      // Both settings adapters treat `modelProviders.<id>` as a bucket write
+      // only when the key has exactly two segments; a dotted id would be
+      // walked as a nested path (`modelProviders.my.gateway`), so the cleanup
+      // must skip it. When the untouched stale entry still wins, the
+      // post-write verification fails the install loudly instead.
+      if (matches) await install;
+      else
+        await expect(install).rejects.toMatchObject({ step: 'modelProviders' });
+      expect(writes).not.toHaveBeenCalledWith(
+        expect.stringMatching(/^modelProviders\.[^.]+\./),
+        expect.anything(),
+      );
+      const own = adapter.getModelProvidersForWrite!().modelProviders;
+      expect(own['my.gateway']).toEqual([legacy]);
+      expect(own).not.toHaveProperty('my');
+      expect(own['openai']).toEqual(
+        matches ? plan.modelProviders![0]!.models : undefined,
+      );
+    },
+  );
+
   it('rolls back when a legacy route in another scope still wins, without writing that bucket', async () => {
     const higher = {
       'openai-responses': [{ id: 'same', baseUrl, envKey: 'HIGHER_KEY' }],

@@ -1883,4 +1883,56 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       unmount();
     },
   );
+
+  itWhenTuiInputReliable(
+    'reopens a saved Responses install with the API step on Responses',
+    async () => {
+      // The Custom Provider entry prefills the ids of the saved install, so
+      // the API step has to open on the same wire — otherwise Save restamps
+      // those ids onto Chat Completions and leaves a duplicate route behind.
+      const savedSettings = {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+        modelProviders: {
+          openai: [
+            {
+              id: 'm1',
+              baseUrl: 'https://gw.example/v1',
+              envKey: 'QWEN_CUSTOM_API_KEY_X',
+              wireApi: 'responses',
+            },
+          ],
+        },
+      } as unknown as Settings;
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        { settings: {}, originalSettings: {}, path: '' },
+        { settings: savedSettings, originalSettings: savedSettings, path: '' },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await navigateToCustomProtocolSelect(stdin, lastFrame);
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 2/7 · API',
+      );
+      await waitForSelectedOption(lastFrame, 'Responses');
+
+      unmount();
+    },
+  );
 });

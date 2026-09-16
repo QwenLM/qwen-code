@@ -785,7 +785,11 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }): React.JSX.Element {
         </Text>
       </Box>
       <Box marginTop={1}>
-        <Text>{flow.state.previewJson}</Text>
+        {flow.state.previewError ? (
+          <Text color={theme.status.error}>{flow.state.previewError}</Text>
+        ) : (
+          <Text>{flow.state.previewJson}</Text>
+        )}
       </Box>
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>

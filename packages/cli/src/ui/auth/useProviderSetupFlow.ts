@@ -18,6 +18,7 @@ import type {
   InputModalities,
   ModelWireApi,
   ModelProvidersConfig,
+  ProviderModelConfig,
   ProviderProtocolConfig,
   ProviderConfig,
   ProviderSetupInputs,
@@ -103,6 +104,9 @@ export interface ProviderSetupState {
 
   // Preview
   previewJson: string;
+  // The planner's refusal, shown in place of the JSON. Always set by the
+  // hook; optional so hand-built state fixtures keep compiling.
+  previewError?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,38 +479,75 @@ export function useProviderSetupFlow(
     if (provider) void onSubmit(provider, buildCurrentInputs());
   }, [provider, onSubmit, buildCurrentInputs]);
 
-  const getPreviewJson = (): string => {
-    if (!provider) return '';
-    const inputs = buildCurrentInputs();
-    const plan = buildInstallPlan(
-      provider,
-      { ...inputs, apiKey: maskApiKey(inputs.apiKey) },
-      getModelsForProviderProtocol(
-        modelProviders,
-        inputs.protocol ?? provider.protocol,
-        providerProtocol,
-      ),
-      selection,
-    );
-    return JSON.stringify(
-      {
-        env: plan.env,
-        modelProviders: Object.fromEntries(
-          (plan.modelProviders ?? []).map((patch) => [
-            patch.authType,
-            patch.models,
-          ]),
+  // Display copy only: preserved `customHeaders` come from the env-resolved
+  // merged settings, so a stored `${TOKEN}` reference reaches the preview as
+  // the real secret. Keep the header names (the shape stays truthful) and
+  // mask the values; `submit` builds its own plan from the raw inputs.
+  const maskCustomHeaders = (
+    model: ProviderModelConfig,
+  ): ProviderModelConfig => {
+    const headers = model.generationConfig?.customHeaders;
+    if (!headers) return model;
+    return {
+      ...model,
+      generationConfig: {
+        ...model.generationConfig,
+        customHeaders: Object.fromEntries(
+          Object.keys(headers).map((name) => [name, '***']),
         ),
-        security: { auth: { selectedType: plan.authType } },
-        model: {
-          name: plan.modelSelection?.modelId,
-          baseUrl: plan.modelSelection?.baseUrl ?? '',
-        },
       },
-      null,
-      2,
-    );
+    };
   };
+
+  // Computed during render on the review step, so it must stay total:
+  // buildInstallPlan refuses reachable inputs (e.g. two same-endpoint models
+  // holding different credential references) and that refusal is surfaced
+  // as `previewError` instead of escaping into React and unmounting the CLI.
+  const buildPreview = (): { json: string; error: string } => {
+    if (!provider) return { json: '', error: '' };
+    try {
+      const inputs = buildCurrentInputs();
+      const plan = buildInstallPlan(
+        provider,
+        { ...inputs, apiKey: maskApiKey(inputs.apiKey) },
+        getModelsForProviderProtocol(
+          modelProviders,
+          inputs.protocol ?? provider.protocol,
+          providerProtocol,
+        ),
+        selection,
+      );
+      return {
+        json: JSON.stringify(
+          {
+            env: plan.env,
+            modelProviders: Object.fromEntries(
+              (plan.modelProviders ?? []).map((patch) => [
+                patch.authType,
+                patch.models.map(maskCustomHeaders),
+              ]),
+            ),
+            security: { auth: { selectedType: plan.authType } },
+            model: {
+              name: plan.modelSelection?.modelId,
+              baseUrl: plan.modelSelection?.baseUrl ?? '',
+            },
+          },
+          null,
+          2,
+        ),
+        error: '',
+      };
+    } catch (error) {
+      return {
+        json: '',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  };
+
+  const preview =
+    currentStep === 'review' ? buildPreview() : { json: '', error: '' };
 
   // -- State ----------------------------------------------------------------
 
@@ -533,7 +574,8 @@ export function useProviderSetupFlow(
     modalityPdf,
     contextWindowSize,
     focusedConfigIndex,
-    previewJson: currentStep === 'review' ? getPreviewJson() : '',
+    previewJson: preview.json,
+    previewError: preview.error,
   };
 
   return {

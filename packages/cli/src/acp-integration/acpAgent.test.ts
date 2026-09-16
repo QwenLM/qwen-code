@@ -547,6 +547,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         ownsModel: (model: { envKey?: string }) =>
           typeof model.envKey === 'string' &&
           model.envKey.startsWith('QWEN_CUSTOM_API_KEY_'),
+        mergeModelsByIdentity: true,
       };
     }
     return undefined;
@@ -22042,6 +22043,50 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     }
   });
+
+  it.each([
+    { order: ['openai', 'idealab'], expected: 'sk-mine' },
+    { order: ['idealab', 'openai'], expected: 'sk-team' },
+  ])(
+    'qwen/providers/connect reuses the first identity twin key across mapped buckets: $order',
+    async ({ order, expected }) => {
+      const baseUrl = 'https://gw.example/v1';
+      const buckets: Record<string, unknown> = {
+        openai: [{ id: 'gpt-4o', baseUrl, envKey: 'QWEN_CUSTOM_API_KEY_MINE' }],
+        idealab: [{ id: 'gpt-4o', baseUrl, envKey: 'TEAM_GATEWAY_KEY' }],
+      };
+      const settings = makeSessionSettings({
+        env: {
+          QWEN_CUSTOM_API_KEY_MINE: 'sk-mine',
+          TEAM_GATEWAY_KEY: 'sk-team',
+        },
+        modelProviders: Object.fromEntries(
+          order.map((id) => [id, buckets[id]]),
+        ),
+        providerProtocol: { idealab: 'openai' },
+      });
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        await expect(
+          agent.extMethod('qwen/providers/connect', {
+            providerId: 'custom-openai-compatible',
+            protocol: 'openai',
+            baseUrl,
+            modelIds: ['gpt-4o'],
+          }),
+        ).resolves.toMatchObject({ success: true });
+        expect(buildInstallPlan).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'custom-openai-compatible' }),
+          expect.objectContaining({ apiKey: expected, baseUrl }),
+          expect.anything(),
+          { authType: undefined, id: undefined, baseUrl: undefined },
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('qwen/providers/connect reuses the stored apiKey when the client omits it', async () => {
     const settings = {

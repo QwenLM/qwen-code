@@ -515,6 +515,91 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
+  it.each(['conversation', 'service'] as const)(
+    'does not reject a %s preset over an owned model in a sibling route bucket it never rewrites',
+    async (installs) => {
+      const conversation = {
+        id: 'MiniMax-M2.7',
+        name: '[MiniMax] MiniMax-M2.7',
+        baseUrl: 'https://api.minimax.io/v1',
+        envKey: 'MINIMAX_API_KEY',
+      };
+      const service = {
+        id: 'image-01',
+        name: '[MiniMax] service',
+        baseUrl: 'https://api.minimax.io/v1',
+        envKey: 'MINIMAX_API_KEY',
+        imageOnly: true,
+        supportsImageGeneration: true,
+      };
+      // The owned model of the *other* purpose lives in a user-named bucket
+      // that merely resolves to the same protocol. The install rewrites only
+      // `modelProviders.openai`, so nothing here can drop it and the removal
+      // guards must not fire.
+      const sibling = installs === 'conversation' ? service : conversation;
+      const adapter = createAdapter({ myrouter: [sibling], openai: [] });
+      vi.mocked(adapter.getValue).mockImplementation((key) =>
+        key === 'providerProtocol' ? { myrouter: 'openai' } : undefined,
+      );
+      const plan = buildInstallPlan(minimaxProvider, {
+        baseUrl: sibling.baseUrl,
+        apiKey: 'test-only',
+        modelIds: installs === 'conversation' ? ['MiniMax-M2.7'] : ['image-01'],
+      });
+      delete plan.env;
+      expect(plan.modelProviders?.[0]?.ownsModel?.(sibling)).toBe(true);
+      const result = await applyProviderInstallPlan(plan, {
+        settings: adapter,
+      });
+      expect(adapter.getModelProviders()).toEqual({
+        myrouter: [sibling],
+        openai: plan.modelProviders![0]!.models,
+      });
+      expect(result.updatedModelProviders).toEqual(adapter.getModelProviders());
+      expect(adapter.setValue).not.toHaveBeenCalledWith(
+        'modelProviders.myrouter',
+        expect.anything(),
+      );
+      expect(adapter.persist).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('still rejects a purpose change for the same identity in a sibling Responses bucket', async () => {
+    // Unlike the removal guards, the purpose-change guard must keep its
+    // route-aware view: the legacy-bucket cleanup deletes an identity match
+    // from any bucket resolving to the Responses route, so replacing an
+    // image model there with a conversation model is a real removal.
+    const baseUrl = 'https://media.example/v1';
+    const existing: ModelProvidersConfig = {
+      myrouter: [{ id: 'main', baseUrl, imageOnly: true }],
+      openai: [],
+    };
+    const snapshot = structuredClone(existing);
+    const adapter = createAdapter(existing);
+    vi.mocked(adapter.getValue).mockImplementation((key) =>
+      key === 'providerProtocol' ? { myrouter: 'openai-responses' } : undefined,
+    );
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      wireApi: 'responses',
+      baseUrl,
+      apiKey: 'test-only',
+      modelIds: ['main'],
+    });
+    plan.env = { TEST_API_KEY: 'must-not-write' };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).rejects.toMatchObject({
+      step: 'modelPurpose',
+      message: expect.stringContaining('another purpose'),
+    });
+    expect(adapter.setValue).not.toHaveBeenCalled();
+    expect(adapter.backup).not.toHaveBeenCalled();
+    expect(adapter.persist).not.toHaveBeenCalled();
+    expect(process.env['TEST_API_KEY']).toBeUndefined();
+    expect(existing).toEqual(snapshot);
+  });
+
   it.each(['append-chat', 'reselect-service', 'reselect-chat'] as const)(
     'preserves intentional preset merge behavior (%s)',
     async (scenario) => {

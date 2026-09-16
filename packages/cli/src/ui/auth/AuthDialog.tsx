@@ -185,10 +185,13 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
+  // The saved route and ids the wizard reopens with. Both must come from the
+  // same lookup: seeding the ids of a Responses install while the API step
+  // defaults to Chat Completions would restamp them onto the other wire.
+  const findSavedModels = (providerConfig: ProviderConfig) =>
+    findExistingProviderModels(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.modelProviders,
       settings.merged.providerProtocol,
       {
         authType: settings.merged.security?.auth?.selectedType,
@@ -196,6 +199,9 @@ export function AuthDialog(): React.JSX.Element {
         baseUrl: settings.merged.model?.baseUrl,
       },
     );
+
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findSavedModels(providerConfig);
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
     return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
@@ -207,16 +213,7 @@ export function AuthDialog(): React.JSX.Element {
     if (!providerConfig) return;
     setupFlow.start(
       providerConfig,
-      findExistingProviderModels(
-        providerConfig,
-        settings.merged.modelProviders,
-        settings.merged.providerProtocol,
-        {
-          authType: settings.merged.security?.auth?.selectedType,
-          id: settings.merged.model?.name,
-          baseUrl: settings.merged.model?.baseUrl,
-        },
-      )?.protocol,
+      findSavedModels(providerConfig)?.protocol,
       existingEnv,
       getExistingModelIds(providerConfig),
     );
@@ -274,7 +271,7 @@ export function AuthDialog(): React.JSX.Element {
       case 'CUSTOM_PROVIDER':
         setupFlow.start(
           customProvider,
-          undefined,
+          findSavedModels(customProvider)?.protocol,
           existingEnv,
           getExistingModelIds(customProvider),
         );

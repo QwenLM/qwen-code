@@ -33,6 +33,7 @@ import {
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
 } from '../../utils/modelConfigUtils.js';
+import { sanitizeProviderBaseUrl } from '../../utils/acpModelUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isActiveModelSelection,
@@ -477,22 +478,64 @@ export function registerWorkspaceModelsRoutes(
               key: 'model.baseUrl',
               value: '',
             });
-            if (
-              activeScope === SettingScope.User &&
-              workspaceSelectionSurvives
-            ) {
-              // Pin inherited fields before clearing their User source; the
-              // Workspace auth override may still have a valid route for them.
-              for (const field of ['name', 'baseUrl'] as const) {
-                if (loaded.workspace.settings.model?.[field] === undefined) {
-                  writes.push({
-                    scope: SettingScope.Workspace,
-                    key: `model.${field}`,
-                    value: loaded.merged.model?.[field] ?? '',
-                  });
-                }
-              }
-            }
+          }
+        }
+
+        // Decide the Workspace `model` pair once, after both scope views are
+        // known. `model` deep-merges field-wise, so a per-field decision could
+        // pair a copied field with one the workspace already owns; only touch
+        // the pair when the workspace owns neither half, and always write both
+        // keys together (an omitted key cannot override a lower scope on merge).
+        const workspaceModel = loaded.workspace.settings.model;
+        if (
+          loaded.isTrusted &&
+          workspaceModel?.name === undefined &&
+          workspaceModel?.baseUrl === undefined
+        ) {
+          const nameCleared = writes.some(
+            (write) => write.key === 'model.name',
+          );
+          const userCleared = writes.some(
+            (write) =>
+              write.scope === SettingScope.User && write.key === 'model.name',
+          );
+          if (!workspaceSelectionSurvives && !nameCleared) {
+            // The workspace's inherited selection lost its route here (e.g. the
+            // workspace-owned provider list replaced the User's on merge) while
+            // the User view still resolves, so no scope tombstoned it above.
+            // Tombstone it in Workspace scope; an ordinary User-only delete
+            // never reaches this branch because its User tombstone counts.
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.name',
+              value: '',
+            });
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.baseUrl',
+              value: '',
+            });
+          } else if (workspaceSelectionSurvives && userCleared) {
+            // Pin inherited fields before clearing their User source; the
+            // Workspace auth override may still have a valid route for them.
+            // Never copy a credential-bearing URL out of the user's private
+            // settings into the shareable workspace file — a '' tombstone only
+            // costs the endpoint disambiguator. A public URL must stay
+            // byte-identical: the runtime disambiguates by exact compare.
+            const inheritedBaseUrl = loaded.merged.model?.baseUrl ?? '';
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.name',
+              value: loaded.merged.model?.name ?? '',
+            });
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.baseUrl',
+              value:
+                sanitizeProviderBaseUrl(inheritedBaseUrl) === inheritedBaseUrl
+                  ? inheritedBaseUrl
+                  : '',
+            });
           }
         }
 

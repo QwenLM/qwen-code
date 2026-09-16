@@ -64,7 +64,10 @@ resolution retain their published meaning. The draft field `api` is not an alias
 New setup writes `openai` plus per-model `wireApi`. Reconfiguration preserves
 metadata and credential references for the exact selected route. It removes
 only matching legacy entries in the writable scope, comparing effective API,
-model id and exact configured URL. Other endpoints, APIs, models and scopes
+model id and exact configured URL. Buckets whose provider id contains a dot
+are left untouched, because the settings adapters would write them as nested
+paths; if such a stale entry still wins, the install fails before writing.
+Other endpoints, APIs, models and scopes
 remain intact; custom mappings are not rewritten. A higher-precedence override of the selected released declaration rejects
 reconfiguration before writing; reconfigure it in its owning context without
 that override. Other overrides that prevent the new configuration taking effect
@@ -97,13 +100,16 @@ Hot reload is transactional: invalid edits leave the prior registry usable.
 Changing or removing an active route's API must not combine credentials from
 the new route with the old generator or silently substitute another API. Keep
 the existing route-unavailable behavior and require explicit selection of the
-changed route when necessary. Restart may resolve the newly edited startup
+changed route when necessary. A failed re-authentication after such an edit
+is reported to the user once, with guidance to reselect the route or restart.
+Restart may resolve the newly edited startup
 configuration. Existing session records need no new field because their
 effective auth type already distinguishes both APIs.
 
 Ink and OpenTUI share the provider setup hook; both must present API selection
-and show the exact persisted configuration in their preview. VS Code and Web
-Shell must expose the same choice. Web Shell uses a labelled review summary with masked credentials; it must
+and show the exact persisted configuration in their preview, with custom
+header values masked; when the planner refuses the inputs, the review step
+shows the refusal instead of a preview. VS Code and Web Shell must expose the same choice. Web Shell uses a labelled review summary with masked credentials; it must
 show the selected API without inventing generated settings or defaults. ACP and daemon installation inputs accept
 `wireApi` and validate it before writing settings. ACP authentication labels use
 one shared OpenAI key method for both runtime APIs. Model removal matches each entry's effective protocol and must not
@@ -115,7 +121,12 @@ ends that startup mapping, including before the first generator is created.
 ACP persists User's own OpenAI wire choice independently of Workspace-derived
 runtime authentication. Deletion validates each writable scope against its own
 effective settings and preserves valid Workspace selections that inherit fields
-from a cleared User selection. Both fast and full startup capture the environment
+from a cleared User selection. The Workspace `model` pair is decided once,
+as an atomic name/baseUrl pair, and only when the workspace owns neither
+field: an inherited selection that loses its route in the workspace is
+tombstoned there, and a preserved one is pinned with a credential-bearing URL
+replaced by an empty tombstone rather than copied into the shareable
+workspace file. Both fast and full startup capture the environment
 before loading workspace values. User selection validation uses that immutable
 snapshot with User's own settings and home-level `.env` files, discovered from
 home rather than the workspace or its ancestors. Shell and home credentials
@@ -130,7 +141,8 @@ reconnection without an explicit API input preserves each saved model's API at
 the exact same endpoint, including both APIs for the same model id. The shared
 install builder performs this preservation for every entry point. The saved
 selection determines the plan's active route, not the API of other models;
-generic custom-provider setup keeps its visible API choice. New models retain
+generic custom-provider setup keeps its visible API choice, prefilled from
+the identified saved route. New models retain
 the preset defaults. Installs with preserved API stamps retire template-version
 metadata that an unstamped template cannot reproduce.
 

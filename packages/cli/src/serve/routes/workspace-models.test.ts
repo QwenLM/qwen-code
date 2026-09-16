@@ -1565,6 +1565,176 @@ describe('DELETE /workspace/models', () => {
     expect(model.baseUrl).toBe('');
   });
 
+  it('tombstones an inherited workspace selection when its own provider entry shadowed a surviving User entry', async () => {
+    // `modelProviders` replaces on merge, so the workspace-owned `openai` list
+    // shadows the User's. Deleting the workspace entry leaves the inherited
+    // `model.name` dangling in this workspace while the User view still
+    // resolves its own entry — so the User must keep its selection and the
+    // Workspace must get the tombstone pair, else the merge keeps 'gpt-4o'
+    // over an empty provider list.
+    writeUserSettings({
+      modelProviders: {
+        openai: [
+          { id: 'gpt-4o', baseUrl: 'https://user-gw/v1', envKey: 'USER_KEY' },
+        ],
+      },
+      model: { name: 'gpt-4o' },
+      security: { auth: { selectedType: 'openai' } },
+    });
+    writeWorkspaceSettings({
+      modelProviders: {
+        openai: [
+          { id: 'gpt-4o', baseUrl: 'https://ws-gw/v1', envKey: 'WS_KEY' },
+        ],
+      },
+    });
+    const { app, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl: 'https://ws-gw/v1',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clearedActiveModel).toBe(true);
+    expect(readWorkspaceSettings()['modelProviders']).toEqual({ openai: [] });
+    expect(readWorkspaceSettings()['model']).toEqual({ name: '', baseUrl: '' });
+    expect(readUserSettings()['model']).toEqual({ name: 'gpt-4o' });
+    expect(readUserSettings()['modelProviders']).toEqual({
+      openai: [
+        { id: 'gpt-4o', baseUrl: 'https://user-gw/v1', envKey: 'USER_KEY' },
+      ],
+    });
+    expect(
+      loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      }).merged.model?.name,
+    ).toBe('');
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'model.name',
+      '',
+      'workspace',
+      undefined,
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'model.baseUrl',
+      '',
+      'workspace',
+      undefined,
+    );
+  });
+
+  it('pins the inherited name but never a credential-bearing baseUrl into the workspace file', async () => {
+    // Same shape as 'does not use workspace-only env to preserve a deleted
+    // User selection', but the stored baseUrl carries userinfo. The pin must
+    // keep the name and tombstone the baseUrl rather than copy the credential
+    // out of ~/.qwen/settings.json into the shareable .qwen/settings.json.
+    const storedBaseUrl = 'https://key@api.example.com';
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'gpt-4o', baseUrl: storedBaseUrl }] },
+      model: { name: 'gpt-4o', baseUrl: storedBaseUrl },
+    });
+    const { app, broadcastSettingsChanged } = makeApp({
+      baseEnv: {},
+      env: {
+        ANTHROPIC_API_KEY: 'test-only-key',
+        ANTHROPIC_MODEL: 'claude-other',
+        ANTHROPIC_BASE_URL: 'https://api.example/v1',
+      },
+    });
+
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl: 'https://api.example.com',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clearedActiveModel).toBe(false);
+    expect(readUserSettings()).toMatchObject({
+      model: { name: '', baseUrl: '' },
+      modelProviders: { openai: [] },
+    });
+    expect(readWorkspaceSettings()['model']).toEqual({
+      name: 'gpt-4o',
+      baseUrl: '',
+    });
+    expect(JSON.stringify(readWorkspaceSettings())).not.toContain('key@');
+    for (const call of broadcastSettingsChanged.mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('key@');
+    }
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'model.name',
+      'gpt-4o',
+      'workspace',
+      undefined,
+    );
+  });
+
+  it('does not pin half of the model pair next to a workspace-owned model.name', async () => {
+    // `model` deep-merges field-wise, so the workspace's own name is paired
+    // with the User's baseUrl in the merged view. Clearing the User source
+    // must not copy that baseUrl up into the workspace file, where it would be
+    // paired with a name it never belonged to.
+    const baseUrl = 'https://my-gw/v1';
+    writeWorkspaceSettings({ model: { name: 'ws-model' } });
+    writeUserSettings({
+      model: { name: 'gpt-4o', baseUrl },
+      modelProviders: { openai: [{ id: 'gpt-4o', baseUrl }] },
+    });
+    const { app, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app).delete('/workspace/models').send({
+      authType: 'openai',
+      modelId: 'gpt-4o',
+      baseUrl,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clearedActiveModel).toBe(false);
+    expect(readWorkspaceSettings()['model']).toEqual({ name: 'ws-model' });
+    expect(readUserSettings()).toMatchObject({
+      model: { name: '', baseUrl: '' },
+      modelProviders: { openai: [] },
+    });
+    expect(
+      broadcastSettingsChanged.mock.calls.filter(
+        ([key, , scope]) =>
+          scope === 'workspace' && String(key).startsWith('model.'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('does not create a workspace settings file on an ordinary User-only delete', async () => {
+    // Control for the Workspace tombstone: when the User scope owns the whole
+    // selection and clears it itself, nothing may be written to the workspace
+    // — a stray empty pair there would override every later /model pick that
+    // persists to the User scope.
+    writeUserSettings({
+      modelProviders: { openai: [{ id: 'gpt-4o' }] },
+      model: { name: 'gpt-4o' },
+    });
+    const { app, broadcastSettingsChanged } = makeApp();
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clearedActiveModel).toBe(true);
+    expect(readUserSettings()['model']).toEqual({ name: '', baseUrl: '' });
+    expect(fs.existsSync(path.join(workspace, '.qwen', 'settings.json'))).toBe(
+      false,
+    );
+    expect(
+      broadcastSettingsChanged.mock.calls.filter(
+        ([, , scope]) => scope === 'workspace',
+      ),
+    ).toEqual([]);
+  });
+
   it('scrubs modelFallbacks in its own owning scope, not the providers scope', async () => {
     // Providers are user-owned but modelFallbacks lives in workspace scope; the
     // scrub must read and rewrite the workspace value.

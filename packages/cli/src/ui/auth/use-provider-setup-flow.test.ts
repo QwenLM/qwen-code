@@ -114,6 +114,110 @@ describe('useProviderSetupFlow API selection', () => {
     expect(result.current.state.previewJson).not.toContain(inputs.apiKey);
   });
 
+  // Reconnect the custom provider on Chat Completions at `baseUrl` with the
+  // given ids and stop on the review step, where the preview is computed.
+  const reviewCustomReconnect = (
+    submit: ReturnType<typeof vi.fn>,
+    modelProviders: Parameters<typeof useProviderSetupFlow>[1],
+    baseUrl: string,
+    modelIds: string,
+  ) => {
+    const { result } = renderHook(() =>
+      useProviderSetupFlow(submit, modelProviders),
+    );
+    act(() => result.current.start(customProvider));
+    act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
+    act(() => result.current.selectWireApi('chat-completions'));
+    act(() => result.current.changeBaseUrl(baseUrl));
+    act(() => result.current.submitBaseUrl());
+    act(() => result.current.submitApiKey('sk-secret-test'));
+    act(() => result.current.changeModelIds(modelIds));
+    act(() => result.current.submitModelIds());
+    act(() => result.current.submitAdvancedConfig());
+    expect(result.current.state.step).toBe('review');
+    return result;
+  };
+
+  it('shows the credential refusal on review instead of throwing in render', () => {
+    // Two saved models on one endpoint can carry different credential
+    // references (an older 6-char generated key next to a 12-char one, or
+    // distinct explicit envKeys). buildInstallPlan refuses to reconnect them
+    // under a single key; the preview runs during render, so the refusal has
+    // to be surfaced there rather than escape to the root error boundary.
+    const baseUrl = 'https://gateway.example/v1';
+    const saved = (keyA: string, keyB: string) => ({
+      openai: [
+        { id: 'a', baseUrl, envKey: keyA },
+        { id: 'b', baseUrl, envKey: keyB },
+      ],
+    });
+    const split = reviewCustomReconnect(
+      vi.fn(),
+      saved(
+        'QWEN_CUSTOM_API_KEY_OPENAI_GATEWAY_ABC123',
+        'QWEN_CUSTOM_API_KEY_OPENAI_GATEWAY_ABC123DEF456',
+      ),
+      baseUrl,
+      'a, b',
+    );
+    expect(split.current.state.previewJson).toBe('');
+    expect(split.current.state.previewError).toContain(
+      'different credential references',
+    );
+
+    // Control: a shared credential reference previews normally.
+    const shared = reviewCustomReconnect(
+      vi.fn(),
+      saved(
+        'QWEN_CUSTOM_API_KEY_OPENAI_GATEWAY_ABC123',
+        'QWEN_CUSTOM_API_KEY_OPENAI_GATEWAY_ABC123',
+      ),
+      baseUrl,
+      'a, b',
+    );
+    expect(shared.current.state.previewError).toBe('');
+    expect(
+      JSON.parse(shared.current.state.previewJson).modelProviders.openai,
+    ).toHaveLength(2);
+  });
+
+  it('masks preserved custom header values in the preview but not the plan', () => {
+    // Merged settings are env-resolved, so a saved `${TOKEN}` header reaches
+    // the hook as the real secret. The review screen masks the API key; it
+    // must not print that header value next to it.
+    const baseUrl = 'https://gateway.example/v1';
+    const models = [
+      {
+        id: 'gpt-5',
+        baseUrl,
+        envKey: 'K',
+        generationConfig: {
+          customHeaders: { Authorization: 'Bearer sk-live-secret' },
+        },
+      },
+    ];
+    const submit = vi.fn().mockResolvedValue(undefined);
+    const result = reviewCustomReconnect(
+      submit,
+      { openai: models },
+      baseUrl,
+      'gpt-5',
+    );
+    const previewJson = result.current.state.previewJson;
+    expect(previewJson).toContain('Authorization');
+    expect(previewJson).not.toContain('sk-live-secret');
+    expect(
+      JSON.parse(previewJson).modelProviders.openai[0].generationConfig,
+    ).toEqual({ customHeaders: { Authorization: '***' } });
+
+    act(() => result.current.submit());
+    const [provider, inputs] = submit.mock.calls[0]!;
+    const plan = buildInstallPlan(provider, inputs, models);
+    expect(plan.modelProviders![0]!.models[0]!.generationConfig).toEqual({
+      customHeaders: { Authorization: 'Bearer sk-live-secret' },
+    });
+  });
+
   it('prefills saved Responses and clears API when switching to Anthropic', () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderSetupFlow(submit));
