@@ -195,8 +195,9 @@ another copy of the same content.
    `QWEN_TELEMETRY_LOG_PROMPTS=0`,
    `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES=0`, and
    `QWEN_USAGE_STATISTICS_ENABLED=0`.
-   On Windows, the approved `PATH` must resolve `powershell` to the system
-   executable, and PowerShell profiles must be absent or
+   On Windows, the approved `PATH` must resolve both `pwsh` and `powershell`
+   to administrator-controlled executables (`pwsh` wins when both are
+   present), and PowerShell profiles must be absent or
    administrator-controlled.
 
 In regular interactive mode, the `permissions.ask` rule presents Qwen's normal
@@ -266,8 +267,9 @@ Missing or invalid provenance fails closed before configuration or credentials a
    `QWEN_TELEMETRY_ENABLED=0`, `QWEN_TELEMETRY_LOG_PROMPTS=0`,
    `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES=0`, and
    `QWEN_USAGE_STATISTICS_ENABLED=0`.
-   On Windows, the approved `PATH` must resolve `powershell` to the system
-   executable, and PowerShell profiles must be absent or
+   On Windows, the approved `PATH` must resolve both `pwsh` and `powershell`
+   to administrator-controlled executables (`pwsh` wins when both are
+   present), and PowerShell profiles must be absent or
    administrator-controlled. A user-controlled shell shim or profile is
    outside the Direct Profile trust model.
 

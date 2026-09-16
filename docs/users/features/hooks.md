@@ -51,17 +51,17 @@ Command hooks execute commands via child processes. Input JSON is passed through
 
 **Configuration:**
 
-| Field           | Type                     | Required | Description                                 |
-| :-------------- | :----------------------- | :------- | :------------------------------------------ |
-| `type`          | `"command"`              | Yes      | Hook type                                   |
-| `command`       | `string`                 | Yes      | Command to execute                          |
-| `name`          | `string`                 | No       | Hook name (for logging)                     |
-| `description`   | `string`                 | No       | Hook description                            |
-| `timeout`       | `number`                 | No       | Timeout in seconds, default 60              |
-| `async`         | `boolean`                | No       | Whether to run asynchronously in background |
-| `env`           | `Record<string, string>` | No       | Environment variables                       |
-| `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
-| `statusMessage` | `string`                 | No       | Status message displayed during execution   |
+| Field           | Type                     | Required | Description                                                                                               |
+| :-------------- | :----------------------- | :------- | :-------------------------------------------------------------------------------------------------------- |
+| `type`          | `"command"`              | Yes      | Hook type                                                                                                 |
+| `command`       | `string`                 | Yes      | Command to execute                                                                                        |
+| `name`          | `string`                 | No       | Hook name (for logging)                                                                                   |
+| `description`   | `string`                 | No       | Hook description                                                                                          |
+| `timeout`       | `number`                 | No       | Timeout in seconds, default 60                                                                            |
+| `async`         | `boolean`                | No       | Whether to run asynchronously in background                                                               |
+| `env`           | `Record<string, string>` | No       | Environment variables                                                                                     |
+| `shell`         | `"bash" \| "powershell"` | No       | Shell to use. Default: `powershell` on Windows (`bash` in Git Bash/MSYS2 environments); `bash` elsewhere. |
+| `statusMessage` | `string`                 | No       | Status message displayed during execution                                                                 |
 
 `timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. To migrate, look for command hooks whose `timeout` is `1000` or more and rewrite the value in seconds, for example `10000` as `10`. To give a command hook a timeout of 1000 seconds or more, keep writing it in milliseconds, for example `1800000` for 30 minutes. A command hook `timeout` that is not a positive number, such as `"30s"`, is ignored and the 60 second default applies. With debug logging enabled (`QWEN_DEBUG_LOG_FILE=1`), each command hook with a millisecond or ignored `timeout` is named once per session in that session's debug log.
 
@@ -77,6 +77,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
           {
             "type": "command",
             "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh\"",
+            "shell": "bash",
             "name": "security-check",
             "timeout": 10
           }
@@ -87,9 +88,11 @@ Command hooks execute commands via child processes. Input JSON is passed through
 }
 ```
 
-`QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are set to the project directory in the environment of every command hook. Bash hooks read them from the environment, so double-quote them like any other shell variable, as in `"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh"`. For cmd hooks, and for a bare `$QWEN_PROJECT_DIR` in PowerShell hooks, the variable is replaced with the quoted project directory before the command runs; `$env:QWEN_PROJECT_DIR` also works in PowerShell.
+> **Variable syntax:** the project-directory variables are exported to the hook environment and are no longer substituted into the command text, so a bash hook must double-quote one inside a path (`"$QWEN_PROJECT_DIR/.qwen/hooks/check.sh"`) -- left bare it word-splits when the project path has spaces, and single quotes no longer expand at all. PowerShell hooks use `$env:VAR` instead: a bare `$VAR` is undefined there, and inside a quoted string it silently expands to nothing.
 
-Migration: bash hooks used to have these variables replaced in the command text before the shell ran, and that replacement has been removed. A bash hook that leaves the variable unquoted in a project path containing spaces, or writes it inside single quotes such as `'$QWEN_PROJECT_DIR/hook.sh'`, must now double-quote it: `"$QWEN_PROJECT_DIR/hook.sh"`.
+> **Windows hooks run PowerShell** (`cmd` is not a hook shell), so cmd syntax must be rewritten: `dir /b`, `if exist` and `&&` fail visibly, while `where x` and `%VAR%` fail **silently**, exiting 0 with wrong output. Prefix a quoted path with `& ` or PowerShell echoes it instead of running it. Where both are installed `pwsh` wins over Windows PowerShell 5.1, so 5.1-only cmdlets are not guaranteed, and a command cannot start with `param` or `using`.
+
+> **Blocking:** hooks launch with `-NoProfile` and `$ErrorActionPreference = 'Stop'`, so a non-terminating error -- `Write-Error` included -- aborts the hook with exit 1, which does not block the tool call; a gate has to reach `exit 2`. A `.ps1` file must also clear the machine's execution policy, which Qwen does not bypass. With `shell: "bash"`, the bare name is resolved ahead of `PATH`, so WSL's launcher or a `bash.exe` in the project can win.
 
 ### HTTP Hooks
 
@@ -497,7 +500,7 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 | Exit Code | Behavior                                                                                                                                                                                                                                                                                                                                                                       |
 | :-------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `0`       | Success. A JSON object in `stdout` controls behavior. Any other `stdout`, including bare JSON values such as `42`, is plain text: it is added to the model context on `SessionStart`, `UserPromptSubmit` and `UserPromptExpansion`, and kept as a system message on other events. Output that looks like a JSON object but does not parse is never added to the model context. |
-| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model.                                                                                                                                                                                                                                                                                          |
+| `2`       | **Blocking error**. Passes `stderr` as error feedback to the model; when `stderr` is empty the reason comes from `stdout`, and a hook that wrote nothing at all still blocks.                                                                                                                                                                                                  |
 | Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                                                                                                                                                                                    |
 
 Adding plain text to the model context applies only to a command hook's `stdout`. An HTTP hook's response body is read as JSON only when its `Content-Type` is `application/json`; any other non-empty body becomes a `systemMessage` on every event. An HTTP hook that adds context must return JSON with `hookSpecificOutput.additionalContext`.
@@ -990,6 +993,7 @@ For API errors, `error` is derived from the HTTP status and the error message: s
           {
             "type": "command",
             "command": "/path/to/rate-limit-alert.sh",
+            "shell": "bash",
             "name": "rate-limit-alerter"
           }
         ]
@@ -1129,6 +1133,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
           {
             "type": "command",
             "command": "/path/to/save-compact-summary.sh",
+            "shell": "bash",
             "name": "save-summary"
           }
         ]
@@ -1324,7 +1329,8 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.qwen/hooks/todo-validator.sh",
+            "command": "\"$HOME/.qwen/hooks/todo-validator.sh\"",
+            "shell": "bash",
             "name": "todo-validator",
             "timeout": 5
           }
@@ -1418,7 +1424,8 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.qwen/hooks/todo-completion-validator.sh",
+            "command": "\"$HOME/.qwen/hooks/todo-completion-validator.sh\"",
+            "shell": "bash",
             "name": "completion-validator",
             "timeout": 5
           }
@@ -1479,6 +1486,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
           {
             "type": "command",
             "command": "/path/to/security-check.sh",
+            "shell": "bash",
             "name": "security-check",
             "description": "Run security checks before tool execution",
             "timeout": 30
@@ -1534,6 +1542,7 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
           {
             "type": "command",
             "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh\"",
+            "shell": "bash",
             "async": true,
             "timeout": 300
           }
