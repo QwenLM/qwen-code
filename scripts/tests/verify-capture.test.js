@@ -251,7 +251,11 @@ describe('verify-capture helper', () => {
   // #1e1e1e canvas, while a constant #d4d4d4 stroke paints an uncovered ring
   // whose green/blue reaches ~0x8a (measured with and without host fonts).
   // A channel ceiling, not a red-pixel count: a count passes with the stroke
-  // deleted entirely.
+  // deleted entirely. The ceiling is DERIVED from the palette the helper
+  // ships — a retune of ANSI[1] moves the bound with it, and the slack above
+  // it absorbs a brighter input red (ANSI[9] is #f14c4c) — and only the rows
+  // the red glyph occupies are scanned, so a future title or legend (the
+  // helper's second emitter is blue #9cdcfe) cannot false-red the guard.
   it('strokes a bold coloured glyph in its own fill, not a constant', async () => {
     let png;
     withDir((dir) => {
@@ -263,18 +267,52 @@ describe('verify-capture helper', () => {
       expect(isPng(out)).toBe(true);
       png = readFileSync(out);
     });
+    const src = readFileSync(HELPER, 'utf8');
+    const palette = src.match(/const ANSI = \[([\s\S]*?)\]/);
+    expect(palette, 'ANSI palette not found in the helper').not.toBeNull();
+    const ansi = [...palette[1].matchAll(/#(?:[0-9a-f]{2}){3}/gi)].map(
+      (m) => m[0],
+    );
+    expect(ansi.length, 'ANSI palette changed shape').toBe(16);
+    // Slack stays well under the ~0x8a a drifted ring measures; it exists to
+    // absorb antialiasing noise and a brighter palette, not the defect.
+    const ceiling =
+      Math.max(
+        parseInt(ansi[1].slice(3, 5), 16),
+        parseInt(ansi[1].slice(5, 7), 16),
+      ) + 0x30;
     const sharp = createRequire(import.meta.url)('sharp');
     const { data, info } = await sharp(png)
       .raw()
       .toBuffer({ resolveWithObject: true });
+    // Scan only the rows the red glyph occupies: bounding the whole canvas
+    // would red this test on a light-coloured label that has nothing to do
+    // with the stroke.
     let maxGB = 0;
-    for (let i = 0; i + 2 < data.length; i += info.channels) {
-      maxGB = Math.max(maxGB, data[i + 1], data[i + 2]);
+    let redRows = 0;
+    for (let y = 0; y < info.height; y += 1) {
+      let hasRed = false;
+      for (let x = 0; x < info.width; x += 1) {
+        const i = (y * info.width + x) * info.channels;
+        if (data[i] - Math.max(data[i + 1], data[i + 2]) > 0x20) {
+          hasRed = true;
+          break;
+        }
+      }
+      if (!hasRed) continue;
+      redRows += 1;
+      for (let x = 0; x < info.width; x += 1) {
+        const i = (y * info.width + x) * info.channels;
+        maxGB = Math.max(maxGB, data[i + 1], data[i + 2]);
+      }
     }
+    expect(redRows, 'no red glyph rendered to measure').toBeGreaterThan(0);
     expect(
       maxGB,
-      'a grey halo was painted around a bold red glyph',
-    ).toBeLessThanOrEqual(0x40);
+      `green/blue reached 0x${maxGB.toString(16)} in the bold red glyph's ` +
+        `rows (ceiling 0x${ceiling.toString(16)}): a grey halo was painted ` +
+        'around it — the stroke drifted from the fill colour',
+    ).toBeLessThanOrEqual(ceiling);
   });
 
   // The title and a bold body cell are the renderer's two bold emitters; when
@@ -282,20 +320,78 @@ describe('verify-capture helper', () => {
   // font-weight="bold" — a no-op where no bold face resolves — while the body
   // cells gained the stroke, so the caption rendered LIGHTER than the cells
   // it heads in the A/B evidence images this helper exists to publish. Pin
-  // the shared recipe: source assertions red on every host, with or without
-  // fonts. The definition `const boldAttrs = (colour) =>` does not match this
-  // pattern; the two call sites — boldAttrs('#9cdcfe') for the title and
-  // boldAttrs(colour) for a bold cell — do, so a site rewritten to a
-  // hand-rolled attribute string drops the count. That floor cannot see a NEW
-  // label that hand-rolls font-weight="bold" (a footer, a legend — the title's
-  // own shape before this fix), so also count the attribute in code, comments
-  // stripped because the prose above boldAttrs carries the literal: exactly
-  // one definition site.
+  // the recipe's CONTENT: the stroke is the mechanism (no pixel test sees it
+  // on a host with fonts), and any spelling of a bold weight is counted so a
+  // new label cannot dodge it with font-weight="700". Comments are stripped
+  // first, in both // and /* */ shapes, because the prose above the recipe
+  // carries the font-weight literal — and nothing here names the helper's
+  // identifier, so a rename or a prose reflow stays green while a dropped
+  // stroke or a hand-rolled bold label goes red.
   it('emits the title and bold body cells through one bold helper', () => {
     const src = readFileSync(HELPER, 'utf8');
-    expect(src.match(/boldAttrs\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
-    const code = src.replace(/^\s*\/\/.*$/gm, '');
-    expect(code.match(/font-weight="bold"/g)?.length ?? 0).toBe(1);
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(code.match(/stroke="\$\{colour\}"/g)?.length ?? 0).toBe(1);
+    expect(code.match(/paint-order="stroke"/g)?.length ?? 0).toBe(1);
+    expect(
+      code.match(/font-weight\s*=\s*["']?(?:bold|[6-9]00)/gi)?.length ?? 0,
+    ).toBe(1);
+  });
+
+  // The recipe pins the mechanism; this pins the effect it exists for: the
+  // title must not render LIGHTER than the bold cells it heads. Only a pixel
+  // comparison sees a title whose stroke was dropped or made conditional
+  // while the body kept its own, and it is host-relative, so it holds with
+  // and without fonts (measured title/body ink: 605/605 with fonts,
+  // 1062/882 without; a stroke-less title falls to 478/605 and 414/882).
+  it('renders the title band no lighter than the body band', async () => {
+    let png;
+    withDir((dir) => {
+      const out = path.join(dir, 'title-weight.png');
+      const res = run(['--out', out, '--cols', '30', '--title', 'FAIL PASS'], {
+        input: `${ESC}[1mFAIL PASS${ESC}[0m\n`,
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      png = readFileSync(out);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const { data, info } = await sharp(png)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    // Band by the renderer's own geometry: the title occupies the first
+    // CELL_H strip below PAD, the body line the next. Ink = any pixel off the
+    // #1e1e1e canvas — the title fill (#9cdcfe) is hardcoded separately from
+    // the body's (#d4d4d4), so counting a shared colour cannot work.
+    const PAD = 12;
+    const CELL_H = 18;
+    const ink = (top) => {
+      let n = 0;
+      for (let y = top; y < top + CELL_H; y += 1) {
+        for (let x = 0; x < info.width; x += 1) {
+          const i = (y * info.width + x) * info.channels;
+          if (
+            data[i] !== 0x1e ||
+            data[i + 1] !== 0x1e ||
+            data[i + 2] !== 0x1e
+          ) {
+            n += 1;
+          }
+        }
+      }
+      return n;
+    };
+    const titleInk = ink(PAD);
+    const bodyInk = ink(PAD + CELL_H);
+    // The 10% slack absorbs host rasterisation noise; the defect measures 21%
+    // (fonts) and 53% (no fonts) below parity, so the slack cannot hide it.
+    expect(
+      titleInk,
+      `title band ink ${titleInk} vs body band ink ${bodyInk}: the caption ` +
+        'rendered lighter than the bold cells it heads — its stroke was ' +
+        'dropped or made conditional',
+    ).toBeGreaterThanOrEqual(bodyInk * 0.9);
   });
 
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
