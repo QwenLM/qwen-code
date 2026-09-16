@@ -73,13 +73,23 @@ export function completedToolCallBoundary(
   return Math.max(0, ...boundaries.values());
 }
 
-// Envelope the background registries wrap a notification's `modelText` in
-// (`background-tasks.ts`, `workflow-run-registry.ts`,
-// `background-notification-queue.ts`, `create-sub-session.ts`). Every
-// interpolated value goes through `escapeXml`, and monitor output additionally
-// defangs these tag names (`sanitizeMonitorLine`), so a verbatim close tag can
-// only come from the emitter — the same trust model `isSystemReminderContent`
-// relies on for `<system-reminder>`.
+// Envelope the background registries wrap a notification's `modelText` in.
+// Seven construction sites in six modules: `packages/cli/src/serve/create-sub-session.ts`,
+// `packages/core/src/services/monitorRegistry.ts` (two),
+// `packages/core/src/services/backgroundShellRegistry.ts`,
+// `packages/core/src/agents/background-tasks.ts`,
+// `packages/core/src/agents/workflow-run-registry.ts`, and
+// `packages/core/src/agents/background-notification-queue.ts`.
+//
+// Most emitters escape their interpolated values with `escapeXml`, and monitor
+// output additionally defangs these tag names (`sanitizeMonitorLine`), so a
+// verbatim close tag inside those payloads can only come from the emitter —
+// the same trust model `isSystemReminderContent` relies on for
+// `<system-reminder>`. The escaping is not uniform, though
+// (`background-notification-queue.ts` interpolates its status and summary
+// raw), and model output is never defanged at all, so the envelope shape alone
+// cannot prove provenance. The predicate below therefore gates on the role
+// that does carry it: every real notification record is user-role.
 const TASK_NOTIFICATION_OPEN = '<task-notification>';
 const TASK_NOTIFICATION_CLOSE = '</task-notification>';
 
@@ -94,8 +104,21 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
 
 /**
  * Whether `content` is a system-injected background notification rather than
- * user input: at least one part is a `<task-notification>` envelope and every
- * part is structural (an envelope, or a `<system-reminder>`).
+ * user input: the entry is user-role, at least one part is a
+ * `<task-notification>` envelope, and every part is structural (an envelope,
+ * or a `<system-reminder>`).
+ *
+ * The role check is the provenance signal, and it has to come first: the
+ * envelope shape is not defanged against model output (see the trust-model
+ * note above), so a MODEL entry whose whole text is a bare envelope — the user
+ * asked the model to echo a notification verbatim, or injected tool/web
+ * content steered the reply into ending with one — would otherwise be trimmed
+ * away. That exposes the prompt the model *did* answer as the tail and returns
+ * `interrupted_prompt` for a session that ended cleanly, re-introducing the
+ * exact false banner this trim exists to remove. Requiring user-role cannot
+ * drop a real notification: `createNotificationRecord`
+ * (`packages/core/src/services/chatRecordingService.ts`) builds every one from
+ * `createBaseRecord('user')`.
  *
  * The "every part" requirement mirrors `isSystemReminderContent` and is what
  * keeps a real prompt out: per-turn reminders ride alongside the prompt text in
@@ -110,6 +133,7 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * read.
  */
 function isSystemNotificationContent(content: Content): boolean {
+  if (content.role !== 'user') return false;
   const parts = content.parts;
   if (!parts || parts.length === 0) return false;
   if (
@@ -124,6 +148,26 @@ function isSystemNotificationContent(content: Content): boolean {
       isWrappedIn(part, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE) ||
       isWrappedIn(part, SYSTEM_REMINDER_OPEN, SYSTEM_REMINDER_CLOSE),
   );
+}
+
+/**
+ * Index just past the last entry {@link detectTurnInterruption} classifies
+ * against: `history.length` minus any trailing system-injected background
+ * notifications.
+ *
+ * Exported so a caller that applies its own guard to the same tail can trim it
+ * identically instead of re-deriving the rule. Without that, a trailing
+ * notification hides the model entry from the caller's guard while the trim
+ * hides the notification from detection, and both miss at once — see
+ * `tailHoldsAnyFunctionCall` in `packages/cli/src/serve/prompt-terminal-ledger.ts`.
+ *
+ * @param history - Chat history in Gemini `Content[]` form, oldest first.
+ * @returns The exclusive end index of the classifiable prefix.
+ */
+export function effectiveHistoryEnd(history: readonly Content[]): number {
+  let end = history.length;
+  while (end > 0 && isSystemNotificationContent(history[end - 1]!)) end--;
+  return end;
 }
 
 /**
@@ -147,8 +191,7 @@ export function detectTurnInterruption(
   // turn never ran leaves a `user` tail that nothing will ever answer. Left in
   // place it classifies as `interrupted_prompt`, which keeps the recovery
   // banner pinned on a session whose last real turn ended cleanly.
-  let end = history.length;
-  while (end > 0 && isSystemNotificationContent(history[end - 1]!)) end--;
+  const end = effectiveHistoryEnd(history);
   if (boundary >= end) return { kind: 'none' };
   const last = history[end - 1];
   if (!last) {

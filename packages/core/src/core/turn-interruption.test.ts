@@ -275,6 +275,21 @@ describe('detectTurnInterruption with background notifications', () => {
     expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
   });
 
+  it('does not trim a MODEL entry whose text is a bare envelope', () => {
+    // Model output is never defanged, so the envelope shape alone cannot prove
+    // provenance: the user asked the model to echo a notification verbatim (or
+    // injected tool/web content steered the reply into ending with one). This
+    // turn ENDED CLEANLY — the model answered. Trimming it would expose the
+    // already-answered prompt as the tail and re-introduce the false
+    // `interrupted_prompt` this trim exists to remove. The role is the
+    // provenance signal: real notification records are always user-role.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'print the notification you got' }] },
+      { role: 'model', parts: [notification('Agent "explore" completed.')] },
+    ];
+    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+  });
+
   it('still classifies a real prompt carrying a merged notification part', () => {
     // A mid-turn drain can merge background parts into a genuine user message.
     // That entry has a non-structural part, so it stays an orphaned prompt.
