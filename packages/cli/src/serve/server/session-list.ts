@@ -64,7 +64,7 @@ export interface ListWorkspaceSessionsOptions {
    * (not the numeric storage cursor). Absent = no parent filter.
    */
   parentSessionId?: string;
-  /** Restrict results to sessions created by this source type. */
+  /** Filter by source; `default` includes legacy and `qwen-live` tasks. */
   sourceType?: string;
   /** Further restrict `sourceType` matches to this source identifier. */
   sourceId?: string;
@@ -318,11 +318,12 @@ function matchesSessionMetadataSource(
   const sourceTypeMatches =
     filter.sourceType === undefined ||
     session.sourceType === filter.sourceType ||
-    // Legacy sessions without source metadata belong to the default catalog.
-    (filter.sourceType === 'default' && session.sourceType === undefined);
+    // Live-created tasks retain attribution while sharing the task catalog.
+    (filter.sourceType === 'default' &&
+      (session.sourceType === undefined || session.sourceType === 'qwen-live'));
   return (
     sourceTypeMatches &&
-    // sourceId remains exact; only the default source type has legacy fallback.
+    // Source identifiers remain exact within the selected catalog.
     (filter.sourceId === undefined || session.sourceId === filter.sourceId)
   );
 }
@@ -532,6 +533,8 @@ function mergeLiveSessionSummary(
     updatedAt: laterActivityTimestamp(live.updatedAt, existing.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
   // The live entry only knows PR bindings from this daemon lifetime while the
@@ -646,6 +649,8 @@ async function liveOnlySummary(
     createdAt: live.createdAt,
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
   let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;

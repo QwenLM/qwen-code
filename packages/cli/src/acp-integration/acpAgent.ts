@@ -5,6 +5,7 @@
  */
 
 import {
+  buildHooksListing,
   type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
@@ -152,6 +153,7 @@ import {
   qualifySkillName,
   sessionIdContext,
   registerSession,
+  getLastPeerInboxFailure,
   SessionSourceService,
   SessionSourceError,
   decodeSessionListCursor,
@@ -210,6 +212,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
@@ -287,10 +290,11 @@ import {
   startChildHeapProbe,
   type ChildHeapProbe,
 } from './child-heap-probe.js';
+import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
-  buildModelReasoningConfigPreview,
+  buildModelReasoningRoutePreview,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
   getDefaultReasoningConfig,
@@ -298,7 +302,6 @@ import {
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
-  resolvePersistedReasoningConfigState,
   REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
   REASONING_EFFORT_NAMES,
@@ -340,6 +343,7 @@ import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -4426,10 +4430,28 @@ class QwenAgent implements Agent {
     return `${path.resolve(runtimeBaseDir)}\0${sessionId}`;
   }
 
-  private withAskUserQuestionRestoreHint<
+  private withSessionRestoreMeta<
     T extends { _meta?: Record<string, unknown> | null },
-  >(session: Session | undefined, response: T): T {
-    if (this.argv.restoreAskUserQuestion !== true) {
+  >(
+    session: Session | undefined,
+    response: T,
+    suppressQuestionHint: boolean,
+  ): T {
+    const backgroundTurn = session?.getBackgroundTurn?.();
+    const hasRunningBackgroundTasks = session?.hasRunningBackgroundTasks?.();
+    if (backgroundTurn || hasRunningBackgroundTasks !== undefined) {
+      response = {
+        ...response,
+        _meta: {
+          ...response._meta,
+          ...(backgroundTurn ? { backgroundTurn } : {}),
+          ...(hasRunningBackgroundTasks !== undefined
+            ? { hasRunningBackgroundTasks }
+            : {}),
+        },
+      };
+    }
+    if (suppressQuestionHint || this.argv.restoreAskUserQuestion !== true) {
       return response;
     }
     if (!session?.shouldHintAskUserQuestionRestore()) {
@@ -4698,7 +4720,16 @@ class QwenAgent implements Agent {
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
-        if (messaging === null) this.peerMessagingStart = null;
+        // Except for a platform with no inbox transport. That refusal is
+        // decided before any filesystem call and holds for every candidate
+        // path, so no later session in this process can succeed; keep the
+        // settled null so the attempt, and its log line, happen once.
+        if (
+          messaging === null &&
+          getLastPeerInboxFailure()?.cause !== 'unsupported_platform'
+        ) {
+          this.peerMessagingStart = null;
+        }
         return messaging;
       } catch (error) {
         debugLogger.error(
@@ -4748,7 +4779,7 @@ class QwenAgent implements Agent {
     // from more than one workspace, and a record exists to be addressed,
     // so it is written only when that session's settings turn messaging
     // on. The process's startup settings answer for nobody else.
-    if (settings.merged.agents?.crossSessionMessaging !== true) return;
+    if (!isCrossSessionMessagingEnabled(settings.merged)) return;
     // Bound by the first session that needs it rather than at startup: an
     // ACP process with no session has nothing to advertise and nobody to
     // receive for, and this is also the first moment the agent exists.
@@ -5450,9 +5481,11 @@ class QwenAgent implements Agent {
       session: Session | undefined,
       response: T,
     ): T =>
-      suppressRestoreAskUserQuestion
-        ? response
-        : this.withAskUserQuestionRestoreHint(session, response);
+      this.withSessionRestoreMeta(
+        session,
+        response,
+        suppressRestoreAskUserQuestion,
+      );
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -5933,9 +5966,11 @@ class QwenAgent implements Agent {
       session: Session | undefined,
       response: T,
     ): T =>
-      suppressRestoreAskUserQuestion
-        ? response
-        : this.withAskUserQuestionRestoreHint(session, response);
+      this.withSessionRestoreMeta(
+        session,
+        response,
+        suppressRestoreAskUserQuestion,
+      );
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -6405,6 +6440,7 @@ class QwenAgent implements Agent {
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
@@ -6417,6 +6453,7 @@ class QwenAgent implements Agent {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
     delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
     delete meta['qwen.goalProposalApproval'];
     if (
       this.privateParentState === 'trusted' &&
@@ -6444,6 +6481,9 @@ class QwenAgent implements Agent {
       suppliedChannelPrompt === true
     ) {
       meta[CHANNEL_PROMPT_META_KEY] = true;
+      if (suppliedChannelOutputMode === 'per_task') {
+        meta[CHANNEL_OUTPUT_MODE_META_KEY] = suppliedChannelOutputMode;
+      }
     }
     // Channel delivery is a daemon-managed side effect (the prompt route
     // injects it from the trusted context); an untrusted direct-ACP caller
@@ -7852,34 +7892,31 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
-        const resolved =
-          !model.isRuntimeModel && !modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? config.getResolvedModelConfig?.(
-                model.authType,
-                model.id,
-                model.registryBaseUrl ?? model.baseUrl,
-              )
-            : undefined;
-        const configOptions =
-          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? undefined
-            : buildModelReasoningConfigPreview(
-                model.id,
-                resolvePersistedReasoningConfigState(
-                  model.id,
-                  settings.merged.model?.reasoningEffort,
-                  resolved?.generationConfig.thinkingMandatory === true,
-                  model.capabilities?.reasoning,
-                ),
-                model.capabilities?.reasoning,
-                resolved
-                  ? {
-                      ...resolved.generationConfig,
-                      model: model.id,
-                      baseUrl: resolved.baseUrl,
-                    }
-                  : undefined,
-              );
+        const resolved = !model.isRuntimeModel
+          ? config.getResolvedModelConfig?.(
+              model.authType,
+              model.id,
+              model.registryBaseUrl,
+            )
+          : undefined;
+        const generation: ContentGeneratorConfig = {
+          ...resolved?.generationConfig,
+          model: model.id,
+          authType: model.authType,
+          baseUrl: resolved?.baseUrl,
+        };
+        const configOptions = model.isRuntimeModel
+          ? undefined
+          : buildModelReasoningRoutePreview(
+              generation,
+              resolveReasoningCapabilities(
+                generation,
+                model.capabilities?.reasoning ??
+                  resolved?.capabilities?.reasoning,
+              ),
+              settings.merged.model?.reasoningEffort,
+              modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+            );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -8466,6 +8503,11 @@ class QwenAgent implements Agent {
           : availableCommands.filter((command) => command.name !== 'workflows'),
       availableSkills: availableSkills ?? [],
       workflowsEnabled,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: true,
+        workflowStepId: true,
+      },
       savedWorkflows,
     };
   }
@@ -8768,37 +8810,29 @@ class QwenAgent implements Agent {
   private buildWorkspaceHooksStatus(config: Config): ServeWorkspaceHooksStatus {
     try {
       const workspaceCwd = this.workspaceCwd(config);
-      const disabled = config.getDisableAllHooks();
-      const hookSystem = config.getHookSystem();
-      if (!hookSystem) {
-        return {
-          v: STATUS_SCHEMA_VERSION,
-          workspaceCwd,
-          initialized: true,
-          disabled,
-          hooks: [],
-          events: IDLE_HOOK_EVENTS,
-        };
-      }
-      const registryEntries = hookSystem.getAllHooks();
-      const hooks: ServeHookEntry[] = registryEntries.map(
-        (entry): ServeHookEntry => ({
-          kind: 'hook',
-          eventName: entry.eventName,
-          config: this.serializeHookConfig(entry.config),
-          source: entry.source as ServeHookSource,
-          ...(entry.matcher ? { matcher: entry.matcher } : {}),
-          ...(entry.sequential !== undefined
-            ? { sequential: entry.sequential }
-            : {}),
-          enabled: entry.enabled,
-        }),
-      );
+      const listing = buildHooksListing(config);
+      // The workspace view lists the registry only; session hooks have their
+      // own per-session status method.
+      const hooks: ServeHookEntry[] = listing.rows
+        .filter((row) => row.origin === 'registry')
+        .map(
+          (row): ServeHookEntry => ({
+            kind: 'hook',
+            eventName: row.eventName,
+            config: this.serializeHookConfig(row.config),
+            source: row.source as ServeHookSource,
+            ...(row.matcher ? { matcher: row.matcher } : {}),
+            ...(row.sequential !== undefined
+              ? { sequential: row.sequential }
+              : {}),
+            enabled: row.enabled,
+          }),
+        );
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
         initialized: true,
-        disabled,
+        disabled: listing.allDisabled,
         hooks,
         events: IDLE_HOOK_EVENTS,
       };
@@ -12659,6 +12693,7 @@ class QwenAgent implements Agent {
                   ? { scriptPath: readableScriptPath }
                   : { script: task.script }),
                 args: task.args,
+                ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
               const result = (await workflowTool
@@ -14052,6 +14087,22 @@ class QwenAgent implements Agent {
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
+            const reasoningError = session
+              .getConfig()
+              .stageReasoningOverrides?.(
+                newMerged.modelProviders,
+                newMerged.providerProtocol ?? {},
+              );
+            if (reasoningError)
+              await session
+                .sendUpdate({
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: reasoningError },
+                  _meta: { qwenDiscreteMessage: true },
+                })
+                .catch((error) =>
+                  debugLogger.warn('Reasoning notice delivery failed', error),
+                );
             if (!session.isIdle()) {
               skipped.push(id);
               return;
@@ -15458,7 +15509,8 @@ class QwenAgent implements Agent {
 
     if (
       activeRuntimeSnapshot ||
-      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+        !modelReasoning?.profile) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,
@@ -15510,6 +15562,13 @@ class QwenAgent implements Agent {
       generation,
       modelReasoning,
     );
+    if (
+      modelReasoning?.profile &&
+      gptOverride?.enabled &&
+      gptOverride.useDefaultEffort
+    ) {
+      return [modeConfigOption, modelConfigOption];
+    }
     const gptEnableOverride =
       generation.reasoning === false
         ? getGptReasoningOverrideState(
@@ -15608,10 +15667,11 @@ class QwenAgent implements Agent {
         config.getAuthType?.(),
         config.getCurrentModelRegistryBaseUrl?.(),
       );
-    if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
-      return undefined;
-    }
-    return getConfiguredModelReasoning(config);
+    const reasoning = getConfiguredModelReasoning(config);
+    return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+      !reasoning?.profile
+      ? undefined
+      : reasoning;
   }
 
   private buildSelectableModelOptions(config: Config) {

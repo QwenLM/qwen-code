@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { FIXED_CAPTURE_TIME } from './e2e/visuals/constants';
 
 /*
- * Five contracts the visuals pipeline depends on and that no runtime assertion
+ * Contracts the visuals pipeline depends on and that no runtime assertion
  * can reach.
  *
  * They live in a vitest file OUTSIDE `e2e/` on purpose. `vitest.config.ts`
@@ -237,6 +237,21 @@ describe('visual capture contracts', () => {
     expect(shotAt, 'the cockpit spec must capture').toBeGreaterThan(-1);
     expect(clearAt, 'focus must be cleared before the capture').toBeLessThan(
       shotAt,
+    );
+  });
+  it('keeps the background-dot action hide inside the hover media query', () => {
+    // Touch devices get no hover reveal: the (hover: none) block keeps row
+    // actions always visible, and this (0,4,0) rule would out-specify it on a
+    // sticky tap-hover, hiding (but not disarming) the buttons.
+    const css = readFileSync(
+      join(HERE, 'components/sidebar/WebShellSidebar.module.css'),
+      'utf8',
+    );
+    const hideRule =
+      '.sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions';
+    expect(css.indexOf(hideRule)).toBe(css.lastIndexOf(hideRule));
+    expect(css, 'the hide rule must live inside @media (hover: hover)').toMatch(
+      /@media \(hover: hover\) \{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
     );
   });
 });

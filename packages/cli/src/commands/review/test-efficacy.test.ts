@@ -716,7 +716,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       appendFileSync(
         join(dir, '.git', 'config'),
         `[filter "evil"]\n\tsmudge = echo ${'x'.repeat(1200000)}\n` +
-          `\tsmudge = touch ${canary}\n`,
+          `\tsmudge = touch ${canary.replaceAll('\\', '/')}\n`,
       );
       writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
 
@@ -829,7 +829,11 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
-  it('REFUSES an include whose `..` the kernel resolves through a symlink', () => {
+  it('REFUSES an include whose `..` the kernel resolves through a symlink', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     // The other half of the test above, and the one that makes the `dangling`
     // bucket safe to drop anything at all. `<repo>/.git/link` is a symlink and
     // `include.path = link/../evil.cfg` names a payload one level ABOVE the

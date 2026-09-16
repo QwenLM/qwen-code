@@ -9,12 +9,10 @@ import type {
   ModelInfo,
   AvailableCommand,
   ContentBlock,
-  RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type {
   AuthenticateUpdateNotification,
-  AskUserQuestionRequest,
   SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
@@ -256,31 +254,6 @@ export class QwenAgentManager {
 
       // Default handling path
       this.sessionUpdateHandler.handleSessionUpdate(data);
-    };
-
-    this.connection.onPermissionRequest = async (
-      data: RequestPermissionRequest,
-    ) => {
-      if (this.callbacks.onPermissionRequest) {
-        const optionId = await this.callbacks.onPermissionRequest(data);
-        return {
-          optionId:
-            this.resolvePermissionOptionId(data, optionId) ||
-            this.resolvePermissionOptionId(data) ||
-            '',
-        };
-      }
-      return { optionId: this.resolvePermissionOptionId(data) || '' };
-    };
-
-    this.connection.onAskUserQuestion = async (
-      data: AskUserQuestionRequest,
-    ) => {
-      if (this.callbacks.onAskUserQuestion) {
-        const result = await this.callbacks.onAskUserQuestion(data);
-        return result;
-      }
-      return { optionId: 'cancel' };
     };
 
     this.connection.onEndTurn = (reason?: string, source?: string) => {
@@ -1467,32 +1440,6 @@ export class QwenAgentManager {
   }
 
   /**
-   * Register permission request callback
-   *
-   * @param callback - Permission request callback function
-   */
-  onPermissionRequest(
-    callback: (request: RequestPermissionRequest) => Promise<string>,
-  ): void {
-    this.callbacks.onPermissionRequest = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
-  /**
-   * Register ask user question callback
-   *
-   * @param callback - Ask user question callback function
-   */
-  onAskUserQuestion(
-    callback: (
-      request: AskUserQuestionRequest,
-    ) => Promise<{ optionId: string; answers?: Record<string, string> }>,
-  ): void {
-    this.callbacks.onAskUserQuestion = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
-  /**
    * Register end-of-turn callback
    *
    * @param callback - Called when ACP stopReason is reported
@@ -1675,34 +1622,5 @@ export class QwenAgentManager {
         this.callbacks.onAvailableModels?.(this.baselineAvailableModels);
       }
     }
-  }
-
-  private resolvePermissionOptionId(
-    request: RequestPermissionRequest,
-    preferredOptionId?: string,
-  ): string | undefined {
-    // Keep this mapping aligned with AcpConnection.resolvePermissionOptionId:
-    // Webview callbacks may provide a semantic choice (allow/reject) while the
-    // CLI requires a concrete ToolConfirmationOutcome optionId.
-    // Always normalize to an optionId that exists in request.options.
-    const options = Array.isArray(request.options) ? request.options : [];
-    if (options.length === 0) {
-      return undefined;
-    }
-
-    if (
-      preferredOptionId &&
-      options.some((option) => option.optionId === preferredOptionId)
-    ) {
-      return preferredOptionId;
-    }
-
-    return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ||
-      options.find((option) => option.optionId === 'proceed_once')?.optionId ||
-      options.find((option) => option.optionId.includes('proceed_once'))
-        ?.optionId ||
-      options[0]?.optionId
-    );
   }
 }
