@@ -922,6 +922,15 @@ wiring above fails that test with `(1s` where it asserts `(4s`. The row prints n
 elapsed time while parked, as recorded above, so this is what the user sees once
 they have answered rather than while the dialog is open.
 
+That wiring is only as good as the instance it lives on, and one review round
+measured the limit: the test rerenders a single row, while the shell mounts the row
+twice — once under a parked confirmation, once above the composer — in two mutually
+exclusive branches. A park therefore unmounts the instance that accumulated the time
+and mounts a fresh one, whose flag never changes value, so the counter still restarts
+after an answer in the shell even though the paused flag is wired correctly and the
+unit test passes. Carrying the accumulated time across the swap means owning it above
+both mounts, which is recorded as a follow-up rather than done here.
+
 Re-running the full matrix afterwards confirms it on the machine rather than in a
 test: eleven checkpoints taken while a dialog is parked each shed one row on both
 sides, from four divergent rows to three, and the rows left there are the
@@ -993,9 +1002,11 @@ the render. The queue lives in a ref so that a turn can drain it and put it back
 within one tick, and a ref is invisible to a render — so the ref stays the
 synchronous source, and the five sites that move it each copy it into state
 besides: the push, the drain, the restore for texts still riding when a turn
-aborts, the pop for editing, and the transcript reset that backs `/clear`,
-resume and branch. That last one is why the rows shed with a cleared screen
-instead of outliving it.
+aborts, the mid-turn steering path that re-queues the remainder it did not
+consume, and the transcript reset that backs `/clear`, resume and branch. The
+composer's pop for editing moves the ref only by draining it, so the drain's
+copy is what mirrors that path. The transcript reset is why the rows shed with a
+cleared screen instead of outliving it.
 
 This is the one decision here that no frame can evidence. Both renderers _steer_
 a plain-Enter submission made mid-turn: the text is drained at the next sampling
@@ -1040,11 +1051,11 @@ site and one at the mount — each fail at least one test, with one limitation: 
 escape-stripping addition carries no mutation of its own. The mount's mutation is
 the rows moved under the composer, which the placement test now catches by
 ordering the two against each other in the chrome's own text. The five ported
-component rows
-fail their own and no other; the mirror sites do not map one to one, because a
-list never given its first entry, or never emptied, is still being asserted
-turns later: draining without mirroring fails one assertion, pushing without it
-fails four, popping for editing two.
+component rows fail their own and no other; the mirror sites do not map one to
+one, because a list never given its first entry, or never emptied, is still
+being asserted turns later. Measured by dropping each copy in turn: pushing
+without it fails four tests, the mid-turn re-queue without it two, and the
+drain, the abort restore and the transcript reset one each.
 
 ## Decision 31 — a model dialog outcome is recorded as well as shown
 
@@ -1317,22 +1328,26 @@ is never drawn. The port inherited that, and the review round caught it on the
 arrow case — the user had navigated to a question and the dialog took it away again
 a tenth of a second later.
 
-Both paths now cancel a pending swap first: the arrow because the keystroke is the
-user's own answer to "which question am I on", the second answer because it
-supersedes the swap the first one scheduled. This is one of the places where the
-port deliberately does not match ink; the same 150 ms pause, the same clamping at
-the last tab, and the same tick-before-swap are kept. ink's behaviour is recorded
-as a defect of its own rather than reproduced, and the double-fire the acceptance
-matrix had already watched on ink's leg is the same defect seen from outside.
+The arrow now cancels a pending swap first, because the keystroke is the user's own
+answer to "which question am I on". The second answer used to cancel it as well and
+supersede the swap the first one scheduled; a later round put a lock in front of that
+path instead, which drops an answer landing inside the pause outright (Decision 37).
+Nothing is left for the cancel to see there: a live timer always belongs to the tab the
+cursor is still on, since the only moves are the swap's own and the two arrows, and both
+arrows cancel first. This is one of the places where the port deliberately does not match
+ink; the same 150 ms pause, the same clamping at the last tab, and the same
+tick-before-swap are kept. ink's behaviour is recorded as a defect of its own rather than
+reproduced, and the double-fire the acceptance matrix had already watched on ink's leg is
+the same defect seen from outside.
 
-Both paths are pinned in the confirmation dialog's suite, each by a mutation of
-its own: a right arrow that lands during a pending pause keeps the question it
-moved to, and removing that cancel fails this test alone; two answers inside one
-pause leave exactly the swap the second one scheduled, in a test that predates
-this round, and removing the cancel in the answer path fails that one alone. On a
-machine the pause and the arrow were already covered by the matrix scenarios that
-answer several questions; the cancellation itself was not observed there, since it
-needs two keystrokes inside 150 ms.
+The arrow is pinned by a mutation of its own: a right arrow that lands during a pending
+pause keeps the question it moved to, and removing that cancel fails this test alone. The
+answer path's cancel was taken out rather than pinned — putting it back fails nothing,
+which is the measurement that showed it unreachable. What the path keeps is the drop: the
+test that predates this round still asserts one advance for two answers inside a pause,
+and the lock's own mutation is recorded under Decision 37. On a machine the pause and the
+arrow were already covered by the matrix scenarios that answer several questions; the
+cancellation itself was not observed there, since it needs two keystrokes inside 150 ms.
 
 ## Decision 35 — the cursor cell prints the character that owns the focus
 
@@ -1346,13 +1361,17 @@ as it does in ink, whose text input decides whether to draw the cursor's
 highlight while always drawing the text under it.
 
 The same row's caret now follows a rule the previous pass had inverted. The caret
-indexes the value the field's owner acknowledged, not the one the keys typed: when
-a keystroke reaches a field whose owner refuses it — a letter into the
-context-window field, which keeps digits only — the accepted value has no character
-at that position to hold a caret, so the cap at the shared prefix between the two
-texts leaves the caret exactly where it was. Before that, each refused key moved
-the caret one code point right, and the first backspace after a burst of them ate a
-real character. Where the two texts are equal the rule reduces to the plain clamp,
+indexes the value the field's owner acknowledged, not the one the keys typed. The two
+texts are walked together and the caret is charged only for the code points the owner
+dropped ahead of it, which covers both shapes a refusal takes: a single refused
+keystroke — a letter into the context-window field, which keeps digits only — drops one
+code point at the caret and leaves the caret exactly where it was, and an owner that
+filters the middle of a pasted value (`1,024` → `1024`) keeps the caret following the
+accepted tail instead of stranding it on the first character removed. A value the walk
+cannot align, because the owner inserted or substituted rather than dropped, falls back
+to capping the caret at the code points the two texts agree on. Before that, each refused
+key moved the caret one code point right, and the first backspace after a burst of them
+ate a real character. Where the two texts are equal the rule reduces to the plain clamp,
 so every accepted edit still behaves as it did.
 
 The row prints only what the flow accepted, which is the divergence Decision 32
@@ -1365,14 +1384,15 @@ had pinned the drift as the expected behaviour, since the caret it asserted was 
 drift; it pins the absence of one now, and the difference from the shape the review
 asked for is stated in that thread.
 
-Two tests and three mutations. The cell that dropped its character when the field
-lost focus fails the new row test in the authentication suite; the resync that
-calls the plain clamp where the shared-prefix cap belongs, and that cap reduced to
-a length clamp, fail the context-window field's edit test and the new unit test of
-the rule itself. Each mutation fails exactly the tests that own the behaviour it
-takes away. The machine leg is unchanged here — a caret in a field the wizard
-renders is still not reachable by any scenario, so the row's rendering rests on the
-unit suites.
+Four mutations, each failing exactly the test that owns the behaviour it takes away:
+the cell that dropped its character when the field lost focus fails the authentication
+suite's row test for a field that lost the cursor; the resync that calls the plain clamp
+where this rule belongs fails that suite's context-window edit test; the fallback cap
+reduced to a length clamp fails the unit test of a single refused keystroke; and the walk
+reduced to that cap alone — the shape this decision used to describe — fails the unit test
+of a value the owner filtered in the middle. The machine leg is unchanged here — a caret
+in a field the wizard renders is still not reachable by any scenario, so the row's
+rendering rests on the unit suites.
 
 ## Decision 36 — the arrow names the call the queue can answer
 
@@ -1433,10 +1453,16 @@ already given.
 
 The latch arms only on an Enter that reports the step moved. An Enter refused by
 validation keeps the step mounted and the read belongs to it, so `abc`, Enter, `def` in
-one read still leaves `abcdef` in the endpoint field. It is a per-render flag rather than
-a per-mount one: the renderer installs a fresh handler per commit and a read cannot span
-a commit, so the flag spans exactly one read, and a field whose submit was rejected — or
-whose auth failed a step later — is editable again on the next render.
+one read still leaves `abcdef` in the endpoint field. It is a ref that holds across
+renders rather than a per-render flag: the render a successful submit schedules would
+otherwise clear it, and in the question dialog that render leaves the submitted row
+mounted and focused for the whole 150 ms pause, so the next read would keep editing a
+field that had already answered. Only a changed mount key clears it, which is the key each
+field is mounted under and also what re-seeds the caret past the value the way ink's text
+input does on mount. A field whose submit was refused stays editable because nothing
+armed the latch. A field whose submit was taken and then failed a step later does not —
+the step is still on screen with the latch armed — and the wizard's last step needs the
+retry counter Decision 39 records.
 
 What stays un-latched is deliberate. The question dialog's tab arrows keep working
 inside the pause Decision 34 protects, because there the keystroke is the user's answer
@@ -1539,6 +1565,77 @@ click-drag text selection over the transcript, which the region answers through
 the same hit-test path and which this renderer never advertised, and a click
 while a dialog is open — the dialog lists are still focusable by default,
 recorded under Follow-ups.
+
+## Decision 39 — the answer row is bounded, and a submit that was not taken leaves the field open
+
+One review round found four ways this port still closed a door on the user, and one
+piece of machinery that had stopped being reachable. All five are recorded here rather
+than folded into the decisions they qualify, because each was measured this round.
+
+The question dialog's free-text answer was the one payload in that dialog with no width
+and no row bound. ink holds the same field in a text input fifty cells wide and one row
+tall, and the confirmation this dialog lives in has no body window of its own, so a
+single long paste grew the dialog past the terminal height and pushed the options the
+user still had to pick off the screen. The row now draws inside a window of its own —
+fifty cells, less the label the row prints in front of it, on the width the dialog has —
+and the caret cell is part of that: past the window it has nowhere to go, exactly as in
+ink's fixed-width input. The collapsed echo of the same value is bounded the same way,
+since what it prints is the value a paste can make arbitrarily long. The bound is on the
+drawing alone. Submission reads the stored value, so the answer keeps every character,
+including the line breaks a pasted paragraph carries.
+
+A bracketed paste is one event with no keypress per character, and the handler that took
+it asked the render which drew the row whether the cursor was on it, while writing under
+the live tab. Two questions it did not ask, both of which the key path already asked for
+its own hazard: whether the burst still stands on the tab the row was drawn for, and
+whether an answer the pause is still holding has locked this one out. One stdin read
+carries pastes beside keys, so the arrows that move the cursor and the paste that trails
+them arrive together — filed unguarded, one question's half-typed answer was concatenated
+with the paste and submitted as another question's, or an answer already recorded was
+widened behind the user's back. Both are now asked of the live position.
+
+The wizard's fields latch on the Enter that submits them, and Decision 37 records the
+latch as the ref it is: only a changed mount key clears it. On the last step of a flow the
+submit is asynchronous, so the `true` that arms the latch means only that the install was
+fired. When that install is rejected — or when it saves service models and no conversation
+model, which also leaves the dialog open — the same step stays mounted for the rest of the
+dialog's life with every key dead: the user could neither correct the field nor retry, and
+backing out of the wizard was the only way left. The dialog now counts its retries and
+hands that counter to the fields as their mount key, bumped on both paths, which re-arms
+the latch and re-seeds the caret the way a fresh mount does.
+
+A submit the answer lock rejects was still closing the row it came from: the field settled
+before the call that could refuse it, against the contract the line model states for its
+own latch. The call now reports whether the answer was recorded, and the field settles on
+that verdict. What the user sees is the rest of the same read — the letters trailing a
+rejected Enter still reach the field, so the answer they come back to give is the whole of
+what they typed rather than the part that preceded the refusal.
+
+The fifth is a removal. Decision 34 cancelled a pending tab swap on two paths; the answer
+path's cancel could no longer observe a timer, because the lock Decision 37 added drops a
+second answer inside the pause before it reaches the cancel, and a live timer always
+belongs to the tab the cursor is still on — the only moves are the swap's own and the two
+arrows, which cancel first. Putting the call back fails no test, which is the measurement
+that showed it unreachable; Decision 34 is corrected to say so.
+
+Six new tests, four in the confirmation dialog's suite and two in the authentication
+one, plus the collapsed-echo assertions added to the pasted-newline test the round
+before it, and nine mutations measured this round. Each mutation fails exactly the tests
+that own the behaviour it takes away:
+
+| mutation                                             | fails                          |
+| ---------------------------------------------------- | ------------------------------ |
+| the collapsed echo prints the raw value again        | the pasted-newline test        |
+| the row's window taken out                           | the long-answer test           |
+| the paste stops asking whose field it is             | the cross-tab paste test       |
+| the paste stops asking whether the answer is locked  | the paste-lock test            |
+| the paste handler reverted whole                     | both paste tests               |
+| the retry counter not bumped on a rejected install   | the auth retry test            |
+| the retry counter not bumped on service models alone | the service-model retry test   |
+| the field settled before the verdict again           | the rejected-submit test       |
+| the unreachable cancel restored                      | nothing — which is the finding |
+
+The machine leg is recorded with the matrix re-run below.
 
 ## Coverage boundary
 
@@ -1767,7 +1864,11 @@ What was verified, and how far the verification reaches:
   to the confirmation's geometry will therefore not fail on its own; re-deriving
   them belongs with that change.
 - The loading indicator has no subagent token rollup and no tokens-per-second
-  segment, both of which ink shows.
+  segment, both of which ink shows. Its elapsed counter also restarts after a
+  parked call in the shell, for the reason Decision 28 records: the row is
+  mounted twice in mutually exclusive branches, so the instance that accumulated
+  the time is not the one that carries on. Carrying it across the swap means
+  owning the accumulator above both mounts.
 - The theme mode helpers have no production caller, so this renderer always
   paints its dark palette.
 - Two dialog list widgets remain where one would do; consolidating them touches

@@ -1207,6 +1207,42 @@ describe('OpenTuiToolConfirmation', () => {
       expect(container.textContent ?? '').not.toContain('mail, xyz');
     });
 
+    it('keeps a free-text row editable whose submit the pause rejected', () => {
+      // Nothing was recorded, so the row has not submitted and the letters
+      // trailing that Enter in the same read still belong to it. Latched
+      // anyway, the row would swallow them and the answer the user comes back
+      // to give is the shorter one.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      pressBatched([
+        { name: 'return', sequence: '\r' },
+        { name: 'down' },
+        { name: 'down' },
+        { name: 'f', sequence: 'f' },
+        { name: 'o', sequence: 'o' },
+        { name: 'o', sequence: 'o' },
+        { name: 'return', sequence: '\r' },
+        { name: 'b', sequence: 'b' },
+        { name: 'a', sequence: 'a' },
+        { name: 'r', sequence: 'r' },
+      ]);
+      settleAdvance();
+      press({ name: 'left' });
+      press({ name: 'down' });
+      press({ name: 'down' });
+      expect(container.textContent ?? '').toContain('foobar');
+      press({ name: 'return', sequence: '\r' });
+      settleAdvance();
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'foobar' } },
+      );
+    });
+
     it('reviews every answer on the Submit tab and cancels from its second row', () => {
       const onConfirm = vi.fn(async () => {});
       const container = mount(multiAskDetails(onConfirm));

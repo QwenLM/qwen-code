@@ -774,22 +774,26 @@ function AskUserQuestionFlow(props: {
   const answerIsLocked = () =>
     advanceTimer.current !== null && answeredTabRef.current === tabRef.current;
 
-  const selectAndAdvance = (value: string) => {
-    if (answerIsLocked()) return;
+  /**
+   * Whether the answer was recorded. The pause of the answer before it can
+   * reject this one, and a caller that latches a field on success has to hear
+   * about that rather than assume it.
+   */
+  const selectAndAdvance = (value: string): boolean => {
+    if (answerIsLocked()) return false;
     const idx = tabRef.current;
     pickedRef.current = { ...pickedRef.current, [idx]: value };
     setPicked((prev) => ({ ...prev, [idx]: value }));
     if (!hasMultipleQuestions) {
       onAnswered({ [idx]: value });
-      return;
+      return true;
     }
-    if (idx >= totalTabs - 1) return;
+    if (idx >= totalTabs - 1) return true;
     // ink's pause, so the ✓ on the row just answered is visible before the tab
-    // swap carries it up into the chip row. An answer landing inside that pause
-    // supersedes the swap scheduled by the previous keystroke: left running,
-    // both timers fire and the question between them is skipped without ever
-    // being drawn.
-    cancelPendingAdvance();
+    // swap carries it up into the chip row. A second answer inside that pause is
+    // dropped by the lock above instead of arming a second timer: left running,
+    // both fire and the question between them is skipped without ever being
+    // drawn. A manual ←/→ cancels the swap outright.
     answeredTabRef.current = idx;
     advanceTimer.current = setTimeout(() => {
       advanceTimer.current = null;
@@ -797,6 +801,7 @@ function AskUserQuestionFlow(props: {
       moveToTab(Math.min(tabRef.current + 1, totalTabs - 1));
       moveToOption(0);
     }, 150);
+    return true;
   };
 
   const submitAll = () => {
@@ -846,8 +851,9 @@ function AskUserQuestionFlow(props: {
     if (!value) return;
     const answer = isMulti ? multiAnswer(true, current) : value;
     if (answer === undefined) return;
-    custom.settle();
-    selectAndAdvance(answer);
+    // Settle on the verdict, not before it: a submit the pause rejects has to
+    // leave the row editable, or the answer the user retypes is swallowed too.
+    if (selectAndAdvance(answer)) custom.settle();
   };
 
   useEffect(
