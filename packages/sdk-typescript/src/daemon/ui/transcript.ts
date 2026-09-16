@@ -6,6 +6,7 @@
 
 import type {
   DaemonPromptCancelledTranscriptBlock,
+  DaemonResourceLink,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextDeltaMeta,
@@ -252,11 +253,56 @@ export function rebuildDaemonTranscriptBlockIndex(
   return blockIndexById;
 }
 
+/**
+ * Fold one resource link into a user block's `resourceLinks` collection.
+ *
+ * Dedup scope is the URI within this one message: repeated echoes/replays of
+ * the same link never duplicate the entry (later echoes only fill in
+ * metadata the earlier ones lacked), while distinct URIs sharing a filename
+ * stay distinct — and the same URI in a *separate* message lives on that
+ * message's own block, so it stays distinct too. The URI is the identity
+ * key; a later echo never rewrites the name of an already-known link.
+ */
+function mergeResourceLinkIntoBlock(
+  existing: readonly DaemonResourceLink[] | undefined,
+  link: DaemonResourceLink,
+): DaemonResourceLink[] {
+  if (!existing || existing.length === 0) return [link];
+  const index = existing.findIndex((entry) => entry.uri === link.uri);
+  if (index === -1) return [...existing, link];
+  const merged = existing[index];
+  if (merged === undefined) return [...existing];
+  return [
+    ...existing.slice(0, index),
+    {
+      ...merged,
+      ...(merged.name === undefined || merged.name === ''
+        ? { name: link.name }
+        : {}),
+      ...(merged.mimeType === undefined && link.mimeType !== undefined
+        ? { mimeType: link.mimeType }
+        : {}),
+      ...(merged.size === undefined && link.size !== undefined
+        ? { size: link.size }
+        : {}),
+      ...(merged.description === undefined && link.description !== undefined
+        ? { description: link.description }
+        : {}),
+    },
+    ...existing.slice(index + 1),
+  ];
+}
+
 function userBlockForAttachment(
   next: DaemonTranscriptState,
   event: Extract<
     DaemonUiEvent,
-    { type: 'user.image.delta' | 'user.file.delta' }
+    {
+      type:
+        | 'user.image.delta'
+        | 'user.file.delta'
+        | 'user.resource_link.delta';
+    }
   >,
 ): DaemonTextTranscriptBlock {
   const activeUserIndex = next.activeUserBlockId
@@ -363,6 +409,24 @@ function applyDaemonTranscriptEvent(
         },
       ];
       next.retainedBytes += estimateBlockBytes(fileBlock) - fileBytesBefore;
+      break;
+    }
+    case 'user.resource_link.delta': {
+      const linkBlock = userBlockForAttachment(next, event);
+      const linkBytesBefore = estimateBlockBytes(linkBlock);
+      if (event.meta) linkBlock.meta = { ...linkBlock.meta, ...event.meta };
+      linkBlock.resourceLinks = mergeResourceLinkIntoBlock(
+        linkBlock.resourceLinks,
+        {
+          uri: event.uri,
+          name: event.name,
+          ...(event.mimeType ? { mimeType: event.mimeType } : {}),
+          ...(event.size !== undefined ? { size: event.size } : {}),
+          ...(event.description ? { description: event.description } : {}),
+        },
+      );
+      next.retainedBytes +=
+        estimateBlockBytes(linkBlock) - linkBytesBefore;
       break;
     }
     case 'assistant.text.delta':
