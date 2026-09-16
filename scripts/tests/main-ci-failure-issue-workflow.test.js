@@ -140,6 +140,11 @@ describe('main CI failure issue workflow', () => {
     expect(download).toContain(
       'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
     );
+    // The never-started classification rides the same single fetch: the meta
+    // projection is the only writer of the file --jobs-meta hands to analyze.
+    expect(download).toContain(
+      'jq -c \'[.jobs[] | select(.conclusion == "failure") | {name: .name, steps: ((.steps // []) | length)}]\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs-meta.json" || true',
+    );
     // `--jobs` has to ride the `analyze` invocation: `plan` never reads
     // `options.jobs`, so moving the flag there drops the section silently. The
     // span ends at the first `> "${analysis}"`, so no later helper call in the
@@ -149,6 +154,45 @@ describe('main CI failure issue workflow', () => {
     )?.[0];
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
+    );
+    expect(analyzeInvocation, 'the analyze invocation').toContain(
+      '--jobs-meta "${RUNNER_TEMP}/failed-jobs-meta.json"',
+    );
+  });
+
+  it('re-runs a never-started run once instead of filing an issue for it', () => {
+    // A failed job with zero executed steps ran no repository code at all —
+    // the runner died after accepting the assignment — so the per-commit
+    // issue can only misattribute a fleet flake to an innocent commit. The
+    // one bounded re-run absorbs the flake; its own completion re-triggers
+    // this workflow, and a recurrence on attempt 2 files normally, so a
+    // persistent outage still surfaces.
+    const rerun = jobs.rerun_never_started;
+    expect(rerun).toBeDefined();
+    expect(rerun.needs).toBe('analyze');
+    expect(String(rerun.if)).toContain(
+      "needs.analyze.outputs.never_started == 'true'",
+    );
+    expect(String(rerun.if)).toContain(
+      'github.event.workflow_run.run_attempt == 1',
+    );
+    // The re-run needs actions:write, and it must not live on the job holding
+    // the bot PAT — that job's { issues: write } scope is pinned below.
+    expect(rerun.permissions).toEqual({ actions: 'write' });
+    expect(JSON.stringify(rerun)).not.toContain('CI_DEV_BOT_PAT');
+    expect(JSON.stringify(rerun)).not.toContain('actions/checkout');
+    expect(JSON.stringify(rerun)).toContain(
+      'actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs',
+    );
+
+    // file_issue files unless the re-run actually started: a skipped rerun
+    // job (ordinary failure with steps) and a failed one (the API call
+    // errored) both fall through to the normal issue path.
+    expect(String(jobs.file_issue.if)).toContain(
+      "needs.analyze.result == 'success'",
+    );
+    expect(String(jobs.file_issue.if)).toContain(
+      "needs.rerun_never_started.result != 'success'",
     );
   });
 
@@ -203,6 +247,9 @@ describe('main CI failure issue workflow', () => {
       contents: 'read',
       issues: 'read',
     });
-    expect(privilegedJobs[0][1].needs).toBe('analyze');
+    expect(privilegedJobs[0][1].needs).toEqual([
+      'analyze',
+      'rerun_never_started',
+    ]);
   });
 });

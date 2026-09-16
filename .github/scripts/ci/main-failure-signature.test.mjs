@@ -14,6 +14,7 @@ import {
   analyzeLogs,
   extractFailingTests,
   failureSignature,
+  parseFailedJobsMeta,
   renderIssueBody,
   renderIssueTitle,
   runCli,
@@ -674,6 +675,95 @@ test('runCli analyze parses the failed-jobs TSV the workflow writes', () => {
     { name: 'Test (macos-latest, Node 22.x)', steps: [] },
   ]);
   assert.deepEqual(analysis.tests, []);
+});
+
+test('flags the never-started class: every failed job ran zero steps', () => {
+  // The observed signature of a runner that died after accepting the job
+  // (E2E run 35051269368): a failed job whose step list is empty.
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [],
+    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+  );
+  assert.equal(analysis.neverStarted, true);
+});
+
+test('a failed job with executed steps is not the never-started class', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [],
+    [
+      { name: 'Build for E2E', steps: 0 },
+      { name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 19 },
+    ],
+  );
+  assert.equal(analysis.neverStarted, false);
+});
+
+test('no failed-job metadata at all is not the never-started class', () => {
+  // The jobs fetch can fail outright; an unknown step count must never read
+  // as zero, or a dead API would route real breaks into the re-run path.
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  assert.equal(analysis.neverStarted, false);
+});
+
+test('parseFailedJobsMeta keeps only well-formed entries', () => {
+  assert.deepEqual(
+    parseFailedJobsMeta(
+      JSON.stringify([
+        { name: 'a', steps: 0 },
+        { name: 'b', steps: 7 },
+        { name: 'c', steps: -1 },
+        { name: 'd', steps: 1.5 },
+        { name: 'e' },
+        { steps: 0 },
+        null,
+      ]),
+    ),
+    [
+      { name: 'a', steps: 0 },
+      { name: 'b', steps: 7 },
+    ],
+  );
+  assert.deepEqual(parseFailedJobsMeta('not json'), []);
+  assert.deepEqual(parseFailedJobsMeta('{"not":"an array"}'), []);
+});
+
+test('runCli analyze classifies from the meta file the workflow writes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sig-meta-'));
+  const metaPath = join(dir, 'failed-jobs-meta.json');
+  writeFileSync(
+    metaPath,
+    JSON.stringify([
+      { name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 },
+    ]),
+  );
+
+  const analysis = JSON.parse(
+    captureStdout([
+      'analyze',
+      '--workflow',
+      'E2E Tests',
+      '--jobs-meta',
+      metaPath,
+    ]),
+  );
+  assert.equal(analysis.neverStarted, true);
+});
+
+test('runCli analyze without a readable meta file files normally', () => {
+  const analysis = JSON.parse(
+    captureStdout([
+      'analyze',
+      '--workflow',
+      'E2E Tests',
+      '--jobs-meta',
+      join(tmpdir(), 'sig-meta-no-such-file.json'),
+    ]),
+  );
+  assert.equal(analysis.neverStarted, false);
 });
 
 test('runCli analyze still plans when the jobs file is missing', () => {

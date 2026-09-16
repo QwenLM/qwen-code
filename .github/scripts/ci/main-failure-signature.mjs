@@ -104,6 +104,46 @@ export function parseFailedJobs(tsv) {
 }
 
 /**
+ * Parse the failed-job metadata projection (`[{name, steps}]`) the workflow
+ * writes alongside the TSV: how many steps each failed job executed in total.
+ * Anything unreadable degrades to no entries — an unknown step count must
+ * never read as zero.
+ */
+export function parseFailedJobsMeta(jsonText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry.name === 'string' &&
+        Number.isInteger(entry.steps) &&
+        entry.steps >= 0,
+    )
+    .map((entry) => ({ name: entry.name, steps: entry.steps }));
+}
+
+/**
+ * The never-started class: the run failed and every failed job executed zero
+ * steps, so no code — not even checkout — ran anywhere (observed 2026-09-16,
+ * E2E run 35051269368: the sandbox:docker leg sat on a pool runner for
+ * exactly 600s and failed without a single step). No commit can cause that,
+ * so the per-commit issue it would file hands the autofix agent nothing it
+ * can act on; the workflow re-runs the failed jobs once instead, and only a
+ * recurrence on the re-run reaches the issue path.
+ */
+export function isNeverStartedRun(failedJobsMeta) {
+  return (
+    failedJobsMeta.length > 0 && failedJobsMeta.every((job) => job.steps === 0)
+  );
+}
+
+/**
  * A signature over the whole failure set, recorded in the body for humans
  * comparing two issues. Matching is done with the per-test markers, which
  * tolerate a failure set that grows or shrinks between runs.
@@ -132,7 +172,12 @@ export function shortenForTitle(testId, limit = 110) {
     : `${collapsed.slice(0, limit - 1)}…`;
 }
 
-export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
+export function analyzeLogs(
+  workflowName,
+  logTexts,
+  failedJobs = [],
+  failedJobsMeta = [],
+) {
   const tests = [];
   for (const logText of logTexts) {
     for (const id of extractFailingTests(logText)) {
@@ -146,6 +191,7 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
     workflow: workflowName,
     tests,
     failedJobs,
+    neverStarted: isNeverStartedRun(failedJobsMeta),
     signature: tests.length
       ? failureSignature(
           workflowName,
@@ -378,6 +424,17 @@ function readFailedJobs(path) {
   }
 }
 
+function readFailedJobsMeta(path) {
+  if (!path) return [];
+  try {
+    return parseFailedJobsMeta(readFileSync(path, 'utf8'));
+  } catch {
+    // A missing or truncated meta file means the step count is unknown, and
+    // unknown must never read as never-started: the run files its issue.
+    return [];
+  }
+}
+
 export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
@@ -390,6 +447,7 @@ export function runCli(argv) {
           options.workflow ?? '',
           logTexts,
           readFailedJobs(options.jobs),
+          readFailedJobsMeta(options['jobs-meta']),
         ),
       )}\n`,
     );
