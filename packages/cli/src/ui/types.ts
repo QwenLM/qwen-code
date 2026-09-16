@@ -639,6 +639,14 @@ export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
   message: string;
 };
 
+export type HistoryItemHookSystemMessage = HistoryItemBase & {
+  type: 'hook_system_message';
+  eventName: string;
+  hookName: string;
+  text: string;
+  level: 'info' | 'warning' | 'error';
+};
+
 // --- Doctor diagnostics types ---
 
 export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
@@ -760,6 +768,7 @@ export type HistoryItemWithoutId =
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage
+  | HistoryItemHookSystemMessage
   | HistoryItemDoctor
   | HistoryItemDiffStats
   | HistoryItemGoalStatus

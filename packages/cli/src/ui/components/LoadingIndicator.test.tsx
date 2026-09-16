@@ -56,6 +56,18 @@ describe('<LoadingIndicator />', () => {
     elapsedTime: 5,
   };
 
+  it('renders a running hook while idle', () => {
+    const { lastFrame } = renderWithContext(
+      <LoadingIndicator
+        currentLoadingPhrase="Linting…"
+        elapsedTime={0}
+        forceVisible
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('Linting…');
+  });
+
   it('should not render when streamingState is Idle', () => {
     const { lastFrame } = renderWithContext(
       <LoadingIndicator {...defaultProps} />,

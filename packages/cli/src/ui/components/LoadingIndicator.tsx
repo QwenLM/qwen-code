@@ -19,6 +19,7 @@ import { t } from '../../i18n/index.js';
 
 interface LoadingIndicatorProps {
   currentLoadingPhrase?: string;
+  forceVisible?: boolean;
   elapsedTime: number;
   rightContent?: React.ReactNode;
   candidatesTokens?: number;
@@ -45,6 +46,7 @@ interface LoadingIndicatorProps {
 
 export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   currentLoadingPhrase,
+  forceVisible = false,
   elapsedTime,
   rightContent,
   candidatesTokens,
@@ -69,7 +71,7 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
     streamingCharsRef && isStreaming ? 100 : null,
   );
 
-  if (streamingState === StreamingState.Idle) {
+  if (streamingState === StreamingState.Idle && !forceVisible) {
     return null;
   }
 

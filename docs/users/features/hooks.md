@@ -34,6 +34,12 @@ Run `/hooks` to open a read-only browser of the hooks this session runs. It move
 
 When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top. It does not change anything: to add, edit or remove a hook, edit `settings.json`.
 
+Run `/hooks` to browse the configured hooks. Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
+
+Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
+
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `hooks.disableAllHooks`, `hooks.stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected.
+
 ## Hook Types
 
 Qwen Code supports four hook executor types:
@@ -51,17 +57,17 @@ Command hooks execute commands via child processes. Input JSON is passed through
 
 **Configuration:**
 
-| Field           | Type                     | Required | Description                                 |
-| :-------------- | :----------------------- | :------- | :------------------------------------------ |
-| `type`          | `"command"`              | Yes      | Hook type                                   |
-| `command`       | `string`                 | Yes      | Command to execute                          |
-| `name`          | `string`                 | No       | Hook name (for logging)                     |
-| `description`   | `string`                 | No       | Hook description                            |
-| `timeout`       | `number`                 | No       | Timeout in seconds, default 60              |
-| `async`         | `boolean`                | No       | Whether to run asynchronously in background |
-| `env`           | `Record<string, string>` | No       | Environment variables                       |
-| `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
-| `statusMessage` | `string`                 | No       | Status message displayed during execution   |
+| Field           | Type                     | Required | Description                                                                                      |
+| :-------------- | :----------------------- | :------- | :----------------------------------------------------------------------------------------------- |
+| `type`          | `"command"`              | Yes      | Hook type                                                                                        |
+| `command`       | `string`                 | Yes      | Command to execute                                                                               |
+| `name`          | `string`                 | No       | Hook name (for logging)                                                                          |
+| `description`   | `string`                 | No       | Hook description                                                                                 |
+| `timeout`       | `number`                 | No       | Timeout in seconds, default 60                                                                   |
+| `async`         | `boolean`                | No       | Whether to run asynchronously in background                                                      |
+| `env`           | `Record<string, string>` | No       | Environment variables                                                                            |
+| `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                                                                     |
+| `statusMessage` | `string`                 | No       | Status message shown on the loading line while the hook runs (default: "Running <Event> hooks…") |
 
 `timeout` is in seconds for command, HTTP and prompt hooks; SDK-registered function hooks keep milliseconds. Command hook timeouts used to be written in milliseconds, so for command hooks a value of `1000` or more is still read as milliseconds and existing settings keep working. To migrate, look for command hooks whose `timeout` is `1000` or more and rewrite the value in seconds, for example `10000` as `10`. To give a command hook a timeout of 1000 seconds or more, keep writing it in milliseconds, for example `1800000` for 30 minutes. A command hook `timeout` that is not a positive number, such as `"30s"`, is ignored and the 60 second default applies. With debug logging enabled (`QWEN_DEBUG_LOG_FILE=1`), each command hook with a millisecond or ignored `timeout` is named once per session in that session's debug log.
 
@@ -97,16 +103,16 @@ HTTP hooks send hook input as POST requests to specified URLs. They support URL 
 
 **Configuration:**
 
-| Field            | Type                     | Required | Description                                               |
-| :--------------- | :----------------------- | :------- | :-------------------------------------------------------- |
-| `type`           | `"http"`                 | Yes      | Hook type                                                 |
-| `url`            | `string`                 | Yes      | Target URL                                                |
-| `headers`        | `Record<string, string>` | No       | Request headers (supports env var interpolation)          |
-| `allowedEnvVars` | `string[]`               | No       | Whitelist of environment variables allowed in URL/headers |
-| `timeout`        | `number`                 | No       | Timeout in seconds, default 600                           |
-| `name`           | `string`                 | No       | Hook name (for logging)                                   |
-| `statusMessage`  | `string`                 | No       | Status message displayed during execution                 |
-| `once`           | `boolean`                | No       | Execute only once per event per session (HTTP hooks only) |
+| Field            | Type                     | Required | Description                                                                                      |
+| :--------------- | :----------------------- | :------- | :----------------------------------------------------------------------------------------------- |
+| `type`           | `"http"`                 | Yes      | Hook type                                                                                        |
+| `url`            | `string`                 | Yes      | Target URL                                                                                       |
+| `headers`        | `Record<string, string>` | No       | Request headers (supports env var interpolation)                                                 |
+| `allowedEnvVars` | `string[]`               | No       | Whitelist of environment variables allowed in URL/headers                                        |
+| `timeout`        | `number`                 | No       | Timeout in seconds, default 600                                                                  |
+| `name`           | `string`                 | No       | Hook name (for logging)                                                                          |
+| `statusMessage`  | `string`                 | No       | Status message shown on the loading line while the hook runs (default: "Running <Event> hooks…") |
+| `once`           | `boolean`                | No       | Execute only once per event per session (HTTP hooks only)                                        |
 
 **Security Features:**
 
@@ -262,15 +268,15 @@ Prompt hooks use an LLM to evaluate hook input and return a decision. This is us
 
 **Configuration:**
 
-| Field           | Type       | Required | Description                                         |
-| :-------------- | :--------- | :------- | :-------------------------------------------------- |
-| `type`          | `"prompt"` | Yes      | Hook type                                           |
-| `prompt`        | `string`   | Yes      | Prompt sent to LLM. Use `$ARGUMENTS` for hook input |
-| `model`         | `string`   | No       | Model to use (defaults to your current model)       |
-| `timeout`       | `number`   | No       | Timeout in seconds, default 30                      |
-| `name`          | `string`   | No       | Hook name (for logging)                             |
-| `description`   | `string`   | No       | Hook description                                    |
-| `statusMessage` | `string`   | No       | Status message displayed during execution           |
+| Field           | Type       | Required | Description                                                                                      |
+| :-------------- | :--------- | :------- | :----------------------------------------------------------------------------------------------- |
+| `type`          | `"prompt"` | Yes      | Hook type                                                                                        |
+| `prompt`        | `string`   | Yes      | Prompt sent to LLM. Use `$ARGUMENTS` for hook input                                              |
+| `model`         | `string`   | No       | Model to use (defaults to your current model)                                                    |
+| `timeout`       | `number`   | No       | Timeout in seconds, default 30                                                                   |
+| `name`          | `string`   | No       | Hook name (for logging)                                                                          |
+| `description`   | `string`   | No       | Hook description                                                                                 |
+| `statusMessage` | `string`   | No       | Status message shown on the loading line while the hook runs (default: "Running <Event> hooks…") |
 
 **Response Format:**
 
@@ -1501,14 +1507,6 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 }
 ```
 
-### Browsing your hooks
-
-Run `/hooks` to browse the configured hooks. Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
-
-Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
-
-This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `hooks.disableAllHooks`, `hooks.stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected.
-
 ## Hook Execution
 
 ### Parallel vs Sequential Execution
@@ -1516,6 +1514,12 @@ This reload covers hook definitions, not hook controls or HTTP security settings
 - By default, hooks execute in parallel for better performance
 - Use `sequential: true` in hook definition to enforce order-dependent execution
 - Sequential hooks can modify input for subsequent hooks in the chain
+
+### Seeing what your hooks do
+
+In the Ink UI, the loading line shows `Running <Event> hooks…` while a hook runs, or its configured `statusMessage`. Hook failures, timeouts, non-blocking warnings, and blocks on events other than Stop produce a visible result without enabling debug logging. Timeout messages suggest raising the hook's `timeout`.
+
+In headless text mode, the same warnings and errors go to stderr once per event, hook name, and outcome combination. JSON output modes do not emit these diagnostics. Hooks cancelled with Esc do not produce a result message. Async hook output is handled separately; see [Async Hooks](#async-hooks).
 
 ### Async Hooks
 

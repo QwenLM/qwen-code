@@ -258,6 +258,7 @@ import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
+import { useHookProgress } from './hooks/use-hook-progress.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
@@ -4516,6 +4517,15 @@ export const AppContainer = (props: AppContainerProps) => {
     hasExecutingTool,
   );
 
+  const hookStatus = useHookProgress({
+    config,
+    onOutcome: (row) =>
+      historyManager.addItem(
+        { type: 'hook_system_message', ...row },
+        Date.now(),
+      ),
+  });
+
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -5094,6 +5104,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
+      hookStatus,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
@@ -5242,6 +5253,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
+      hookStatus,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,

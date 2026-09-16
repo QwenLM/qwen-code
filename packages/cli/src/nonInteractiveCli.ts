@@ -90,9 +90,16 @@ import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
+import {
+  MessageBusType,
+  type HookProgress,
+} from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
+import { hookProgressToRow } from './ui/hooks/use-hook-progress.js';
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
+  sanitizeForStderr,
+  DENIAL_REASON_ECHO_LIMIT,
   AlreadyReportedError,
   handleError,
   handleToolError,
@@ -928,6 +935,19 @@ export async function runNonInteractive(
       flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
     };
 
+    const hookWarnings = new Set<string>();
+    const hookBus =
+      outputFormat === OutputFormat.TEXT ? config.getMessageBus() : undefined;
+    const onHookProgress = (msg: HookProgress) => {
+      const row = hookProgressToRow(msg);
+      if (!row || row.level === 'info') return;
+      const key = `${msg.eventName}\0${msg.hookName}\0${msg.outcome}`;
+      if (hookWarnings.has(key)) return;
+      hookWarnings.add(key);
+      process.stderr.write(
+        sanitizeForStderr(row.text, DENIAL_REASON_ECHO_LIMIT) + '\n\n',
+      );
+    };
     // EPIPE: don't process.exit here — that bypasses the caller's
     // runExitCleanup → flush() and drops queued JSONL writes. Destroy
     // stdout instead and let the natural return drive cleanup. (Aborting
@@ -1068,6 +1088,7 @@ export async function runNonInteractive(
 
     try {
       process.stdout.on('error', stdoutErrorHandler);
+      hookBus?.subscribe(MessageBusType.HOOK_PROGRESS, onHookProgress);
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
@@ -3360,6 +3381,7 @@ export async function runNonInteractive(
       unsubscribeRecordingFailure?.();
 
       process.stdout.removeListener('error', stdoutErrorHandler);
+      hookBus?.unsubscribe(MessageBusType.HOOK_PROGRESS, onHookProgress);
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);

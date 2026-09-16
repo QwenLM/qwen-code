@@ -192,7 +192,7 @@ export async function handleError(
 const TOOL_NAME_ECHO_LIMIT = 64;
 
 /** Longest denial reason echoed to stderr in a denied-tool warning. */
-const DENIAL_REASON_ECHO_LIMIT = 500;
+export const DENIAL_REASON_ECHO_LIMIT = 500;
 
 /**
  * A denial reason can be a hook's stderr or JSON `reason`, and a tool name
@@ -200,7 +200,7 @@ const DENIAL_REASON_ECHO_LIMIT = 500;
  * whitespace to one line, drop terminal escapes, control and Unicode format
  * characters (bidi overrides, zero-width), and bound the length.
  */
-function sanitizeForStderr(text: string, limit: number): string {
+export function sanitizeForStderr(text: string, limit: number): string {
   const clean = stripAnsiAndControl(text.replace(/\s+/g, ' '))
     .replace(/\p{Cf}/gu, '')
     .trim();

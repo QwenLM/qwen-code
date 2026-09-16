@@ -55,6 +55,7 @@ export function isSyntheticHistoryItem(
     case 'user_prompt_submit_blocked':
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
+    case 'hook_system_message':
       return true;
 
     // Steer messages (mid-turn user injections) are typed 'user' but

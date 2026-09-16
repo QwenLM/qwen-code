@@ -1199,6 +1199,7 @@ export function projectItemToStreamEvent(
     case 'gemini_thought_content':
     case 'help':
     case 'notification':
+    case 'hook_system_message':
     case 'tool_use_summary':
     case 'diff_stats':
       return null;

@@ -350,6 +350,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'user_prompt_submit_blocked':
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
+    case 'hook_system_message':
     case 'goal_status':
     case 'goal_state':
     case 'vision_notice':
@@ -646,6 +647,14 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           </Box>
         </Box>
       )}
+      {itemForDisplay.type === 'hook_system_message' &&
+        (itemForDisplay.level === 'error' ? (
+          <ErrorMessage text={itemForDisplay.text} />
+        ) : itemForDisplay.level === 'warning' ? (
+          <WarningMessage text={itemForDisplay.text} />
+        ) : (
+          <InfoMessage text={itemForDisplay.text} />
+        ))}
       {itemForDisplay.type === 'memory_saved' && (
         <MemorySavedMessage item={itemForDisplay} />
       )}

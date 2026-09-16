@@ -929,6 +929,18 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('notifies progress observers when initialization creates the message bus', async () => {
+    const config = new Config({ ...baseParams });
+    const listener = vi.fn();
+    expect(config.getMessageBus()).toBeUndefined();
+    const unsubscribe = config.onMessageBusChange(listener);
+    await config.initialize();
+    expect(listener).toHaveBeenCalledExactlyOnceWith(config.getMessageBus());
+    unsubscribe();
+    config.setMessageBus(config.getMessageBus()!);
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
   describe('setHooksFromSettings', () => {
     const userHooks = {
       PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],

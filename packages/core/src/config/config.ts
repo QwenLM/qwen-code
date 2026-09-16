@@ -2950,6 +2950,9 @@ export class Config {
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly messageBusChangeListeners = new Set<
+    (bus: MessageBus) => void
+  >();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
@@ -3678,10 +3681,11 @@ export class Config {
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
-      this.messageBus = new MessageBus();
+      const messageBus = new MessageBus();
+      this.setMessageBus(messageBus);
 
       // Subscribe to HOOK_EXECUTION_REQUEST to execute hooks
-      this.messageBus.subscribe<HookExecutionRequest>(
+      messageBus.subscribe<HookExecutionRequest>(
         MessageBusType.HOOK_EXECUTION_REQUEST,
         async (request: HookExecutionRequest) => {
           try {
@@ -9324,6 +9328,14 @@ export class Config {
    */
   setMessageBus(messageBus: MessageBus): void {
     this.messageBus = messageBus;
+    for (const listener of this.messageBusChangeListeners) listener(messageBus);
+  }
+
+  onMessageBusChange(listener: (bus: MessageBus) => void): () => void {
+    this.messageBusChangeListeners.add(listener);
+    return () => {
+      this.messageBusChangeListeners.delete(listener);
+    };
   }
 
   /**

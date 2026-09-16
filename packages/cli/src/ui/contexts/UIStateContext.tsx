@@ -128,6 +128,7 @@ export interface UIState {
   showEscapePrompt: boolean;
   elapsedTime: number;
   currentLoadingPhrase: string;
+  hookStatus: string | null;
   historyRemountKey: number;
   messageQueue: string[];
   showAutoAcceptIndicator: ApprovalMode;

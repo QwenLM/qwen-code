@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
 import type {
   ChatRecord,
   Config,
@@ -22,6 +23,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { CLIUserMessage } from './nonInteractive/types.js';
 import {
+  MessageBusType,
   executeToolCall,
   isTelemetrySdkInitialized,
   ToolErrorType,
@@ -378,6 +380,7 @@ describe('runNonInteractive', () => {
       }),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
+      getMessageBus: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
@@ -1116,6 +1119,69 @@ describe('runNonInteractive', () => {
         'Retrying provider attempt (0 buffered tool call(s) discarded).',
       );
       expect(stderr).not.toContain('undefined');
+    },
+  );
+
+  it.each([
+    [OutputFormat.TEXT, ['timeout', 'timeout'], 1],
+    [OutputFormat.TEXT, ['timeout', 'error'], 2],
+    [OutputFormat.JSON, ['timeout'], 0],
+    [OutputFormat.TEXT, ['success'], 0],
+  ] as const)(
+    'reports hook diagnostics in %s for %j',
+    async (format, outcomes, count) => {
+      setupMetricsMock();
+      const bus = new EventEmitter();
+      const subscribe = vi.fn(
+        (type: string, listener: (msg: HookProgress) => void) =>
+          bus.on(type, listener),
+      );
+      const unsubscribe = vi.fn(
+        (type: string, listener: (msg: HookProgress) => void) =>
+          bus.off(type, listener),
+      );
+      vi.mocked(mockConfig.getMessageBus).mockReturnValue({
+        subscribe,
+        unsubscribe,
+      } as unknown as ReturnType<Config['getMessageBus']>);
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      mockLlmClient.sendMessageStream.mockImplementation(() => {
+        for (const outcome of outcomes)
+          bus.emit(MessageBusType.HOOK_PROGRESS, {
+            type: MessageBusType.HOOK_PROGRESS,
+            phase: 'end',
+            eventName: 'PreToolUse',
+            hookName: 'diagnostic-hook',
+            systemMessage:
+              outcome === 'success' ? 'diagnostic-hook information' : undefined,
+            hookType: 'command',
+            index: 0,
+            total: 1,
+            outcome,
+            durationMs: 2000,
+          } satisfies HookProgress);
+        return createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]);
+      });
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'hook-progress-test',
+      );
+      const diagnostics = processStderrSpy.mock.calls.filter(([text]) =>
+        String(text).includes('diagnostic-hook'),
+      );
+      expect(diagnostics).toHaveLength(count);
+      if (format === OutputFormat.TEXT)
+        expect(unsubscribe).toHaveBeenCalledExactlyOnceWith(
+          ...subscribe.mock.calls[0],
+        );
+      else expect(subscribe).not.toHaveBeenCalled();
     },
   );
 

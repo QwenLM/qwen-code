@@ -67,6 +67,26 @@ describe('<HistoryItemDisplay />', () => {
     config: mockConfig,
   };
 
+  it.each([
+    ['info', '●'],
+    ['warning', '△'],
+    ['error', '✕'],
+  ] as const)('renders hook %s with its status prefix', (level, prefix) => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: 'hook_system_message',
+      eventName: 'PreToolUse',
+      hookName: 'lint',
+      text: 'Hook result',
+      level,
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    expect(lastFrame()).toContain(prefix);
+    expect(lastFrame()).toContain('Hook result');
+  });
+
   it('renders UserMessage for "user" type', () => {
     const item: HistoryItem = {
       ...baseItem,

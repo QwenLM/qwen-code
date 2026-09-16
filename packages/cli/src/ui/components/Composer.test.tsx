@@ -39,12 +39,14 @@ import { StreamingState } from '../types.js';
 vi.mock('./LoadingIndicator.js', () => ({
   LoadingIndicator: ({
     currentLoadingPhrase,
+    forceVisible,
     candidatesTokens,
     taskStartTokens,
     taskStartStreamingChars,
     showResponseTokensPerSecond,
   }: {
     currentLoadingPhrase?: string;
+    forceVisible?: boolean;
     candidatesTokens?: number;
     taskStartTokens?: number;
     taskStartStreamingChars?: number;
@@ -59,6 +61,7 @@ vi.mock('./LoadingIndicator.js', () => ({
         ? `: chars ${taskStartStreamingChars}`
         : ''}
       {showResponseTokensPerSecond ? ': show t/s' : ''}
+      {forceVisible ? ': forced' : ''}
     </Text>
   ),
 }));
@@ -240,6 +243,20 @@ describe('Composer', () => {
   });
 
   describe('Loading Indicator', () => {
+    it('prioritizes hook status even with decorative phrases disabled and while idle', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Idle,
+        hookStatus: 'Linting…',
+        currentLoadingPhrase: 'Analyzing',
+      });
+      const config = createMockConfig({
+        getAccessibility: vi.fn(() => ({ enableLoadingPhrases: false })),
+      });
+      const { lastFrame } = renderComposer(uiState, config);
+      expect(lastFrame()).toContain('LoadingIndicator: Linting…');
+      expect(lastFrame()).toContain(': forced');
+      expect(lastFrame()).not.toContain('Analyzing');
+    });
     it('renders LoadingIndicator with phrase when streaming', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,

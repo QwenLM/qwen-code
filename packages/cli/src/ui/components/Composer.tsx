@@ -81,13 +81,14 @@ export const Composer = ({ footerRef }: ComposerProps) => {
     <Box flexDirection="column" marginTop={1}>
       {!uiState.embeddedShellFocused && !suppressBottomLoadingIndicator && (
         <LoadingIndicator
-          // Hide loading phrases when enableLoadingPhrases is explicitly false.
-          // Using === false ensures phrases show by default when undefined.
+          // Hook status remains visible when decorative loading phrases are disabled.
           currentLoadingPhrase={
-            config.getAccessibility()?.enableLoadingPhrases === false
+            uiState.hookStatus ??
+            (config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
-              : uiState.currentLoadingPhrase
+              : uiState.currentLoadingPhrase)
           }
+          forceVisible={Boolean(uiState.hookStatus)}
           elapsedTime={uiState.elapsedTime}
           candidatesTokens={responseCandidateTokens}
           taskStartTokens={taskStartTokens}
