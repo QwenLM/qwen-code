@@ -311,6 +311,37 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('docker lock cache ownership heal', () => {
+    // Run 35039618620 (#11973) died in the same second its test step
+    // started: `exec 9>` on ~/.cache/qwen-code-ci/docker-sandbox-daemon.lock
+    // failed with EACCES — a root-owned leftover in the runner's home, not
+    // disk pressure — and the prune step died on the same file. The
+    // workspace heal only chowns $GITHUB_WORKSPACE; the lock directory
+    // lives outside it, so the heal must reach it too.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const heal = steps.find(
+      (step) => step.name === 'Restore workspace ownership',
+    );
+
+    it('chowns the host-side docker lock directory back to the runner', () => {
+      expect(heal).toBeDefined();
+      expect(heal.run).toContain('[ -d "${HOME}/.cache/qwen-code-ci" ]');
+      expect(heal.run).toContain(
+        'chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci"',
+      );
+    });
+
+    it('heals before any step opens the daemon lock', () => {
+      const names = steps.map((step) => step.name);
+      expect(names.indexOf('Restore workspace ownership')).toBeLessThan(
+        names.indexOf('Run E2E tests'),
+      );
+      expect(names.indexOf('Restore workspace ownership')).toBeLessThan(
+        names.indexOf('Prune dangling docker images'),
+      );
+    });
+  });
+
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
