@@ -2177,7 +2177,13 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
   return ops;
 }
 
-function stripHeredocBodies(command: string): string {
+/**
+ * Remove heredoc body lines (and their delimiter lines) so text bash hands to
+ * the reading command as data is not scanned as shell. Shared by
+ * `walkCompoundCommand` and by the Bash-rule paths in permission-manager.ts,
+ * which must not let body text drive the splitter's comment/quote state.
+ */
+export function stripHeredocBodies(command: string): string {
   const lines = command.split('\n');
   const kept: string[] = [];
   const pendingDelimiters: string[] = [];
@@ -2221,6 +2227,19 @@ function getHeredocDelimiters(line: string): string[] {
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       continue;
+    }
+    // A word-initial `#` starts a comment (the escape check above already
+    // consumed an escaped one), so a `<<` after it is text bash discards, not
+    // a heredoc operator. Stop the scan there, or a commented `<<EOF` would
+    // register a phantom delimiter and strip the real command lines that
+    // follow.
+    if (
+      !inSingle &&
+      !inDouble &&
+      ch === '#' &&
+      (i === 0 || ' \t;&|'.includes(line[i - 1]!))
+    ) {
+      break;
     }
     if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
       continue;

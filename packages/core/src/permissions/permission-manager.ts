@@ -14,7 +14,10 @@ import {
   toolMatchesRuleToolName,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
-import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
+import {
+  extractShellOperationsAcrossCommand,
+  stripHeredocBodies,
+} from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import {
   isShellCommandReadOnlyAST,
@@ -331,9 +334,14 @@ export class PermissionManager {
     // ── Bash-rule pass: split compound commands and evaluate each
     // sub-command independently against Bash(...) patterns, returning the
     // most restrictive result. Priority: deny > ask > allow.
+    //
+    // Heredoc bodies are stripped before splitting (as walkCompoundCommand
+    // already does): bash hands a body to the reading command as data and
+    // never tokenizes it, so it must not drive the splitter's comment, quote
+    // or substitution state.
     let bashDecision: PermissionDecision;
     if (command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCompoundCommand(stripHeredocBodies(command));
       if (subCommands.length > 1) {
         bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
       } else {
@@ -953,7 +961,7 @@ export class PermissionManager {
     // rule matching any segment is the deciding rule. Recurse per segment so
     // nested compounds and per-segment virtual ops are covered.
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCompoundCommand(stripHeredocBodies(command));
       if (subCommands.length > 1) {
         for (const subCmd of subCommands) {
           const rule = this.findMatchingDenyRule({ ...ctx, command: subCmd });
@@ -1109,7 +1117,7 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCompoundCommand(stripHeredocBodies(command));
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
           this.hasRelevantRules({ ...ctx, command: subCmd }),
@@ -1207,7 +1215,7 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCompoundCommand(stripHeredocBodies(command));
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
           this.hasMatchingAskRule({ ...ctx, command: subCmd }),

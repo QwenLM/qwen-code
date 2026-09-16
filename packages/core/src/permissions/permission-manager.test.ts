@@ -27,6 +27,7 @@ import {
   buildHumanReadableRuleLabel,
   TOOL_NAME_ALIASES,
 } from './rule-parser.js';
+import { stripHeredocBodies } from './shell-semantics.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -704,6 +705,463 @@ describe('splitCompoundCommand', () => {
       expect(splitCompoundCommand(command)).toEqual(['echo hi']);
     },
   );
+
+  // A word-initial `#` outside quotes opens a comment that runs to the end of
+  // the physical line, so every operator inside it is inert. Confirmed against
+  // bash: each of these traces a single `+ echo a`, and
+  // `bash -xc "echo 'a' # comment ; echo B"` traces a single `+ echo a`.
+  //
+  // The `'a\'` rows passed before the comment state existed too, but only by
+  // accident — the backslash inside the quotes was read as an escape that
+  // swallowed the closing `'`, so the scanner sat in an unterminated string
+  // that masked the operator. They keep passing once #11765 makes that
+  // backslash literal, because the comment then masks the operator for the
+  // right reason.
+  it.each([
+    [`echo 'a' # comment ; echo B`],
+    [`echo 'a\\' # note: use ; carefully`],
+    [`echo 'a\\' # trailing && touch /tmp/x`],
+    [`echo 'a\\' # trailing | touch /tmp/x`],
+    ['echo hi # nothing here'],
+    [`git status # don't ; echo B`],
+    ['echo a # c && rm -rf /tmp/x'],
+    ['echo a # c || rm -rf /tmp/x'],
+    ['echo a # c | rm -rf /tmp/x'],
+    ['echo a # c & rm -rf /tmp/x'],
+  ])(
+    'does not split %s, where the operator is inside a comment',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual([command]);
+    },
+  );
+
+  // Over-correction guard: `#` starts a comment only at the start of a word, so
+  // bash really does run two commands here.
+  it('still splits echo a#b ; echo B, where # is not at a word start', async () => {
+    expect(splitCompoundCommand('echo a#b ; echo B')).toEqual([
+      'echo a#b',
+      'echo B',
+    ]);
+  });
+
+  // Same guard for the whitespace side. bash's word separators are the three
+  // default `IFS` characters — space, tab, newline — and not JavaScript's `\s`,
+  // which also matches `\r`, `\v`, `\f` and `\u00a0`. After any of those four the
+  // `#` is mid-word and literal, so the `;` stays a real boundary and bash runs
+  // both commands: `bash -xc "$(printf 'echo a\r#c ; echo DANGER')"` traces
+  // `+ echo $'a\r#c'` and then `+ echo DANGER`. Reading the `#` as a comment
+  // folded the line into one segment, so the second command lost its rule check.
+  it.each([
+    [
+      'a carriage return',
+      'echo a\r#c ; echo DANGER',
+      ['echo a\r#c', 'echo DANGER'],
+    ],
+    [
+      'a vertical tab',
+      'echo a\v#c ; rm -rf /tmp/x',
+      ['echo a\v#c', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a form feed',
+      'echo a\f#c ; rm -rf /tmp/x',
+      ['echo a\f#c', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a no-break space',
+      'echo a\u00a0#c ; rm -rf /tmp/x',
+      ['echo a\u00a0#c', 'rm -rf /tmp/x'],
+    ],
+  ])(
+    'still splits after %s, which does not end a bash word',
+    async (_separator, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // An escaped boundary does not end a word: `bash -xc 'echo a\ #b ; echo B'`
+  // traces `+ echo a #b` then `+ echo B` — the `#` is mid-word and literal.
+  // Reading it as a comment would swallow the `;` boundary and drop the second
+  // command's rule check.
+  it('does not read a comment after an escaped space', async () => {
+    expect(splitCompoundCommand('echo a\\ #b ; rm -rf /tmp/x')).toEqual([
+      'echo a\\ #b',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  it('does not read a comment after an escaped operator', async () => {
+    expect(splitCompoundCommand('echo a\\;#c ; rm -rf /tmp/x')).toEqual([
+      'echo a\\;#c',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // A word starts after an operator as well as after whitespace:
+  // `bash -xc "echo a;#c ; rm -rf /tmp/x"` traces a single `+ echo a`. The
+  // comment is the only pending text after the `;`, so it is dropped rather
+  // than emitted as a segment of its own.
+  it('reads a # straight after an operator as a comment', async () => {
+    expect(splitCompoundCommand('echo a;#c ; rm -rf /tmp/x')).toEqual([
+      'echo a',
+    ]);
+  });
+
+  // Inside quotes a `#` is literal, so the operator after the closing quote is
+  // a real boundary.
+  it('does not treat a quoted # as a comment', async () => {
+    expect(splitCompoundCommand(`echo '# c' ; rm -rf /tmp/x`)).toEqual([
+      `echo '# c'`,
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // The row above pins nothing about branch *order*: its `#` is preceded by `'`,
+  // which is not a word boundary, so `isCommentStart` returns false there no
+  // matter where the comment block sits. A quoted `#` preceded by a space stays
+  // literal only because the quote check runs first — hoisting the comment block
+  // above `if (inSingle || inDouble) { continue; }` (a reorder that leaves this
+  // whole file green) folds these two into one segment that `Bash(echo *)`
+  // covers, while `bash -xc 'echo "a # b" ; echo DANGER'` runs both commands.
+  it.each([
+    ['echo "a # b" ; rm -rf /tmp/x', 'echo "a # b"'],
+    ["echo 'a # b' ; rm -rf /tmp/x", "echo 'a # b'"],
+  ])(
+    'does not read the space-preceded quoted # in %s as a comment',
+    async (command, head) => {
+      expect(splitCompoundCommand(command)).toEqual([head, 'rm -rf /tmp/x']);
+    },
+  );
+
+  // `#` at index 0 is at a word start, so a shebang line is a comment; being
+  // the whole pending text it is dropped, and the newline after it still
+  // bounds the real command.
+  it('treats a leading # as a comment', async () => {
+    expect(splitCompoundCommand('#!/bin/sh\necho hi')).toEqual(['echo hi']);
+  });
+
+  // A full-line comment is the whole pending text between two boundaries, so
+  // it is dropped from the output rather than emitted as its own segment —
+  // the most common comment placement in a multi-line command (#11815).
+  it('drops a full-line comment between two commands', async () => {
+    expect(
+      splitCompoundCommand('npm install\n# run the tests\nnpm test'),
+    ).toEqual(['npm install', 'npm test']);
+  });
+
+  // The composition the Bash-rule paths use: heredoc bodies are stripped
+  // before the split, so body text — here a stray backtick — cannot drive the
+  // comment or quote state, and the real tail keeps its own segment.
+  it('keeps the tail its own segment after a heredoc with a stray backtick', async () => {
+    expect(
+      splitCompoundCommand(
+        stripHeredocBodies(
+          "cat <<'EOF'\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x",
+        ),
+      ),
+    ).toEqual(["cat <<'EOF'", "echo a # x'` y'", 'rm -rf /tmp/x']);
+  });
+
+  // A commented-out `<<EOF` opens no heredoc, so the following line is a real
+  // command and must survive the strip.
+  it('does not strip real commands after a commented heredoc marker', async () => {
+    expect(
+      splitCompoundCommand(
+        stripHeredocBodies('echo hi # note <<EOF\nrm -rf /tmp/x'),
+      ),
+    ).toEqual(['echo hi # note <<EOF', 'rm -rf /tmp/x']);
+  });
+
+  // The comment ends at the *physical* newline, and that newline stays a
+  // boundary: `bash -xc $'echo hi # c\nrm -rf /tmp/x'` traces both commands, so
+  // the `rm` must keep its own segment and its own rule check.
+  it('keeps the newline that ends a comment as a boundary', async () => {
+    expect(splitCompoundCommand('echo hi # c\nrm -rf /tmp/x')).toEqual([
+      'echo hi # c',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // …and a backslash does not reach past that newline. bash does not continue a
+  // line inside a comment, so it runs the `rm` here; letting the existing
+  // `escaped` flag find the newline folded both commands into one segment and
+  // the `rm` lost its rule check.
+  it('does not let a trailing backslash extend a comment', async () => {
+    expect(splitCompoundCommand('echo hi # foo \\\nrm -rf /tmp/x')).toEqual([
+      'echo hi # foo \\',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // A space-preceded `#` inside a `${ … }` parameter expansion is literal: bash
+  // does no comment recognition there, so the `;` stays a real boundary and the
+  // tail runs — `bash -xc 'x=""; echo ${x:- a #b} ; touch m ; echo SECOND'`
+  // traces `+ echo a '#b'`, `+ touch m` and `+ echo SECOND`. Folding the line
+  // here cost the tail its own rule check and hid it from the virtual-op pass.
+  it('does not read a # inside a parameter expansion as a comment', async () => {
+    expect(splitCompoundCommand('echo ${x:- a #b} ; rm -rf /tmp/x')).toEqual([
+      'echo ${x:- a #b}',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // Over-correction guard for the same depth: it is scoped to the expansion.
+  // After the closing `}` the `#` is at a word start again, while bash keeps the
+  // `#` in `${x#pre}` and `${#x}` literal; both split today and must keep doing
+  // so, or the guard would over-split every `#` that follows a `${ … }`.
+  it.each([
+    ['echo ${x} # c ; rm -rf /tmp/x', ['echo ${x} # c ; rm -rf /tmp/x']],
+    ['echo ${x#pre} ; rm -rf /tmp/x', ['echo ${x#pre}', 'rm -rf /tmp/x']],
+    ['echo ${#x} ; rm -rf /tmp/x', ['echo ${#x}', 'rm -rf /tmp/x']],
+    // The depth only ever grows from `${`, so the closing `}` has to be the
+    // guarded decrement rather than a bare `-1`: a stray unquoted `}` before the
+    // expansion would otherwise drive the depth negative, the following `${`
+    // would bring it back to 0 instead of 1, and the literal `#` inside the
+    // expansion would fold the line — relaxing the `> 0` clamp turns the
+    // verdict on this command from `deny` into `allow`.
+    [
+      'echo } ${x:- a #b} ; rm -rf /tmp/x',
+      ['echo } ${x:- a #b}', 'rm -rf /tmp/x'],
+    ],
+    // The `commandSubDepth > 0` clamp on the `)` decrement is load-bearing:
+    // the stray `)` of a bare subshell must not drive the depth negative, or
+    // the `}` guard's `commandSubDepth === 0` conjunct would fail, the
+    // expansion would stay open, the `#` would read as literal, and the `;`
+    // inside the comment bash hides would become a boundary — a false deny on
+    // an `rm` bash never runs. Removing the clamp turns this row red.
+    [
+      '( ls ) ; echo ${x} # c ; rm -rf /tmp/x',
+      ['( ls )', 'echo ${x} # c ; rm -rf /tmp/x'],
+    ],
+  ])(
+    'keeps the # semantics of %s around a parameter expansion',
+    async (command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // A `}` inside a substitution does not close an enclosing `${ … }`: bash
+  // parses the substitution body first, so the expansion is still open when the
+  // later `#` appears and the `;` after the real `}` stays a boundary.
+  // `bash -xc 'x=""; echo ${x:-$(echo }) #c} ; touch m ; echo SECOND'` traces
+  // `+ touch m` and `+ echo SECOND` — reading that `}` as the closer dropped the
+  // depth while bash was still inside the expansion, and the literal `#` then
+  // swallowed the `;` and the tail's rule check with it.
+  it.each([
+    [
+      'a command substitution',
+      'echo ${x:-$(echo }) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(echo }) #c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a brace expansion in a command substitution',
+      'echo ${x:-$(ls {a,b}) # c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(ls {a,b}) # c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a backtick substitution',
+      'echo ${x:-`echo }` #c} ; rm -rf /tmp/x',
+      ['echo ${x:-`echo }` #c}', 'rm -rf /tmp/x'],
+    ],
+    // Control: bash honours no bare `{ … }` while scanning for the `}` that
+    // closes `${ … }`, so `bash -xc 'x=""; echo ${x:-{a,b} # c} ; echo SECOND'`
+    // traces only `+ echo '{a,b'` and never runs the second command. This row
+    // keeps folding, and a substitution counter that also counted brace groups
+    // would start splitting it.
+    [
+      'no substitution at all',
+      'echo ${x:-{a,b} # c} ; echo SECOND',
+      ['echo ${x:-{a,b} # c} ; echo SECOND'],
+    ],
+  ])(
+    'does not let %s inside the expansion close it early',
+    async (_where, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // A process substitution is NOT a third substituted body here, because
+  // bash's own `${ … }` close-scan does not treat `<( … )` / `>( … )` as one:
+  // a `}` inside it still closes the inner expansion, the expansion closes at
+  // the `}` right after the `)`, and a space-preceded `#` after that is a
+  // real top-level comment. `bash -xc 'a=1; echo ${a:-${b:-<(x })} # note} ;
+  // touch m'` traces only `+ echo 1` and never creates the marker, and
+  // `bash -c 'echo ${a:-${b:-<(x })}'` with `a` unset dies with
+  // `bad substitution: no closing ')' in <(x` — the inner expansion's word is
+  // the literal `<(x`, proving it closed at the inner `}`. Charging `<( … )`
+  // to `commandSubDepth` would split these lines where bash runs one command
+  // plus a comment — the over-splitting #11815 removed — so these rows pin
+  // the agreement.
+  it.each([
+    [
+      'a process substitution reading',
+      'echo ${a:-${b:-<(x })} # note} ; rm -rf /tmp/x',
+      ['echo ${a:-${b:-<(x })} # note} ; rm -rf /tmp/x'],
+    ],
+    [
+      'a process substitution writing',
+      'echo ${a:-${b:->(x })} # note} ; rm -rf /tmp/x',
+      ['echo ${a:-${b:->(x })} # note} ; rm -rf /tmp/x'],
+    ],
+    // bash closes the expansion at the `}` after the `)`, so the stray `}` is
+    // an argument and the `;` a real boundary: `bash -xc 'a=1; echo
+    // ${a:-${b:-<(x })} } ; echo SECOND'` traces `+ echo 1 '}'` and
+    // `+ echo SECOND`.
+    [
+      'a real boundary after the expansion closes',
+      'echo ${a:-${b:-<(x })} } ; echo SECOND',
+      ['echo ${a:-${b:-<(x })} }', 'echo SECOND'],
+    ],
+  ])(
+    'does not let %s hold the expansion open past bash',
+    async (_where, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // bash performs no comment recognition inside `(( … ))` / `$(( … ))`, so the
+  // `#` stays literal and `))` still closes the expansion. Swallowing the `))`
+  // additionally stranded the arithmetic depth at 1, after which no later bare
+  // `&` was a boundary. `bash -xc '(( 1 #c )) ; touch m'` prints an arithmetic
+  // error and still runs the `touch`, and `bash -xc 'echo $(( 1 #c )) & touch
+  // m'` creates the marker in the backgrounded subshell.
+  it('does not read a # inside an arithmetic expansion as a comment', async () => {
+    expect(splitCompoundCommand('echo $(( 1 #c )) & rm -rf /tmp/x')).toEqual([
+      'echo $(( 1 #c ))',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  it('does not read a # inside an arithmetic command as a comment', async () => {
+    expect(splitCompoundCommand('(( 1 #c )) ; rm -rf /tmp/x')).toEqual([
+      '(( 1 #c ))',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // Over-correction guard: a comment must never be able to leave the arithmetic
+  // depth raised, or every later bare `&` stops being a boundary — including on
+  // the following physical line.
+  it('keeps a later & a boundary after a # inside arithmetic', async () => {
+    expect(
+      splitCompoundCommand('echo $(( 1 # c ))\necho a & rm -rf /tmp/x'),
+    ).toEqual(['echo $(( 1 # c ))', 'echo a', 'rm -rf /tmp/x']);
+  });
+
+  // The `)` that closes an arithmetic expansion must not be charged to the
+  // enclosing `$( … )`: arithmetic's `))` is consumed as a pair further down, so
+  // taking the decrement on the first `)` of `$((1))` dropped `commandSubDepth`
+  // one step early. The `}` that follows then met the `commandSubDepth === 0`
+  // conjunct of the `${ … }` guard and closed the expansion while bash is still
+  // inside it, so the literal `#` passed the `paramDepth === 0` gate and its
+  // skip-to-newline swallowed the real `;` — folding the tail into one
+  // allow-covered segment and taking that command's rule check with it.
+  it('does not let an arithmetic ) close the enclosing substitution', async () => {
+    expect(
+      splitCompoundCommandSegments(
+        'echo ${x:-$(echo $((1)) }) #c} ; rm -rf /tmp/x',
+      ),
+    ).toEqual([
+      { command: 'echo ${x:-$(echo $((1)) }) #c}', terminator: ';' },
+      { command: 'rm -rf /tmp/x', terminator: '' },
+    ]);
+  });
+
+  // Same class: a `}` before the substitution's own `)`, two arithmetic
+  // expansions, and a command that would plausibly be denied. Each was 2
+  // segments before the `$((` support and 1 with the unconditional decrement.
+  it.each([
+    [
+      'a brace before the substitution',
+      'echo ${x:-$(echo $((1)) } ) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(echo $((1)) } ) #c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'two arithmetic expansions',
+      'echo ${x:-$(echo $((1)) $((2)) }) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(echo $((1)) $((2)) }) #c}', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a non-echo command',
+      'echo ${x:-$(printf pad $((2)) }) #c} ; rm -rf /tmp/x',
+      ['echo ${x:-$(printf pad $((2)) }) #c}', 'rm -rf /tmp/x'],
+    ],
+  ])(
+    'keeps the tail after %s next to an arithmetic expansion',
+    async (_where, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // Control: the arithmetic depth keeps its own closers, so a substitution that
+  // holds only arithmetic still closes, and grouping parens inside arithmetic
+  // are not mistaken for a substitution's.
+  it.each([
+    [
+      'echo $(echo $((1)) ) ; rm -rf /tmp/x',
+      ['echo $(echo $((1)) )', 'rm -rf /tmp/x'],
+    ],
+    [
+      'echo $(( (1+2) )) ; rm -rf /tmp/x',
+      ['echo $(( (1+2) ))', 'rm -rf /tmp/x'],
+    ],
+  ])('still splits %s', async (command, expected) => {
+    expect(splitCompoundCommand(command)).toEqual(expected);
+  });
+
+  // bash finds a backtick body's closing delimiter with a raw scan that does not
+  // honour an outer-level `#`, so the tail really runs: the oracle
+  // `bash -xc 'echo `date # c` ; echo SECOND'` traces `++ date`, `+ echo …` and
+  // `+ echo SECOND`. The comment skip therefore has to stop at the backtick so
+  // the operator after it keeps its own segment and its own rule check.
+  it('does not let a comment swallow a closing backtick', async () => {
+    expect(splitCompoundCommand('echo `date # c` ; rm -rf /tmp/x')).toEqual([
+      'echo `date # c`',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  // …and outside a body a backtick inside a comment is comment text, so the
+  // skip must run to the newline there. Stopping at that backtick gave the
+  // discarded tail back to the state machine, which rebuilt quote, escape and
+  // arithmetic state from it and folded the next line into the comment's
+  // segment: `bash -xc $'echo a # x` b\'\nrm -rf /tmp/x'` runs the `rm`.
+  it.each([
+    [
+      'an apostrophe',
+      "echo a # x` b'\nrm -rf /tmp/x",
+      ["echo a # x` b'", 'rm -rf /tmp/x'],
+    ],
+    [
+      'a trailing backslash',
+      'echo a # x` b \\\nrm -rf /tmp/x',
+      ['echo a # x` b \\', 'rm -rf /tmp/x'],
+    ],
+    [
+      'an inert ((',
+      'echo a # x` y(( z\necho b & rm -rf /tmp/x',
+      ['echo a # x` y(( z', 'echo b', 'rm -rf /tmp/x'],
+    ],
+  ])(
+    'does not rebuild state from the tail of a comment holding %s',
+    async (_tail, command, expected) => {
+      expect(splitCompoundCommand(command)).toEqual(expected);
+    },
+  );
+
+  // Inside a backtick body the escape half of the terminator is load-bearing:
+  // bash's raw scan for the closing delimiter skips an escaped backtick, so
+  // `` `a # x \` b` `` is one body and the comment inside it runs to the closing
+  // backtick. Reading the escaped backtick as the delimiter instead leaves the
+  // body open, so the `${ … }` later in the line keeps its depth and the `#`
+  // after it stops being a comment.
+  it('does not stop a comment at an escaped backtick', async () => {
+    expect(
+      splitCompoundCommand(
+        'echo `a # x \\` b` ; echo ${y:- z} # c ; rm -rf /tmp/x',
+      ),
+    ).toEqual(['echo `a # x \\` b`', 'echo ${y:- z} # c ; rm -rf /tmp/x']);
+  });
 });
 
 // ─── splitCompoundCommandSegments ────────────────────────────────────────────
@@ -2395,6 +2853,200 @@ describe('PermissionManager', () => {
       expect(await pm.isCommandAllowed('safe-cmd a && evil-cmd b')).toBe(
         'deny',
       );
+    });
+
+    // #11815 — bash runs only the `echo` here, and `Bash(echo *)` covers it, so
+    // the commented-out tail must not drag the whole line into a prompt.
+    it('operator inside a comment: treated as single command', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `echo 'a' # comment ; rm -rf /tmp/x`,
+        }),
+      ).toBe('allow');
+    });
+
+    // The comment stops at the physical newline and bash runs the `rm` on the
+    // next line, so the backslash before that newline must not extend the
+    // comment over it and cost the `rm` its deny check.
+    it('command after a comment line: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hi # foo \\\nrm -rf /tmp/x',
+        }),
+      ).toBe('deny');
+    });
+
+    // The Bash-rule paths strip heredoc bodies before splitting (the same
+    // entry point `walkCompoundCommand` already uses), so the `#` line never
+    // reaches the comment state and only `cat <<EOF` is evaluated. bash hands
+    // the body to `cat` as data and never runs the `rm` —
+    // `bash -xc $'cat <<EOF\n# hi ; rm -rf /\nEOF'` traces only `+ cat` — and a
+    // bare `cat` is read-only, so the verdict is allow. The deny that fired
+    // before this change was a false positive on text that is never executed.
+    it('heredoc body comment line: no deny on text bash never runs', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      // `cat` with a heredoc has no rule hitting it; the rm text is data for
+      // cat, not a command. Name the verdict rather than only ruling deny out.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cat <<EOF\n# hi ; rm -rf /\nEOF',
+        }),
+      ).toBe('allow');
+    });
+
+    // Recorded decision: `xargs rm` turns the heredoc body into argv and
+    // really runs it, and once the body is stripped a `Bash(rm *)` deny can no
+    // longer catch that — argument-level awareness for a non-shell consumer is
+    // #9417's scope. Until then the bare `xargs rm` head matches no rule and
+    // the command resolves to ask, so the user is still prompted; it must
+    // never resolve to allow.
+    it('heredoc body feeding a non-shell consumer: ask, not allow', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'xargs rm <<EOF\n# hi ; rm -rf /tmp/x\nEOF',
+        }),
+      ).toBe('ask');
+    });
+
+    // A commented-out `<<EOF` opens no heredoc, so the following line is a
+    // real command bash runs — the strip must not read the comment as a
+    // heredoc marker and hide that command from the deny.
+    it('commented heredoc marker opens no heredoc: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hi # note <<EOF\nrm -rf /tmp/x',
+        }),
+      ).toBe('deny');
+    });
+
+    // A backtick in a heredoc body is data bash never parses, so it must not
+    // reach the splitter's `backtickDepth`: left counted, it stranded the
+    // depth at 1, the genuine comment on the later line stopped at the
+    // backtick inside it, and the re-scanned apostrophe opened a quote that
+    // never closed, folding the final `rm` into the comment segment — allow,
+    // while bash runs the rm. Stripping the body before the split keeps it
+    // from driving any scanner state.
+    it('a backtick in a heredoc body does not corrupt the comment state: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(*)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cat <<'EOF'\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x",
+        }),
+      ).toBe('deny');
+    });
+
+    // The full-line comment used to survive as its own segment, match no
+    // Bash(...) rule, and drag the most-restrictive aggregation to ask although
+    // bash runs exactly the two allowed commands (#11815).
+    it('full-line comment between two allowed commands: no false prompt', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(npm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'npm install\n# run the tests\nnpm test',
+        }),
+      ).toBe('allow');
+    });
+
+    // The comment state reads a `#` literal wherever bash does not tokenize a
+    // comment — inside `${ … }`, inside `$(( … ))` / `(( … ))`, and inside a
+    // backtick substitution — so the `;` or `&` after the closing delimiter
+    // stays a real boundary. Folding these lines into one segment let
+    // `Bash(echo *)` cover the tail, turning a configured deny into an allow.
+    it.each([
+      ['a parameter expansion', 'echo ${x:- a #b} ; rm -rf /tmp/x'],
+      ['an arithmetic expansion', 'echo $(( 1 #c )) & rm -rf /tmp/x'],
+      [
+        'an arithmetic command',
+        'echo NPMTEST ; (( failures #c )) ; rm -rf /tmp/x',
+      ],
+      ['a backtick substitution', 'echo `date # c` ; rm -rf /tmp/x'],
+      // A `}` inside a substitution body is not the closer of the `${ … }`
+      // around it, so the `#` that follows it is still literal inside the
+      // expansion and the `;` after the real `}` is a real boundary.
+      [
+        'a nested command substitution',
+        'echo ${x:-$(echo }) #c} ; rm -rf /tmp/x',
+      ],
+      ['a stray } before the expansion', 'echo } ${x:- a #b} ; rm -rf /tmp/x'],
+    ])('comment-like # in %s: deny still fires', async (_where, command) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('deny');
+    });
+
+    // A backtick in a comment is comment text, so the tail of the comment must
+    // not be fed back to the state machine: doing so folded the next line, or
+    // the command after a `&`, into a segment `Bash(echo *)` covers while bash
+    // runs the tail.
+    it.each([
+      ["echo a # x` b'\nrm -rf /tmp/x"],
+      ['echo a # x` b \\\nrm -rf /tmp/x'],
+      ['echo a # x` y(( z\necho b & rm -rf /tmp/x'],
+    ])('comment tail of %s: deny still fires', async (command) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('deny');
     });
   });
 

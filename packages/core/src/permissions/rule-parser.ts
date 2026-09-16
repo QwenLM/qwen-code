@@ -864,6 +864,63 @@ function isAsyncOperator(command: string, index: number): boolean {
 }
 
 /**
+ * Characters that end a bash word, so a `#` after one of them starts a word and
+ * so a comment: the three default `IFS` whitespace characters plus the operators
+ * that separate commands. The start of the input is handled by
+ * {@link isCommentStart} itself.
+ *
+ * The whitespace half is an explicit list rather than `\s`. JavaScript's `\s`
+ * also matches `\r`, `\v`, `\f` and `\u00a0`, and bash treats none of those as
+ * word separators: `bash -xc "$(printf 'echo a\r#c ; echo DANGER')"` traces two
+ * commands, because the `#` is mid-word and literal while the `;` after it is a
+ * real boundary. Reading that `#` as a comment folded the line into one segment,
+ * so the command bash ran second never got its own rule check.
+ *
+ * Confirmed against bash for the operators: `echo a;#c` and `echo a&#c` each run
+ * one command, and `echo a|#c` is a syntax error because the `#` comments out
+ * the right-hand side of the pipe. Redirection operators and `(` are
+ * deliberately absent: bash starts a word there too, but leaving them literal
+ * only over-splits, which stays fail-closed, and no reported shape needs them.
+ *
+ * This state is this splitter's alone and it encodes bash's rules. The sibling
+ * `splitCommands` in `../utils/shell-utils.ts` — reached through
+ * `checkCommandPermissions`, so by the shell-confirmation path — has no `#`
+ * state at all and so disagrees on inputs like `echo hi # ; rm -rf /tmp/x`,
+ * and the rule is applied on every platform although cmd.exe has no `#` comment
+ * character. Converging the two splitters, and deciding how a shell-agnostic
+ * splitter learns the reported shell, is tracked in #11882. Three older
+ * `#`-comment rules already live in this package
+ * (`detectCommandSubstitution` in `../utils/shell-utils.ts`,
+ * `findUnquotedCommentStart` and `splitTrailingShellComment` in
+ * `../tools/shell.ts`), so grep the name before trusting one of them.
+ */
+const COMMENT_WORD_BOUNDARIES = [' ', '\t', '\n', ';', '&', '|'];
+
+/**
+ * Whether the `#` at `index` opens a comment rather than being a literal.
+ *
+ * bash only starts a comment at the start of a word, so `echo a#b` prints
+ * `a#b` while `echo a #b` prints `a`. The same word rule keeps the arithmetic
+ * base prefix in `echo $(( 8#17 ))` literal.
+ *
+ * The boundary check is escape-aware: a backslash-escaped space or operator
+ * does not end a word, so the `#` after `a\ ` or `a\;` is mid-word and
+ * literal — treating it as a comment would swallow the rest of the line and
+ * merge a real `;` boundary away, dropping the rule check the following
+ * command would have got.
+ */
+function isCommentStart(command: string, index: number): boolean {
+  if (index === 0) {
+    return true;
+  }
+  const previous = command[index - 1]!;
+  return (
+    COMMENT_WORD_BOUNDARIES.includes(previous) &&
+    precedingBackslashCount(command, index - 1) % 2 === 0
+  );
+}
+
+/**
  * One segment of a compound command, together with the operator that ended it.
  */
 export interface CompoundCommandSegment {
@@ -895,6 +952,27 @@ export function splitCompoundCommandSegments(
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
+  // Nesting depth of `${ … }` parameter expansions. bash tokenizes no comment
+  // inside one, so a space-preceded `#` there is literal and the closing `}`
+  // still closes the expansion: `bash -xc 'x=""; echo ${x:- a #b} ; touch m ;
+  // echo SECOND'` traces `+ echo a '#b'`, `+ touch m` and `+ echo SECOND`.
+  // Reading that `#` as a comment swallowed the `;` and folded both commands
+  // into one allow-covered segment.
+  let paramDepth = 0;
+  // Nesting depth of `$( … )` command substitutions only — backtick bodies are
+  // tracked separately by `backtickDepth` below. A substitution body is
+  // scanned without honouring a `}`: bash parses the body before it looks for
+  // the `}` that closes an enclosing `${ … }`, so a brace inside one must not
+  // close the expansion — `bash -xc 'x=""; echo ${x:-$(echo }) #c} ; touch m ;
+  // echo SECOND'` traces `+ touch m` and runs the tail, while counting that
+  // `}` as the closer dropped the depth early and the literal `#` after it
+  // then swallowed the real `;`. Both counters suppress the `}` closer, which
+  // is why the `}` guard below consults both.
+  let commandSubDepth = 0;
+  // 0 or 1: whether the scanner is inside a backtick body. It is the only place
+  // a `#`-comment ends at a backtick rather than at the physical newline, so the
+  // skip below consults it.
+  let backtickDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -916,6 +994,106 @@ export function splitCompoundCommandSegments(
       continue;
     }
     if (inSingle || inDouble) {
+      continue;
+    }
+
+    // Track `${ … }` nesting. Only the `#` branch below consults it, so an
+    // operator inside the expansion is unaffected.
+    if (ch === '$' && command[i + 1] === '{') {
+      paramDepth++;
+      i++; // -1 +1: step onto the `{`
+      continue;
+    }
+    // `$((` is arithmetic, tracked below, and no substitution at all. The `(`
+    // is left to the operator scan so the matching `)` decrements this.
+    if (ch === '$' && command[i + 1] === '(' && command[i + 2] !== '(') {
+      commandSubDepth++;
+      continue;
+    }
+    // Arithmetic's own closers are consumed below as the `))` pair, so a `)`
+    // reached while `arithmeticDepth` is above zero is never the `)` that
+    // closes a `$( … )`. Charging it here zeroed the depth on the first half of
+    // `$((1))` and left the enclosing substitution counted as already closed:
+    // in `echo ${x:-$(echo $((1)) }) #c} ; rm -rf /tmp/x` the literal `}` then
+    // met the `commandSubDepth === 0` conjunct below, closed `${ … }` while
+    // bash is still inside it, and the word-initial `#` passed the
+    // `paramDepth === 0` gate and swallowed the real `;`, folding the tail into
+    // one allow-covered segment (#11815).
+    if (ch === ')' && arithmeticDepth === 0 && commandSubDepth > 0) {
+      commandSubDepth--;
+    }
+    // An unescaped backtick outside quotes opens or closes a body; quotes and
+    // backslashes were handled above, so this only sees a live delimiter.
+    if (ch === '`') {
+      backtickDepth = backtickDepth === 0 ? 1 : 0;
+      continue;
+    }
+    if (
+      ch === '}' &&
+      paramDepth > 0 &&
+      commandSubDepth === 0 &&
+      backtickDepth === 0
+    ) {
+      paramDepth--;
+    }
+
+    // A word-initial `#` opens a comment that runs to the end of the physical
+    // line, so an operator inside it is not a boundary: bash runs
+    // `echo 'a' # comment ; echo B` as a single `echo` (#11815).
+    //
+    // bash tokenizes no comment inside arithmetic and none inside a `${ … }`
+    // expansion, so the `#` there stays literal and the delimiter closing the
+    // construct still closes it. Both depth guards keep a following `;`, `&` or
+    // newline a real boundary; without them the skip ran past the closing `))`
+    // — which also stranded `arithmeticDepth` above zero and muted every later
+    // bare `&` — or past the closing `}`.
+    //
+    // This scan deliberately ignores `escaped`. A backslash does not continue a
+    // line inside a comment — bash really does run the `rm` in `echo hi # foo \`
+    // followed by a newline and `rm -rf /` — so honouring the escape would fold
+    // that second command into the comment's segment and cost it its own rule
+    // check. For the same reason the newline is left for the operator scan
+    // below, and stays a boundary. An unescaped backtick ends the skip only
+    // when the `#` sits inside a backtick body: bash finds such a body's closing
+    // delimiter with a raw scan that does not honour the `#`
+    // (`bash -xc 'echo `date # c` ; echo SECOND'` traces `++ date`, `+ echo …`
+    // and `+ echo SECOND`), so stopping there keeps the operator after it a
+    // boundary. Outside a body the backtick is comment text bash has already
+    // discarded, and stopping there handed the tail of the comment back to the
+    // state machine below, which rebuilt quote, escape and arithmetic state out
+    // of it — reopening a quote that never closes, re-arming the escape that
+    // eats the newline, or stranding the arithmetic depth — and folded a real
+    // boundary into an allow-covered segment.
+    if (
+      ch === '#' &&
+      arithmeticDepth === 0 &&
+      paramDepth === 0 &&
+      isCommentStart(command, i)
+    ) {
+      const stopAtBacktick = backtickDepth > 0;
+      const commentStart = i;
+      while (
+        i < command.length &&
+        command[i] !== '\n' &&
+        !(
+          stopAtBacktick &&
+          command[i] === '`' &&
+          precedingBackslashCount(command, i) % 2 === 0
+        )
+      ) {
+        i++;
+      }
+      // A comment that is the whole pending text (a full-line comment, the
+      // common case in a multi-line command) produces no segment of its own:
+      // emitting one would match no Bash(...) rule and drag the most
+      // restrictive aggregation to ask although bash runs only the real
+      // commands around it. When the skip stopped at a newline the operator
+      // scan then emits an empty segment, which is not pushed; when it ran to
+      // the end of input the final segment is empty and is not pushed either.
+      if (command.slice(lastSplit, commentStart).trim() === '') {
+        lastSplit = i;
+      }
+      i--; // -1 because the loop will i++, landing back on the delimiter
       continue;
     }
 
@@ -971,6 +1149,7 @@ export function splitCompoundCommandSegments(
  *   "git status && rm -rf /"  → ["git status", "rm -rf /"]
  *   "ls -la | grep foo"      → ["ls -la", "grep foo"]
  *   "echo 'a && b'"          → ["echo 'a && b'"]  (inside quotes)
+ *   "echo 'a' # c ; echo B"  → ["echo 'a' # c ; echo B"]  (inside a comment)
  *   "a && b || c"            → ["a", "b", "c"]
  *   "git status & rm -rf /"  → ["git status", "rm -rf /"]  (async operator)
  *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
