@@ -720,13 +720,21 @@ describe('OpenTuiToolConfirmation', () => {
       );
     });
 
-    it('answers the option an arrow reached in the same batch', () => {
+    it('answers the free-text row an arrow burst reached in the same read', () => {
       const onConfirm = vi.fn(async () => {});
       mount(askDetails(twoOptions, onConfirm));
-      pressBatched([{ name: 'down' }, { name: 'return', sequence: '\r' }]);
+      // Off the option list and onto the free-text row, then that row's own
+      // character and its Enter, all out of one stdin read: the submit has to
+      // follow the cursor the arrows moved, not the one this render drew.
+      pressBatched([
+        { name: 'down' },
+        { name: 'down' },
+        { name: 'x', sequence: 'x' },
+        { name: 'return', sequence: '\r' },
+      ]);
       expect(onConfirm).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnce,
-        { answers: { '0': 'B' } },
+        { answers: { '0': 'x' } },
       );
     });
 
@@ -902,6 +910,127 @@ describe('OpenTuiToolConfirmation', () => {
       expect(onConfirm).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnce,
         { answers: { '2': 'sms' } },
+      );
+    });
+
+    it('carries an answer given earlier in the same read into the submit that ends it', () => {
+      // The digit only queues the answer, so the Submit tab this same read walks
+      // to has to read it from the mirror: the render that armed the handler
+      // predates the burst and still reports the question unanswered.
+      const onConfirm = vi.fn(async () => {});
+      mount(multiAskDetails(onConfirm));
+      pressBatched([
+        { name: '1', sequence: '1' },
+        { name: 'right' },
+        { name: 'right' },
+        { name: 'right' },
+        { name: 'return', sequence: '\r' },
+      ]);
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'staging' } },
+      );
+    });
+
+    it('counts a typed entry the same read checked and submitted', () => {
+      // Typing into a multi-select row is what ticks its box, and the tick is
+      // what submitAll asks for. Both land in one read here, so the flag has to
+      // be readable before the render that carries it.
+      const onConfirm = vi.fn(async () => {});
+      mount(multiAskDetails(onConfirm));
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'down' });
+      press({ name: 'down' });
+      pressBatched([
+        { name: 's', sequence: 's' },
+        { name: 'm', sequence: 'm' },
+        { name: 's', sequence: 's' },
+        { name: 'return', sequence: '\r' },
+        // Off the row before the arrow becomes a tab move, as above.
+        { name: 'up' },
+        { name: 'right' },
+        { name: 'return', sequence: '\r' },
+      ]);
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '2': 'sms' } },
+      );
+    });
+
+    it('keeps a submitted row closed to the read that follows the submit', () => {
+      // The submit's own re-render parks the dialog on the answered tab for the
+      // whole pause, with the row still mounted and still focused, so a latch
+      // that re-render clears hands the field back to the next read and lets it
+      // widen an answer already recorded.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'down' });
+      press({ name: 'down' });
+      typeChars('sms');
+      press({ name: 'return', sequence: '\r' });
+      act(() => {
+        vi.advanceTimersByTime(50);
+      });
+      typeChars('Z');
+      settleAdvance();
+      expect(container.textContent ?? '').not.toContain('smsZ');
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '2': 'sms' } },
+      );
+    });
+
+    it('keeps a digit trailing an answer in the same read from replacing it', () => {
+      // The field's own latch only reaches its insert branch. An arrow in the
+      // same read steps the cursor off the free-text row, so the digit behind it
+      // lands on the option branch and answers the question a second time while
+      // the pause still holds the row it settled on screen.
+      const onConfirm = vi.fn(async () => {});
+      mount(multiAskDetails(onConfirm));
+      press({ name: 'down' });
+      press({ name: 'down' });
+      typeChars('xyz');
+      pressBatched([
+        { name: 'return', sequence: '\r' },
+        { name: 'up' },
+        { name: '1', sequence: '1' },
+        { name: 'right' },
+        { name: 'right' },
+        { name: 'right' },
+        { name: 'return', sequence: '\r' },
+      ]);
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'xyz' } },
+      );
+    });
+
+    it('holds a tick the same read trails a multi-select answer with', () => {
+      // A multi-select answer is rebuilt from its ticked boxes at submit, so a
+      // Space behind the Enter changes an answer already given: the pause still
+      // holds the question the Enter settled.
+      const onConfirm = vi.fn(async () => {});
+      mount(multiAskDetails(onConfirm));
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'space', sequence: ' ' });
+      press({ name: 'down' });
+      press({ name: 'down' });
+      typeChars('sms');
+      pressBatched([
+        { name: 'return', sequence: '\r' },
+        { name: 'up' },
+        { name: 'space', sequence: ' ' },
+        { name: 'right' },
+        { name: 'return', sequence: '\r' },
+      ]);
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '2': 'mail, sms' } },
       );
     });
 

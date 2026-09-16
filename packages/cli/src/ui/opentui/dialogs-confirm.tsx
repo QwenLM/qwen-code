@@ -651,7 +651,10 @@ function AskUserQuestionFlow(props: {
   const tabRef = useRef(0);
   const selectedRef = useRef(0);
   const checkedRef = useRef<Record<number, string[]>>({});
+  const pickedRef = useRef<Record<number, string>>({});
+  const typedCheckedRef = useRef<Record<number, boolean>>({});
   const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const answeredTabRef = useRef<number | null>(null);
   const { width } = useTerminalDimensions();
 
   // Derived from the two indices alone so the keyboard handler can read them
@@ -675,19 +678,25 @@ function AskUserQuestionFlow(props: {
   const typedValue = (idx: number) => typedRef.current[idx] ?? typed[idx] ?? '';
   const checkedLabels = (idx: number) =>
     checkedRef.current[idx] ?? checked[idx] ?? [];
+  // The state stays as the fallback because `answerFor` also runs during render,
+  // for the chip ✓ and the review list, where a ref-only read would report a
+  // question unanswered until the first write lands.
+  const pickedValue = (idx: number) => pickedRef.current[idx] ?? picked[idx];
+  const typedCheckedFor = (idx: number) =>
+    typedCheckedRef.current[idx] ?? typedChecked[idx] ?? false;
   const customValue = typedValue(tab);
   const isCustomAnswer =
     question !== undefined &&
     !isMultiSelect &&
-    picked[tab] !== undefined &&
-    !question.options.some((option) => option.label === picked[tab]);
+    pickedValue(tab) !== undefined &&
+    !question.options.some((option) => option.label === pickedValue(tab));
 
   const answerFor = (idx: number): string | undefined => {
     const current = questions[idx];
-    if (!current?.multiSelect) return picked[idx];
+    if (!current?.multiSelect) return pickedValue(idx);
     const labels = [...checkedLabels(idx)];
     const own = typedValue(idx).trim();
-    if (typedChecked[idx] && own) labels.push(own);
+    if (typedCheckedFor(idx) && own) labels.push(own);
     return labels.length > 0 ? labels.join(', ') : undefined;
   };
 
@@ -710,12 +719,31 @@ function AskUserQuestionFlow(props: {
     setChecked((prev) => ({ ...prev, [idx]: next }));
   };
 
-  const cancelPendingAdvance = () => {
-    if (advanceTimer.current) clearTimeout(advanceTimer.current);
+  // A multi-select box tracks whether its free-text entry counts, so typing into
+  // it checks the box and emptying it unchecks it again.
+  const markTypedChecked = (idx: number, on: boolean) => {
+    typedCheckedRef.current = { ...typedCheckedRef.current, [idx]: on };
+    setTypedChecked((prev) => ({ ...prev, [idx]: on }));
   };
 
+  const cancelPendingAdvance = () => {
+    if (advanceTimer.current) clearTimeout(advanceTimer.current);
+    advanceTimer.current = null;
+    answeredTabRef.current = null;
+  };
+
+  // The tab the pending swap belongs to. While that swap is armed, the row it
+  // just settled is still drawn and still owns the keys, so the rest of one
+  // stdin read would answer the same question again and quietly replace the
+  // answer already recorded. Only the answer is locked, not the cursor: a manual
+  // ←/→ cancels the swap and this guard with it.
+  const answerIsLocked = () =>
+    advanceTimer.current !== null && answeredTabRef.current === tabRef.current;
+
   const selectAndAdvance = (value: string) => {
+    if (answerIsLocked()) return;
     const idx = tabRef.current;
+    pickedRef.current = { ...pickedRef.current, [idx]: value };
     setPicked((prev) => ({ ...prev, [idx]: value }));
     if (!hasMultipleQuestions) {
       onAnswered({ [idx]: value });
@@ -728,7 +756,10 @@ function AskUserQuestionFlow(props: {
     // both timers fire and the question between them is skipped without ever
     // being drawn.
     cancelPendingAdvance();
+    answeredTabRef.current = idx;
     advanceTimer.current = setTimeout(() => {
+      advanceTimer.current = null;
+      answeredTabRef.current = null;
       moveToTab(Math.min(tabRef.current + 1, totalTabs - 1));
       moveToOption(0);
     }, 150);
@@ -754,10 +785,8 @@ function AskUserQuestionFlow(props: {
     const idx = tabRef.current;
     typedRef.current = { ...typedRef.current, [idx]: next };
     setTyped((prev) => ({ ...prev, [idx]: next }));
-    // A multi-select box tracks whether its free-text entry counts, so typing
-    // into it checks the box and emptying it unchecks it again.
     if (questions[idx]?.multiSelect === true) {
-      setTypedChecked((prev) => ({ ...prev, [idx]: next.trim().length > 0 }));
+      markTypedChecked(idx, next.trim().length > 0);
     }
   };
 
@@ -778,7 +807,7 @@ function AskUserQuestionFlow(props: {
     const value = current.trim();
     const isMulti = questions[idx]?.multiSelect === true;
     if (isMulti) {
-      setTypedChecked((prev) => ({ ...prev, [idx]: value.length > 0 }));
+      markTypedChecked(idx, value.length > 0);
     }
     if (!value) return;
     const answer = isMulti ? multiAnswer(true, current) : value;
@@ -898,7 +927,7 @@ function AskUserQuestionFlow(props: {
       return;
     }
 
-    if (original.name === 'space' && multi && asked) {
+    if (original.name === 'space' && multi && asked && !answerIsLocked()) {
       const option = asked.options[selectedRef.current];
       if (option) toggleChecked(tabRef.current, option.label);
       return;
@@ -912,7 +941,7 @@ function AskUserQuestionFlow(props: {
       }
       if (multi) {
         const idx = tabRef.current;
-        const answer = multiAnswer(typedChecked[idx] === true, typedValue(idx));
+        const answer = multiAnswer(typedCheckedFor(idx), typedValue(idx));
         if (answer !== undefined) selectAndAdvance(answer);
         return;
       }
