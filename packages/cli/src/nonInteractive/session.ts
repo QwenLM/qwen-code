@@ -52,26 +52,34 @@ import {
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
-interface MonitorStartedQueueItem {
+interface TaskStartedQueueItem {
   task_id: string;
   tool_use_id?: string;
   description: string;
+  subagent_type?: string;
 }
 
-interface MonitorQueueItem {
+interface TaskNotificationQueueItem {
   displayText: string;
   modelText: string;
+  todoWorkChainId?: string;
+  monitorId?: string;
   sdkNotification: {
     task_id: string;
     tool_use_id?: string;
     status: string;
+    usage?: {
+      total_tokens: number;
+      tool_uses: number;
+      duration_ms: number;
+    };
   };
 }
 
 class Session {
   private userMessageQueue: CLIUserMessage[] = [];
-  private monitorStartedQueue: MonitorStartedQueueItem[] = [];
-  private monitorQueue: MonitorQueueItem[] = [];
+  private taskStartedQueue: TaskStartedQueueItem[] = [];
+  private taskNotificationQueue: TaskNotificationQueueItem[] = [];
   private pendingContinueTurn: boolean = false;
   private continueTurnInProgress: boolean = false;
   private readonly sessionAbortController: AbortController;
@@ -92,6 +100,8 @@ class Session {
   private configInitialized: boolean = false;
   private monitorNotificationsRegistered: boolean = false;
   private monitorRegistrationsRegistered: boolean = false;
+  private backgroundTaskNotificationsRegistered: boolean = false;
+  private backgroundTaskRegistrationsRegistered: boolean = false;
   private settings: LoadedSettings;
   private readonly unsubscribeRecordingFailure: () => void;
 
@@ -239,6 +249,8 @@ class Session {
       this.configInitialized = true;
       this.registerMonitorRegistrations();
       this.registerMonitorNotifications();
+      this.registerBackgroundTaskRegistrations();
+      this.registerBackgroundTaskNotifications();
     } catch (error) {
       debugLogger.error('[Session] Failed to initialize config:', error);
       throw error;
@@ -259,9 +271,11 @@ class Session {
         const entry = registry.get(meta.monitorId);
         if (!entry || entry.status !== 'running') return;
       }
-      this.enqueueMonitorNotification({
+      this.enqueueTaskNotification({
         displayText,
         modelText,
+        todoWorkChainId: meta.todoWorkChainId,
+        monitorId: meta.monitorId,
         sdkNotification: {
           task_id: meta.monitorId,
           tool_use_id: meta.toolUseId,
@@ -282,13 +296,64 @@ class Session {
       if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
         return;
       }
-      this.enqueueMonitorStarted({
+      this.enqueueTaskStarted({
         task_id: entry.monitorId,
         tool_use_id: entry.toolUseId,
         description: entry.description,
       });
     });
     this.monitorRegistrationsRegistered = true;
+  }
+
+  private registerBackgroundTaskNotifications(): void {
+    if (this.backgroundTaskNotificationsRegistered) {
+      return;
+    }
+
+    this.config
+      .getBackgroundTaskRegistry()
+      .setNotificationCallback((displayText, modelText, meta) => {
+        if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
+          return;
+        }
+        this.enqueueTaskNotification({
+          displayText,
+          modelText,
+          todoWorkChainId: meta.todoWorkChainId,
+          sdkNotification: {
+            task_id: meta.agentId,
+            tool_use_id: meta.toolUseId,
+            status: meta.status,
+            usage: meta.stats
+              ? {
+                  total_tokens: meta.stats.totalTokens,
+                  tool_uses: meta.stats.toolUses,
+                  duration_ms: meta.stats.durationMs,
+                }
+              : undefined,
+          },
+        });
+      });
+    this.backgroundTaskNotificationsRegistered = true;
+  }
+
+  private registerBackgroundTaskRegistrations(): void {
+    if (this.backgroundTaskRegistrationsRegistered) {
+      return;
+    }
+
+    this.config.getBackgroundTaskRegistry().setRegisterCallback((entry) => {
+      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
+        return;
+      }
+      this.enqueueTaskStarted({
+        task_id: entry.agentId,
+        tool_use_id: entry.toolUseId,
+        description: entry.description,
+        subagent_type: entry.subagentType,
+      });
+    });
+    this.backgroundTaskRegistrationsRegistered = true;
   }
 
   /**
@@ -513,6 +578,8 @@ class Session {
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
         recoverableCancellation: true,
@@ -607,6 +674,8 @@ class Session {
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         continueInterrupted: true,
+        captureBackgroundTaskNotifications: false,
+        captureBackgroundTaskRegistrations: false,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
         recoverableCancellation: true,
@@ -636,18 +705,18 @@ class Session {
     }
   }
 
-  private async processMonitorNotificationBatch(
-    batch: MonitorQueueItem[],
+  private async processTaskNotificationBatch(
+    batch: TaskNotificationQueueItem[],
   ): Promise<void> {
     await this.waitForInitialization();
 
     batch = batch.filter((item) => {
-      if (item.sdkNotification.status !== 'running') {
+      if (!item.monitorId || item.sdkNotification.status !== 'running') {
         return true;
       }
       return (
-        this.config.getMonitorRegistry().get(item.sdkNotification.task_id)
-          ?.status !== 'cancelled'
+        this.config.getMonitorRegistry().get(item.monitorId)?.status !==
+        'cancelled'
       );
     });
     if (batch.length === 0) {
@@ -667,6 +736,7 @@ class Session {
 
     const promptId = this.getNextPromptId();
     const turnAbortController = this.startTurn();
+    let resultAlreadyEmitted = false;
     try {
       await runNonInteractive(
         this.config,
@@ -679,11 +749,20 @@ class Session {
           controlService: this.controlService ?? undefined,
           sendMessageType: SendMessageType.Notification,
           notificationDisplayText: combinedDisplayText,
+          todoWorkChainId: batch[0]?.todoWorkChainId,
+          captureBackgroundTaskNotifications: false,
+          captureBackgroundTaskRegistrations: false,
           captureMonitorNotifications: false,
           captureMonitorRegistrations: false,
           recoverableCancellation: true,
+          onResultEmitted: () => {
+            resultAlreadyEmitted = true;
+          },
         },
       );
+    } catch (error) {
+      if (!resultAlreadyEmitted) throw error;
+      debugLogger.error('[Session] Task notification turn error:', error);
     } finally {
       this.finishTurn(turnAbortController);
     }
@@ -697,8 +776,8 @@ class Session {
     while (
       (this.pendingContinueTurn ||
         this.userMessageQueue.length > 0 ||
-        this.monitorStartedQueue.length > 0 ||
-        this.monitorQueue.length > 0) &&
+        this.taskStartedQueue.length > 0 ||
+        this.taskNotificationQueue.length > 0) &&
       !this.isShuttingDown &&
       !this.sessionAbortController.signal.aborted
     ) {
@@ -724,21 +803,30 @@ class Session {
         continue;
       }
 
-      const started = this.monitorStartedQueue.shift();
+      const started = this.taskStartedQueue.shift();
       if (started) {
         this.outputAdapter.emitSystemMessage('task_started', started);
         continue;
       }
 
-      if (this.monitorQueue.length === 0) {
+      if (this.taskNotificationQueue.length === 0) {
         continue;
       }
-      const batch = this.monitorQueue.splice(0);
+      const todoWorkChainId = this.taskNotificationQueue[0]!.todoWorkChainId;
+      let splitIdx = 1;
+      while (
+        splitIdx < this.taskNotificationQueue.length &&
+        this.taskNotificationQueue[splitIdx]!.todoWorkChainId ===
+          todoWorkChainId
+      ) {
+        splitIdx++;
+      }
+      const batch = this.taskNotificationQueue.splice(0, splitIdx);
       try {
-        await this.processMonitorNotificationBatch(batch);
+        await this.processTaskNotificationBatch(batch);
       } catch (error) {
         debugLogger.error(
-          '[Session] Error processing monitor notification batch:',
+          '[Session] Error processing task notification batch:',
           error,
         );
         await this.emitErrorResult(error);
@@ -751,13 +839,15 @@ class Session {
     this.ensureProcessingStarted();
   }
 
-  private enqueueMonitorStarted(started: MonitorStartedQueueItem): void {
-    this.monitorStartedQueue.push(started);
+  private enqueueTaskStarted(started: TaskStartedQueueItem): void {
+    this.taskStartedQueue.push(started);
     this.ensureProcessingStarted();
   }
 
-  private enqueueMonitorNotification(notification: MonitorQueueItem): void {
-    this.monitorQueue.push(notification);
+  private enqueueTaskNotification(
+    notification: TaskNotificationQueueItem,
+  ): void {
+    this.taskNotificationQueue.push(notification);
     this.ensureProcessingStarted();
   }
 
@@ -771,8 +861,8 @@ class Session {
       if (
         (this.pendingContinueTurn ||
           this.userMessageQueue.length > 0 ||
-          this.monitorStartedQueue.length > 0 ||
-          this.monitorQueue.length > 0) &&
+          this.taskStartedQueue.length > 0 ||
+          this.taskNotificationQueue.length > 0) &&
         !this.isShuttingDown &&
         !this.sessionAbortController.signal.aborted
       ) {
@@ -889,9 +979,12 @@ class Session {
     this.abortSession();
     this.abortTaskRegistries();
     this.stopMonitorCallbacks();
+    this.stopBackgroundTaskCallbacks();
 
     // Wait for all pending work
     await this.waitForAllPendingWork();
+    this.stopMonitorCallbacks();
+    this.stopBackgroundTaskCallbacks();
     this.abortTaskRegistries();
 
     this.finishShutdown();
@@ -900,11 +993,16 @@ class Session {
   private async drainAndShutdown(): Promise<void> {
     debugLogger.debug('[Session] Draining pending work before shutdown');
 
-    // Abort monitors and stop callbacks first, then drain anything already
-    // queued so EOF does not remain coupled to monitor process lifetime.
-    this.abortTaskRegistries();
+    // Stop registry callbacks before aborting so cancellation notifications
+    // cannot enqueue a fresh model turn after stdin has closed. Initialization
+    // can install callbacks while the drain waits, so stop them again before
+    // the final abort.
     this.stopMonitorCallbacks();
+    this.stopBackgroundTaskCallbacks();
+    this.abortTaskRegistries();
     await this.waitForAllPendingWork();
+    this.stopMonitorCallbacks();
+    this.stopBackgroundTaskCallbacks();
     this.abortTaskRegistries();
 
     this.finishShutdown();
@@ -938,6 +1036,25 @@ class Session {
     if (this.monitorRegistrationsRegistered) {
       registry.setRegisterCallback(undefined);
       this.monitorRegistrationsRegistered = false;
+    }
+  }
+
+  private stopBackgroundTaskCallbacks(): void {
+    if (
+      !this.backgroundTaskNotificationsRegistered &&
+      !this.backgroundTaskRegistrationsRegistered
+    ) {
+      return;
+    }
+
+    const registry = this.config.getBackgroundTaskRegistry();
+    if (this.backgroundTaskNotificationsRegistered) {
+      registry.setNotificationCallback(undefined);
+      this.backgroundTaskNotificationsRegistered = false;
+    }
+    if (this.backgroundTaskRegistrationsRegistered) {
+      registry.setRegisterCallback(undefined);
+      this.backgroundTaskRegistrationsRegistered = false;
     }
   }
 
