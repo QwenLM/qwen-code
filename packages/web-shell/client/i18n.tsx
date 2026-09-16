@@ -16,6 +16,15 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'footnotes.note': (v) => `Footnote ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `View ${v?.count ?? ''} references`,
+  'footnotes.preview': 'Reference preview',
+  'footnotes.previous': 'Previous reference',
+  'footnotes.next': 'Next reference',
+  'footnotes.citations': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
+  'daemon.capacity.exhausted':
+    'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -539,6 +548,21 @@ const EN: Messages = {
       : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
   'visionBridge.ok': (v) =>
     `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
+  'approval.goal.title': 'Confirm session goal',
+  'approval.goal.overview': 'Goal overview',
+  'approval.goal.full': 'Full content',
+  'approval.goal.outcome': 'Outcome',
+  'approval.goal.doneWhen': 'Completion criteria',
+  'approval.goal.mustNot': 'Constraints',
+  'approval.goal.budget': 'Budget',
+  'approval.goal.onBlock': 'When blocked',
+  'approval.goal.context': 'Context',
+  'approval.goal.confirm': 'Set goal and continue',
+  'approval.goal.reject': 'Not now',
+  'approval.goal.hint':
+    'Setting this goal continues execution and checks progress after each turn. Blockers will be reported.',
+  'approval.goal.pending': 'Submitting…',
+  'approval.goal.failed': 'Could not submit your choice. Please try again.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -1259,6 +1283,8 @@ const EN: Messages = {
   'workflowRuns.user': 'User',
   'workflowRuns.projectDescription': 'Available in this project',
   'workflowRuns.userDescription': 'Available across projects',
+  'workflowRuns.extension': 'Extension',
+  'workflowRuns.extensionDescription': 'Provided by an installed extension',
   'workflowRuns.detail.toggle': (v) => `Show details for ${v?.name ?? ''}`,
   'workflowRuns.detail.loading': 'Loading workflow definition…',
   'workflowRuns.detail.unavailable':
@@ -1838,6 +1864,14 @@ const EN: Messages = {
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
+  'background.result': 'Background result',
+  'background.agent': 'Background agent',
+  'background.running': 'Background tasks running',
+  'background.task': 'Background task',
+  'background.details': 'View details',
+  'background.processing': (v) => `Processing ${v?.label ?? ''} results`,
+  'background.source': 'Source',
+  'background.pending': 'Awaiting processing',
   'system.taskCompleted': 'Background task completed',
   'system.taskFailed': 'Background task failed',
   'system.taskCancelled': 'Background task cancelled',
@@ -2994,6 +3028,9 @@ const EN: Messages = {
   'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
   'sources.title': 'Sources',
+  'sources.count': (v) =>
+    `${v?.count ?? 0} ${(v?.count ?? 0) === 1 ? 'source' : 'sources'}`,
+  'sources.currentTurn': 'Sources for this turn',
   'sources.add': 'Add source',
   'sources.empty': 'Add files or links for reference.',
   'sources.explanation':
@@ -3536,7 +3573,22 @@ const EN: Messages = {
   'channels.editor.secret.placeholder': (v) => `Enter ${v?.label ?? 'secret'}`,
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
+  'channels.editor.field.shared.outputMode': 'Output Mode',
+  'channels.editor.field.shared.outputMode.description':
+    'Choose one final result for the complete task, each complete assistant response, or the last reply in each turn. Defaults to per turn: the main response finishes independently of background follow-ups. Applies to cards and ordinary messages.',
+  'channels.editor.field.shared.outputMode.option.per_task': 'Per task',
+  'channels.editor.field.shared.outputMode.option.per_response': 'Per response',
+  'channels.editor.field.shared.outputMode.option.per_turn':
+    'Per turn (default)',
   'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.dws.senderPolicy': 'Sender policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
+  'channels.editor.field.dws.dmPolicy': 'Direct message access',
+  'channels.editor.field.dws.dmPolicy.description':
+    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
+  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
+  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
   'channels.editor.field.shared.senderPolicy.description':
     'Choose who can start a direct conversation with this Channel.',
   'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
@@ -3762,6 +3814,14 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'footnotes.note': (v) => `脚注 ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `查看 ${v?.count ?? ''} 条引用`,
+  'footnotes.preview': '引用预览',
+  'footnotes.previous': '上一条引用',
+  'footnotes.next': '下一条引用',
+  'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
+  'daemon.capacity.exhausted':
+    '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
@@ -4333,6 +4393,21 @@ const ZH: Messages = {
       : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
   'visionBridge.ok': (v) =>
     `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
+  'approval.goal.title': '确认会话目标',
+  'approval.goal.overview': '目标概览',
+  'approval.goal.full': '完整内容',
+  'approval.goal.outcome': '目标',
+  'approval.goal.doneWhen': '完成条件',
+  'approval.goal.mustNot': '执行边界',
+  'approval.goal.budget': '预算',
+  'approval.goal.onBlock': '遇到阻塞时',
+  'approval.goal.context': '上下文',
+  'approval.goal.confirm': '设置并继续',
+  'approval.goal.reject': '暂不设置',
+  'approval.goal.hint':
+    '设置后将继续执行，并在每轮结束时检查目标进展；遇到阻塞会说明原因。',
+  'approval.goal.pending': '正在提交…',
+  'approval.goal.failed': '提交失败，请重试。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -4990,6 +5065,8 @@ const ZH: Messages = {
   'workflowRuns.user': '用户',
   'workflowRuns.projectDescription': '仅在当前项目中可用',
   'workflowRuns.userDescription': '在所有项目中可用',
+  'workflowRuns.extension': '扩展',
+  'workflowRuns.extensionDescription': '由已安装的扩展提供',
   'workflowRuns.detail.toggle': (v) => `查看 ${v?.name ?? ''} 的详情`,
   'workflowRuns.detail.loading': '正在加载工作流定义…',
   'workflowRuns.detail.unavailable': '这个工作流定义已不可用。',
@@ -5528,6 +5605,14 @@ const ZH: Messages = {
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
+  'background.result': '后台结果',
+  'background.agent': '后台智能体',
+  'background.running': '后台任务执行中',
+  'background.task': '后台任务',
+  'background.details': '查看详情',
+  'background.processing': (v) => `正在处理 ${v?.label ?? ''} 结果`,
+  'background.source': '来源',
+  'background.pending': '等待处理',
   'system.taskCompleted': '后台任务执行完成',
   'system.taskFailed': '后台任务执行失败',
   'system.taskCancelled': '后台任务已取消',
@@ -6599,6 +6684,8 @@ const ZH: Messages = {
   'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
   'sources.title': '来源',
+  'sources.count': (v) => `${v?.count ?? 0} 个来源`,
+  'sources.currentTurn': '本轮来源',
   'sources.add': '添加来源',
   'sources.empty': '添加文件或链接作为参考。',
   'sources.explanation': '添加引用不会将内容发送给助手。',
@@ -7094,7 +7181,21 @@ const ZH: Messages = {
   'channels.editor.secret.clear': '清除',
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
+  'channels.editor.field.shared.outputMode': '输出模式',
+  'channels.editor.field.shared.outputMode.description':
+    '选择在整个任务完成后、每次完整回复后，或每轮结束时发送最后一条回复。默认按轮输出：主回复独立结束，后台后续回复单独发送。适用于卡片和普通消息。',
+  'channels.editor.field.shared.outputMode.option.per_task': '按任务',
+  'channels.editor.field.shared.outputMode.option.per_response': '按回复',
+  'channels.editor.field.shared.outputMode.option.per_turn': '按轮（默认）',
   'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
+  'channels.editor.field.dws.dmPolicy': '私聊访问',
+  'channels.editor.field.dws.dmPolicy.description':
+    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
+  'channels.editor.field.dws.dmPolicy.option.open': '开放',
+  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
   'channels.editor.field.shared.senderPolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
   'channels.editor.field.shared.senderPolicy.option.pairing': '配对',

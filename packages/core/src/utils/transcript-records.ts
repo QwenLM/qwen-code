@@ -116,6 +116,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'at_command',
   'attribution_snapshot',
   'notification',
+  'background_task_completed',
   'cron',
   'mid_turn_user_message',
   'realtime_message',
@@ -133,6 +134,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
+  'goal_turn_end',
   'turn_result',
   ...ARTIFACT_RECORD_SUBTYPES,
 ]);

@@ -341,6 +341,121 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('shows the default output mode for an existing unconfigured channel and saves a changed mode', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'outputMode',
+          label: 'Output Mode',
+          kind: 'enum',
+          default: 'per_turn',
+          options: [
+            { value: 'per_task', label: 'Per task' },
+            { value: 'per_response', label: 'Per response' },
+            { value: 'per_turn', label: 'Per turn (default)' },
+          ],
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance: INSTANCE, onSave });
+
+    expect(fieldByLabel('Output Mode')?.textContent).toBe('Per turn (default)');
+    expect(sectionHeadingOf(fieldByLabel('Output Mode'))).toBe(
+      'Conversation management',
+    );
+    await selectOption('Output Mode', 'Per task');
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+
+    expect(onSave).toHaveBeenCalledWith(
+      'release-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({ outputMode: 'per_task' }),
+      }),
+    );
+    await renderDialog({
+      descriptor,
+      instance: { ...INSTANCE },
+      language: 'zh-CN',
+    });
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按轮（默认）');
+    expect(sectionHeadingOf(fieldByLabel('输出模式'))).toBe('会话管理');
+    expect(document.body.textContent).toContain('默认按轮输出：主回复独立结束');
+    await selectOption('输出模式', '按任务');
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按任务');
+    await selectOption('输出模式', '按回复');
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按回复');
+    await selectOption('输出模式', '按轮（默认）');
+    expect(fieldByLabel('输出模式')?.textContent).toBe('按轮（默认）');
+  });
+
+  it('edits DWS direct access separately from sender and group authorization', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'dws',
+      displayName: 'DingTalk Workspace',
+      manageable: true,
+      fields: [
+        ...DINGTALK_WITH_ACCESS.fields.filter((field) =>
+          ['senderPolicy', 'groupPolicy', 'allowedUsers'].includes(field.key),
+        ),
+        {
+          key: 'dmPolicy',
+          label: 'DM descriptor fallback',
+          kind: 'enum',
+          required: true,
+          default: 'open',
+          options: [
+            { value: 'open', label: 'Open' },
+            { value: 'disabled', label: 'Disabled' },
+          ],
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'dws-bot',
+      config: { type: 'dws', senderPolicy: 'pairing', groupPolicy: 'open' },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, instance, onSave });
+    expect(sectionHeadingOf(fieldByLabel('Direct message access'))).toBe(
+      'Access control',
+    );
+    expect(fieldByLabel('Direct message access')?.textContent).toContain(
+      'Open',
+    );
+    expect(fieldByLabel('Sender policy')).not.toBeNull();
+    await selectOption('Direct message access', 'Disabled');
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save!.click());
+    expect(onSave).toHaveBeenCalledWith(
+      'dws-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          dmPolicy: 'disabled',
+          groupPolicy: 'open',
+          senderPolicy: 'pairing',
+        }),
+      }),
+    );
+    await renderDialog({
+      descriptor,
+      instance: { ...instance, config: onSave.mock.calls[0]![1].config },
+      language: 'zh-CN',
+    });
+    expect(fieldByLabel('私聊访问')?.textContent).toContain('禁用');
+    expect(fieldByLabel('发送者策略')).not.toBeNull();
+  });
+
   it('defaults to the primary workspace and allows a registered workspace', async () => {
     const onWorkspaceChange = vi.fn();
     await renderDialog({ onWorkspaceChange });

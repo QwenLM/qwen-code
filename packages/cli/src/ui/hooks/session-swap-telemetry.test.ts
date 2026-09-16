@@ -170,6 +170,7 @@ function makeFakeEnv() {
   const fakeChat = {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
+    setCompletedToolCallIds: vi.fn(),
   };
 
   // One shared session-service object: every getSessionService() call sees

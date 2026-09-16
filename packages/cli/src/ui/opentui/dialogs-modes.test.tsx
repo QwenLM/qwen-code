@@ -341,7 +341,16 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    // Wait for the selection marker, not just the row: the catalog text
+    // renders with the mount-time selection (index 0) and the pre-selection
+    // of the active style lands in a later passive-effect commit. Pressing
+    // keys on text presence alone can interleave as up-then-derive-then-
+    // return, which picks Concise instead of default.
+    await waitFor(() =>
+      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+        '› Concise',
+      ),
+    );
     press('up');
     press('return');
 

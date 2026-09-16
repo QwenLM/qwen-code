@@ -3291,6 +3291,8 @@ export const useLlmStream = (
         const message = messages[index];
         if (GOAL_COMMAND_RE.test(message)) {
           await handleSlashCommand(message);
+          // The command has already taken effect; restoring it after cancelled
+          // steering preparation would execute that side effect again.
           continue;
         }
 
@@ -4517,7 +4519,10 @@ export const useLlmStream = (
       };
       const orphanedEntries: Part[][] = [];
       try {
-        const history = llmClient?.getHistoryShallow?.() ?? [];
+        const history =
+          llmClient?.getChat?.()?.getHistoryForRecovery?.() ??
+          llmClient?.getHistoryShallow?.() ??
+          [];
         for (let i = history.length - 1; i >= 0; i--) {
           const entry = history[i];
           if (!entry || entry.role !== 'user') break;

@@ -6849,7 +6849,22 @@ describe('LlmChat', async () => {
     it('rejects before request serialization and restores history when hard-rescue compression is still oversized', async () => {
       const originalHistory: Content[] = [
         { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
-        { role: 'model', parts: [{ text: 'ack' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'ended',
+                name: 'update_goal',
+                response: {},
+              },
+            },
+          ],
+        },
       ];
       const recordChatCompression = vi.fn();
       const chatWithRecording = new LlmChat(
@@ -6862,7 +6877,7 @@ describe('LlmChat', async () => {
         } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
-      chatWithRecording.setHistory(originalHistory);
+      chatWithRecording.setHistory(originalHistory, ['ended']);
       chatWithRecording.setLastPromptTokenCount(176_999);
 
       vi.spyOn(
@@ -6895,6 +6910,8 @@ describe('LlmChat', async () => {
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(176_999);
       expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
+      expect(chatWithRecording.getCompletedToolCallIds()).toEqual(['ended']);
+      expect(chatWithRecording.getHistoryForRecovery()).toEqual([]);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
       );
@@ -8209,6 +8226,156 @@ describe('LlmChat', async () => {
         mockContentGenerator.generateContentStream,
       ).mock.calls[0][0].config as { maxOutputTokens?: number };
       expect(requestConfig.maxOutputTokens).toBe(32_768);
+    });
+  });
+
+  describe('completed tool boundary', () => {
+    const result: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: { id: 'ended', name: 'update_goal', response: {} },
+        },
+      ],
+    };
+
+    it.each(['summary', 'fast'] as const)(
+      'preserves and records completed boundaries through %s compression',
+      async (mode) => {
+        const call: Content = {
+          role: 'model',
+          parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+        };
+        const recordChatCompression = vi.fn();
+        const recordingChat = new LlmChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordChatCompression,
+          } as unknown as ConstructorParameters<typeof LlmChat>[3],
+          uiTelemetryService,
+        );
+        recordingChat.setHistory(
+          [
+            { role: 'user', parts: [{ text: 'work' }] },
+            {
+              ...call,
+              parts: [
+                { text: 'reasoning '.repeat(100), thought: true },
+                ...call.parts!,
+              ],
+            },
+            structuredClone(result),
+          ],
+          ['ended'],
+        );
+        if (mode === 'summary') {
+          vi.spyOn(
+            ChatCompressionService.prototype,
+            'compress',
+          ).mockResolvedValueOnce({
+            newHistory: [call, structuredClone(result)],
+            info: {
+              originalTokenCount: 1000,
+              newTokenCount: 100,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          });
+        }
+
+        const info =
+          mode === 'summary'
+            ? await recordingChat.tryCompress('completed-boundary', true)
+            : recordingChat.compressFast().info;
+
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(recordingChat.getCompletedToolCallIds()).toEqual(['ended']);
+        expect(recordingChat.getHistoryForRecovery()).toEqual([]);
+        expect(recordChatCompression).toHaveBeenCalledWith(
+          expect.objectContaining({
+            completedToolCallIds: ['ended'],
+            compressedHistory: recordingChat.getHistory(),
+          }),
+        );
+      },
+    );
+
+    it('restores the earlier completed boundary when rewind removes a later one', () => {
+      const later: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'later',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      chat.setHistory(
+        [
+          structuredClone(result),
+          { role: 'user', parts: [{ text: 'next goal' }] },
+          later,
+        ],
+        ['ended', 'later'],
+      );
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      chat.truncateHistory(1);
+      expect(chat.getCompletedToolCallIds()).toEqual(['ended']);
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      const input: Content = { role: 'user', parts: [{ text: 'unanswered' }] };
+      chat.addHistory(input);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
+      expect(chat.getHistory()).toEqual([result]);
+    });
+
+    it('keeps completed results out of recovery and retry without altering model history', () => {
+      chat.setHistory([structuredClone(result)]);
+      chat.setCompletedToolCallIds(['ended']);
+      expect(chat.getHistory()).toEqual([result]);
+      expect(chat.getHistory(true)).toEqual([result]);
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      chat.addHistory(input);
+      expect(chat.getHistoryForRecovery()).toEqual([input]);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
+      expect(chat.getHistory()).toEqual([result]);
+    });
+
+    it('preserves the boundary through deliberate history transforms and invalidates removed IDs', () => {
+      chat.setHistory([structuredClone(result)], ['ended']);
+      chat.setHistory(
+        [{ role: 'user', parts: [{ text: 'startup' }] }, ...chat.getHistory()],
+        chat.getCompletedToolCallIds(),
+      );
+      chat.stripThoughtsFromHistory();
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      chat.truncateHistory(1);
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+      chat.addHistory(structuredClone(result));
+      expect(chat.getHistoryForRecovery()).toHaveLength(2);
+      chat.setCompletedToolCallIds(['ended']);
+      chat.setHistory([structuredClone(result)]);
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+    });
+
+    it('rejects ambiguous imported IDs and clears the boundary on clear', () => {
+      chat.setHistory(
+        [structuredClone(result), structuredClone(result)],
+        ['ended'],
+      );
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+      chat.setHistory([structuredClone(result)], ['ended']);
+      chat.clearHistory();
+      chat.addHistory(structuredClone(result));
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+      expect(chat.getHistoryForRecovery()).toEqual([result]);
     });
   });
 

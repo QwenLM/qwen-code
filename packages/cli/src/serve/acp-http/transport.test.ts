@@ -1862,6 +1862,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it.each(['full', 'summary'] as const)(
+    'accepts the daemon eventDetailMode extension over ACP: %s',
+    async (eventDetailMode) => {
+      const send = vi.spyOn(bridge, 'sendPrompt');
+      const connId = await initialize();
+      await newSession(connId);
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'hello' }],
+          eventDetailMode,
+        },
+      });
+      expect(ack.status).toBe(202);
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledWith(
+          'sess-1',
+          expect.objectContaining({ eventDetailMode }),
+          expect.any(AbortSignal),
+          expect.anything(),
+        ),
+      );
+    },
+  );
+
   it.each([
     { meta: undefined, context: {} },
     { meta: { 'qwen.daemon.submittedPrompt': 'forged' }, context: {} },

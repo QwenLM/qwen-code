@@ -698,7 +698,11 @@ export function SettingsMessage({
       <SettingInput
         name={setting.key}
         label={formatSettingLabel(setting, t)}
-        type={setting.type === 'number' ? 'number' : 'text'}
+        type={
+          setting.type === 'number' || setting.type === 'integer'
+            ? 'number'
+            : 'text'
+        }
         value={value}
         disabled={disabled}
         onCommit={(next) => handleSetValue(setting.key, next)}

@@ -113,6 +113,10 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import {
+  extractTurnBudgetDirectiveText,
+  parseTurnBudgetDirective,
+} from './turn-budget.js';
 import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
@@ -139,10 +143,8 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
-import {
-  buildApiHistoryFromConversation,
-  replayUiTelemetryFromConversation,
-} from '../services/sessionService.js';
+import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
+import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
@@ -586,8 +588,9 @@ export class LlmClient {
         sessionStartSource ?? SessionStartSource.Resume,
         signal,
       );
-      this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
+      await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
+      chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -605,17 +608,19 @@ export class LlmClient {
       );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
-      const resumedHistory = buildApiHistoryFromConversation(
+      const restored = buildSessionHistoryFromConversation(
         resumedSessionData.conversation,
       );
+      const resumedHistory = restored.apiHistory;
       this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
         signal,
       );
-      this.restoreLoadedSkillsFromHistory(resumedHistory);
+      await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
+      chat.setCompletedToolCallIds(restored.completedToolCallIds);
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -671,11 +676,17 @@ export class LlmClient {
     }
   }
 
-  private restoreLoadedSkillsFromHistory(history: Content[]): void {
+  private async restoreLoadedSkillsFromHistory(
+    history: Content[],
+  ): Promise<void> {
     const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
-      | { restoreLoadedSkillsFromHistory?: (history: Content[]) => void }
+      | {
+          restoreLoadedSkillsFromHistory?: (
+            history: Content[],
+          ) => void | Promise<void>;
+        }
       | undefined;
-    skillTool?.restoreLoadedSkillsFromHistory?.(history);
+    await skillTool?.restoreLoadedSkillsFromHistory?.(history);
   }
 
   async addHistory(content: Content) {
@@ -1667,6 +1678,7 @@ export class LlmClient {
     await this.seedAgentReminderDedupFromCurrent();
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
+      this.getChat().getCompletedToolCallIds(),
     );
   }
 
@@ -1704,7 +1716,10 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
-      this.getChat().setHistory([startupContext, ...currentHistory]);
+      this.getChat().setHistory(
+        [startupContext, ...currentHistory],
+        this.getChat().getCompletedToolCallIds(),
+      );
     }
   }
 
@@ -2814,7 +2829,10 @@ export class LlmClient {
       const changed = m.tokensSaved > 0;
       if (changed) {
         // setHistory conservatively clears loaded-skill tracking.
-        this.getChat().setHistory(mcResult.history);
+        this.getChat().setHistory(
+          mcResult.history,
+          this.getChat().getCompletedToolCallIds(),
+        );
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -2870,6 +2888,42 @@ export class LlmClient {
 
   private clearStopHookForced(promptId: string): void {
     this.stopHookForcedPromptIds.delete(promptId);
+  }
+
+  /**
+   * Open the turn's token budget: the session's output-token total now, and
+   * the `+500k`-style target the user typed, if any. Only a user query or its
+   * retry can carry a directive; a cron, goal, notification or teammate turn
+   * starts with none. A retry of the same prompt keeps the snapshot it
+   * already has, so the failed attempt's tokens still count against it.
+   */
+  private beginTurnBudget(
+    messageType: SendMessageType,
+    request: PartListUnion,
+    promptId: string,
+  ): void {
+    const turnBudget = this.config.getTurnBudget?.();
+    if (!turnBudget) return;
+    const sessionId = this.config.getSessionId();
+    if (
+      messageType === SendMessageType.Retry &&
+      turnBudget.current(sessionId)?.promptId === promptId
+    ) {
+      return;
+    }
+    const directive =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Retry
+        ? parseTurnBudgetDirective(extractTurnBudgetDirectiveText(request))
+        : null;
+    turnBudget.beginTurn({
+      promptId,
+      sessionId,
+      budget: directive?.total ?? null,
+      ...(directive ? { directiveText: directive.text } : {}),
+      outputTokensAtTurnStart:
+        uiTelemetryService.getTotalOutputTokens(sessionId),
+    });
   }
 
   async *sendMessageStream(
@@ -2939,6 +2993,11 @@ export class LlmClient {
     ) {
       await this.config.assertCanStartTurn();
     }
+    if (
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery
+    )
+      this.config.applyReasoningOverrides?.();
     const signal = options?.goalSignal
       ? AbortSignal.any([callerSignal, options.goalSignal])
       : callerSignal;
@@ -3234,6 +3293,11 @@ export class LlmClient {
     if (startsInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+      // A side question asked while a turn is running is not a new turn: it
+      // must not move the running turn's starting point or drop its target.
+      if (!options?.isConcurrentSideQuery) {
+        this.beginTurnBudget(messageType, request, prompt_id);
+      }
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
       this.clearStopHookForced(prompt_id);
@@ -5103,6 +5167,9 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      this.getChat().setCompletedToolCallIds(
+        previousChat.getCompletedToolCallIds(),
+      );
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&

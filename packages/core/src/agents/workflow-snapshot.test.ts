@@ -239,6 +239,54 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(list[0].agentsRespawned).toBeUndefined();
   });
 
+  // The large-run flag is history worth keeping: a run's snapshot is what the
+  // user reads after the fact to see why it was big. Older snapshots have no
+  // flag and still load; a malformed one is not trusted.
+  it('keeps the large-run flag, and loads snapshots without one', async () => {
+    const config = fakeConfig(projectDir);
+    const sizeWarning = {
+      axis: 'agents' as const,
+      scheduledAgents: 16,
+      totalTokens: 0,
+      projectedTokens: 1_120_000,
+      agentCap: 15,
+      tokenCap: 1_500_000,
+      capFromGuideline: true,
+      at: 1_700_000_000_500,
+    };
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_sized', sizeWarning }),
+    );
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_unsized', startTime: 1_700_000_000_001 }),
+    );
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list.find((s) => s.runId === 'wf_sized')?.sizeWarning).toEqual(
+      sizeWarning,
+    );
+    expect(
+      list.find((s) => s.runId === 'wf_unsized')?.sizeWarning,
+    ).toBeUndefined();
+  });
+
+  it('discards a snapshot whose size warning is malformed', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_badsize' }));
+    const snapshotPath =
+      config.storage.getWorkflowRunSnapshotPath('wf_badsize');
+    const parsed = JSON.parse(
+      await fs.readFile(snapshotPath, 'utf8'),
+    ) as Record<string, unknown>;
+    parsed['sizeWarning'] = { axis: 'time' };
+    await fs.writeFile(snapshotPath, JSON.stringify(parsed), 'utf8');
+
+    expect(await listWorkflowSnapshots(config)).toHaveLength(0);
+  });
+
   it('records the respawn count it was given', async () => {
     const config = fakeConfig(projectDir);
     await writeWorkflowSnapshot(
