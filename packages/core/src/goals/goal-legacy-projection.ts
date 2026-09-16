@@ -30,6 +30,22 @@ export interface LegacyGoalStatus {
   lastReason?: string;
 }
 
+/**
+ * The shape carried by the `active_goal` stream event and produced by
+ * `projectActiveGoal` from a Goal v3 snapshot. Deliberately kept separate from
+ * `LegacyActiveGoal` below: the two differ in which fields are optional, so
+ * merging them would silently change a wire type.
+ */
+export interface ActiveGoal {
+  condition: string;
+  iterations: number;
+  deferredEvaluations?: number;
+  setAt: number;
+  tokensAtStart: number;
+  lastReason?: string;
+  hookId: string;
+}
+
 export interface LegacyActiveGoal {
   readonly condition: string;
   readonly iterations: number;

@@ -1,8 +1,10 @@
 name: 'Desktop Release'
 
-run-name: 'Desktop release ${{ inputs.version }}'
+run-name: 'Desktop release ${{ github.event.release.tag_name || inputs.version }}'
 
 on:
+  release:
+    types: ['published']
   workflow_dispatch:
     inputs:
       version:
@@ -10,7 +12,7 @@ on:
         required: true
         type: 'string'
       qwen_code_ref:
-        description: 'Qwen Code branch, tag, or commit to bundle.'
+        description: 'Qwen Code branch or commit to bundle, reachable from main. A release tag whose own commit is off main is refused here: dispatch checks the ref itself, while only the release event peels to its parent.'
         required: true
         default: 'main'
         type: 'string'
@@ -39,7 +41,32 @@ on:
         required: true
         default: false
         type: 'boolean'
-
+  # Kept callable so a scheduled dry run can exercise the packaging path
+  # itself — building the runtime and the installers is the only thing that
+  # catches a bundled-runtime regression introduced outside this package.
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: 'string'
+      qwen_code_ref:
+        required: true
+        type: 'string'
+      electron_bridge:
+        required: true
+        type: 'boolean'
+      dry_run:
+        required: true
+        type: 'boolean'
+      draft:
+        required: true
+        type: 'boolean'
+      prerelease:
+        required: true
+        type: 'boolean'
+      clobber:
+        required: true
+        type: 'boolean'
 permissions:
   contents: 'read'
 
@@ -55,6 +82,16 @@ env:
 jobs:
   prepare:
     name: 'Prepare release metadata'
+    if: |-
+      ${{
+        github.event_name != 'release' ||
+        (
+          github.repository == 'QwenLM/qwen-code' &&
+          vars.RELEASE_DESKTOP_SYNC_PUBLISH == 'true' &&
+          startsWith(github.event.release.tag_name, 'v') &&
+          github.event.release.prerelease == false
+        )
+      }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     outputs:
@@ -71,7 +108,7 @@ jobs:
         shell: 'bash'
         env:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
-          INPUT_VERSION: '${{ inputs.version }}'
+          INPUT_VERSION: '${{ github.event.release.tag_name || inputs.version }}'
           IS_DRAFT: '${{ inputs.draft }}'
           IS_DRY_RUN: '${{ inputs.dry_run }}'
           IS_PRERELEASE: '${{ inputs.prerelease }}'
@@ -86,7 +123,7 @@ jobs:
             echo "::error::Desktop prereleases must use a SemVer prerelease suffix, for example 0.2.1-rc.1: $INPUT_VERSION"
             exit 1
           fi
-          if [ "$IS_DRY_RUN" = 'false' ] && [ "$IS_DRAFT" = 'false' ] && [ "$IS_PRERELEASE" = 'false' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [ "$IS_DRY_RUN" != 'true' ] && [ "$IS_DRAFT" != 'true' ] && [ "$IS_PRERELEASE" != 'true' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Published stable Desktop versions must use X.Y.Z: $INPUT_VERSION"
             exit 1
           fi
@@ -105,20 +142,32 @@ jobs:
         id: 'source'
         shell: 'bash'
         env:
-          INPUT_REF: '${{ inputs.qwen_code_ref }}'
+          INPUT_REF: '${{ github.event.release.tag_name || inputs.qwen_code_ref }}'
           IS_DRY_RUN: '${{ inputs.dry_run }}'
         run: |
           set -euo pipefail
           git fetch origin "$INPUT_REF"
           sha="$(git rev-parse FETCH_HEAD)"
-          if [ "$IS_DRY_RUN" = 'false' ]; then
-            if [ "$GITHUB_REF_NAME" != 'main' ]; then
-              echo '::error::Published desktop releases must run from main.'
+          if [ "$IS_DRY_RUN" != 'true' ]; then
+            if [ "$GITHUB_REF_NAME" != 'main' ] && [ "$GITHUB_EVENT_NAME" != 'release' ]; then
+              echo '::error::Published desktop releases must run from main or follow a published release.'
               exit 1
             fi
+            # CLI release tags usually point at an off-main version-bump commit
+            # whose parent is on main. Verify that parent, while still building
+            # the tag itself; tag-publishing permission remains the trust anchor
+            # for the version-bump commit.
+            ancestor="$sha"
+            if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
+              ancestor="$(git rev-parse "${sha}^")"
+            fi
             git fetch origin main:refs/remotes/origin/main
-            if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
-              echo '::error::Published desktop releases may only bundle commits reachable from main.'
+            if ! git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main; then
+              if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
+                echo "::error::Release $INPUT_REF: the tag commit's first parent $ancestor is not reachable from main, so this step cannot confirm the release was cut from main. That shape is a non-main source ref, or commits added to the release branch after the version bump; the dispatch arm refuses it too."
+              else
+                echo '::error::Published desktop releases may only bundle commits reachable from main.'
+              fi
               exit 1
             fi
           fi
@@ -222,7 +271,7 @@ jobs:
         run: 'node scripts/version.js "${{ needs.prepare.outputs.version }}"'
 
       - name: 'Require updater signing key for publishing'
-        if: '${{ inputs.dry_run == false }}'
+        if: "${{ github.event_name == 'release' || inputs.dry_run == false }}"
         shell: 'bash'
         env:
           TAURI_SIGNING_PRIVATE_KEY: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
@@ -234,7 +283,7 @@ jobs:
           fi
 
       - name: 'Import macOS certificate'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'bash'
         env:
           APPLE_CERTIFICATE: '${{ secrets.APPLE_CERTIFICATE }}'
@@ -270,7 +319,7 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: 'Configure macOS notarization'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'bash'
         env:
           APPLE_API_ISSUER: '${{ secrets.APPLE_API_ISSUER }}'
@@ -302,7 +351,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: 'Import Windows certificate'
-        if: "runner.os == 'Windows' && inputs.dry_run == false"
+        if: "runner.os == 'Windows' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'pwsh'
         env:
           WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
@@ -356,40 +405,60 @@ jobs:
         run: 'npm run test:release'
 
       - name: 'Sign bundled vendor binaries (macOS)'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         working-directory: 'packages/desktop-shell'
         shell: 'bash'
         env:
           APPLE_SIGNING_IDENTITY: '${{ env.APPLE_SIGNING_IDENTITY }}'
         run: |
           set -euo pipefail
-          # Sign all native macOS executables in the bundled runtime so
-          # notarization does not reject them. Tauri only signs the main
-          # app binary; resources like ripgrep and the Node.js runtime are
-          # embedded verbatim and must be signed beforehand.
+          # Sign every native macOS binary in the bundled runtime so
+          # notarization does not reject them. Tauri only signs the main app
+          # binary; the runtime is embedded verbatim and must be signed
+          # beforehand.
+          #
+          # Enumerate the Mach-O files instead of listing the known ones. The
+          # runtime is a copy of the CLI's dist tree, so its native payload
+          # changes whenever a CLI dependency does, without anything in this
+          # package changing. An unsigned renderer library arrived exactly
+          # that way and failed release 0.2.3-preview.0 in the notary service,
+          # twenty minutes into the job, against a list that had covered every
+          # binary the runtime carried when it was written.
           runtime_dir="runtime/qwen-code"
-          # ripgrep vendor binaries
-          rg_dir="$runtime_dir/lib/vendor/ripgrep"
-          if [ -d "$rg_dir" ]; then
-            find "$rg_dir" -type f -name 'rg' -path '*-darwin/*' -exec \
-              codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
-              --options runtime --timestamp \
-              {} +
-          else
-            echo "::warning::Ripgrep vendor directory not found at $rg_dir; no ripgrep binaries signed."
+          mach_o=()
+          while IFS= read -r -d '' file; do
+            if [ "$(file -b --mime-type "$file")" = 'application/x-mach-binary' ]; then
+              mach_o+=("$file")
+            fi
+          done < <(find "$runtime_dir" -type f -print0)
+          if [ "${#mach_o[@]}" -eq 0 ]; then
+            echo "::error::No Mach-O binary found under $runtime_dir. The runtime is not staged as expected."
+            exit 1
           fi
-          # Node.js runtime binary
+          # Node.js runs the CLI's JIT; nothing else in the runtime needs an
+          # entitlement of its own, and libraries inherit the host process's.
           node_bin="$runtime_dir/node/bin/node"
-          if [ -f "$node_bin" ]; then
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
-              --options runtime --timestamp \
-              --entitlements src-tauri/NodeEntitlements.plist "$node_bin"
-          else
-            echo "::warning::Node.js runtime binary not found at $node_bin; no Node.js binary signed."
+          for file in "${mach_o[@]}"; do
+            if [ "$file" = "$node_bin" ]; then
+              codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+                --options runtime --timestamp \
+                --entitlements src-tauri/NodeEntitlements.plist "$file"
+            else
+              codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+                --options runtime --timestamp "$file"
+            fi
+          done
+          if [ ! -f "$node_bin" ]; then
+            echo "::warning::Node.js runtime binary not found at $node_bin."
           fi
+          # Verify here rather than learning it from the notary service.
+          for file in "${mach_o[@]}"; do
+            codesign --verify --strict "$file"
+          done
+          echo "Signed and verified ${#mach_o[@]} Mach-O binaries under $runtime_dir."
 
       - name: 'Refresh bundled runtime checksums after signing (macOS)'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         working-directory: 'packages/desktop-shell'
         run: 'node scripts/prepare-runtime.js --refresh-checksums'
 
@@ -401,7 +470,7 @@ jobs:
         working-directory: 'packages/desktop-shell'
         shell: 'bash'
         env:
-          DRY_RUN: '${{ inputs.dry_run }}'
+          DRY_RUN: "${{ github.event_name == 'release' && 'false' || inputs.dry_run }}"
           TAURI_SIGNING_PRIVATE_KEY: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}'
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
@@ -416,7 +485,7 @@ jobs:
           npm run tauri -- build "${args[@]}"
 
       - name: 'Verify macOS signature'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'bash'
         run: |
           set -euo pipefail
@@ -429,7 +498,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$entitlements")" = true
 
       - name: 'Verify Windows signature'
-        if: "runner.os == 'Windows' && inputs.dry_run == false"
+        if: "runner.os == 'Windows' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'pwsh'
         env:
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
@@ -546,12 +615,16 @@ jobs:
 
   publish:
     name: 'Publish GitHub release'
-    if: "${{ inputs.dry_run == false && github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ (github.event_name == 'release' || inputs.dry_run == false) && github.repository == 'QwenLM/qwen-code' }}"
     needs:
       - 'prepare'
       - 'build'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
+    # The feed move below overwrites desktop-latest.json with --clobber, so it
+    # sits behind the same deployment gate as the OSS mirror job.
+    environment:
+      name: 'production-release'
     permissions:
       contents: 'write'
     steps:
@@ -624,7 +697,7 @@ jobs:
           echo "url=$release_url" >> "$GITHUB_OUTPUT"
 
       - name: 'Update stable updater feed'
-        if: '${{ inputs.draft == false && inputs.prerelease == false }}'
+        if: "${{ github.event_name == 'release' || (inputs.draft == false && inputs.prerelease == false) }}"
         env:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_TOKEN: '${{ github.token }}'
@@ -692,7 +765,7 @@ jobs:
 
   sync-oss:
     name: 'Mirror stable Desktop release to Aliyun OSS'
-    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) }}"
     needs:
       - 'prepare'
       - 'build'
@@ -704,6 +777,7 @@ jobs:
     with:
       version: '${{ needs.prepare.outputs.version }}'
       source: 'artifact'
+      follows_release: "${{ github.event_name == 'release' }}"
     secrets:
       ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
       ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'

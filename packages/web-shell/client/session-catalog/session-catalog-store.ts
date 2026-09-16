@@ -172,6 +172,10 @@ function liveSessionSnapshotsEqual(
       !prior ||
       prior.clientCount !== session.clientCount ||
       prior.hasActivePrompt !== session.hasActivePrompt ||
+      prior.activeWorkState !== session.activeWorkState ||
+      prior.hasRunningBackgroundTasks !== session.hasRunningBackgroundTasks ||
+      JSON.stringify(prior.backgroundTurn) !==
+        JSON.stringify(session.backgroundTurn) ||
       prior.isWaitingForPermission !== session.isWaitingForPermission ||
       prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
       prior.updatedAt !== session.updatedAt
@@ -216,6 +220,7 @@ export class SessionCatalogStore {
   private readonly liveStateFailureStreaks = new Map<string, number>();
   private liveSessionRevision = 0;
   private readonly liveSessionRevisions = new Map<string, number>();
+  private readonly liveSessionRequestTimes = new Map<string, number>();
   private readonly liveSessionsByWorkspace = new Map<
     string,
     ReadonlyMap<string, DaemonSessionLiveState>
@@ -775,6 +780,10 @@ export class SessionCatalogStore {
     return this.liveSessionsByWorkspace.has(workspaceCwd);
   }
 
+  getLiveSessionRequestStartedAt(workspaceCwd: string): number | undefined {
+    return this.liveSessionRequestTimes.get(workspaceCwd);
+  }
+
   getLiveSessionRevision(workspaceCwd: string): number | undefined {
     return this.liveSessionRevisions.get(workspaceCwd);
   }
@@ -833,7 +842,11 @@ export class SessionCatalogStore {
   applyLiveState(
     workspaceCwd: string,
     liveSessions: readonly DaemonSessionLiveState[],
+    requestStartedAt?: number,
   ): ReadonlySet<string> {
+    if (requestStartedAt === undefined)
+      this.liveSessionRequestTimes.delete(workspaceCwd);
+    else this.liveSessionRequestTimes.set(workspaceCwd, requestStartedAt);
     this.recordLiveSessions(workspaceCwd, liveSessions);
     const liveById = new Map(
       liveSessions.map((session) => [session.sessionId, session]),
@@ -860,6 +873,7 @@ export class SessionCatalogStore {
         const live = liveById.get(session.sessionId);
         const clientCount = live?.clientCount ?? 0;
         const hasActivePrompt = live?.hasActivePrompt ?? false;
+        const activeWorkState = live?.activeWorkState;
         const isWaitingForPermission = live?.isWaitingForPermission ?? false;
         const isWaitingForUserQuestion =
           live?.isWaitingForUserQuestion ?? false;
@@ -882,6 +896,11 @@ export class SessionCatalogStore {
         if (
           session.clientCount === clientCount &&
           session.hasActivePrompt === hasActivePrompt &&
+          session.activeWorkState === activeWorkState &&
+          session.hasRunningBackgroundTasks ===
+            live?.hasRunningBackgroundTasks &&
+          JSON.stringify(session.backgroundTurn) ===
+            JSON.stringify(live?.backgroundTurn) &&
           session.isWaitingForPermission === isWaitingForPermission &&
           session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
           session.updatedAt === updatedAt
@@ -894,6 +913,9 @@ export class SessionCatalogStore {
           ...session,
           clientCount,
           hasActivePrompt,
+          activeWorkState,
+          backgroundTurn: live?.backgroundTurn,
+          hasRunningBackgroundTasks: live?.hasRunningBackgroundTasks,
           isWaitingForPermission,
           isWaitingForUserQuestion,
           ...(updatedAt !== undefined ? { updatedAt } : {}),
@@ -948,6 +970,7 @@ export class SessionCatalogStore {
   private clearLiveSessions(workspaceCwd: string): void {
     if (!this.liveSessionsByWorkspace.delete(workspaceCwd)) return;
     this.liveSessionRevisions.delete(workspaceCwd);
+    this.liveSessionRequestTimes.delete(workspaceCwd);
     const observationListeners =
       this.liveSessionObservationListeners.get(workspaceCwd);
     if (observationListeners) {
@@ -1135,6 +1158,7 @@ export class SessionCatalogStore {
     this.liveStatePendingActivity.clear();
     this.liveStateFailureStreaks.clear();
     this.liveSessionRevisions.clear();
+    this.liveSessionRequestTimes.clear();
     this.liveSessionsByWorkspace.clear();
     this.liveSessionListeners.clear();
     this.liveSessionObservationListeners.clear();

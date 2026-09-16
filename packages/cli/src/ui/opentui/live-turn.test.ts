@@ -33,6 +33,9 @@ const live = vi.hoisted(() => ({
   turns: [] as Array<{ prompt: unknown; options: unknown }>,
   waiters: [] as Array<() => void>,
   declines: new Set<number>(),
+  signals: [] as AbortSignal[],
+  /** Events a 1-based turn yields ahead of the stub's bare `done`. */
+  script: new Map<number, Array<Record<string, unknown>>>(),
 }));
 
 vi.mock('./live-session.js', () => ({
@@ -40,14 +43,16 @@ vi.mock('./live-session.js', () => ({
   async *livePromptEvents(
     _config: unknown,
     prompt: unknown,
-    _signal: unknown,
+    signal: AbortSignal,
     options: unknown,
   ) {
+    live.signals.push(signal);
     live.turns.push({ prompt, options });
     if (live.turns.length === 1) {
       await new Promise<void>((resolve) => live.waiters.push(resolve));
     }
     if (live.declines.has(live.turns.length)) return;
+    for (const event of live.script.get(live.turns.length) ?? []) yield event;
     yield { type: 'done' };
   },
 }));
@@ -113,6 +118,52 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.turns.length = 0;
     live.waiters.length = 0;
     live.declines.clear();
+    live.signals.length = 0;
+    live.script.clear();
+  });
+
+  it('fires onComplete once when a turn completes without an abort', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+
+    act(() => {
+      result.current.submit('plain prompt', undefined, { onComplete });
+    });
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire onComplete when the turn ends on an aborted signal (R6-6)', async () => {
+    // Esc while a tool batch is out: the generator's abort paths (the
+    // all-cancelled batch above them) end with a normal return, so the seq
+    // guard alone passes and the signal has to settle it — a command's
+    // onComplete (e.g. /dream's manual-run recording) must not run for a turn
+    // the user cancelled.
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+
+    act(() => {
+      result.current.submit('dream prompt', undefined, { onComplete });
+    });
+    act(() => {
+      result.current.interrupt();
+    });
+    expect(live.signals[0]?.aborted).toBe(true);
+
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it('forwards per-turn options through the idle submit hop (R1-4)', () => {
@@ -288,6 +339,106 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     });
 
     expect(result.current.queueLength).toBe(0);
-    expect(popped).toBe('steer me\nthen @b.ts\nqueued after');
+    expect(popped).toBe('steer me\n\nthen @b.ts\n\nqueued after');
+  });
+});
+
+describe('useOpenTuiLiveTurn streaming counters', () => {
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+    live.declines.clear();
+    live.signals.length = 0;
+    live.script.clear();
+  });
+
+  function renderTurn() {
+    return renderHook(() => useOpenTuiLiveTurn({ config: {} as Config }));
+  }
+
+  async function settle(result: { current: { streaming: boolean } }) {
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+  }
+
+  it('counts model text, thoughts and tool args, but never tool output', async () => {
+    live.script.set(1, [
+      { type: 'thinking', delta: 'hmm' },
+      { type: 'text', delta: 'hello there' },
+      {
+        type: 'tool-start',
+        id: 'c1',
+        tool: 'run_shell_command',
+        title: 'ls',
+      },
+      { type: 'tool-args', id: 'c1', args: '{"command":"ls"}' },
+      // Tool-generated, not model-generated: ink leaves it out of the estimate.
+      { type: 'tool-output', id: 'c1', output: 'a lot of stdout' },
+      { type: 'tool-end', id: 'c1', success: true, summary: '' },
+    ]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('go');
+    });
+    await settle(result);
+
+    expect(result.current.streamingCharsRef.current).toBe(
+      'hmm'.length + 'hello there'.length + '{"command":"ls"}'.length,
+    );
+  });
+
+  it('marks content as receiving once model text arrives', async () => {
+    live.script.set(1, [{ type: 'text', delta: 'here you go' }]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('go');
+    });
+    await settle(result);
+
+    expect(result.current.isReceivingContent).toBe(true);
+  });
+
+  it('returns to the waiting-on-API state once the tool batch ends', async () => {
+    live.script.set(1, [
+      { type: 'text', delta: 'let me look' },
+      {
+        type: 'tool-start',
+        id: 'c1',
+        tool: 'run_shell_command',
+        title: 'ls',
+      },
+      { type: 'tool-end', id: 'c1', success: true, summary: '' },
+    ]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('go');
+    });
+    await settle(result);
+
+    expect(result.current.isReceivingContent).toBe(false);
+  });
+
+  it('restarts the counter for each new user turn', async () => {
+    live.script.set(1, [{ type: 'text', delta: 'aaaa' }]);
+    live.script.set(2, [{ type: 'text', delta: 'bb' }]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('one');
+    });
+    await settle(result);
+    expect(result.current.streamingCharsRef.current).toBe(4);
+
+    act(() => {
+      result.current.submit('two');
+    });
+    await vi.waitFor(() =>
+      expect(result.current.streamingCharsRef.current).toBe(2),
+    );
   });
 });

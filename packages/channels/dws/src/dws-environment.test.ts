@@ -18,7 +18,7 @@ describe('DWS process environment', () => {
         NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
         DWS_DISABLE_KEYCHAIN: '1',
         DWS_AGENT_PRODUCT: 'openclaw',
-        AONE_SANDBOX_ID: 'sandbox-secret',
+        AONE_SANDBOX_ID: 'sandbox-id',
         XDG_DATA_HOME: '/srv/qwen/data',
         OPENAI_API_KEY: 'model-secret',
         QWEN_SERVER_TOKEN: 'daemon-secret',
@@ -32,6 +32,7 @@ describe('DWS process environment', () => {
       NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
       DWS_DISABLE_KEYCHAIN: '1',
       DWS_AGENT_PRODUCT: 'qwen-code',
+      AONE_SANDBOX_ID: 'sandbox-id',
       XDG_DATA_HOME: '/srv/qwen/data',
       NO_COLOR: '1',
     });

@@ -20,23 +20,16 @@ interface ModeItem {
 
 export function ApprovalModeDialog({
   currentMode,
-  sessionWorkflowEnabled = false,
   onSelect,
 }: ApprovalModeDialogProps) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
-  const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.map((id) => ({
+  const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.filter(
+    (id) => id !== 'plan',
+  ).map((id) => ({
     id,
-    name: t(
-      id === 'plan' && sessionWorkflowEnabled
-        ? 'mode.listLabel.planReview'
-        : `mode.listLabel.${id}`,
-    ),
-    description: t(
-      id === 'plan' && sessionWorkflowEnabled
-        ? 'mode.desc.planReview'
-        : `mode.desc.${id}`,
-    ),
+    name: t(`mode.listLabel.${id}`),
+    description: t(`mode.desc.${id}`),
   }));
 
   const currentIdx = approvalModes.findIndex((m) => m.id === currentMode);

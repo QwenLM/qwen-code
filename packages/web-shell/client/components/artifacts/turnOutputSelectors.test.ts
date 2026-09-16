@@ -22,6 +22,86 @@ function toolGroup(id: string, tools: ACPToolCall[]): ToolGroupMessage {
 }
 
 describe('turnOutputSelectors', () => {
+  it('keeps each saved version in its original turn and omits the matching local latest card', () => {
+    const latestUrl = 'file:///tmp/publications/latest/index.html';
+    const messages = [
+      userMessage('u1', 'build'),
+      toolGroup('t1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'update'),
+      toolGroup('t2', [
+        { callId: 'publish-2', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u3', 'record latest link'),
+      toolGroup('t3', [
+        {
+          callId: 'record',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { url: latestUrl },
+        },
+      ]),
+    ];
+    const first = {
+      id: 'first',
+      toolCallId: 'publish-1',
+      storage: 'published',
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        publishedUrl: latestUrl,
+      },
+    } as DaemonSessionArtifact;
+    const second = { ...first, id: 'second', toolCallId: 'publish-2' };
+    const latest = {
+      id: 'latest',
+      toolCallId: 'publish-2',
+      storage: 'published',
+      url: latestUrl,
+    } as DaemonSessionArtifact;
+    expect(
+      getArtifactsByTurn(messages.slice(0, 4), [first, second, latest]).get(
+        'u2',
+      ),
+    ).toEqual([second]);
+    const grouped = getArtifactsByTurn(messages, [first, second, latest]);
+    expect(grouped.get('u1')).toEqual([first]);
+    expect(grouped.get('u2')).toEqual([second]);
+    expect(grouped.get('u3')).toEqual([latest]);
+  });
+
+  it('keeps the matching latest card when its published page is browser-openable', () => {
+    const messages = [
+      userMessage('u1', 'build'),
+      toolGroup('t1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'update'),
+      toolGroup('t2', [
+        { callId: 'publish-2', toolName: 'Artifact', status: 'completed' },
+      ]),
+    ];
+    const first = {
+      id: 'first',
+      toolCallId: 'publish-1',
+      storage: 'published',
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        publishedUrl: 'https://example.com/latest',
+      },
+    } as DaemonSessionArtifact;
+    const second = { ...first, id: 'second', toolCallId: 'publish-2' };
+    const latest = {
+      id: 'latest',
+      toolCallId: 'publish-2',
+      storage: 'published',
+      url: 'https://example.com/latest',
+    } as DaemonSessionArtifact;
+    const grouped = getArtifactsByTurn(messages, [first, second, latest]);
+    expect(grouped.get('u1')).toEqual([first]);
+    expect(grouped.get('u2')).toEqual([second, latest]);
+  });
+
   it('attaches expanded directory files to the recorded folder turn', () => {
     const messages = [
       userMessage('u1', 'export excel'),

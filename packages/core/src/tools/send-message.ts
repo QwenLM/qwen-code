@@ -135,6 +135,9 @@ class SendMessageInvocation extends BaseToolInvocation<
       // Addresses this tool would keep in-process must never be handed
       // back to the model as a peer address, bare.
       isReserved: (address) => isInProcessRecipient(address, teamFile),
+      // Which of this process's records is the sender. Matters only for a
+      // process hosting several sessions; the default covers the rest.
+      slot: this.config.getSessionRegistrySlot(),
     });
 
     switch (outcome.kind) {
@@ -359,7 +362,7 @@ class SendMessageInvocation extends BaseToolInvocation<
       }
 
       return {
-        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary.`,
+        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary. There is no inline reply: whatever it does with your message shows up in its completion notification for this task_id. Do not relaunch the task while waiting.`,
         returnDisplay: `Message queued for ${entry.description}`,
       };
     }
@@ -452,7 +455,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (!teamManager) {
       const msg = this.peerMessagingOff
-        ? `No active team and no task_id, and cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so "${to}" cannot be another session. ` +
+        ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
           'Create a team, pass `task_id` to message a background task, or use ' +
@@ -483,7 +486,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         // that the name it wants could belong to a session this setting
         // is hiding.
         errMsg += this.peerMessagingOff
-          ? ` Cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so another session could not have taken that name either.`
+          ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
           : ` No reachable session has that name either; use list_agents to see who is reachable.`;
       }
       return {

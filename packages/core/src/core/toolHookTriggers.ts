@@ -240,6 +240,7 @@ export async function firePostToolUseHook(
   permissionMode: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  durationMs?: number,
 ): Promise<PostToolUseHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -260,6 +261,7 @@ export async function firePostToolUseHook(
           tool_response: toolResponse,
           tool_use_id: toolUseId,
           ...(tool_call_id && { tool_call_id }),
+          ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         },
         signal,
       },
@@ -335,6 +337,7 @@ export async function firePostToolUseFailureHook(
   permissionMode?: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  durationMs?: number,
 ): Promise<PostToolUseFailureHookResult> {
   if (!messageBus) {
     return {};
@@ -356,6 +359,7 @@ export async function firePostToolUseFailureHook(
           tool_input: toolInput,
           error: errorMessage,
           is_interrupt: isInterrupt,
+          ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         },
         signal,
       },

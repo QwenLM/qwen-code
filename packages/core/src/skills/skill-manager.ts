@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -25,6 +26,7 @@ import {
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
+  qualifySkillName,
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -627,7 +629,7 @@ export class SkillManager {
   stopWatching(): void {
     debugLogger.info('Stopping skill directory watchers...');
     for (const watcher of this.watchers.values()) {
-      void watcher.close().catch((error) => {
+      void closeFileWatcher(watcher).catch((error) => {
         debugLogger.warn('Failed to close skills watcher:', error);
       });
     }
@@ -1027,6 +1029,13 @@ export class SkillManager {
           }
           skills.push({
             ...skill,
+            // The registry identity carries the owner, so two extensions
+            // shipping `pdf` contribute two names and a reader can tell where
+            // a skill came from. The manifest and the workspace
+            // extension-skill store keep using the authored spelling;
+            // `Config.isSkillEnabled` bridges the two.
+            name: qualifySkillName(extension.name, skill.name),
+            authoredName: skill.name,
             extensionName: extension.name,
             extensionDisplayName: extension.displayName,
             // Normalize so downstream consumers reading `skill.priority`
@@ -1234,15 +1243,14 @@ export class SkillManager {
 
     for (const existingPath of this.watchers.keys()) {
       if (!watchTargets.has(existingPath)) {
-        void this.watchers
-          .get(existingPath)
-          ?.close()
-          .catch((error) => {
+        void closeFileWatcher(this.watchers.get(existingPath)).catch(
+          (error) => {
             debugLogger.warn(
               `Failed to close skills watcher for ${existingPath}:`,
               error,
             );
-          });
+          },
+        );
         this.watchers.delete(existingPath);
       }
     }

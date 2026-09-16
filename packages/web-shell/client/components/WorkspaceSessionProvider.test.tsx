@@ -141,6 +141,176 @@ describe('WorkspaceSessionProvider targets', () => {
     });
   });
 
+  it('waits for the primary workspace before mounting an initial session', async () => {
+    const capabilities = mocks.workspace.capabilities;
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'connecting',
+      capabilities: undefined,
+    };
+    const renderSession = () =>
+      act(async () => {
+        root.render(
+          <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
+        );
+      });
+
+    await renderSession();
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'connected',
+      capabilities,
+    };
+    await renderSession();
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-a',
+    });
+  });
+
+  it('shows a retry when initial session workspace discovery fails', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'error',
+      capabilities: undefined,
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
+      );
+    });
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain(
+      'The workspace service could not be reached.',
+    );
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => retry?.click());
+    expect(mocks.workspace.refreshCapabilities).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      language: 'en',
+      guidance:
+        'The workspace service could not be reached. Check the daemon and try again.',
+    },
+    {
+      language: 'zh-CN',
+      guidance: '无法连接工作区服务，请检查守护进程后重试。',
+    },
+  ] as const)(
+    'shows guidance and the discovery error in $language',
+    async ({ language, guidance }) => {
+      mocks.workspace = {
+        ...mocks.workspace,
+        status: 'error',
+        capabilities: undefined,
+        error: new Error('502 Daemon restarting'),
+      };
+      await act(async () => {
+        root.render(
+          <WorkspaceSessionProvider
+            sessionId="session-a"
+            webShellProps={{ language }}
+          />,
+        );
+      });
+      expect(mocks.providerMounts).toBe(0);
+      expect(container.textContent).toContain('502 Daemon restarting');
+      expect(container.textContent).toContain(guidance);
+    },
+  );
+
+  it('keeps the app mounted when opening a standalone session from a workspace', async () => {
+    const onSessionIdChange = await renderTarget('session-a', '/work/a');
+    const app = container.querySelector('output');
+    const appReport = mocks.appProps.at(-1)?.['onSessionIdChange'] as
+      | NonNullable<WebShellProps['onSessionIdChange']>
+      | undefined;
+
+    act(() => {
+      appReport?.('standalone-a', undefined, undefined, {
+        kind: 'standalone',
+      });
+    });
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+
+    expect(container.querySelector('output')).toBe(app);
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'standalone-a',
+      sessionContext: { kind: 'standalone' },
+      workspaceCwd: undefined,
+    });
+  });
+
+  it('keeps the app mounted when leaving an initially loaded standalone session', async () => {
+    const onSessionIdChange = vi.fn();
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+        workspaces: [
+          { id: 'a', cwd: '/work/a', primary: true, trusted: true },
+          { id: 'b', cwd: '/work/b', primary: false, trusted: true },
+        ],
+      },
+    };
+    mocks.getStandaloneSession.mockResolvedValue({
+      sessionId: 'standalone-a',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: false,
+    });
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+    await vi.waitFor(() => expect(mocks.providerMounts).toBe(1));
+    const app = container.querySelector('output');
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-b"
+          workspaceCwd="/work/b"
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+
+    expect(container.querySelector('output')).toBe(app);
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+    });
+  });
+
   it('keeps one provider during rapid prop changes', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
 
@@ -307,12 +477,10 @@ describe('WorkspaceSessionProvider targets', () => {
     });
   });
 
-  it('does not remount when an unknown daemon resolves as modern', async () => {
+  it('keeps an empty composer mounted while discovering the workspace', async () => {
     mocks.workspace = { ...mocks.workspace, capabilities: undefined };
     await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
-      );
+      root.render(<WorkspaceSessionProvider webShellProps={{}} />);
     });
     expect(mocks.providerMounts).toBe(1);
 
@@ -325,9 +493,7 @@ describe('WorkspaceSessionProvider targets', () => {
       },
     };
     await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider sessionId="session-a" webShellProps={{}} />,
-      );
+      root.render(<WorkspaceSessionProvider webShellProps={{}} />);
     });
 
     expect(mocks.providerMounts).toBe(1);
@@ -376,7 +542,7 @@ describe('WorkspaceSessionProvider targets', () => {
       sessionId: 'standalone-a',
       sessionContext: { kind: 'standalone' },
     });
-    expect(mocks.providerProps.at(-1)).not.toHaveProperty('workspaceCwd');
+    expect(mocks.providerProps.at(-1)?.['workspaceCwd']).toBeUndefined();
   });
 
   it('never calls a standalone route when the capability is absent', async () => {
@@ -810,6 +976,65 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
     expect(mocks.providerMounts).toBe(1);
     expect(mocks.providerUnmounts).toBe(0);
+  });
+
+  it('does not show a stale lookup error for a newly created session', async () => {
+    const onSessionIdChange = vi.fn();
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: ['standalone_sessions_v1'],
+      },
+    };
+    mocks.getStandaloneSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'standalone_session_not_found' },
+        'not found',
+      ),
+    );
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="missing"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('Conversation not found'),
+    );
+
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+    const reportedChange = mocks.appProps.at(-1)?.['onSessionIdChange'] as
+      | NonNullable<WebShellProps['onSessionIdChange']>
+      | undefined;
+    act(() => {
+      reportedChange?.('standalone-created', undefined, undefined, {
+        kind: 'standalone',
+      });
+    });
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-created"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ onSessionIdChange }}
+        />,
+      );
+    });
+
+    expect(container.textContent).not.toContain('Conversation not found');
+    expect(mocks.providerMounts).toBeGreaterThan(0);
   });
 
   it('rejects conflicting standalone and workspace targets', async () => {
