@@ -71,6 +71,7 @@ import {
   resolveInteractionMode,
   resolveMainSessionOutputStyle,
 } from './prompts.js';
+import { buildOmniMediaGuidanceSection } from '../omni/media-guidance.js';
 import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
@@ -1630,6 +1631,11 @@ export class LlmClient {
     const base = getMainSessionBaseSystemPrompt(this.config);
     const stableLayers = {
       base,
+      // Progressive media understanding contract: WHY deliveries carry
+      // 【媒体降质】/【媒体省略】/【媒体转写】 markers and how to fetch
+      // fuller evidence. Stable — omni config/provider don't change
+      // in-session — so it belongs inside the cached static prefix.
+      mediaGuidance: buildOmniMediaGuidanceSection(this.config),
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
@@ -4026,6 +4032,49 @@ export class LlmClient {
           // the user prompt. Contrast the ToolResult path below, which
           // must append to avoid splitting functionCall / functionResponse.
           systemReminders.unshift(userQueryMemory.prompt);
+        }
+
+        // Omni passive media-memory recall (memory design M §9.3, D10
+        // sideQuery mode): a bounded selector reads what memory knows
+        // about the media handles THIS request carries and the chosen
+        // entries are injected here — strictly before the main request
+        // is sent (never retrofitted into a later turn). Latency is
+        // bounded by sideQuery.timeoutMs; the no-op cases (mode active,
+        // memory off, no handles in the request) return null without
+        // model traffic, and every failure degrades to no injection.
+        // Optional call: stub configs in tests may omit the method.
+        if (this.config.isOmniEnabled?.()) {
+          const { runOmniMemorySideQuery, formatOmniMemorySideQueryReminder } =
+            await import('../omni/memory-side-query.js');
+          const omniRecall = await runOmniMemorySideQuery({
+            config: this.config,
+            requestParts: requestToSend,
+            promptId: prompt_id,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+          if (omniRecall?.result) {
+            systemReminders.push(
+              formatOmniMemorySideQueryReminder(omniRecall.result),
+            );
+            // The user record was persisted before this reminder existed —
+            // record the payload so the transcript (and the trajectory
+            // exporter) shows what memory the model was actually given.
+            this.config
+              .getChatRecordingService()
+              ?.recordOmniRecallReminder(omniRecall.result);
+          } else if (omniRecall?.reason) {
+            // A degraded passive recall is invisible by construction: the
+            // turn proceeds normally, just without the memory it was
+            // supposed to carry. With a pinned-but-unavailable selector
+            // model that is a permanent outage of the feature with nothing
+            // to see, so the reason is recorded (memory design M §9.3
+            // obliges recording it) rather than dropped on the floor.
+            debugLogger.debug(
+              `omni passive media-memory recall degraded ` +
+                `(${omniRecall.reason}) for ` +
+                `${omniRecall.resourceIds.length} resource(s)`,
+            );
+          }
         }
 
         requestToSend = [...systemReminders, ...requestToSend];
