@@ -2350,6 +2350,19 @@ describe('ResponsesPipeline', () => {
           },
         }) +
         '\n\n',
+      ...['', 'data: '].map(
+        (prefix) =>
+          prefix +
+          JSON.stringify({
+            routify_response: {
+              success: false,
+              status: 400,
+              error_source: 'CLIENT_ERROR',
+              error_message: `AllModelsFailed: ${JSON.stringify(encryptedError)}`,
+            },
+          }) +
+          '\n\n',
+      ),
     ];
 
     it.each(encryptedBodies)(
@@ -2369,81 +2382,92 @@ describe('ResponsesPipeline', () => {
       },
     );
 
-    it('preserves tool call/result pairs when recovering encrypted replay', async () => {
-      fetchMock.mockResolvedValueOnce(errorResponse(400, encryptedBodies[0]!));
-      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
-      const request = replayRequest();
-      request.contents = [
-        ...(request.contents as Content[]),
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call_1',
-                name: 'lookup',
-                args: { value: 1 },
+    it.each(encryptedBodies)(
+      'preserves tool call/result pairs when recovering encrypted replay: %s',
+      async (body) => {
+        fetchMock.mockResolvedValueOnce(errorResponse(400, body));
+        fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+        const request = replayRequest();
+        request.contents = [
+          ...(request.contents as Content[]),
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'lookup',
+                  args: { value: 1 },
+                },
               },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call_1',
-                name: 'lookup',
-                response: { output: 'found' },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'lookup',
+                  response: { output: 'found' },
+                },
               },
-            },
-          ],
-        },
-      ];
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      expect(await drain(pipeline, request)).toBeUndefined();
-      const first = parsedCall(0);
-      const second = parsedCall(1);
-      expect(first.input.filter((i) => i.type === 'reasoning')).toHaveLength(3);
-      expect(second.input.filter((i) => i.type === 'reasoning')).toHaveLength(
-        0,
-      );
-      expect(second.input.slice(-2)).toEqual(first.input.slice(-2));
-      expect(second.input.slice(-2).map((i) => i.type)).toEqual([
-        'function_call',
-        'function_call_output',
-      ]);
-    });
+            ],
+          },
+        ];
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig(),
+          makeCliConfig(),
+        );
+        expect(await drain(pipeline, request)).toBeUndefined();
+        const first = parsedCall(0);
+        const second = parsedCall(1);
+        expect(first.input.filter((i) => i.type === 'reasoning')).toHaveLength(
+          3,
+        );
+        expect(second.input.filter((i) => i.type === 'reasoning')).toHaveLength(
+          0,
+        );
+        expect(second.input.slice(-2)).toEqual(first.input.slice(-2));
+        expect(second.input.slice(-2).map((i) => i.type)).toEqual([
+          'function_call',
+          'function_call_output',
+        ]);
+      },
+    );
 
-    it('surfaces the second encrypted rejection without looping', async () => {
-      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      expect(await drain(pipeline, replayRequest())).toMatchObject({
-        status: 400,
-      });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    });
+    it.each(encryptedBodies)(
+      'surfaces the second encrypted rejection without looping: %s',
+      async (body) => {
+        fetchMock.mockResolvedValue(errorResponse(400, body));
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig(),
+          makeCliConfig(),
+        );
+        expect(await drain(pipeline, replayRequest())).toMatchObject({
+          status: 400,
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      },
+    );
 
-    it('does not retry encrypted rejection without reasoning in the request', async () => {
-      fetchMock.mockResolvedValue(errorResponse(400, encryptedBodies[0]!));
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(),
-      );
-      expect(
-        await drain(pipeline, {
-          model: 'gpt-5',
-          contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
-        }),
-      ).toMatchObject({ status: 400 });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
+    it.each(encryptedBodies)(
+      'does not retry encrypted rejection without reasoning in the request: %s',
+      async (body) => {
+        fetchMock.mockResolvedValue(errorResponse(400, body));
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig(),
+          makeCliConfig(),
+        );
+        expect(
+          await drain(pipeline, {
+            model: 'gpt-5',
+            contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+          }),
+        ).toMatchObject({ status: 400 });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      },
+    );
 
     // ── RED behaviors ────────────────────────────────────────────────────
 

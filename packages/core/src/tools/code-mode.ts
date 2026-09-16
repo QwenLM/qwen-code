@@ -222,6 +222,8 @@ export function buildExecDescription(plan: CodeModeBindingPlan): string {
 
 Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Tool calls can be composed with Promise.all. Await every tool promise; unawaited calls are cancelled when the script finishes. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
 
+When a tool takes JavaScript source in a string, that source is parsed separately from this exec program. For static nested source, prefer a String.raw tagged template without nested backticks or interpolations, and use forward slashes in Windows file paths. Inspect returned field names before composing dependent calls; a tool's output field names may differ from another tool's input field names.
+
 Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls.
 
 Available globals:
