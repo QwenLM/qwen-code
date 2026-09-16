@@ -1558,6 +1558,41 @@ describe('stripAnalysisBlock', () => {
     expect(stripAnalysisBlock('<think>r cut off mid-')).toBe('');
   });
 
+  it('pins the case-insensitive flag on both constructors', () => {
+    // Without `i`, an uppercase-tagged block reads as unterminated and the
+    // summary after it would be swallowed with the scratchpad.
+    expect(stripAnalysisBlock('<ANALYSIS>r</ANALYSIS>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+    expect(stripAnalysisBlock('<THINK>cut off')).toBe('');
+  });
+
+  it('keeps prose that merely names a reasoning tag mid-sentence', () => {
+    // A debugging session about reasoning models is exactly the population
+    // this fallback serves, so a tag mention must not eat the summary tail.
+    expect(
+      stripAnalysisBlock(
+        'The session was about <think> tags and the fix landed.',
+      ),
+    ).toBe('The session was about <think> tags and the fix landed.');
+    expect(
+      stripAnalysisBlock('We discussed `<thinking>` blocks in the prompt.'),
+    ).toBe('We discussed `<thinking>` blocks in the prompt.');
+    expect(
+      stripAnalysisBlock(
+        'Docs say <reasoning> is native; summary follows here.',
+      ),
+    ).toBe('Docs say <reasoning> is native; summary follows here.');
+  });
+
+  it('still swallows a truncated block that starts on its own line', () => {
+    // The real truncation shape: the unterminated tag opens a line of its own
+    // and everything after it is scratchpad.
+    expect(stripAnalysisBlock('partial summary\n<analysis>cut off')).toBe(
+      'partial summary',
+    );
+  });
+
   it('returns an empty string for an all-analysis summary', () => {
     expect(
       stripAnalysisBlock(

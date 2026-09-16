@@ -522,19 +522,25 @@ const RESUME_TRAILER =
  *    pattern then treats the whole answer as unterminated and swallows the
  *    real summary after it (#11969). Cross-pair closers like
  *    `<analysis>...</think>` are accepted for the same reason.
- *  - The unclosed-tag fallback (`<analysis>[\s\S]*$`) catches the case
- *    where the model started an `<analysis>` block and ran out of
- *    output tokens before closing it. Without this, the closed-tag
- *    regex above misses and the entire scratchpad leaks into history
- *    via the fallback path in `postProcessSummary`.
+ *  - The unclosed-tag fallback (line-anchored `<analysis>[\s\S]*$`)
+ *    catches the case where the model started an `<analysis>` block and
+ *    ran out of output tokens before closing it. Without this, the
+ *    closed-tag regex above misses and the entire scratchpad leaks into
+ *    history via the fallback path in `postProcessSummary`. The line
+ *    anchor keeps prose that merely names a reasoning tag mid-sentence
+ *    intact.
  */
 const REASONING_TAG_NAMES = '(?:analysis|think|thinking|reasoning)';
 const CLOSED_REASONING_BLOCK = new RegExp(
   `<${REASONING_TAG_NAMES}>[\\s\\S]*?<\\/${REASONING_TAG_NAMES}>\\s*`,
   'gi',
 );
+// The unclosed fallback fires only at a line boundary: the truncation case it
+// exists for (model ran out of output tokens mid-block) always leaves the tag
+// at the start of a line, while a mid-sentence mention like "about <think>
+// tags" is prose and keeps its tail.
 const UNCLOSED_REASONING_BLOCK = new RegExp(
-  `<${REASONING_TAG_NAMES}>[\\s\\S]*$`,
+  `(?:^|\\n)[ \\t]*<${REASONING_TAG_NAMES}>[\\s\\S]*$`,
   'gi',
 );
 
@@ -543,8 +549,9 @@ export function stripAnalysisBlock(rawSummary: string): string {
   // `/g`, newlines via `[\s\S]`, any of the native closer tags above).
   let result = rawSummary.replace(CLOSED_REASONING_BLOCK, '');
   // Second pass: strip any remaining unclosed reasoning tag (the model ran
-  // out of output tokens before closing). Uses an end-of-string anchor
-  // since there's no closing tag to stop at.
+  // out of output tokens before closing). Anchored to a line boundary plus
+  // the end of the string, so prose that merely names a tag mid-sentence is
+  // left alone.
   result = result.replace(UNCLOSED_REASONING_BLOCK, '');
   return result.trim();
 }
