@@ -1654,6 +1654,14 @@ checkpoints differing on both legs at once: the mid-stream indicator, `/stats`,
 and the held-phrase row — the content that moves between two runs of the same
 binary.
 
+The whole matrix was run again after main was merged into the branch, and every
+count above came back the same. The merge moved one thing on a frame: the
+version the banner prints, which main had bumped, and which is inside the
+transcript region on both legs and so appears in almost every capture. With
+that string normalised away, the same 146 of the 152 plain captures are
+byte-identical to the run before the merge and the same three checkpoints are
+not.
+
 Nothing recorded in this decision moves a frame, and that is the expected result
 rather than a missing one. The bound on the answer row is the identity until a
 value exceeds the window, and no scenario types one that does; the paste guards,
