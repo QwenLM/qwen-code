@@ -63,7 +63,7 @@ export function HookConfigDetailStep({
 
   const commandBoxWidth = Math.min(terminalWidth - 6, 80);
 
-  const labelWidth = 12;
+  const labelWidth = 16;
   const showMatcher = supportsMatchers(hookEvent.event);
 
   const detailFields: Array<[string, string]> = [];
@@ -81,11 +81,13 @@ export function HookConfigDetailStep({
   if (definition.type === 'http' && definition.if)
     detailFields.push([t('Condition:'), definition.if]);
   const options = [
-    definition.type === 'command' && definition.async
+    definition.type === 'command' && definition.async === true
       ? t('runs in background')
       : undefined,
-    definition.type === 'http' && definition.once ? t('runs once') : undefined,
-    hookConfig.sequential ? t('sequential') : undefined,
+    definition.type === 'http' && definition.once === true
+      ? t('runs once')
+      : undefined,
+    hookConfig.sequential === true ? t('sequential') : undefined,
   ].filter((option): option is string => option !== undefined);
   if (options.length) detailFields.push([t('Options:'), options.join(', ')]);
   if (hookConfig.skillRoot)
@@ -128,7 +130,10 @@ export function HookConfigDetailStep({
         </Box>
         <Text color={theme.text.primary}>{sourceDisplay}</Text>
         {hookConfig.sourcePath && (
-          <Text color={theme.text.secondary}> ({hookConfig.sourcePath})</Text>
+          <Text color={theme.text.secondary}>
+            {' '}
+            ({String(hookConfig.sourcePath)})
+          </Text>
         )}
       </Box>
 
@@ -146,7 +151,9 @@ export function HookConfigDetailStep({
           <Box width={labelWidth}>
             <Text color={theme.text.secondary}>{t('Extension:')}</Text>
           </Box>
-          <Text color={theme.text.primary}>{hookConfig.sourceDisplay}</Text>
+          <Text color={theme.text.primary}>
+            {String(hookConfig.sourceDisplay)}
+          </Text>
         </Box>
       )}
 
@@ -155,7 +162,9 @@ export function HookConfigDetailStep({
           <Box width={labelWidth}>
             <Text color={theme.text.secondary}>{t('Name:')}</Text>
           </Box>
-          <Text color={theme.text.primary}>{hookConfig.config.name}</Text>
+          <Text color={theme.text.primary}>
+            {String(hookConfig.config.name)}
+          </Text>
         </Box>
       )}
 
@@ -165,17 +174,17 @@ export function HookConfigDetailStep({
             <Text color={theme.text.secondary}>{t('Desc:')}</Text>
           </Box>
           <Text color={theme.text.primary}>
-            {hookConfig.config.description}
+            {String(hookConfig.config.description)}
           </Text>
         </Box>
       )}
 
       {detailFields.map(([label, value]) => (
         <Box key={label}>
-          <Box width={16}>
+          <Box width={labelWidth}>
             <Text color={theme.text.secondary}>{label}</Text>
           </Box>
-          <Text color={theme.text.primary}>{value}</Text>
+          <Text color={theme.text.primary}>{String(value)}</Text>
         </Box>
       ))}
 
@@ -191,7 +200,7 @@ export function HookConfigDetailStep({
             paddingX={1}
             width={commandBoxWidth}
           >
-            <Text color={theme.text.primary}>{getCommand()}</Text>
+            <Text color={theme.text.primary}>{String(getCommand())}</Text>
           </Box>
         </>
       )}
@@ -208,7 +217,7 @@ export function HookConfigDetailStep({
             paddingX={1}
             width={commandBoxWidth}
           >
-            <Text color={theme.text.primary}>{getPrompt()}</Text>
+            <Text color={theme.text.primary}>{String(getPrompt())}</Text>
           </Box>
         </>
       )}
@@ -225,7 +234,7 @@ export function HookConfigDetailStep({
             paddingX={1}
             width={commandBoxWidth}
           >
-            <Text color={theme.text.primary}>{getUrl()}</Text>
+            <Text color={theme.text.primary}>{String(getUrl())}</Text>
           </Box>
         </>
       )}

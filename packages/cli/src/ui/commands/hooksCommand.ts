@@ -12,7 +12,7 @@ import type {
   MessageActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import type { Config, HookEventName } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { supportsMatchers } from '../components/hooks/constants.js';
@@ -114,7 +114,7 @@ const listCommand: SlashCommand = {
       };
     }
 
-    const listing = buildHooksListing(config);
+    const listing = buildHooksListing(config, getCurrentLanguage());
     const totalHooks = listing.rows.length;
 
     if (totalHooks === 0) {
@@ -158,7 +158,9 @@ const listCommand: SlashCommand = {
 
     for (const row of listing.rows) {
       addHook(row.eventName, normalizeMatcher(row.matcher), {
-        name: row.name || row.displayText || t('unnamed'),
+        name: (row.displayText || t('unnamed'))
+          .replace(/\s+/g, ' ')
+          .replace(/([\\`*_{}[\]()<>])/g, '\\$1'),
         source: row.extensionName
           ? `${formatHookSource(row.source)} (${row.extensionName})`
           : formatHookSource(row.source),

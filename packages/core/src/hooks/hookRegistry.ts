@@ -6,6 +6,7 @@
 
 import type { HookDefinition, HookConfig } from './types.js';
 import {
+  HookType,
   HookEventName,
   HooksConfigSource,
   HOOKS_CONFIG_FIELDS,
@@ -58,6 +59,26 @@ export interface HookRegistryEntry {
    * (session/user/project/extension) entries leave this undefined.
    */
   agentScope?: string;
+}
+
+/** Registry identity for deduplication and enabled state, without display truncation. */
+export function getHookIdentity(config: HookConfig): string {
+  if (config.name) return config.name;
+  switch (config.type) {
+    case HookType.Command:
+      return config.command || 'unknown-command';
+    case HookType.Http:
+      return config.url || 'unknown-url';
+    case HookType.Function:
+      return config.id || 'unknown-function';
+    case HookType.Prompt:
+      return config.prompt || 'prompt-hook';
+    default: {
+      const exhaustive: never = config;
+      void exhaustive;
+      return 'unknown-hook';
+    }
+  }
 }
 
 /**
@@ -209,17 +230,7 @@ export class HookRegistry {
   private getHookIdentity(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    const config = entry.config;
-    if (config.name) return config.name;
-    if (config.type === 'command')
-      return (config as { command?: string }).command || 'unknown-command';
-    if (config.type === 'http')
-      return (config as { url?: string }).url || 'unknown-url';
-    if (config.type === 'function')
-      return (config as { id?: string }).id || 'unknown-function';
-    if (config.type === 'prompt')
-      return (config as { prompt?: string }).prompt || 'prompt-hook';
-    return 'unknown-hook';
+    return getHookIdentity(entry.config);
   }
 
   /**
@@ -330,7 +341,11 @@ export class HookRegistry {
     if (
       !definition ||
       typeof definition !== 'object' ||
-      !Array.isArray(definition.hooks)
+      !Array.isArray(definition.hooks) ||
+      (definition.matcher !== undefined &&
+        typeof definition.matcher !== 'string') ||
+      (definition.sequential !== undefined &&
+        typeof definition.sequential !== 'boolean')
     ) {
       debugLogger.warn(
         `Discarding invalid hook definition for ${eventName} from ${source}:`,
@@ -410,14 +425,20 @@ export class HookRegistry {
       return false;
     }
 
-    if (config.type === 'command' && !config.command) {
+    if (
+      config.type === 'command' &&
+      (typeof config.command !== 'string' || !config.command)
+    ) {
       debugLogger.warn(
         `Command hook ${eventName} from ${source} missing command field`,
       );
       return false;
     }
 
-    if (config.type === 'http' && !config.url) {
+    if (
+      config.type === 'http' &&
+      (typeof config.url !== 'string' || !config.url)
+    ) {
       debugLogger.warn(
         `HTTP hook ${eventName} from ${source} missing url field`,
       );
@@ -431,7 +452,10 @@ export class HookRegistry {
       return false;
     }
 
-    if (config.type === 'prompt' && !config.prompt) {
+    if (
+      config.type === 'prompt' &&
+      (typeof config.prompt !== 'string' || !config.prompt)
+    ) {
       debugLogger.warn(
         `Prompt hook ${eventName} from ${source} missing prompt field`,
       );

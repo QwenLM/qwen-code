@@ -29,6 +29,54 @@ describe('HookRegistry', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      { type: HookType.Command, command: { argv: 'echo bad' } },
+      { type: HookType.Http, url: { href: 'https://bad.example' } },
+      { type: HookType.Prompt, prompt: { text: 'bad' } },
+    ])(
+      'discards malformed payloads while retaining valid hooks: $type',
+      async (bad) => {
+        mockConfig.getUserHooks = vi.fn().mockReturnValue({
+          PreToolUse: [
+            { hooks: [bad, { type: HookType.Command, command: 'echo good' }] },
+          ],
+        });
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+        expect(registry.getAllHooks().map((entry) => entry.config)).toEqual([
+          expect.objectContaining({ command: 'echo good' }),
+        ]);
+      },
+    );
+
+    it.each([{ matcher: ['Read'] }, { matcher: 123 }, { sequential: 'false' }])(
+      'discards malformed definitions while retaining valid hooks: %j',
+      async (bad) => {
+        mockConfig.getUserHooks = vi.fn().mockReturnValue({
+          PreToolUse: [
+            {
+              ...bad,
+              hooks: [{ type: HookType.Command, command: 'echo bad' }],
+            },
+            {
+              matcher: 'Read',
+              sequential: true,
+              hooks: [{ type: HookType.Command, command: 'echo good' }],
+            },
+          ],
+        });
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+        expect(registry.getAllHooks()).toEqual([
+          expect.objectContaining({
+            matcher: 'Read',
+            sequential: true,
+            config: expect.objectContaining({ command: 'echo good' }),
+          }),
+        ]);
+      },
+    );
+
     it('should initialize with empty hooks when no config provided', async () => {
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();

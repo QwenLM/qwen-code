@@ -2878,4 +2878,12 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
   'Kept model as {{model}}': 'Model mantingut com a {{model}}',
+
+  'Status message:': 'Missatge d’estat:',
+  'Condition:': 'Condició:',
+  'Options:': 'Opcions:',
+  'Skill:': 'Habilitat:',
+  'runs in background': 'execució en segon pla',
+  'runs once': 'execució única',
+  sequential: 'seqüencial',
 };

@@ -303,7 +303,13 @@ export function HooksManagementDialog({
 
   const renderContent = () => {
     if (currentStep === HOOKS_MANAGEMENT_STEPS.HOOKS_DISABLED) {
-      return <HooksDisabledStep configuredHooksCount={configuredHooksCount} />;
+      return (
+        <HooksDisabledStep
+          configuredHooksCount={
+            config?.getHookSystem() ? configuredHooksCount : undefined
+          }
+        />
+      );
     }
 
     if (isLoading) {

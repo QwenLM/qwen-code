@@ -70,6 +70,29 @@ describe('HookConfigDetailStep', () => {
     vi.clearAllMocks();
   });
 
+  it.each(['url', 'statusMessage', 'if', 'skillRoot'])(
+    'renders malformed optional display data without throwing: %s',
+    (field) => {
+      const hookConfig = {
+        ...createMockHookConfig(),
+        config: {
+          type: HookType.Http,
+          url: 'https://good.example',
+          [field]: { value: 'bad' },
+        },
+        ...(field === 'skillRoot' ? { skillRoot: { value: 'bad' } } : {}),
+      } as unknown as HookConfigDisplayInfo;
+      const { lastFrame } = render(
+        <HookConfigDetailStep
+          hookEvent={createMockHookEvent()}
+          hookConfig={hookConfig}
+        />,
+      );
+      expect(lastFrame()).toContain('Hook details');
+      expect(lastFrame()).not.toContain('Objects are not valid');
+    },
+  );
+
   it('shows HTTP execution options and the registering skill', () => {
     const hookConfig: HookConfigDisplayInfo = {
       ...createMockHookConfig(HooksConfigSource.Session),

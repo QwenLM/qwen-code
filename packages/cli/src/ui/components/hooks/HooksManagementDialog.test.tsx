@@ -327,6 +327,7 @@ describe('HooksManagementDialog', () => {
           hooks: {
             PreToolUse: [
               {
+                matcher: 'Read',
                 hooks: [
                   {
                     type: HookType.Command,
@@ -382,6 +383,22 @@ describe('HooksManagementDialog', () => {
       expect(lastFrame()).toContain('Session (temporary)'),
     );
     expect(lastFrame()).toContain('echo temporary');
+    pressKey('return');
+    await vi.waitFor(() => expect(lastFrame()).toContain('Hook details'));
+    expect(lastFrame()).toMatch(/Skill:\s+\/skills\/test/);
+  });
+
+  it('does not invent a configured count when disabled without a hook system', async () => {
+    const config = disabledHooksConfig()!;
+    vi.mocked(config.getHookSystem).mockReturnValue(undefined);
+    mockedUseConfig.mockReturnValue(config);
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('Hook Configuration - Disabled'),
+    );
+    expect(lastFrame()).not.toContain('0 configured hooks');
   });
 
   it('renders an absent config as an empty list', async () => {
@@ -392,7 +409,8 @@ describe('HooksManagementDialog', () => {
       <HooksManagementDialog onClose={mockOnClose} />,
     );
     await vi.waitFor(() => expect(lastFrame()).not.toContain('Loading hooks'));
-    expect(lastFrame()).not.toContain('Failed to load');
+    expect(lastFrame()).not.toContain('Error loading hooks:');
+    expect(lastFrame()).toContain('No hook events found.');
   });
 
   it('should allow Escape to close during loading state', () => {

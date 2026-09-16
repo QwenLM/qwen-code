@@ -5,7 +5,9 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getExtensionDisplayName } from '../extension/i18n.js';
 import type { Config } from '../config/config.js';
+import { getHookIdentity } from './hookRegistry.js';
 import type { HookConfig, HookEventName } from './types.js';
 import { HookType, HooksConfigSource } from './types.js';
 
@@ -78,9 +80,11 @@ export type HooksListingConfig = Pick<
 >;
 
 const PROMPT_DISPLAY_LIMIT = 50;
+const debugLogger = createDebugLogger('HOOKS_LISTING');
 
 /** One-line identity shared by hook listing consumers. */
 export function describeHookConfig(config: HookConfig): string {
+  if (config.name) return String(config.name);
   switch (config.type) {
     case HookType.Command:
       return config.command || '';
@@ -164,32 +168,16 @@ function toRow(config: HookConfig, placement: RowPlacement): HooksListingRow {
   };
 }
 
-function hookIdentity(config: HookConfig): string {
-  if (config.name) return config.name;
-  switch (config.type) {
-    case HookType.Command:
-      return config.command || 'unknown-command';
-    case HookType.Http:
-      return config.url || 'unknown-url';
-    case HookType.Function:
-      return config.id || 'unknown-function';
-    case HookType.Prompt:
-      return config.prompt || 'prompt-hook';
-    default: {
-      const exhaustive: never = config;
-      void exhaustive;
-      return 'unknown-hook';
-    }
-  }
-}
-
 /**
  * Lists every hook the session can run: the registry's entries with their
  * real enabled state, followed by the hooks registered for the current
  * session. Rows are not dropped when hooks are disabled, so a caller can show
  * what is configured but switched off; without a hook system there are none.
  */
-export function buildHooksListing(config: HooksListingConfig): HooksListing {
+export function buildHooksListing(
+  config: HooksListingConfig,
+  locale?: string,
+): HooksListing {
   const listing: HooksListing = {
     rows: [],
     allDisabled: config.getDisableAllHooks(),
@@ -211,24 +199,38 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
       enabled: entry.enabled,
     });
     if (entry.source === HooksConfigSource.Extensions) {
-      const identity = hookIdentity(entry.config);
+      const identity = getHookIdentity(entry.config);
       const extensions = config
         .getExtensions()
         .filter(
           (extension) =>
             extension.isActive &&
-            extension.hooks?.[entry.eventName]?.some((definition) =>
-              definition.hooks.some((hook) => hookIdentity(hook) === identity),
+            Array.isArray(extension.hooks?.[entry.eventName]) &&
+            extension.hooks?.[entry.eventName]?.some(
+              (definition) =>
+                definition?.matcher === entry.matcher &&
+                definition?.sequential === entry.sequential &&
+                Array.isArray(definition?.hooks) &&
+                definition.hooks.some(
+                  (hook) => hook && getHookIdentity(hook) === identity,
+                ),
             ),
         );
       const extension = extensions[0];
       if (extension) {
-        row.extensionName = extension.displayName ?? extension.name;
+        row.extensionName = locale
+          ? getExtensionDisplayName(extension, locale)
+          : (extension.displayName ?? extension.name);
         row.extensionPath = extension.path;
       }
       if (extensions.length > 1) {
-        createDebugLogger('HOOKS_LISTING').debug(
+        debugLogger.debug(
           'Multiple extensions match a registered hook; using the first extension.',
+          {
+            eventName: entry.eventName,
+            identity,
+            extensions: extensions.map((extension) => extension.name),
+          },
         );
       }
     }

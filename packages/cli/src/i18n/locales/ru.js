@@ -2333,4 +2333,12 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
   'Kept model as {{model}}': 'Оставлена модель {{model}}',
+
+  'Status message:': 'Сообщение о состоянии:',
+  'Condition:': 'Условие:',
+  'Options:': 'Параметры:',
+  'Skill:': 'Навык:',
+  'runs in background': 'выполняется в фоне',
+  'runs once': 'выполняется один раз',
+  sequential: 'последовательно',
 };

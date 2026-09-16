@@ -15,7 +15,6 @@
  */
 
 import { formatHookTimeout } from '../components/hooks/hook-timeout-label.js';
-export { formatHookTimeout } from '../components/hooks/hook-timeout-label.js';
 import { useMemo, useState } from 'react';
 import { useKeyboard } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';

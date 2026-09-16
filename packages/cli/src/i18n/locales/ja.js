@@ -2124,4 +2124,12 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
   'Kept model as {{model}}': 'モデルは {{model}} のままです',
+
+  'Status message:': 'ステータスメッセージ:',
+  'Condition:': '条件:',
+  'Options:': 'オプション:',
+  'Skill:': 'スキル:',
+  'runs in background': 'バックグラウンドで実行',
+  'runs once': '一度だけ実行',
+  sequential: '順次実行',
 };

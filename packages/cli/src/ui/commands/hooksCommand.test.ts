@@ -316,8 +316,52 @@ describe('hooksCommand', () => {
         expect((result as { content: string }).content).toContain(
           `- **${name}** [User]`,
         );
+        expect((result as { content: string }).content).not.toContain(
+          '(disabled)',
+        );
       },
     );
+
+    it('renders extension attribution in the non-interactive listing', async () => {
+      const hook = { type: 'command', name: 'lint', command: 'echo lint' };
+      const ctx = makeContext({
+        configHooks: [
+          { eventName: 'PreToolUse', source: 'extensions', config: hook },
+        ],
+      });
+      ctx.services.config!.getExtensions = () =>
+        [
+          {
+            name: 'lint-extension',
+            isActive: true,
+            hooks: { PreToolUse: [{ hooks: [hook] }] },
+          },
+        ] as unknown as ReturnType<
+          NonNullable<typeof ctx.services.config>['getExtensions']
+        >;
+      const result = await hooksCommand.action!(ctx, '');
+      expect((result as { content: string }).content).toContain(
+        '- **lint** [Extension (lint-extension)]',
+      );
+    });
+
+    it('keeps multiline prompt names within a single escaped bullet', async () => {
+      const result = await hooksCommand.action!(
+        makeContext({
+          configHooks: [
+            {
+              eventName: 'Stop',
+              source: 'user',
+              config: { type: 'prompt', prompt: 'first\n**second**' },
+            },
+          ],
+        }),
+        '',
+      );
+      expect((result as { content: string }).content).toContain(
+        '- **first \\*\\*second\\*\\*** [User]',
+      );
+    });
 
     it('marks a disabled registry row', async () => {
       const result = await hooksCommand.action!(

@@ -9,7 +9,7 @@ import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
 
 interface HooksDisabledStepProps {
-  configuredHooksCount: number;
+  configuredHooksCount?: number;
 }
 
 export function HooksDisabledStep({
@@ -37,12 +37,14 @@ export function HooksDisabledStep({
       {/* Main message */}
       <Box marginBottom={1}>
         <Text color={theme.text.primary}>
-          {t(
-            'All hooks are currently disabled. You have {{count}} that are not running.',
-            {
-              count: hooksText,
-            },
-          )}
+          {configuredHooksCount === undefined
+            ? t('No hook commands will execute')
+            : t(
+                'All hooks are currently disabled. You have {{count}} that are not running.',
+                {
+                  count: hooksText,
+                },
+              )}
         </Text>
       </Box>
 

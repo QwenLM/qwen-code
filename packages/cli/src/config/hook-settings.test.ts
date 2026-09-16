@@ -36,15 +36,51 @@ describe('resolveHookSettingsForConfig', () => {
     ).toEqual({ userHooks: user, projectHooks: project, hooks: merged });
   });
 
-  it('falls back to the merged hooks for user hooks when user settings have none', () => {
+  it('preserves legacy merged hooks not present in the workspace scope', () => {
     const resolved = resolveHookSettingsForConfig(
       merged,
       { userHooks: undefined, projectHooks: project },
       false,
     );
 
-    expect(resolved.userHooks).toBe(merged);
+    expect(resolved.userHooks).toEqual(merged);
     expect(resolved.projectHooks).toBe(project);
+  });
+
+  it('preserves an explicitly empty project scope instead of falling back to merged hooks', () => {
+    const resolved = resolveHookSettingsForConfig(
+      user,
+      { userHooks: user },
+      false,
+    );
+    expect(resolved.projectHooks).toEqual({});
+    expect(resolved.userHooks).toEqual(user);
+  });
+
+  it('keeps system hooks while excluding workspace hooks from the user fallback', () => {
+    const systemDefinition = {
+      hooks: [{ type: 'command', command: 'echo system' }],
+    };
+    const projectDefinition = {
+      hooks: [{ type: 'command', command: 'echo workspace' }],
+    };
+    const projectHooks = { Stop: [projectDefinition] };
+    const mergedHooks = { Stop: [systemDefinition, projectDefinition] };
+    expect(
+      resolveHookSettingsForConfig(mergedHooks, { projectHooks }, false),
+    ).toEqual({
+      hooks: mergedHooks,
+      userHooks: { Stop: [systemDefinition] },
+      projectHooks,
+    });
+    expect(
+      resolveHookSettingsForConfig(projectHooks, { projectHooks }, false)
+        .userHooks,
+    ).toEqual({ Stop: [] });
+    expect(
+      resolveHookSettingsForConfig({ Stop: [systemDefinition] }, {}, false)
+        .userHooks,
+    ).toEqual({ Stop: [systemDefinition] });
   });
 
   it('falls back to the merged hooks when no separated hooks were supplied', () => {

@@ -14,6 +14,7 @@
  * useKeyboard consumer receives each key.
  */
 
+import { formatHookTimeout } from '../components/hooks/hook-timeout-label.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { render, screen } from '@testing-library/react';
@@ -94,7 +95,6 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { DISPLAY_HOOK_EVENTS } from '../components/hooks/constants.js';
 import {
   OpenTuiHooksDialog,
-  formatHookTimeout,
   hookDetailFields,
   hooksBannerText,
   openHookEvent,

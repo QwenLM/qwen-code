@@ -9,6 +9,12 @@ import { formatHookTimeout } from './hook-timeout-label.js';
 
 describe('formatHookTimeout', () => {
   it.each([
+    [HookType.Command, '60000' as unknown as number, '60000 ms'],
+    [HookType.Command, '30' as unknown as number, '30 s'],
+    [HookType.Command, 0, '60 s'],
+    [HookType.Command, -1, '60 s'],
+    [HookType.Http, 0, '600 s'],
+    [HookType.Http, -1, '∞'],
     [HookType.Command, 999, '999 s'],
     [HookType.Command, 1000, '1000 ms'],
     [HookType.Function, 5, '5 ms'],

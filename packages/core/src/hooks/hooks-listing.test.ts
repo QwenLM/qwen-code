@@ -58,6 +58,52 @@ function makeConfig(options: {
 }
 
 describe('buildHooksListing', () => {
+  it('matches extension ownership by matcher and sequential while ignoring malformed manifests', () => {
+    const hook: HookConfig = { type: HookType.Command, command: 'echo shared' };
+    const config = makeConfig({
+      entries: () => [
+        entry(hook, { source: HooksConfigSource.Extensions, matcher: 'Read' }),
+        entry(hook, {
+          source: HooksConfigSource.Extensions,
+          matcher: 'Write',
+          sequential: true,
+        }),
+      ],
+    });
+    config.getExtensions = () =>
+      [
+        { name: 'bad-event', isActive: true, hooks: { PreToolUse: {} } },
+        {
+          name: 'bad-definition',
+          isActive: true,
+          hooks: { PreToolUse: [null, {}, { hooks: [null] }] },
+        },
+        {
+          name: 'reader',
+          isActive: true,
+          path: '/reader',
+          hooks: { PreToolUse: [{ matcher: 'Read', hooks: [hook] }] },
+        },
+        {
+          name: 'writer',
+          isActive: true,
+          path: '/writer',
+          hooks: {
+            PreToolUse: [{ matcher: 'Write', sequential: true, hooks: [hook] }],
+          },
+        },
+      ] as unknown as ReturnType<HooksListingConfig['getExtensions']>;
+    expect(
+      buildHooksListing(config).rows.map((row) => [
+        row.extensionName,
+        row.extensionPath,
+      ]),
+    ).toEqual([
+      ['reader', '/reader'],
+      ['writer', '/writer'],
+    ]);
+  });
+
   it('annotates only matching active extension registry hooks without adding rows', () => {
     const config = makeConfig({
       entries: () => [
@@ -111,10 +157,20 @@ describe('buildHooksListing', () => {
     expect(rows[0]).toMatchObject({
       extensionName: 'Extension A',
       extensionPath: '/extensions/a',
-      displayText: 'echo real',
+      displayText: 'registered',
     });
     expect(rows[1]).not.toHaveProperty('extensionName');
     expect(rows[1]).not.toHaveProperty('extensionPath');
+    const extensions = config.getExtensions();
+    extensions[0].config = {
+      name: 'extension-a',
+      version: '1.0.0',
+      _rawLocalizable: { displayName: { en: 'Extension A', zh: '扩展甲' } },
+    };
+    config.getExtensions = () => extensions;
+    expect(buildHooksListing(config, 'zh').rows[0].extensionName).toBe(
+      '扩展甲',
+    );
   });
 
   it('flattens each hook type into its identity and literal text', () => {
