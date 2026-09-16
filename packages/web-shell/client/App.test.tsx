@@ -40161,6 +40161,37 @@ describe('settings-derived theme and language (#11955)', () => {
     expect(onLanguageResolved).not.toHaveBeenCalled();
   });
 
+  it('keeps an explicit language authoritative during a workspace language change', async () => {
+    testState.settings = [languageSetting('en')];
+    const onLanguageChange = vi.fn();
+    const onLanguageResolved = vi.fn();
+    const { container } = renderApp({
+      language: 'zh-CN',
+      onLanguageChange,
+      onLanguageResolved,
+    });
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(button).not.toBeNull();
+      button?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('zh-CN');
+    expect(onLanguageChange).not.toHaveBeenCalled();
+    expect(onLanguageResolved).not.toHaveBeenCalled();
+  });
+
   it('never turns a rolled-back settings language pick into a host opinion', async () => {
     // With no language prop, the resolved value is settings-derived. If the
     // /language sync fails, the rollback must restore it through the

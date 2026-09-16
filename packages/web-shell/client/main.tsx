@@ -224,12 +224,12 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   // the value App resolved from settings and reports through
   // onThemeResolved/onLanguageResolved. Kept out of the props so a
   // settings-derived value never latches as a host override.
-  const [documentTheme, setDocumentTheme] = useState<WebShellTheme | undefined>(
-    () => getInitialTheme(),
+  const [documentTheme, setDocumentTheme] = useState<WebShellTheme>(
+    () => theme ?? WebShellThemeId.Dark,
   );
-  const [documentLanguage, setDocumentLanguage] = useState<
-    WebShellLanguage | undefined
-  >(() => getInitialLanguage());
+  const [documentLanguage, setDocumentLanguage] = useState<WebShellLanguage>(
+    () => language ?? normalizeLanguage(navigator.language),
+  );
   const [sessionId, setSessionId] = useState<string | undefined>(() =>
     getSessionIdFromUrl(),
   );
@@ -257,10 +257,8 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
   // the effective theme so mobile status bars / overscroll backgrounds stay
   // consistent when the user toggles or when ?theme= lands via URL. While
-  // the entry has no opinion and settings have not resolved yet, leave
-  // index.html's pre-paint value alone rather than forcing a default.
+  // settings have not resolved yet, retain index.html's pre-paint default.
   useEffect(() => {
-    if (documentTheme === undefined) return;
     const root = document.documentElement;
     root.classList.remove('theme-dark', 'theme-light', 'dark');
     root.classList.add(`theme-${documentTheme}`);
@@ -358,13 +356,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               window.location.reload();
             }}
             retryMode={canReload ? 'reload' : 'reset'}
-            language={documentLanguage ?? normalizeLanguage(navigator.language)}
+            language={documentLanguage}
           />
         );
       }}
     >
       <BrowserTurnNotifications
-        language={documentLanguage ?? normalizeLanguage(navigator.language)}
+        language={documentLanguage}
         options={{ defaultEnabled: true }}
       >
         <StandaloneContext.Provider value={true}>

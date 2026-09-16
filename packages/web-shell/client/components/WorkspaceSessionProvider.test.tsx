@@ -228,12 +228,7 @@ describe('WorkspaceSessionProvider targets', () => {
     },
   );
 
-  it('keeps the dark palette and browser locale on error surfaces when the host passes no opinion (#11955)', async () => {
-    // The standalone entry passes theme/language as undefined when the user
-    // never chose one. These surfaces render before App's settings
-    // resolution reaches them, so they must fall back to the pre-paint dark
-    // default and the browser locale — not light tokens on the dark
-    // pre-paint page and unconditional English.
+  it('keeps the dark palette and English fallback when an embedder passes no opinion', async () => {
     const originalLanguage = navigator.language;
     Object.defineProperty(navigator, 'language', {
       value: 'zh-CN',
@@ -255,7 +250,7 @@ describe('WorkspaceSessionProvider targets', () => {
       const surface = container.querySelector('[data-web-shell-root]');
       expect(surface?.className).toContain('dark');
       expect(container.textContent).toContain(
-        '无法连接工作区服务，请检查守护进程后重试。',
+        'The workspace service could not be reached. Check the daemon and try again.',
       );
     } finally {
       Object.defineProperty(navigator, 'language', {

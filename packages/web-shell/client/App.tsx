@@ -11852,14 +11852,16 @@ export function App({
         blockCommand();
         return;
       }
-      // Switch optimistically, but keep the host on the observe-only channel
-      // until the daemon accepts the change: onLanguageChange persists the
-      // value as the host's own opinion, and a refused or failed pick must
-      // never be persisted. With no host opinion the rolled-back value is
-      // settings-derived, so persisting it would shadow every later
-      // settings.json edit (#11955).
-      setSelectedLanguage(nextLanguage);
-      onLanguageResolvedRef.current?.(nextLanguage);
+      // Switch optimistically only when settings own the language. An explicit
+      // host prop remains authoritative while a workspace value is persisted.
+      // onLanguageChange persists an accepted user-scoped choice as a new host
+      // opinion; the observe-only channel keeps settings-derived values from
+      // shadowing later settings.json edits (#11955).
+      const hostControlsLanguage = providedLanguage !== undefined;
+      if (!hostControlsLanguage) {
+        setSelectedLanguage(nextLanguage);
+        onLanguageResolvedRef.current?.(nextLanguage);
+      }
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
         .then(() => {
           if (!owner.current.isCurrent()) return;
@@ -11875,8 +11877,10 @@ export function App({
         })
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
-          setSelectedLanguage(previousLanguage);
-          onLanguageResolvedRef.current?.(previousLanguage);
+          if (!hostControlsLanguage) {
+            setSelectedLanguage(previousLanguage);
+            onLanguageResolvedRef.current?.(previousLanguage);
+          }
           reportError(error, 'Failed to sync /language command');
         });
     },
@@ -11885,6 +11889,7 @@ export function App({
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
+      providedLanguage,
       sessionWriteBlocked,
       sendPrompt,
       selectedLanguage,

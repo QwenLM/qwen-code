@@ -204,15 +204,22 @@ describe('StandaloneApp', () => {
     expect(reloadUrl).toContain('workspace=workspace-1');
   });
 
-  it('passes no theme or language opinion when URL and localStorage are unset (#11955)', () => {
+  it('passes no app opinion while retaining standalone document defaults (#11955)', () => {
     // "No opinion" (undefined) lets App resolve the daemon's effective
-    // ui.theme / general.language. Concrete fallbacks here (dark +
-    // navigator.language) are what shadowed settings.json in #11955.
+    // ui.theme / general.language. The concrete document fallbacks stay on
+    // the separate chrome channel, where they cannot shadow settings.json.
     window.localStorage.clear();
+    vi.spyOn(navigator, 'language', 'get').mockReturnValue('zh-CN');
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
     expect(testState.props?.webShellProps.theme).toBeUndefined();
     expect(testState.props?.webShellProps.language).toBeUndefined();
+    expect(testState.props?.chromeTheme).toBe('dark');
+    expect(testState.props?.chromeLanguage).toBe('zh-CN');
+    expect(document.documentElement.classList.contains('theme-dark')).toBe(
+      true,
+    );
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
   });
 
   it('keeps the stored theme and language as the entry opinion', () => {

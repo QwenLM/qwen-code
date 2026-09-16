@@ -34,7 +34,7 @@ function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
 function surfaceLanguage(
   language: WebShellProps['language'],
 ): WebShellLanguage {
-  return normalizeLanguage(language ?? navigator.language);
+  return normalizeLanguage(language);
 }
 
 function withChrome(
