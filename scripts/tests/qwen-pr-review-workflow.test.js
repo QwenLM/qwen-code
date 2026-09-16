@@ -7511,27 +7511,57 @@ describe('qwen pr review unchanged-diff anchor', () => {
     expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
   });
 
-  // R2-2. record-reviewed's evidence that a review happened is
-  // review_completed — an output of the very step the reviewed agent runs
-  // in, whose real $GITHUB_OUTPUT the agent can reach. Every post-agent
-  // cede must overwrite a planted value last: the false write can only
-  // suppress a stamp, never enable one.
-  it('overwrites a planted review_completed on every post-agent cede', () => {
+  // R2-2 / R3-1. record-reviewed's stamp gate has TWO arms and both read an
+  // output of the very step the reviewed agent runs in, whose real
+  // $GITHUB_OUTPUT the agent can reach. Clearing only review_completed left
+  // the unchanged_diff arm able to ENABLE a stamp on a head whose review
+  // ceded — and on a salvaged head, defeating the salvage exclusion. Every
+  // post-agent cede must overwrite a planted value last in each arm: a false
+  // write can only suppress a stamp, never enable one.
+  it('overwrites every planted stamp-gate input on each post-agent cede', () => {
     const run = anchorDoc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Run review',
     ).run;
-    const overwrite = 'echo "review_completed=false" >> "$GITHUB_OUTPUT"';
-    // The shared cede function: the write must land before the exit, so a
-    // planted value cannot survive it (last write wins within one step).
+    // Derive the arms from the gate itself instead of restating them, so a
+    // third positive arm cannot be added without its own overwrite. `!=`
+    // arms (the salvage exclusion) are not stamp inputs and stay out.
+    const gate = parse(workflow).jobs['record-reviewed'].if;
+    const overwrites = [...gate.matchAll(/outputs\.(\w+) == 'true'/g)].map(
+      (m) => `echo "${m[1]}=false" >> "$GITHUB_OUTPUT"`,
+    );
+    expect(overwrites).toEqual([
+      'echo "review_completed=false" >> "$GITHUB_OUTPUT"',
+      'echo "unchanged_diff=false" >> "$GITHUB_OUTPUT"',
+    ]);
+    // The shared cede function, and the salvage-armed cede that does not go
+    // through it. Each write must land before the exit, so a planted value
+    // cannot survive it (last write wins within one step).
     const cede = run.match(/cede_superseded\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
     expect(cede).not.toBe('');
-    expect(cede.indexOf(overwrite)).toBeGreaterThan(-1);
-    expect(cede.indexOf(overwrite)).toBeLessThan(cede.indexOf('exit 0'));
-    // The salvage-armed cede does not go through cede_superseded.
-    const salvageCede = run.match(
-      /Salvage-armed review attempt did not complete[\s\S]*?exit 0/,
-    )?.[0];
-    expect(salvageCede).toContain(overwrite);
+    const salvageCede =
+      run.match(
+        /Salvage-armed review attempt did not complete[\s\S]*?exit 0/,
+      )?.[0] ?? '';
+    expect(salvageCede).not.toBe('');
+    for (const site of [
+      ['cede_superseded', cede],
+      ['salvage-armed cede', salvageCede],
+    ]) {
+      const [name, body] = site;
+      for (const overwrite of overwrites) {
+        const at = body.indexOf(overwrite);
+        expect(at, `${name} does not write ${overwrite}`).toBeGreaterThan(-1);
+        expect(at, `${name} writes ${overwrite} after its exit`).toBeLessThan(
+          body.indexOf('exit 0'),
+        );
+      }
+    }
+    // The honest writer of unchanged_diff sits in the skip branch, which
+    // exits before the agent runs — so no cede can be reached with a true
+    // value this step wrote itself.
+    expect(run.indexOf('echo "unchanged_diff=true"')).toBeLessThan(
+      run.indexOf('cede_superseded() {'),
+    );
   });
 
   // R1-3. The prose is what a reader has to go on, and both sites claimed
