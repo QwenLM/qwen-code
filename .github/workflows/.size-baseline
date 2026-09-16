@@ -23,10 +23,10 @@
 1482 codeql.yml
 9389 comment-attachment-guard.yml
 1634 desktop-packaging-check.yml
-31677 desktop-release.yml
+35684 desktop-release.yml
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
-27902 e2e.yml
+30740 e2e.yml
 11394 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
@@ -60,7 +60,7 @@
 6777 serve-ab-publish.yml
 17013 serve-ab.yml
 2641 stale.yml
-10920 sync-desktop-to-oss.yml
+11328 sync-desktop-to-oss.yml
 10018 sync-live-host-to-oss.yml
 10988 sync-release-to-oss.yml
 2508 tui-parity.yml

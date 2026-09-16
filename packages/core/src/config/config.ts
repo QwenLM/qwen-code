@@ -151,6 +151,12 @@ import { BackgroundAgentResumeService } from '../agents/background-agent-resume.
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { TurnBudget } from '../core/turn-budget.js';
+import {
+  isWorkflowSizeGuideline,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuideline,
+  type WorkflowSizeGuidelineSetting,
+} from '../agents/runtime/workflow-size.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -169,6 +175,8 @@ import {
   logStartSession,
   logSessionEnd,
   logRipgrepFallback,
+  logGoalState,
+  goalStateEventFromSnapshot,
   RipgrepFallbackEvent,
   StartSessionEvent,
   type TelemetryTarget,
@@ -1199,6 +1207,11 @@ export interface ConfigParameters {
    * even when unset it fires at most once per process.
    */
   skipWorkflowUsageWarning?: boolean;
+  /**
+   * Advisory size guideline for dynamic workflows
+   * (`tools.workflowSizeGuideline`). Unset or unrecognised means the default.
+   */
+  workflowSizeGuideline?: string;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -2829,6 +2842,7 @@ export class Config {
   private goalProposalHostSupported = false;
   private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
+  private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -2929,11 +2943,11 @@ export class Config {
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
-  private readonly userHooks?: Record<string, unknown>;
+  private userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
-  private readonly projectHooks?: Record<string, unknown>;
+  private projectHooks?: Record<string, unknown>;
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
-  private readonly hooks?: Record<string, unknown>;
+  private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
   private readonly memoryManager: MemoryManager;
@@ -3190,6 +3204,11 @@ export class Config {
     this.sessionWorkflowEnabled = params.sessionWorkflowEnabled ?? false;
     this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
+    this.workflowSizeGuideline = isWorkflowSizeGuideline(
+      params.workflowSizeGuideline,
+    )
+      ? params.workflowSizeGuideline
+      : undefined;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -8974,6 +8993,25 @@ export class Config {
   }
 
   /**
+   * The dynamic-workflow size guideline in effect: stated in the Workflow tool
+   * description, and the agent threshold of the large-run warning.
+   */
+  getWorkflowSizeGuideline(): WorkflowSizeGuidelineSetting {
+    return resolveWorkflowSizeGuidelineSetting(this.workflowSizeGuideline);
+  }
+
+  /**
+   * Apply a guideline the user changed mid-session. Runs started afterwards use
+   * it; the tool description keeps its startup value, so the caller also tells
+   * the model.
+   */
+  setWorkflowSizeGuideline(size: WorkflowSizeGuideline | undefined): void {
+    this.workflowSizeGuideline = isWorkflowSizeGuideline(size)
+      ? size
+      : undefined;
+  }
+
+  /**
    * Whether the turn loop should fire a fast-model call after each tool batch
    * to emit a `tool_use_summary` message. Mirrors Claude Code's
    * `CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES` gate, but defaults to on so the
@@ -9318,6 +9356,24 @@ export class Config {
     // Prefer new userHooks field, fall back to hooks for backward compatibility
     const hooks = this.userHooks ?? this.hooks;
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
+  /**
+   * Replaces the settings-derived hook maps captured at construction. The CLI
+   * calls this after re-reading the settings files so that
+   * `HookSystem.reload()` sees edits made since startup. All three fields are
+   * replaced together, as at construction, so a stale legacy `hooks` snapshot
+   * can never resurface through the fallback in the getters. The bare, safe
+   * mode and folder trust gates in the getters still apply.
+   */
+  setHooksFromSettings(hooks: {
+    userHooks?: Record<string, unknown>;
+    projectHooks?: Record<string, unknown>;
+    hooks?: Record<string, unknown>;
+  }): void {
+    this.userHooks = hooks.userHooks;
+    this.projectHooks = hooks.projectHooks;
+    this.hooks = hooks.hooks;
   }
 
   getExtensions(): Extension[] {
@@ -9807,6 +9863,16 @@ export class Config {
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
+    });
+    // Every committed transition reaches telemetry from here, the one place
+    // that holds both the runtime and the Config its loggers need. Subscribed
+    // before the restore below starts, so the broadcast that republishes a
+    // resumed session's Goal is seen and skipped rather than missed and then
+    // mistaken for the next live transition.
+    runtime.subscribe((snapshot, cause, meta) => {
+      if (meta?.replayed) return;
+      const event = goalStateEventFromSnapshot(snapshot, cause);
+      if (event) logGoalState(this, event);
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

@@ -99,6 +99,7 @@ export type TurnOutputOpenRequest = (
   | {
       id: string;
       kind: 'attachment';
+      silentUnavailable?: boolean;
       title: string;
       turnId: string;
       mimeType?: string;
