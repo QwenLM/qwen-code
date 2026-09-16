@@ -145,6 +145,13 @@ describe('MemoryManager', () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         expect(unhandled).not.toHaveBeenCalled();
+        // The rejection handler must still untrack the task. Hollowing it out
+        // to `() => {}` keeps the assertion above green while the settled
+        // promise and its task id leak for the process lifetime — `inFlight`
+        // has no other delete site and no `clear()`.
+        expect(
+          (mgr as unknown as { inFlight: Map<string, unknown> }).inFlight.size,
+        ).toBe(0);
       } finally {
         process.off('unhandledRejection', unhandled);
       }
