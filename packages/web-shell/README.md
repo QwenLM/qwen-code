@@ -597,3 +597,23 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
 | `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
+
+### Native settings presentation
+
+Embedding hosts can hide individual native settings while keeping the native form and model selector:
+
+```tsx
+<WebShellWithProviders
+  settings={{
+    excludeItems: ['setting:fast-model', 'setting:vision-model'],
+  }}
+/>
+```
+
+`WebShellSettingsOptions.excludeItems` accepts `WebShellSettingItemId` values. Import `WEB_SHELL_SETTING_ITEM_IDS` for the supported readonly list. IDs are curated aliases, not daemon configuration paths: `setting:language` targets the language control and `setting:fast-model` targets the fast-model picker. Aliases remain stable if their internal schema paths change. New upstream settings remain visible by default; unknown runtime IDs are ignored.
+
+The frontend blocks have their own IDs: `builtin:chat-width`, `builtin:browser-notifications`, `builtin:live-setup`, `builtin:local-control`, and `builtin:model-management`. Hiding ordinary Model fields keeps the model list and selection available; exclude the model-management block explicitly to hide it. Browser notifications remain independent of chat width. Existing capability restrictions still apply.
+
+Omitting `settings`, omitting `excludeItems`, or passing an empty list preserves existing presentation. Exclusions apply in both settings scopes. Empty categories disappear, category navigation falls back to an available category, and excluding everything displays the existing empty state. Settings-launched pickers close if their source item becomes excluded.
+
+**Presentation is not access control.** Exclusions do not rewrite saved configuration or restrict daemon writes, slash commands, model management elsewhere, or direct file access. This option does not add allowlists, scope policies, field overrides, or item-level deep links.
