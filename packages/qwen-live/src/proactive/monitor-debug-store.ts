@@ -204,9 +204,9 @@ export class MonitorDebugStore {
         for (const recorder of this.recorders)
           if (recorder.directory === entry.directory) recorder.evict();
         await privateDirectory(entry.directory);
-        // Remove the media subtree first and the marker last: a removal that
-        // fails part-way leaves the archive recognizable, so the next prune
-        // retries it instead of orphaning it.
+        // Remove the media subtree first: a removal that fails there leaves
+        // the marker untouched, so the archive stays recognizable and the
+        // next prune retries it instead of orphaning it.
         await rm(join(entry.directory, 'requests'), {
           recursive: true,
           force: true,
@@ -225,10 +225,18 @@ export class MonitorDebugStore {
         const code = (error as NodeJS.ErrnoException).code;
         // A concurrent pruner on the same root already removed it.
         if (code === 'ENOENT') continue;
+        // The recursive rm unlinks monitor.json before its final rmdir can
+        // fail, and a marker-less archive is an orphan no later prune
+        // retries. Certify retention only while the marker actually survives.
+        const retained = await lstat(join(entry.directory, 'monitor.json'))
+          .then((stat) => stat.isFile() && !stat.isSymbolicLink())
+          .catch(() => false);
         this.emit('proactive.monitor_debug_prune_failed', {
           directory: entry.directory,
-          retained: true,
-          reason: code ?? (error instanceof Error ? error.message : 'unknown'),
+          retained,
+          reason: retained
+            ? (code ?? (error instanceof Error ? error.message : 'unknown'))
+            : 'orphaned_directory',
         });
       }
     }

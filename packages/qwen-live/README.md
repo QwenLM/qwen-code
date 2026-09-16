@@ -413,8 +413,11 @@ not a ten-request or disk-size limit. Deletion is best-effort: an archive
 that cannot be removed (for example a file held open by another process on
 Windows) is kept past this cap and reported as
 `proactive.monitor_debug_prune_failed` with the failure reason, and later
-prunes retry it until it can be removed; a persistent reason such as `EACCES`
-from the deletion itself needs manual cleanup. An archive that fails the
+prunes retry it until it can be removed. A removal that failed only after
+the archive's marker was already deleted is instead reported with
+`retained: false` and reason `orphaned_directory`, later prunes no longer
+recognize the leftover, and — like a persistent reason such as `EACCES` from
+the deletion itself — it needs manual cleanup. An archive that fails the
 ownership scan is skipped silently rather than reported, is not counted
 against this cap, and must be found and removed by hand. An evicted Monitor
 keeps running

@@ -71,6 +71,15 @@ vi.mock('node:fs/promises', async (original) => {
       const remaining = rmFailures.get(String(path));
       if (remaining) {
         rmFailures.set(String(path), remaining - 1);
+        // Model rimraf's partial progress: a recursive removal unlinks the
+        // directory's children before the final rmdir retry that a held
+        // handle or concurrent writer makes fail, so the failed rm has
+        // already emptied its target.
+        for (const child of await fs.readdir(String(path)).catch(() => []))
+          await fs.rm(join(String(path), child), {
+            recursive: true,
+            force: true,
+          });
         throw Object.assign(new Error('busy'), { code: 'EBUSY' });
       }
       return fs.rm(path, options);
@@ -525,6 +534,51 @@ describe('MonitorDebugStore', () => {
     expect(log).not.toHaveBeenCalledWith(
       'proactive.monitor_debug_failed',
       expect.objectContaining({ reason: 'initialization_failed' }),
+    );
+  });
+
+  it('reports an orphaned archive as unretained when its removal fails after the marker is gone', async () => {
+    await mkdir(root, { mode: 0o700 });
+    const owned: string[] = [];
+    for (let time = 1; time <= 12; time += 1)
+      owned.push(await ownedDirectory(time));
+    // Block the archive directory itself: a recursive rm unlinks
+    // monitor.json before the final rmdir can fail (the rm mock replays
+    // that partial progress), leaving a husk no later prune recognizes.
+    rmFailures.set(owned[1]!, 1);
+    expect(await store.initialize()).toBe(true);
+    await expect(lstat(owned[0]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await lstat(owned[1]!)).isDirectory()).toBe(true);
+    await expect(lstat(join(owned[1]!, 'monitor.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(log).toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({
+        directory: owned[1],
+        retained: false,
+        reason: 'orphaned_directory',
+      }),
+    );
+    // A destroyed archive must never be logged as retained or pruned.
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({ directory: owned[1], retained: true }),
+    );
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_pruned',
+      expect.objectContaining({ directory: owned[1] }),
+    );
+    // Marker-less, the husk is unrecognized: later prunes stay silent.
+    log.mockClear();
+    expect(await store.initialize()).toBe(true);
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_prune_failed',
+      expect.objectContaining({ directory: owned[1] }),
+    );
+    expect(log).not.toHaveBeenCalledWith(
+      'proactive.monitor_debug_pruned',
+      expect.objectContaining({ directory: owned[1] }),
     );
   });
 
