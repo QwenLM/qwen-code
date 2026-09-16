@@ -13138,6 +13138,7 @@ describe('useLlmStream', () => {
               name: 'save_memory',
               args: { fact: 'test fact' },
               isClientInitiated: true,
+              executionOrigin: { kind: 'client' },
             }),
           ],
           expect.any(AbortSignal),
@@ -16511,6 +16512,39 @@ describe('useLlmStream', () => {
         });
       }
     });
+  });
+
+  it('keeps media preparation cancellable before the model stream starts', async () => {
+    let preparationSignal: AbortSignal | undefined;
+    handleAtCommandSpy.mockImplementation(({ signal }) => {
+      preparationSignal = signal;
+      return new Promise((resolve) => {
+        signal.addEventListener(
+          'abort',
+          () =>
+            resolve({
+              processedQuery: null,
+              shouldProceed: false,
+            }),
+          { once: true },
+        );
+      });
+    });
+    const { result } = renderTestHook();
+    let submission: Promise<void> | undefined;
+    await act(async () => {
+      submission = result.current.submitQuery('@slow-video.mp4 inspect');
+    });
+    await waitFor(() => expect(preparationSignal).toBeDefined());
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+    await act(async () => {
+      result.current.cancelOngoingRequest();
+      await submission;
+    });
+    expect(preparationSignal?.aborted).toBe(true);
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
   it('should process @include commands, adding user turn after processing to prevent race conditions', async () => {
