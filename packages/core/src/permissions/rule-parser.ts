@@ -1473,6 +1473,13 @@ export function matchesDomainPattern(
 // MCP tool wildcard matching
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Deny-list matching; allowlists must compare raw MCP server identities. */
+export function matchesToolPattern(pattern: string, toolName: string): boolean {
+  return toolName.startsWith('mcp__')
+    ? matchesMcpPattern(pattern, toolName)
+    : pattern === toolName;
+}
+
 /**
  * Match an MCP tool name against a pattern that may contain wildcards.
  *

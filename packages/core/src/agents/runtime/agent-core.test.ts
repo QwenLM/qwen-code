@@ -1244,12 +1244,16 @@ describe('AgentCore.prepareTools', () => {
     };
   }
 
-  it.each(['todo_write', 'workflow', 'image_gen'])(
-    'rejects an empty required pool after filtering %s',
-    async (name) => {
+  it.each(
+    ['todo_write', 'workflow', 'image_gen'].flatMap((name) =>
+      [false, true].map((schema) => ({ name, schema })),
+    ),
+  )(
+    'rejects an empty required pool after filtering $name (schema=$schema)',
+    async ({ name, schema }) => {
       const { core } = buildAgentForTools(
         {
-          tools: [name, 'structured_output'],
+          tools: schema ? [name, 'structured_output'] : [name],
           requiredTools: [name],
         },
         [

@@ -61,7 +61,7 @@ import type {
   AgentToolResultEvent,
 } from './agent-events.js';
 import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
-import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import {
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
@@ -1034,11 +1034,7 @@ async function narrowDispatchTools(
   );
   const pool = bounded.filter(
     (name) =>
-      !denyPatterns?.some((pattern) =>
-        name.startsWith('mcp__')
-          ? matchesMcpPattern(pattern, name)
-          : pattern === name,
-      ),
+      !denyPatterns?.some((pattern) => matchesToolPattern(pattern, name)),
   );
   if (pool.length === 0) {
     throw new Error(
