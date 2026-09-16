@@ -5649,6 +5649,7 @@ export const MessageList = memo(
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
+              onTurnOutputOpen={onTurnOutputOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
                 onEditUserMessage && userMessageEditTarget

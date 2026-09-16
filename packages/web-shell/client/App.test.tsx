@@ -7151,6 +7151,85 @@ describe('artifact panel fullscreen', () => {
     ).toBeNull();
   });
 
+  it('reloads the current file when reopening its active tool preview tab', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'before external edit',
+      truncated: false,
+    });
+    const { container } = renderApp();
+    await flush();
+    const open = async () => {
+      await act(async () => {
+        testState.latestMessageListProps?.onTurnOutputOpen?.({
+          id: 'file:/tmp/project/notes.txt',
+          kind: 'attachment',
+          title: 'notes.txt',
+          turnId: 'read-1',
+          workspacePath: '/tmp/project/notes.txt',
+          workspaceCwd: '/tmp/project',
+          silentUnavailable: true,
+        });
+      });
+      await flush();
+    };
+    await open();
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledTimes(1);
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'after external edit',
+      truncated: false,
+    });
+    await open();
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelectorAll('button[title="notes.txt"]'),
+    ).toHaveLength(1);
+    expect(container.textContent).toContain('after external edit');
+    expect(container.textContent).not.toContain('before external edit');
+  });
+
+  it.each([false, true])(
+    'handles a missing tool preview file with silentUnavailable=%s',
+    async (silentUnavailable) => {
+      const onToast = vi.fn();
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      const { container } = renderApp({ onToast });
+      await flush();
+      mockWorkspaceActions.stat.mockRejectedValueOnce(
+        new Error('file deleted'),
+      );
+      await act(async () => {
+        testState.latestMessageListProps?.onTurnOutputOpen?.({
+          id: 'file:/tmp/project/notes.txt',
+          kind: 'attachment',
+          title: 'notes.txt',
+          turnId: 'read-1',
+          workspacePath: '/tmp/project/notes.txt',
+          workspaceCwd: '/tmp/project',
+          silentUnavailable,
+        });
+      });
+      expect(mockWorkspaceActions.stat).toHaveBeenCalledWith(
+        '/tmp/project/notes.txt',
+      );
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      if (silentUnavailable) expect(onToast).not.toHaveBeenCalled();
+      else expect(onToast).toHaveBeenCalledWith('error', 'file deleted');
+    },
+  );
+
   it('loads a daemon attachment before opening its preview', async () => {
     const { container } = renderApp();
     await flush();
