@@ -15,7 +15,9 @@
 
 import {
   isWorkflowSourceRef,
+  MAX_WORKFLOW_CALL_TRACES,
   type WorkflowSourceRef,
+  type WorkflowCallTrace,
 } from './workflow-correlation.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -34,6 +36,10 @@ import {
   type WorkflowTask,
   type WorkflowTerminalStatus,
 } from './workflow-run-registry.js';
+import {
+  isWorkflowSizeWarning,
+  type WorkflowSizeWarning,
+} from './runtime/workflow-size.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
@@ -43,6 +49,8 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
   sourceRef?: WorkflowSourceRef;
+  workflowCalls?: WorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   runId: string;
   /** Tool call that launched the run. Absent on legacy snapshots. */
   toolUseId?: string;
@@ -67,6 +75,8 @@ export interface WorkflowSnapshot {
   agentsCompleted: number;
   /** Absent on snapshots written before resume respawns were counted. */
   agentsRespawned?: number;
+  /** Absent when the run never crossed a size threshold, and on older snapshots. */
+  sizeWarning?: WorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   /** `perPhaseTokens` flattened to `[phaseOrNull, tokens]` pairs. */
@@ -88,6 +98,10 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   return {
     runId: task.runId,
     ...(task.sourceRef ? { sourceRef: { ...task.sourceRef } } : {}),
+    ...(task.workflowCalls
+      ? { workflowCalls: task.workflowCalls.map((call) => ({ ...call })) }
+      : {}),
+    ...(task.workflowCallsTruncated ? { workflowCallsTruncated: true } : {}),
     ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
     description: task.description,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
@@ -106,6 +120,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     agentsDispatched: task.agentsDispatched,
     agentsCompleted: task.agentsCompleted,
     agentsRespawned: task.agentsRespawned ?? 0,
+    ...(task.sizeWarning ? { sizeWarning: { ...task.sizeWarning } } : {}),
     tokensSpent: task.tokensSpent,
     tokenBudgetTotal: task.tokenBudgetTotal,
     perPhaseTokens: Array.from(task.perPhaseTokens.entries()),
@@ -293,6 +308,8 @@ function isWorkflowDispatch(value: unknown): value is WorkflowDispatchTrace {
     typeof value['label'] === 'string' &&
     typeof value['prompt'] === 'string' &&
     isOptionalString(value['subagentId']) &&
+    isOptionalString(value['stepId']) &&
+    isOptionalString(value['workflowCallId']) &&
     (status === 'queued' ||
       status === 'running' ||
       status === 'completed' ||
@@ -377,9 +394,27 @@ function isWorkflowEvent(value: unknown): value is WorkflowEvent {
   }
 }
 
+function isWorkflowCall(value: unknown): value is WorkflowCallTrace {
+  if (!isRecord(value)) return false;
+  const status = value['status'];
+  return (
+    typeof value['id'] === 'string' &&
+    isOptionalString(value['stepId']) &&
+    isOptionalString(value['workflowName']) &&
+    (status === 'running' ||
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled') &&
+    isFiniteNumber(value['startedAt']) &&
+    (value['endedAt'] === undefined || isFiniteNumber(value['endedAt'])) &&
+    isOptionalString(value['error'])
+  );
+}
+
 function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   if (!isRecord(value)) return false;
   const status = value['status'];
+  const workflowCalls = value['workflowCalls'];
   const phaseVisits = value['phaseVisits'];
   const dispatches = value['dispatches'];
   const events = value['events'];
@@ -387,6 +422,12 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   return (
     (value['sourceRef'] === undefined ||
       isWorkflowSourceRef(value['sourceRef'])) &&
+    (workflowCalls === undefined ||
+      (Array.isArray(workflowCalls) &&
+        workflowCalls.length <= MAX_WORKFLOW_CALL_TRACES &&
+        workflowCalls.every(isWorkflowCall))) &&
+    (value['workflowCallsTruncated'] === undefined ||
+      typeof value['workflowCallsTruncated'] === 'boolean') &&
     typeof value['runId'] === 'string' &&
     value['runId'].length > 0 &&
     isOptionalString(value['toolUseId']) &&
@@ -412,6 +453,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     isFiniteNumber(value['agentsCompleted']) &&
     (value['agentsRespawned'] === undefined ||
       isFiniteNumber(value['agentsRespawned'])) &&
+    (value['sizeWarning'] === undefined ||
+      isWorkflowSizeWarning(value['sizeWarning'])) &&
     isFiniteNumber(value['tokensSpent']) &&
     (value['tokenBudgetTotal'] === null ||
       isFiniteNumber(value['tokenBudgetTotal'])) &&

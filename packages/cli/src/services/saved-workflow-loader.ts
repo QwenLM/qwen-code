@@ -6,10 +6,19 @@
 
 /**
  * @fileoverview Discovers saved workflow scripts under `.qwen/workflows/`
- * (project) and `~/.qwen/workflows/` (user) and exposes each as a `/<name>`
- * slash command that dispatches the `workflow` tool with the file's path.
- * The script is read at execution time (by the tool), so edits to a saved
- * workflow take effect on the next invocation.
+ * (project) and `~/.qwen/workflows/` (user), plus the workflows active
+ * extensions ship, and exposes each as a `/<name>` slash command.
+ *
+ * Typed in the interactive UI, the command dispatches the `workflow` tool with
+ * the file's path; the script is read at execution time (by the tool), so edits
+ * take effect on the next invocation. Everywhere else — headless, ACP, and the
+ * model invoking the command through the Skill tool — a `{type:'tool'}` return
+ * cannot run, so the command expands to a prompt asking the model to call
+ * `Workflow({ name })`.
+ *
+ * An extension workflow whose script declares `meta.whenToUse` is listed for
+ * the model, so the model can start it when a request matches that condition.
+ * Every run still goes through the workflow approval.
  *
  * Enumeration, project-over-user precedence, and the name constraint all live
  * in core's `listSavedWorkflows` — the single source of truth shared with the
@@ -62,14 +71,29 @@ export class SavedWorkflowLoader implements ICommandLoader {
   }
 
   private toCommand(entry: SavedWorkflowEntry): SlashCommand {
+    // An extension workflow shows its own description; its owner is carried
+    // once, by the source badge.
+    const description =
+      entry.source === 'extension' && entry.description
+        ? entry.description
+        : `Run the "${entry.name}" saved workflow (${entry.source})`;
+    // Listed for the model only when a third-party author said when the
+    // workflow applies. A user who consented to the extension still approves
+    // every run; a workflow without the condition is left to the user.
+    const modelInvocable = entry.source === 'extension' && !!entry.whenToUse;
     return {
       name: entry.name,
-      // An extension workflow shows its own description; its owner is carried
-      // once, by the source badge.
-      description:
-        entry.source === 'extension' && entry.description
-          ? entry.description
-          : `Run the "${entry.name}" saved workflow (${entry.source})`,
+      description,
+      ...(modelInvocable
+        ? {
+            modelInvocable: true,
+            // Commands reach the skill listing as a name and a description,
+            // so the condition rides in the description, as it does for a
+            // skill entry.
+            modelDescription: `${description} — ${entry.whenToUse}`,
+            whenToUse: entry.whenToUse,
+          }
+        : {}),
       // File-derived command (all execution modes via commandUtils fallback);
       // `source` carries the distinct workflow identity for display/telemetry.
       kind: CommandKind.FILE,
@@ -91,37 +115,71 @@ export class SavedWorkflowLoader implements ICommandLoader {
       ...(entry.extensionName
         ? { extensionName: entry.extensionName, workflowName: entry.name }
         : {}),
-      // Interactive only: the action returns a `{type:'tool'}` dispatch, which
-      // the non-interactive command adapter converts to `unsupported`. Listing
-      // these in headless / ACP modes would advertise a command that then fails
-      // to run, so restrict them until those paths can execute a tool return.
-      supportedModes: ['interactive'],
       acceptsInput: true,
       argumentHint: '[json-args]',
       action: (
-        _context: CommandContext,
+        context: CommandContext,
         args: string,
       ): SlashCommandActionReturn => {
-        const toolArgs: Record<string, unknown> = {
-          // The tool reads the file fresh at execution time (hot reload).
-          scriptPath: entry.scriptPath,
-        };
-        const trimmed = (args ?? '').trim();
-        if (trimmed.length > 0) {
-          // Forward user-supplied text to the script's `args` global. Parse as
-          // JSON when valid (objects / arrays / numbers — matching the tool's
-          // "actual JSON value" contract), else pass the raw string so plain
-          // text still reaches the script.
-          toolArgs['args'] = tryParseJson(trimmed);
+        const workflowArgs = parseWorkflowArgs(args);
+        if (
+          context.executionMode === 'non_interactive' ||
+          context.executionMode === 'acp'
+        ) {
+          return {
+            type: 'submit_prompt',
+            content: buildWorkflowInvocationPrompt(entry, workflowArgs),
+          };
         }
         return {
           type: 'tool',
           toolName: ToolNames.WORKFLOW,
-          toolArgs,
+          toolArgs: {
+            // The tool reads the file fresh at execution time (hot reload).
+            scriptPath: entry.scriptPath,
+            ...(workflowArgs !== undefined ? { args: workflowArgs } : {}),
+          },
         };
       },
     };
   }
+}
+
+/**
+ * The prompt a workflow command expands to where it cannot dispatch the tool
+ * itself. It names the workflow by its qualified name, not the command's: a
+ * command renamed on a collision (`gcp.gcp:audit`) still runs `gcp:audit`.
+ */
+export function buildWorkflowInvocationPrompt(
+  entry: SavedWorkflowEntry,
+  workflowArgs: unknown,
+): string {
+  const name = JSON.stringify(entry.name);
+  const call =
+    workflowArgs === undefined
+      ? `{ name: ${name} }`
+      : `{ name: ${name}, args: ${JSON.stringify(workflowArgs)} }`;
+  return [
+    entry.source === 'extension'
+      ? `Run the "${entry.name}" workflow.`
+      : `Run the "${entry.name}" saved workflow (${entry.source}).`,
+    entry.description,
+    entry.whenToUse,
+    `Invoke: Workflow(${call})`,
+  ]
+    .filter((part) => part)
+    .join('\n\n');
+}
+
+/**
+ * The script's `args` global from the text after the command. JSON when valid
+ * (objects / arrays / numbers — matching the tool's "actual JSON value"
+ * contract), else the raw string so plain text still reaches the script;
+ * `undefined` when nothing was typed.
+ */
+function parseWorkflowArgs(raw: string): unknown {
+  const trimmed = (raw ?? '').trim();
+  return trimmed.length > 0 ? tryParseJson(trimmed) : undefined;
 }
 
 function tryParseJson(raw: string): unknown {
