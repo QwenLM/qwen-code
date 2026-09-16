@@ -8,6 +8,7 @@ import type { Content, Part } from '@google/genai';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  GoalTurnEndRecordPayload,
 } from './chatRecordingService.js';
 
 export interface BuildApiHistoryOptions {
@@ -55,13 +56,24 @@ function copyContentForApiHistory(content: Content): Content {
   };
 }
 
-function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
+function appendApiHistoryRecord(
+  history: Content[],
+  record: ChatRecord,
+  completedToolCallIds: ReadonlySet<string>,
+): void {
   if (!record.message || record.subtype === 'realtime_message') return;
 
   const message = copyContentForApiHistory(record.message);
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
-    if (previous?.role === 'user') {
+    if (
+      previous?.role === 'user' &&
+      !previous.parts?.some(
+        (part) =>
+          part.functionResponse?.id !== undefined &&
+          completedToolCallIds.has(part.functionResponse.id),
+      )
+    ) {
       previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
       return;
     }
@@ -70,18 +82,66 @@ function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
   history.push(message);
 }
 
+function hasUniqueToolResult(history: Content[], toolCallId: unknown): boolean {
+  if (typeof toolCallId !== 'string' || toolCallId.length === 0) return false;
+  let calls = 0;
+  let results = 0;
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      if (part.functionCall?.id === toolCallId) calls += 1;
+      if (part.functionResponse?.id === toolCallId) results += 1;
+    }
+  }
+  return calls === 1 && results === 1;
+}
+
 export class SessionApiHistoryAccumulator {
   private history: Content[] = [];
   private compressionCandidate: unknown;
+  private completedToolCallIds = new Set<string>();
+  private lastMaterialRecord?: ChatRecord;
 
   add(record: ChatRecord): void {
     if (record.type === 'system') {
+      if (record.subtype === 'goal_turn_end') {
+        const payload = record.systemPayload as
+          | GoalTurnEndRecordPayload
+          | undefined;
+        const previous = this.lastMaterialRecord;
+        const permit = record.goalContext;
+        if (
+          previous?.type === 'tool_result' &&
+          typeof permit?.goalId === 'string' &&
+          permit.goalId.length > 0 &&
+          typeof permit.turnId === 'string' &&
+          permit.turnId.length > 0 &&
+          Number.isInteger(permit.revision) &&
+          previous.goalContext?.goalId === permit.goalId &&
+          previous.goalContext.revision === permit.revision &&
+          previous.goalContext.turnId === permit.turnId &&
+          previous.message?.parts?.some(
+            (part) => part.functionResponse?.id === payload?.toolCallId,
+          ) &&
+          hasUniqueToolResult(this.history, payload?.toolCallId)
+        ) {
+          this.completedToolCallIds.add(payload!.toolCallId);
+        }
+        return;
+      }
       if (!isApiHistoryCompressionCandidate(record)) return;
       const payload = record.systemPayload as ChatCompressionRecordPayload;
       this.compressionCandidate = payload.compressedHistory;
       this.history = Array.isArray(payload.compressedHistory)
         ? payload.compressedHistory.map(copyContentForApiHistory)
         : [];
+      this.completedToolCallIds = new Set(
+        Array.isArray(payload.completedToolCallIds)
+          ? payload.completedToolCallIds.filter((toolCallId) =>
+              hasUniqueToolResult(this.history, toolCallId),
+            )
+          : [],
+      );
+      this.lastMaterialRecord = undefined;
       return;
     }
 
@@ -91,7 +151,21 @@ export class SessionApiHistoryAccumulator {
     ) {
       return;
     }
-    appendApiHistoryRecord(this.history, record);
+    if (!record.message || record.subtype === 'realtime_message') return;
+    for (const part of record.message.parts ?? []) {
+      if (part.functionCall?.id) {
+        this.completedToolCallIds.delete(part.functionCall.id);
+      }
+      if (part.functionResponse?.id) {
+        this.completedToolCallIds.delete(part.functionResponse.id);
+      }
+    }
+    appendApiHistoryRecord(this.history, record, this.completedToolCallIds);
+    this.lastMaterialRecord = record;
+  }
+
+  getCompletedToolCallIds(): string[] {
+    return [...this.completedToolCallIds];
   }
 
   finish(options: BuildApiHistoryOptions = {}): Content[] {
@@ -124,7 +198,21 @@ export function buildApiHistoryFromConversation(
   conversation: { messages: readonly ChatRecord[] },
   options: BuildApiHistoryOptions = {},
 ): Content[] {
+  return buildSessionHistoryFromConversation(conversation, options).apiHistory;
+}
+
+export function buildSessionHistoryFromConversation(
+  conversation: { messages: readonly ChatRecord[] },
+  options: BuildApiHistoryOptions = {},
+): { apiHistory: Content[]; completedToolCallIds?: string[] } {
   const accumulator = new SessionApiHistoryAccumulator();
   for (const record of conversation.messages) accumulator.add(record);
-  return accumulator.finish(options);
+  const apiHistory = accumulator.finish(options);
+  const completedToolCallIds = accumulator
+    .getCompletedToolCallIds()
+    .filter((toolCallId) => hasUniqueToolResult(apiHistory, toolCallId));
+  return {
+    apiHistory,
+    ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
+  };
 }
