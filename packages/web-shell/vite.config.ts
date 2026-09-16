@@ -65,7 +65,7 @@ export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 export const WEB_SHELL_BUILD_TARGET = 'es2021';
 
 export default defineConfig(({ command }) => ({
-  root: 'client',
+  root: resolve(__dirname, 'client'),
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
@@ -96,8 +96,26 @@ export default defineConfig(({ command }) => ({
   build: {
     // Avoid esbuild lowering xterm's logical assignments into invalid code.
     target: WEB_SHELL_BUILD_TARGET,
-    outDir: '../dist',
+    outDir: resolve(__dirname, 'dist'),
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'client/index.html'),
+        // This entry deliberately has no imports or exports: the resulting
+        // root-scoped worker is registered as a classic script.
+        sw: resolve(__dirname, 'client/sw.js'),
+      },
+      output: {
+        // Keep sw.js at the root (no hash) — the browser byte-compares the file
+        // on each load to detect updates. All other entry chunks get the standard
+        // hashed name under assets/.
+        entryFileNames: (chunk) =>
+          chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
+        // Vite's IIFE format cannot have multiple inputs. The worker's
+        // import-free entry still emits as a classic script with ES output.
+        format: 'es',
+      },
+    },
   },
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),

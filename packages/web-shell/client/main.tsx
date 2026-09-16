@@ -2,6 +2,7 @@
 import './styles/globals.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { useCallback, useEffect, useState } from 'react';
 import {
   DaemonWorkspaceProvider,
@@ -355,8 +356,16 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 }
 
 async function main() {
-  const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
+  // Persist a URL token before removing it. The URL is scrubbed even when the
+  // browser floor rejects boot, so credentials never remain in the address bar.
+  const daemonToken = getDaemonToken();
   removeDaemonTokenFromUrl();
+  if (
+    document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
+  )
+    return;
+  const resolvedDaemonToken =
+    daemonToken ?? (await waitForDaemonTokenMessage());
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -370,7 +379,7 @@ async function main() {
     <React.StrictMode>
       <StandaloneAuth
         baseUrl={DAEMON_BASE_URL || window.location.origin}
-        initialToken={daemonToken}
+        initialToken={resolvedDaemonToken}
         language={getInitialLanguage()}
         theme={getInitialTheme()}
       >
@@ -381,3 +390,14 @@ async function main() {
 }
 
 void main();
+
+// Register the PWA service worker.
+//
+// Deferred to `load` so the SW registration does not compete with the React
+// module graph during initial load. `navigator.serviceWorker` is only defined
+// in secure contexts (HTTPS or localhost) — the check also guards against
+// environments where SW is intentionally disabled.
+//
+// The SW is served at /sw.js by the daemon's static handler (pre-auth, no-cache)
+// with `Service-Worker-Allowed: /` so its scope covers the whole origin.
+scheduleServiceWorkerRegistration({ production: import.meta.env.PROD });
