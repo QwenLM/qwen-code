@@ -1687,6 +1687,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
           preview: {
             kind: 'subagent_delegation',
             agentName: 'reviewer',
+            teammateName: 'security-reviewer',
             task: 'Review safely',
           },
           resultPreview: {
@@ -1703,6 +1704,10 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tool).toMatchObject({
       callId: 'agent-safe',
       status: 'completed',
+      args: {
+        name: 'security-reviewer',
+        subagent_type: 'reviewer',
+      },
     });
     expect(tool?.endTime).toBe(20);
   });

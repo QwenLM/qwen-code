@@ -15,9 +15,12 @@ import type {
   GenerateContentResponseUsageMetadata,
   Part,
 } from '@google/genai';
+
 import {
   type Config,
   type ContentGeneratorConfig,
+  type TeamManager,
+  type TeammateApprovalRequestEvent,
   type LlmChat,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
@@ -242,6 +245,7 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  TeamEventType,
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
@@ -449,6 +453,7 @@ const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+const TEAM_MANAGER_CHANGED_ABORT_REASON = 'qwen:team-manager-changed';
 const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
@@ -1706,6 +1711,7 @@ function parsePromptChannelDelivery(
   };
 }
 
+const TEAMMATE_NOTIFICATION_TASK_PREFIX = 'teammate-';
 const MAX_DEFERRED_UNRELATED_CRON_QUEUE = 20;
 
 export function resolveExistingFile(
@@ -2188,6 +2194,14 @@ export class Session implements SessionContext {
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
+  #teamManagerChangeCallback:
+    | ((manager: TeamManager | null) => void)
+    | undefined;
+  #boundTeamManager: TeamManager | null = null;
+  #teammateApprovalListener:
+    | ((event: TeammateApprovalRequestEvent) => void)
+    | undefined;
+  private teammateApprovalAbortController = new AbortController();
   private workflowHistory: WorkflowSnapshot[];
   /**
    * R7-5: runIds whose snapshot write this session has observed. Latches
@@ -2383,6 +2397,7 @@ export class Session implements SessionContext {
 
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
+    this.#registerTeamManagerCallbacks();
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
     this.config
@@ -4487,6 +4502,12 @@ export class Session implements SessionContext {
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback(undefined);
     this.workflowApprovalAbortController.abort(SESSION_DISPOSE_ABORT_REASON);
+    if (this.#teamManagerChangeCallback) {
+      this.config.onTeamManagerChange?.(null, this.#teamManagerChangeCallback);
+      this.#teamManagerChangeCallback = undefined;
+    }
+    this.#detachTeamManager();
+    this.teammateApprovalAbortController.abort(SESSION_DISPOSE_ABORT_REASON);
   }
 
   /**
@@ -10442,6 +10463,143 @@ export class Session implements SessionContext {
             },
           ),
       );
+    }
+  }
+
+  #registerTeamManagerCallbacks(): void {
+    this.#teamManagerChangeCallback = (manager) => {
+      if (manager === this.#boundTeamManager) return;
+      this.#detachTeamManager();
+      this.#boundTeamManager = manager;
+      if (!manager) return;
+      this.teammateApprovalAbortController = new AbortController();
+
+      manager.setLeaderMessageCallback((modelText, displayText) => {
+        if (this.#boundTeamManager !== manager) return;
+        this.#enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId: `${TEAMMATE_NOTIFICATION_TASK_PREFIX}${randomUUID()}`,
+          status: 'completed',
+          kind: 'agent',
+          continuesTodoStopGuardWorkChain: true,
+          structured: { description: displayText },
+        });
+      });
+      this.#teammateApprovalListener = (event) => {
+        void this.#requestTeammateApproval(event);
+      };
+      manager
+        .getEventEmitter()
+        .on(
+          TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+          this.#teammateApprovalListener,
+        );
+    };
+    this.config.onTeamManagerChange?.(this.#teamManagerChangeCallback);
+    this.#teamManagerChangeCallback(this.config.getTeamManager?.() ?? null);
+  }
+
+  #detachTeamManager(): void {
+    if (!this.#boundTeamManager) return;
+    this.teammateApprovalAbortController.abort(
+      TEAM_MANAGER_CHANGED_ABORT_REASON,
+    );
+    this.#boundTeamManager.setLeaderMessageCallback(null);
+    if (this.#teammateApprovalListener) {
+      this.#boundTeamManager
+        .getEventEmitter()
+        .off(
+          TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+          this.#teammateApprovalListener,
+        );
+    }
+    const queueLength = this.notificationQueue.length;
+    this.notificationQueue = this.notificationQueue.filter(
+      (item) => !item.taskId.startsWith(TEAMMATE_NOTIFICATION_TASK_PREFIX),
+    );
+    if (!this.disposed && this.notificationQueue.length !== queueLength) {
+      this.#activeWorkChanged();
+    }
+    this.#teammateApprovalListener = undefined;
+    this.#boundTeamManager = null;
+  }
+
+  async #requestTeammateApproval(
+    event: TeammateApprovalRequestEvent,
+  ): Promise<void> {
+    const confirmation = event.confirmationDetails;
+    if (!confirmation || this.disposed || this.closing) {
+      await event.respond(ToolConfirmationOutcome.Cancel).catch(() => {});
+      return;
+    }
+
+    const confirmationDetails = {
+      ...confirmation,
+      onConfirm: async () => {},
+    } as ToolCallConfirmationDetails;
+    const permissionOptions = toPermissionOptions(confirmationDetails, true);
+    const offeredPermissionOptions = permissionOptions.map((option) => ({
+      ...option,
+    }));
+    const toolCallId = `teammate:${event.teammateName}:${randomUUID()}`;
+    const { title, locations, kind } = this.toolCallEmitter.resolveToolMetadata(
+      event.toolName,
+      event.toolInput,
+    );
+    let approved = false;
+    try {
+      const response = (await this.#requestPermissionQueued(
+        {
+          sessionId: this.sessionId,
+          options: permissionOptions,
+          toolCall: {
+            toolCallId,
+            status: 'pending',
+            title: `${event.teammateName}: ${title}`,
+            content: buildPermissionRequestContent(confirmationDetails),
+            locations,
+            kind,
+            rawInput: event.toolInput,
+            _meta: {
+              toolName: event.toolName,
+              teammateName: event.teammateName,
+              ...interactionMetaFields(confirmationDetails),
+            },
+          },
+        },
+        this.teammateApprovalAbortController.signal,
+      )) as RequestPermissionResponse & { answers?: Record<string, string> };
+      let outcome = resolvePermissionOutcome(
+        response,
+        offeredPermissionOptions,
+      );
+      if (outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault) {
+        outcome = ToolConfirmationOutcome.ProceedOnce;
+        this.config.setApprovalMode(ApprovalMode.DEFAULT);
+        await this.sendCurrentModeUpdateNotification();
+      }
+      await event.respond(
+        outcome,
+        response.answers ? { answers: response.answers } : undefined,
+      );
+      approved = outcome !== ToolConfirmationOutcome.Cancel;
+    } catch (error) {
+      debugLogger.warn(
+        `Teammate approval failed for ${event.teammateName}/${event.toolName}: ${this.#formatError(error)}`,
+      );
+      await event.respond(ToolConfirmationOutcome.Cancel).catch(() => {});
+    } finally {
+      await this.sendUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        status: approved ? 'completed' : 'failed',
+        content: [],
+        _meta: {
+          toolName: event.toolName,
+          teammateName: event.teammateName,
+        },
+      }).catch(() => {});
     }
   }
 

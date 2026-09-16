@@ -215,8 +215,8 @@ button.row:disabled {
   text-align: left;
 }
 
-.task:hover,
-.task:focus-visible {
+.task:not(:disabled):hover,
+.task:not(:disabled):focus-visible {
   background: var(--accent);
   outline: none;
 }
@@ -224,6 +224,11 @@ button.row:disabled {
 .task:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.task[aria-disabled='true'] {
+  cursor: default;
+  opacity: 1;
 }
 
 .taskIcon {
@@ -246,11 +251,16 @@ button.row:disabled {
 }
 
 .agentName,
+.agentTask,
 .taskName {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.agentTask {
+  color: var(--muted-foreground);
 }
 
 .taskName {
@@ -291,6 +301,10 @@ button.row:disabled {
 }
 
 .taskStatus[data-status='completed'] {
+  color: var(--success-color);
+}
+
+.taskStatus[data-status='idle'] {
   color: var(--success-color);
 }
 

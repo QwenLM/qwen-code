@@ -23,7 +23,7 @@ import type {
   ToolConfig,
 } from '../runtime/agent-types.js';
 import type { AgentEventEmitter } from '../runtime/agent-events.js';
-import type { ApprovalMode } from '../../config/config.js';
+import type { ApprovalMode, MCPServerConfig } from '../../config/config.js';
 import type { TeammateIdentity } from '../team/types.js';
 
 /**
@@ -109,6 +109,8 @@ export interface InProcessSpawnConfig {
     apiKey?: string;
     baseUrl?: string;
   };
+  /** Optional MCP servers declared by this agent definition. */
+  mcpServers?: Record<string, MCPServerConfig>;
   /**
    * Optional chat history from the parent session. When provided, this
    * history is prepended to the agent's chat so it has conversational

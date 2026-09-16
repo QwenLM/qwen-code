@@ -20,6 +20,7 @@ import {
   installSessionWorkflowRevisionWriteThrough,
   type Config,
   type DerivedApprovalModeConfigHooks,
+  type MCPServerConfig,
 } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
 import { type ContentGenerator } from '../../core/contentGenerator.js';
@@ -141,6 +142,7 @@ export class InProcessBackend implements Backend {
         inProcessConfig.runtimeConfig.modelConfig.model,
         inProcessConfig.authOverrides,
         inProcessConfig.approvalMode,
+        inProcessConfig.mcpServers,
         {
           acquireAutoApprovalOverride: () => this.acquireAutoApprovalOverride(),
           releaseAutoApprovalOverride: () => this.releaseAutoApprovalOverride(),
@@ -569,6 +571,7 @@ async function createPerAgentConfig(
   modelId?: string,
   authOverrides?: InProcessSpawnConfig['authOverrides'],
   approvalMode?: ApprovalMode,
+  mcpServers?: Record<string, MCPServerConfig>,
   approvalModeHooks?: DerivedApprovalModeConfigHooks,
 ): Promise<{
   config: Config;
@@ -611,6 +614,11 @@ async function createPerAgentConfig(
   let agentRegistry: ToolRegistry | undefined;
 
   try {
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
+      const merged = { ...(base.getMcpServers() ?? {}), ...mcpServers };
+      override.getMcpServers = () => merged;
+    }
+
     // Delegated rather than re-enacted. The three steps below used to be
     // inlined here, identical to the shared helper — and a second copy is a
     // second place for an invariant to be broken: a change sharing the
@@ -630,6 +638,21 @@ async function createPerAgentConfig(
       markRebuilt: false,
     });
     agentRegistry = override.getToolRegistry();
+
+    if (mcpServers) {
+      const serverNames = Object.keys(mcpServers);
+      const results = await Promise.allSettled(
+        serverNames.map((name) => agentRegistry!.discoverToolsForServer(name)),
+      );
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        if (result.status === 'rejected') {
+          debugLogger.warn(
+            `Failed to discover MCP server "${serverNames[i]}" for agent "${agentId}": ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+          );
+        }
+      }
+    }
 
     if (authOverrides?.authType) {
       try {
