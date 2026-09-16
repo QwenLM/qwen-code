@@ -444,4 +444,39 @@ describe('review-unchanged-diff', () => {
       git(ci, 'config', '--unset', 'diff.external');
     }
   });
+
+  it('a reachable refs/replace plant cannot collapse the fingerprint', () => {
+    // The object-redirect half of the header's neutralization, and the one
+    // that needs no config at all: a replace ref in the CI checkout's common
+    // dir — a directory nothing in the review pipeline wipes — redirects the
+    // head's TREE to the reviewed anchor's, so the fingerprint's diff comes
+    // out byte-identical to the anchor's and a head carrying genuinely new
+    // code verdicts `unchanged`. Assert on a CHANGED fixture, the two
+    // collapse cases' own rule: under a collapse an `unchanged`-shaped
+    // assertion would pass vacuously.
+    git(work, 'checkout', '-q', 'pr');
+    const head = commit(
+      work,
+      'a.txt',
+      'one\ntwo\nthree\nfour\nfive\nsix\n  seven\ntextconv\nexternal\nreplace\n',
+      'R: replace target',
+    );
+    const anchor = git(work, 'rev-parse', 'HEAD~1');
+    git(work, 'push', '-q', '--force', 'origin', `HEAD:refs/pull/${PR}/head`);
+    markReviewed(anchor);
+    // The plant is read in `ci`, so the objects it names have to be there
+    // before `git replace` will record them.
+    const plantRef = 'refs/qwen-review-plant/pr';
+    git(ci, 'fetch', '-q', 'origin', `+refs/pull/${PR}/head:${plantRef}`);
+    const headTree = git(work, 'rev-parse', `${head}^{tree}`);
+    const anchorTree = git(work, 'rev-parse', `${anchor}^{tree}`);
+    git(ci, 'replace', headTree, anchorTree);
+    try {
+      const { verdict } = run(head);
+      assert.equal(verdict, 'changed diff-differs');
+    } finally {
+      git(ci, 'replace', '-d', headTree);
+      git(ci, 'update-ref', '-d', plantRef);
+    }
+  });
 });

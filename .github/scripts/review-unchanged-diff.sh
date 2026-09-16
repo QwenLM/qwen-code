@@ -39,7 +39,8 @@
 # --no-textconv. A textconv filter that prints a constant makes two different
 # blobs compare equal, so git drops the file from the diff entirely — no
 # `index` line survives to differ — every head then hashes as the empty digest
-# and any reviewed ancestor anchors a false skip.
+# and any reviewed ancestor anchors a false skip. Object REDIRECT is the same
+# harm without any config: see GIT_NO_REPLACE_OBJECTS below.
 # Context lines are part of the diff on purpose: when main edits a file the
 # PR also touches, the PR's diff against the new base differs and the review
 # runs. What that comparison SEES is the PR's own diff and nothing else —
@@ -52,6 +53,15 @@
 # Usage: review-unchanged-diff.sh <owner/repo> <pr-number> <head-sha> <base-ref>
 # Env:   GH_TOKEN  read access for the commit status lookup
 set -uo pipefail
+
+# refs/replace is the one object-redirect surface a reachable `.git` can plant
+# and nothing in the review pipeline wipes: one `git replace <tree> <reviewed
+# tree>` in the checkout's common dir makes merge-base, rev-list and the
+# fingerprint's diff all resolve a head carrying new code as an already
+# reviewed ancestor. Exported, not a per-call flag, so every git call below —
+# including one added later — inherits it. Same idiom as packages/cli's
+# review worktree (GIT_NO_REPLACE_OBJECTS=1).
+export GIT_NO_REPLACE_OBJECTS=1
 
 REPO="${1:-}"
 PR_NUMBER="${2:-}"
