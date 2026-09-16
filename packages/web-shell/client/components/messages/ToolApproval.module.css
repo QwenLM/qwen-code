@@ -20,7 +20,7 @@
   flex-direction: column;
   max-height: min(360px, 55vh);
   margin: 0 auto;
-  overflow-y: hidden;
+  overflow-y: auto;
   padding: 16px;
   border-radius: 12px;
   background: var(--background);
@@ -149,7 +149,9 @@
   color: var(--foreground);
   white-space: pre-wrap;
   word-break: break-word;
-  min-height: 0;
+  min-height: 3.5em;
+  /* The floating sheet's flex budget binds first, so this cap governs the
+     inline variant. */
   max-height: 300px;
   overflow-y: auto;
   line-height: 1.6;
@@ -168,7 +170,7 @@
   padding: 8px 12px;
   background: var(--secondary);
   border-radius: 7px;
-  min-height: 0;
+  min-height: 3.5em;
 }
 
 .codeBlock {
@@ -180,6 +182,8 @@
   word-break: break-word;
   line-height: 1.5;
   min-height: 0;
+  /* The floating sheet's flex budget binds first, so this cap governs the
+     inline variant. */
   max-height: 300px;
   overflow-y: auto;
 }
