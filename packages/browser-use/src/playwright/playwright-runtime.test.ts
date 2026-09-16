@@ -379,6 +379,41 @@ describe('PlaywrightRuntime command contracts', () => {
     ).toHaveLength(2);
   });
 
+  it.each([
+    ['the page reports itself closed', 'isClosed'],
+    ['the close event already released the tab', 'close'],
+  ] as const)(
+    'reports STALE_TAB when %s while a page command runs',
+    async (_label, signal) => {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+      // The pinned playwright-core client renders a closed target as a plain
+      // Error (only TimeoutError sets `name`), and evaluate-channel text
+      // fails closed, so the dispatcher must decide from the tab's own state.
+      fixture.page.evaluate.mockImplementation(async () => {
+        if (signal === 'isClosed') {
+          fixture.page.isClosed.mockReturnValue(true);
+        } else {
+          const onClose = fixture.page.on.mock.calls.find(
+            ([event]) => event === 'close',
+          )?.[1] as (() => void) | undefined;
+          expect(onClose).toBeDefined();
+          onClose!();
+        }
+        throw new Error(
+          'page.evaluate: Target page, context or browser has been closed',
+        );
+      });
+      await expect(
+        fixture.runtime.dispatch('playwright.evaluate', {
+          tabId: tab.id,
+          script: 'return 1;',
+        }),
+      ).rejects.toMatchObject({ code: 'STALE_TAB' });
+      fixture.page.isClosed.mockReturnValue(false);
+    },
+  );
+
   it('builds locator plans and delegates read and input operations', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);

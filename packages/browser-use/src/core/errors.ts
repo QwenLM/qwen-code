@@ -58,11 +58,11 @@ export function sanitizeOperationError(
   // ("locator.fill: ..."); classify on the failure text, not the call site.
   const apiName = /^[a-zA-Z][\w$]*(?:\.[\w$]+)*:\s/.exec(rawMessage)?.[0];
   const failure = rawMessage.slice(apiName?.length ?? 0);
-  // Playwright's structured error name survives the client boundary and is
-  // the only page-independent signal; it decides before any text is read.
+  // Only TimeoutError carries its name across Playwright's client boundary
+  // in the pinned playwright-core; a closed target arrives as a plain Error,
+  // so tab-gone is decided by the dispatcher from the tab's own state before
+  // this classifier runs. The name decides before any text is read.
   const name = error instanceof Error ? error.name : '';
-  if (name === 'TargetClosedError')
-    return new BrowserRuntimeError('STALE_TAB', message);
   if (name === 'TimeoutError')
     return new BrowserRuntimeError('OPERATION_TIMEOUT', message);
   // Playwright renders its own failure as the first line of the message.
