@@ -2788,29 +2788,6 @@ export class Session implements SessionContext {
       const cancelledByUser =
         result?.stopReason === 'cancelled' &&
         turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
-      if (
-        turn.endingToolCallId &&
-        result?.stopReason === 'end_turn' &&
-        failureMessage === undefined &&
-        !turn.controller.signal.aborted
-      ) {
-        const recorder = this.config.getChatRecordingService();
-        if (recorder) {
-          try {
-            await recorder.recordGoalTurnEnd(
-              turn.endingToolCallId,
-              turn.permit,
-            );
-            const chat = this.#getCurrentChat();
-            chat.setCompletedToolCallIds([
-              ...chat.getCompletedToolCallIds(),
-              turn.endingToolCallId,
-            ]);
-          } catch (error) {
-            debugLogger.warn('Failed to record ACP Goal turn end:', error);
-          }
-        }
-      }
       // A turn preempted by a newly arrived user prompt is a handoff, not a
       // failure. `this.pendingPrompt` is the goal turn's own controller while
       // a goal turn is in flight, so a new prompt aborts it with
@@ -2868,6 +2845,29 @@ export class Session implements SessionContext {
           await runtime.releaseTurn(turn.turnKey, { requeue: false });
         } else {
           await runtime.releaseTurn(turn.turnKey);
+        }
+      }
+      if (
+        turn.endingToolCallId &&
+        result?.stopReason === 'end_turn' &&
+        failureMessage === undefined &&
+        !turn.controller.signal.aborted
+      ) {
+        const recorder = this.config.getChatRecordingService();
+        if (recorder) {
+          try {
+            await recorder.recordGoalTurnEnd(
+              turn.endingToolCallId,
+              turn.permit,
+            );
+            const chat = this.#getCurrentChat();
+            chat.setCompletedToolCallIds([
+              ...chat.getCompletedToolCallIds(),
+              turn.endingToolCallId,
+            ]);
+          } catch (error) {
+            debugLogger.warn('Failed to record ACP Goal turn end:', error);
+          }
         }
       }
     } catch (error) {

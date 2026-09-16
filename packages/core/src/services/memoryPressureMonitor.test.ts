@@ -1421,7 +1421,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
-              getCompletedToolCallIds: () => ['goal-end'],
+              getCompletedToolCallIds: () => ['call_1', 'goal-end'],
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1445,7 +1445,7 @@ describe('MemoryPressureMonitor', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
       const compacted = setHistory.mock.calls[0][0] as Content[];
-      expect(setHistory.mock.calls[0][1]).toEqual(['goal-end']);
+      expect(setHistory.mock.calls[0][1]).toEqual(['call_1', 'goal-end']);
       expect(compacted.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
         'goal-end',
       );
@@ -1459,6 +1459,18 @@ describe('MemoryPressureMonitor', () => {
         ),
       );
       expect(blankedResponses.length).toBeGreaterThan(0);
+      for (const entry of blankedResponses) {
+        const index = compacted.indexOf(entry);
+        expect(entry).not.toBe(toolHistory[index]);
+        expect(entry.parts?.[0]?.functionResponse?.id).toBe(
+          toolHistory[index].parts?.[0]?.functionResponse?.id,
+        );
+      }
+      expect(
+        blankedResponses
+          .flatMap((entry) => entry.parts ?? [])
+          .map((part) => part.functionResponse?.id),
+      ).toContain('call_1');
       const memoryResult = compacted
         .flatMap((entry) => entry.parts ?? [])
         .find((part) => part.functionResponse?.id === 'call_0');

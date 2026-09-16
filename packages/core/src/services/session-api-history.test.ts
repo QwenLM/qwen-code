@@ -149,6 +149,53 @@ describe('Goal turn end history metadata', () => {
     ).toEqual(['finish-2']);
   });
 
+  it.each([0, 2])(
+    'rejects a compression boundary with %s matching calls',
+    (callCount) => {
+      const messages = records();
+      const [call, result] = buildApiHistoryFromConversation({ messages });
+      messages.push({
+        ...messages[2]!,
+        uuid: 'compression',
+        parentUuid: 'end',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [
+            ...Array.from({ length: callCount }, () => call!),
+            result!,
+          ],
+          completedToolCallIds: ['finish'],
+        },
+      });
+      expect(
+        buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
+      ).toBeUndefined();
+    },
+  );
+
+  it('drops a boundary whose result is removed when stripping thoughts', () => {
+    const messages = records();
+    messages[1]!.message!.parts![0]!.thought = true;
+    expect(
+      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
+    ).toEqual(['finish']);
+    const restored = buildSessionHistoryFromConversation(
+      { messages },
+      { stripThoughtsFromHistory: true },
+    );
+    expect(restored.completedToolCallIds).toBeUndefined();
+    expect(
+      restored.apiHistory
+        .flatMap((entry) => entry.parts ?? [])
+        .some((part) => part.functionResponse?.id === 'finish'),
+    ).toBe(false);
+  });
+
   it('restores only an explicitly preserved compression boundary', () => {
     const messages = records();
     const compressedHistory = buildApiHistoryFromConversation({ messages });

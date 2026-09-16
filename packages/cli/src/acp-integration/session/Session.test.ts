@@ -28228,9 +28228,16 @@ describe('Session', () => {
             );
             mockToolsWithTerminatingUpdateGoal();
             if (recordingFails) {
-              mockChatRecordingService.recordGoalTurnEnd.mockRejectedValue(
-                new Error('writer failed'),
+              let writeFailed = false;
+              mockChatRecordingService.recordGoalTurnEnd.mockImplementation(
+                async () => {
+                  writeFailed = true;
+                  throw new Error('writer failed');
+                },
               );
+              mockGoalRuntime.finishTurn.mockImplementation(async () => {
+                if (writeFailed) throw new Error('writer failed');
+              });
             }
             mockChat.sendMessageStream = vi
               .fn()
@@ -28251,6 +28258,7 @@ describe('Session', () => {
             expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
             // Settled as a completed iteration, not paused as a failure.
             expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+            expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
             // The turn ends, but its own tool response still has to reach the
             // transcript, or the next request carries a call with no result.
             expect(mockChat.addHistory).toHaveBeenCalledWith({
@@ -28351,6 +28359,62 @@ describe('Session', () => {
             kind: 'interrupted_prompt',
             canContinue: true,
           });
+        });
+
+        it('does not record a clean boundary when cancellation arrives during settlement flush', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'cancelled-during-flush',
+          };
+          const turnKey = `goal-runtime:${permit.turnId}`;
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          const settlement = session as unknown as {
+            pendingPrompt: AbortController | null;
+            activeGoalTurn?: {
+              controller: AbortController;
+              endingToolCallId?: string;
+            };
+          };
+          let releaseFlush: (() => void) | undefined;
+          mockChatRecordingService.flush.mockImplementation(async () => {
+            if (
+              settlement.activeGoalTurn?.endingToolCallId &&
+              !settlement.pendingPrompt
+            ) {
+              await new Promise<void>((resolve) => {
+                releaseFlush = resolve;
+              });
+            }
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            );
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'finish the goal',
+          });
+          await vi.waitFor(() => expect(releaseFlush).toBeDefined());
+          settlement.activeGoalTurn!.controller.abort('qwen:user-cancel');
+          releaseFlush!();
+          await vi.waitFor(() =>
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              expect.objectContaining({ reason: 'end_turn', source: 'goal' }),
+            ),
+          );
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          expect(
+            mockChatRecordingService.recordGoalTurnEnd,
+          ).not.toHaveBeenCalled();
+          expect(mockChat.setCompletedToolCallIds).not.toHaveBeenCalled();
         });
 
         it('runs managed memory effects after an early Goal turn end', async () => {
