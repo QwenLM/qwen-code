@@ -142,8 +142,12 @@ describe('main CI failure issue workflow', () => {
     );
     // The never-started classification rides the same single fetch: the meta
     // projection is the only writer of the file --jobs-meta hands to analyze.
+    // `-s` is load-bearing: --paginate writes one JSON document per page, and
+    // projecting per document would leave N concatenated arrays that the
+    // helper's JSON.parse rejects, silently reading every run with more than
+    // 100 jobs as not never-started.
     expect(download).toContain(
-      'jq -c \'[.jobs[] | select(.conclusion == "failure") | {name: .name, steps: ((.steps // []) | length)}]\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs-meta.json" || true',
+      'jq -c -s \'[.[].jobs[] | select(.conclusion == "failure") | {name: .name, steps: ((.steps // []) | length)}]\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs-meta.json" || true',
     );
     // `--jobs` has to ride the `analyze` invocation: `plan` never reads
     // `options.jobs`, so moving the flag there drops the section silently. The
@@ -170,6 +174,19 @@ describe('main CI failure issue workflow', () => {
     const rerun = jobs.rerun_never_started;
     expect(rerun).toBeDefined();
     expect(rerun.needs).toBe('analyze');
+    // Both ends of the producer wiring, pinned like the consumer `if:` below:
+    // cutting either link turns the whole feature into a silent no-op behind
+    // a green suite — jq's `// false` fallback prints false for every run and
+    // no re-run ever fires.
+    expect(jobs.analyze.outputs.never_started).toBe(
+      '${{ steps.plan.outputs.never_started }}',
+    );
+    const planRun = String(
+      jobs.analyze.steps.find((step) => step.id === 'plan').run,
+    );
+    expect(planRun).toContain(
+      'echo "never_started=$(jq -r \'.neverStarted // false\' "${analysis}")" >> "${GITHUB_OUTPUT}"',
+    );
     expect(String(rerun.if)).toContain(
       "needs.analyze.outputs.never_started == 'true'",
     );
@@ -184,6 +201,25 @@ describe('main CI failure issue workflow', () => {
     expect(JSON.stringify(rerun)).toContain(
       'actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs',
     );
+    // The request pinned with its method and the env that fills the URL: the
+    // URL substring alone stays green when `-X POST` is dropped (a GET on
+    // this path 404s) or the env goes (the URL renders
+    // runs//rerun-failed-jobs) — gh exits non-zero, the job fails, file_issue
+    // files, and no run is ever re-run again: the feature silently off.
+    expect(rerun.steps[0].env.WORKFLOW_RUN_ID).toBe(
+      '${{ github.event.workflow_run.id }}',
+    );
+    expect(String(rerun.steps[0].run)).toContain(
+      'gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"',
+    );
+    // The one decision in the workflow that suppresses a filing must announce
+    // itself: once the re-run absorbs the flake, the notice and the step
+    // summary are the only record the suppression ever happened.
+    expect(rerun.steps[0].env.WORKFLOW_RUN_URL).toBe(
+      '${{ github.event.workflow_run.html_url }}',
+    );
+    expect(String(rerun.steps[0].run)).toContain('::notice::');
+    expect(String(rerun.steps[0].run)).toContain('GITHUB_STEP_SUMMARY');
 
     // file_issue files unless the re-run actually started: a skipped rerun
     // job (ordinary failure with steps) and a failed one (the API call
@@ -200,6 +236,19 @@ describe('main CI failure issue workflow', () => {
     // would be skipped — on every ordinary failure and every attempt-2
     // recurrence — before the condition is ever evaluated.
     expect(String(jobs.file_issue.if)).toContain('always()');
+
+    // A never-started run that files anyway either recurred after its
+    // re-run or could not even be re-run — either way the issue records a
+    // fleet failure for a human rather than pitching the agent a repair no
+    // commit can make. The decision stays in analyze and crosses
+    // over as a plain string; file_issue only gates the route on it — no new
+    // checkout, helper call, or scope for the job holding the bot PAT.
+    expect(jobs.file_issue.steps[0].env.NEVER_STARTED).toBe(
+      '${{ needs.analyze.outputs.never_started }}',
+    );
+    expect(String(jobs.file_issue.steps[0].run)).toContain(
+      'if [[ "${NEVER_STARTED}" == \'true\' ]]; then',
+    );
   });
 
   it('re-reads an existing issue so recorded recurrences survive the update', () => {

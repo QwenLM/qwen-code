@@ -264,6 +264,35 @@ function failedJobLines(failedJobs) {
  * a reader which lane broke when no test name survived to say so.
  */
 function renderPerCommitBody({ analysis, occurrence }) {
+  // A run whose failed jobs all executed zero steps ran no code at all, so
+  // the issue has nothing for the autofix agent to repair: the body names
+  // the fleet failure and the workflow keeps the issue off the agent's
+  // route, both keying on the same flag.
+  if (analysis.neverStarted) {
+    return [
+      `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
+      '',
+      'A main-branch CI run failed on `main` with no step of any failed job',
+      'executed — the runner accepted each job and died before its first',
+      'step — and one automatic re-run did not clear it. No commit can have',
+      'caused this, so the issue is tracked per commit as a runner-fleet',
+      'failure.',
+      '',
+      `- Workflow: ${analysis.workflow}`,
+      ...(analysis.failedJobs.length
+        ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
+        : []),
+      `- Run: ${occurrence.runUrl}`,
+      `- Run ID: ${occurrence.runId}`,
+      `- Commit: ${occurrence.sha}`,
+      '',
+      'This issue is deliberately not routed to the autofix agent: no code',
+      'change can fix a job that never started. It needs a human to look at',
+      'the runner fleet.',
+      '',
+    ].join('\n');
+  }
+
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
     '',

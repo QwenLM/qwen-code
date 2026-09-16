@@ -90,7 +90,11 @@ jobs:
           # Every failed job's executed-step count, feeding the helper's
           # never-started classification: a failed job with zero steps never
           # ran a line of repository code, so no commit can be its cause.
-          jq -c '[.jobs[] | select(.conclusion == "failure") | {name: .name, steps: ((.steps // []) | length)}]' \
+          # `-s` slurps the pages `--paginate` writes into one document before
+          # projecting: per-document the file would hold N concatenated arrays
+          # and the helper's JSON.parse would throw, silently reading every
+          # run with more than 100 jobs as not never-started.
+          jq -c -s '[.[].jobs[] | select(.conclusion == "failure") | {name: .name, steps: ((.steps // []) | length)}]' \
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs-meta.json" || true
 
@@ -188,10 +192,13 @@ jobs:
   # 2026-09-16 on E2E run 35051269368, whose sandbox:docker leg sat on a pool
   # runner for exactly 600s and failed without a single step). No commit can
   # cause that, so the per-commit issue it would file hands the autofix agent
-  # an unactionable flake — re-run the failed jobs once instead. The re-run's
-  # own completion re-triggers this workflow, and a failure on attempt 2 files
-  # normally, so a persistent fleet outage still surfaces after one retry
-  # rather than once per merged commit.
+  # an unactionable flake — re-run the failed jobs once instead. A flake is
+  # absorbed: the re-run passes and no issue ever existed. A recurrence on
+  # attempt 2 files per commit as a fleet failure kept off the autofix route,
+  # so a persistent outage costs one human-read issue per merge rather than
+  # one agent round per merge. A non-failure attempt 2 — cancelled, timed
+  # out, stale — files nothing: analyze's failure-only gate skips it, so the
+  # re-run step's annotation is the record of the suppressed filing.
   rerun_never_started:
     name: 'Re-run jobs that never started'
     needs: 'analyze'
@@ -208,8 +215,15 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
         run: |-
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
+          # This job is the one decision in the workflow that suppresses a
+          # filing, so it announces itself: once the re-run absorbs the flake,
+          # this annotation is the only record the suppression ever happened.
+          message="Re-ran the failed jobs of ${WORKFLOW_RUN_URL}: no step of any failed job ran, so no issue was filed"
+          echo "::notice::${message}"
+          echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
 
   # Every GitHub write happens here, as the autofix bot. This job deliberately
   # checks out nothing and runs no repository code: it only consumes the title
@@ -220,8 +234,9 @@ jobs:
       - 'analyze'
       - 'rerun_never_started'
     # Skip filing only when the one bounded re-run actually started. A skipped
-    # rerun job (an ordinary failure with steps) and a failed one (the re-run
-    # request itself errored) both fall through to the normal issue path.
+    # rerun job (an ordinary failure with steps, or an attempt-2+ recurrence)
+    # and a failed one (the re-run request itself errored) both fall through
+    # to filing, where the body and route follow never_started.
     # always() is load-bearing: without a status check function Actions
     # implicitly prepends success(), and a skipped rerun_never_started is not
     # a success, so the condition below would never be evaluated.
@@ -241,12 +256,20 @@ jobs:
           EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'
           ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
           ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
+          NEVER_STARTED: '${{ needs.analyze.outputs.never_started }}'
           AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
         run: |-
           apply_autofix_route() {
+            # A run whose failed jobs all executed zero steps ran no
+            # repository code, so there is no repair for the agent to make:
+            # the issue records the fleet failure for a human instead.
+            if [[ "${NEVER_STARTED}" == 'true' ]]; then
+              echo "Leaving the issue off the autofix route: no failed job executed a step."
+              return 0
+            fi
             gh issue edit "$1" \
               --repo "${REPO}" \
               --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \

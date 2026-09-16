@@ -709,6 +709,40 @@ test('no failed-job metadata at all is not the never-started class', () => {
   assert.equal(analysis.neverStarted, false);
 });
 
+test('a filed never-started run reads as a fleet failure, off the autofix route', () => {
+  // By the time a never-started run files, its one automatic re-run already
+  // happened (or the re-run request itself failed), so the issue must not
+  // pitch the autofix agent a repair no commit can make.
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [],
+    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+
+  // The per-commit marker stays the first line: plan dedupes on it.
+  assert.ok(
+    body.startsWith(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`),
+  );
+  assert.ok(body.includes('runner-fleet'));
+  assert.ok(body.includes('one automatic re-run did not clear it'));
+  assert.ok(!body.includes('labeled for autofix'));
+});
+
+test('a run whose failed jobs executed steps keeps the autofix pitch', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [],
+    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 19 }],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+
+  assert.ok(body.includes('labeled for autofix'));
+  assert.ok(!body.includes('runner-fleet'));
+});
+
 test('parseFailedJobsMeta keeps only well-formed entries', () => {
   assert.deepEqual(
     parseFailedJobsMeta(
