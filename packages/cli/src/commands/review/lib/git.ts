@@ -40,13 +40,31 @@ export const GIT_TIMEOUT_MS = 120_000;
 function gitOpts() {
   return {
     timeout: GIT_TIMEOUT_MS,
+    // The house ceiling, on EVERY wrapper: the string forms used to inherit
+    // Node's 1 MiB default, so a `config --get-regexp` whose output an
+    // adversary padded past it threw ENOBUFS, `gitOpt` answered null, and
+    // the steering disclosure that names the planted filter never printed
+    // — while `hasFilter` flipped false and the capture ruling relaxed.
+    // Same ceiling as `gitRaw` below, so there is one constant to reason
+    // about.
+    maxBuffer: 512 * 1024 * 1024,
     // `sanitizedGitEnv`, not `process.env`: an exported `GIT_DIR` redirects
     // discovery for every command here at once — `releaseWorktree`'s
     // `worktree remove --force` included, which is a delete — and the
     // `GIT_CONFIG_*` family injects config the same way. The disposable-tree
     // commands were given this treatment first; these run against the user's
     // own repository, so they need it more, not less.
-    env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
+    env: {
+      ...sanitizedGitEnv(),
+      GIT_TERMINAL_PROMPT: '0',
+      // Pin the message locale: `fix-delta` rules on the English rendering
+      // of `add`'s tolerated notes, and LANG/LC_* pass through the
+      // sanitizer — a git with translated catalogs would turn every
+      // tolerated shape into a hard refusal. Porcelain output is never
+      // localized, so the pin changes nothing for the other callers.
+      LANG: 'C',
+      LC_ALL: 'C',
+    },
   };
 }
 
@@ -208,6 +226,97 @@ export function git(...args: string[]): string {
   return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8' })
     .replace(/\r\n/g, '\n')
     .trim();
+}
+
+/**
+ * Run `git` with extra environment on top of the sanitised one. Returns
+ * stdout, trimmed.
+ *
+ * Exists for the one variable the sanitiser strips on purpose and a command
+ * still legitimately needs: `GIT_INDEX_FILE`. `fix-delta` snapshots the
+ * working tree through a throwaway index so the user's own index is never
+ * touched, and the redirect is exactly what `sanitizedGitEnv` deletes — so it
+ * is re-added here, after the sanitising, never by pointing at `process.env`.
+ */
+export function gitWithEnv(
+  extraEnv: Record<string, string>,
+  args: string[],
+): string {
+  const opts = gitOpts();
+  return execFileSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    encoding: 'utf8',
+  })
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+/**
+ * `gitWithEnv` with the output as RAW BYTES — `gitRaw`'s contract under the
+ * throwaway-index environment. A `-z` listing read through the string
+ * form rewrites every non-UTF-8 name byte to U+FFFD, and a path handed
+ * back to git under that rendering names a file that does not exist.
+ */
+export function gitWithEnvRaw(
+  extraEnv: Record<string, string>,
+  args: string[],
+): Buffer {
+  const opts = gitOpts();
+  return execFileSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * `gitWithEnv` with stderr CAPTURED instead of inherited and the exit
+ * status KEPT instead of thrown. The callers are `fix-delta`'s captures
+ * (`add -A`, and the tracked re-inclusion `add -u` that follows it), which
+ * must rule on the child's own notes: an unlistable directory exits 0
+ * with only a warning and leaves its content silently absent from the
+ * index, and a co-occurring failure hides behind a tolerated neighbour's
+ * stderr — neither shape is reachable through a try/catch on the exit
+ * status.
+ */
+export function gitWithEnvReport(
+  extraEnv: Record<string, string>,
+  args: string[],
+  input?: Buffer,
+): { stdout: string; stderr: string; status: number; completed: boolean } {
+  const opts = gitOpts();
+  // spawnSync, not execFileSync: the verdicts need stderr when the child
+  // EXITS 0 too — `execFileSync` only hands back stderr on the throw path,
+  // which is exactly where the exit-0 warning shape never reaches.
+  const result = spawnSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    encoding: 'utf8',
+    // The same raised ceiling `gitRaw` takes: this child's stderr is the
+    // evidence the capture ruling reads, and the per-file autocrlf notes of
+    // a large tree pass Node's 1 MiB default — past it the child is killed
+    // mid-capture and its truncated notes are all the verdict sees.
+    maxBuffer: 512 * 1024 * 1024,
+    // `input` is the byte-exact channel for a pathspec list: a tracked name
+    // spawn args would coerce through UTF-8 rides `--pathspec-from-file=-`
+    // untouched.
+    ...(input === undefined ? {} : { input }),
+    stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+  });
+  return {
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    status: result.status ?? -1,
+    // A child killed by a signal (timeout, buffer overflow) or never
+    // spawned did not EXIT — its notes are a partial capture, and the
+    // verdict must refuse them instead of ruling on them.
+    completed:
+      result.status !== null &&
+      result.signal === null &&
+      result.error === undefined,
+  };
 }
 
 /**
@@ -586,6 +695,45 @@ function refusalError(refusal: string | null): Error | undefined {
       `next \`git worktree add\` over it will still fail. Run \`qwen review ` +
       `cleanup\` from a checkout outside the review temp dir.`,
   );
+}
+
+/**
+ * `gitRaw`'s byte contract — stdout is a `-z` listing, and the string
+ * decode would rewrite every non-UTF-8 name byte to U+FFFD — with stderr
+ * captured and the exit status KEPT, the same need `gitWithEnvReport`
+ * answers for the string form. The caller is `fix-delta`'s discovery
+ * status: an exit-0 `warning: could not open directory …` over a subtree
+ * nobody read is a partial enumeration, and stdout plus the exit code
+ * cannot tell it from a clean one.
+ */
+export function gitRawReport(
+  args: string[],
+  extraEnv?: Record<string, string>,
+): {
+  stdout: Buffer;
+  stderr: Buffer;
+  status: number;
+  completed: boolean;
+} {
+  const opts = gitOpts();
+  // Same refusal shape as `gitRaw` — the launch-dir gate throws with the
+  // reason, the one case with a reason a caller can hand to a user.
+  assertTrustedLaunchDir();
+  const result = spawnSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return {
+    stdout: result.stdout ?? Buffer.alloc(0),
+    stderr: result.stderr ?? Buffer.alloc(0),
+    status: result.status ?? -1,
+    completed:
+      result.status !== null &&
+      result.signal === null &&
+      result.error === undefined,
+  };
 }
 
 /**

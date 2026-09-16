@@ -1377,8 +1377,12 @@ const UNRESOLVED_REPO =
  * `worktreeResidue`'s is — a combined newline-delimited answer mis-pairs under
  * a directory whose name holds a newline. `null` is the unresolved repository
  * above, which every caller reports rather than reads as clean.
+ *
+ * Exported for the caller that blanks rather than refuses: `fix-delta`'s
+ * capture needs `filters` apart from `unread` (the first rides
+ * `filterBlankEnv`, the second keeps the strict ruling).
  */
-function screenForTree(worktree: string): FilterScreen | null {
+export function screenForTree(worktree: string): FilterScreen | null {
   const discover = (flag: string): string | null => {
     const r = spawnSync('git', ['rev-parse', '--path-format=absolute', flag], {
       cwd: worktree,
