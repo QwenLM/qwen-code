@@ -37,6 +37,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
 
@@ -247,9 +248,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
    */
   private collectCandidates(): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
-    return registry
-      .getAllTools()
-      .filter((t) => registry.isDeferredAndHidden(t.name));
+    return registry.getAllTools().filter(
+      (t) =>
+        registry.isDeferredAndHidden(t.name) &&
+        // Media-policy tools without modelAccess.enabled must never be
+        // surfaced to the model — not even via keyword discovery.
+        !isMediaPolicyToolHiddenFromModel(this.config, t),
+    );
   }
 
   private async loadAndReturnSchemas(
@@ -288,7 +293,12 @@ class ToolSearchInvocation extends BaseToolInvocation<
         continue;
       }
       if (!registry.isToolDeclared(canonical)) {
-        missing.push(requested);
+        const tool = registry.getTool(canonical);
+        if (tool && isMediaPolicyToolHiddenFromModel(this.config, tool)) {
+          blocked.push(canonical);
+        } else {
+          missing.push(requested);
+        }
         continue;
       }
       if (
@@ -323,6 +333,14 @@ class ToolSearchInvocation extends BaseToolInvocation<
       }
       if (!tool) {
         missing.push(requested);
+        continue;
+      }
+      // Hidden media-policy tools cannot be revealed by exact-name lookup
+      // either: modelAccess.enabled is the only switch that exposes them.
+      // Blocking here (after ensureTool, which is where the descriptor
+      // becomes inspectable) guarantees no schema reveal happens below.
+      if (isMediaPolicyToolHiddenFromModel(this.config, tool)) {
+        blocked.push(canonical);
         continue;
       }
       // Only reveal + count toward the setTools() trigger when the tool
@@ -431,7 +449,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const blockedMessages = blocked.map((name) =>
         isLeaderOnlyToolUnavailableInSubagent(name)
           ? getLeaderOnlyToolUnavailableMessage(name)
-          : getSubagentPlanToolUnavailableMessage(name),
+          : isPlanLifecycleToolUnavailableInSubagent(name)
+            ? getSubagentPlanToolUnavailableMessage(name)
+            : `Tool "${name}" is a media policy tool and is not available to the model.`,
       );
       blockedErrorMessage = blockedMessages.join('\n');
       const header = llmContent ? '\n\n' : '';
