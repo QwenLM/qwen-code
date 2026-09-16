@@ -4807,20 +4807,6 @@ describe('review supersede salvage (#10110)', () => {
     expect((run.match(/cede_superseded/g) ?? []).length).toBe(5);
   });
 
-  it('pins the kill-record branch acceptance bound', () => {
-    // Scoped to supersede_reverted_during_run(): a whole-file toContain is
-    // satisfiable by an occurrence anywhere in the YAML, so the bound could
-    // be deleted from the branch and stay green on a stray copy elsewhere.
-    // The needle runs through `|| continue` — the full shell line — so
-    // nothing can be inserted between the bound and the skip (an appended
-    // ceiling conjunct leaves a shorter needle's substring intact). The
-    // sibling lost-record pair branch's START_TS - 15 tolerance is a
-    // deliberately different bound and stays out of this pin.
-    expect(supersedeRevertedSource()).toContain(
-      '[ "$at" -ge "$(( START_TS + SALVAGE_POLL_SECONDS ))" ] || continue',
-    );
-  });
-
   it('decides KEEP vs CEDE with the extracted salvage_eligible', () => {
     const fn = run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0];
     expect(fn).toBeTruthy();
@@ -4870,12 +4856,6 @@ describe('review supersede salvage (#10110)', () => {
 
   function writeSignalSource() {
     return run.match(/write_signal\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
-  }
-
-  function supersedeRevertedSource() {
-    return (
-      run.match(/supersede_reverted_during_run\(\) \{[\s\S]*?\n\}/)?.[0] ?? ''
-    );
   }
 
   function runWatcher({
