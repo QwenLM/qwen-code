@@ -680,6 +680,28 @@ export class AgentCore {
    * inherits all tools (excluding AgentTool to prevent recursion).
    */
   async prepareTools(): Promise<FunctionDeclaration[]> {
+    const tools = await this.prepareToolDeclarations();
+    const requiredTools = this.toolConfig?.requiredTools;
+    if (requiredTools) {
+      const effectiveNames =
+        this.codeModeAllowedToolNames ?? tools.map((tool) => tool.name);
+      const requestedExec =
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+        requiredTools.includes(ToolNames.EXEC) &&
+        tools.some((tool) => tool.name === ToolNames.EXEC);
+      if (
+        !requestedExec &&
+        !effectiveNames.some((name) => name && requiredTools.includes(name))
+      ) {
+        throw new Error(
+          'agent({tools}): the requested allowlist leaves no tools at all after runtime filtering.',
+        );
+      }
+    }
+    return tools;
+  }
+
+  private async prepareToolDeclarations(): Promise<FunctionDeclaration[]> {
     const toolRegistry = this.runtimeContext.getToolRegistry();
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];

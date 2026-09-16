@@ -69,6 +69,7 @@ import {
 } from '../../core/reasoning-effort.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
+import type { ToolConfig } from './agent-types.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import {
   GitWorktreeService,
@@ -957,40 +958,103 @@ function listToolNames(names: readonly string[]): string {
   );
 }
 
-/**
- * The allowlist as exact tool names. A deny list is matched at run time, so an
- * `mcp__` pattern can stay a pattern there; an allowlist is matched by exact
- * name when the declarations are filtered (`getFunctionDeclarationsFiltered`),
- * so a pattern left as-is would hand the agent nothing from that server while
- * the script believes it kept the server. Expand each pattern against the
- * registry instead, and report the entries that expand to nothing.
- */
-async function expandAllowlistToToolNames(
+function matchesAllow(
+  tool: { name: string; serverName?: unknown; serverToolName?: unknown },
+  pattern: string,
+): boolean {
+  if (pattern === tool.name) return true;
+  if (
+    typeof tool.serverName !== 'string' ||
+    typeof tool.serverToolName !== 'string' ||
+    !tool.serverName ||
+    tool.serverName.includes('*')
+  )
+    return false;
+  const server = `mcp__${tool.serverName}`;
+  return (
+    pattern === server ||
+    pattern === `${server}__*` ||
+    pattern === `${server}__${tool.serverToolName}`
+  );
+}
+
+async function narrowDispatchTools(
   config: Config,
-  names: readonly string[],
-): Promise<{ tools: string[]; unmatched: string[] }> {
-  const toolRegistry = config.getToolRegistry();
-  if (!toolRegistry) return { tools: [...names], unmatched: [] };
-  await toolRegistry.warmAll();
-  const registered = toolRegistry.getAllTools().map((tool) => tool.name);
+  toolConfig: ToolConfig,
+  requestedTools: string[],
+  schema: boolean,
+): Promise<ToolConfig> {
+  const registry = config.getToolRegistry();
+  await registry.warmAll();
+  const registered = registry.getAllTools();
   const tools: string[] = [];
   const unmatched: string[] = [];
-  for (const name of names) {
-    // An exact registered name — MCP or not — is kept as given.
-    if (!name.startsWith('mcp__') || registered.includes(name)) {
-      tools.push(name);
-      continue;
-    }
-    const matched = registered.filter((candidate) =>
-      matchesMcpPattern(name, candidate),
+  for (const name of requestedTools) {
+    const matches = registered.filter(
+      (tool) =>
+        matchesAllow(tool, name) ||
+        (!name.startsWith('mcp__') && tool.displayName === name),
     );
-    if (matched.length === 0) {
-      unmatched.push(name);
-      continue;
-    }
-    tools.push(...matched);
+    if (matches.length === 0) unmatched.push(name);
+    tools.push(...matches.map((tool) => tool.name));
   }
-  return { tools: Array.from(new Set(tools)), unmatched };
+  if (unmatched.length > 0) {
+    throw new Error(
+      `agent({tools}): ${listToolNames(unmatched)} ${unmatched.length === 1 ? 'matches' : 'match'} no tool. Use a registered tool name, display name, or MCP pattern (mcp__<server>, mcp__<server>__*, mcp__<server>__<tool>).`,
+    );
+  }
+  const agentTypeAllows = toolConfig.tools.filter(
+    (tool): tool is string => typeof tool === 'string',
+  );
+  const inherited =
+    agentTypeAllows.length === 0 || agentTypeAllows.includes('*');
+  const bounded = tools.filter(
+    (name) =>
+      inherited ||
+      registered.some(
+        (tool) =>
+          tool.name === name &&
+          agentTypeAllows.some(
+            (pattern) =>
+              matchesAllow(tool, pattern) ||
+              (!pattern.startsWith('mcp__') && tool.displayName === pattern),
+          ),
+      ),
+  );
+  if (bounded.length === 0) {
+    throw new Error(
+      `agent({tools, agentType}): none of ${listToolNames(tools)} is among the tools the agent type allows (${listToolNames(agentTypeAllows)}), so it would have no tools at all.`,
+    );
+  }
+  const denyPatterns = toolConfig.disallowedTools?.map(
+    (name) =>
+      registered.find((tool) => tool.name === name)?.name ??
+      registered.find((tool) => tool.displayName === name)?.name ??
+      name,
+  );
+  const pool = bounded.filter(
+    (name) =>
+      !denyPatterns?.some((pattern) =>
+        name.startsWith('mcp__')
+          ? matchesMcpPattern(pattern, name)
+          : pattern === name,
+      ),
+  );
+  if (pool.length === 0) {
+    throw new Error(
+      `agent({tools}): every requested tool (${listToolNames(tools)}) is denied for this dispatch, so it would have no tools at all.`,
+    );
+  }
+  const requiredTools = [...new Set(pool)];
+  if (schema) pool.push(ToolNames.STRUCTURED_OUTPUT);
+  const exact = [...new Set(pool)];
+  return {
+    ...toolConfig,
+    disallowedTools: denyPatterns,
+    tools: exact,
+    executionAllowedTools: exact,
+    requiredTools,
+  };
 }
 
 /**
@@ -1148,89 +1212,13 @@ async function runOverridePath(
     schemaTools = [...baseConfig.tools, ToolNames.STRUCTURED_OUTPUT];
   }
 
-  // `agent({tools})`: the only tools this dispatch may use. It never widens.
-  // The agent type's own allowlist bounds it, every deny is subtracted, and a
-  // narrowing that leaves nothing is refused here rather than dispatched as a
-  // tool-less agent that would spend its turn discovering it can do nothing.
-  // Both matches follow `prepareTools`: exact name, or MCP pattern for an
-  // `mcp__` tool.
-  let requestedPool: string[] | undefined;
-  if (requestedTools.length > 0) {
-    const expansion = await expandAllowlistToToolNames(config, requestedTools);
-    // A built-in that exists but is not registered in this session passes, as
-    // it does for a deny: the agent could not have used it either way.
-    const unmatched = [
-      ...expansion.unmatched,
-      ...(await subagentMgr.findUnmatchedToolNames(expansion.tools)),
-    ];
-    if (unmatched.length > 0) {
-      throw new Error(
-        `agent({tools}): ${listToolNames(unmatched)} ${
-          unmatched.length === 1 ? 'matches' : 'match'
-        } no tool. Use a tool name (run_shell_command, write_file, edit), a display name (Shell, WriteFile, Edit), or an MCP pattern (mcp__<server>, mcp__<server>__*, mcp__<server>__<tool>).`,
-      );
-    }
-    const denyPatterns = [
-      ...(baseConfig.disallowedTools ?? []),
-      ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
-      ...requestedDenies,
-    ].map((name) => resolveBuiltinToolName(name) ?? name);
-    const agentTypeAllows =
-      baseConfig.tools &&
-      baseConfig.tools.length > 0 &&
-      !baseConfig.tools.includes('*')
-        ? baseConfig.tools.map((name) => resolveBuiltinToolName(name) ?? name)
-        : undefined;
-    const matchesAny = (patterns: readonly string[], name: string): boolean =>
-      patterns.some((pattern) =>
-        name.startsWith('mcp__')
-          ? matchesMcpPattern(pattern, name)
-          : pattern === name,
-      );
-    requestedPool = expansion.tools.filter(
-      (name) =>
-        !matchesAny(denyPatterns, name) &&
-        (agentTypeAllows === undefined || matchesAny(agentTypeAllows, name)),
-    );
-    if (requestedPool.length === 0) {
-      if (
-        agentTypeAllows !== undefined &&
-        !expansion.tools.some((name) => matchesAny(agentTypeAllows, name))
-      ) {
-        throw new Error(
-          `agent({tools, agentType}): none of ${listToolNames(expansion.tools)} is among the tools agent type '${sanitizeForErrorMessage(
-            opts.agentType ?? '',
-          )}' allows (${listToolNames(agentTypeAllows)}). An allowlist can only narrow that set, so this dispatch would have no tools at all.`,
-        );
-      }
-      throw new Error(
-        `agent({tools}): every requested tool (${listToolNames(
-          expansion.tools,
-        )}) is denied for this dispatch — by the workflow tool floor, by the agent type's denies, or by disallowedTools — so it would have no tools at all.`,
-      );
-    }
-    // Schema mode delivers its result through structured_output, so the
-    // allowlist keeps it whether or not the script listed it. A dispatch that
-    // also DENIES it is refused a few lines below.
-    if (
-      opts.schema !== undefined &&
-      !requestedPool.includes(ToolNames.STRUCTURED_OUTPUT)
-    ) {
-      requestedPool = [...requestedPool, ToolNames.STRUCTURED_OUTPUT];
-    }
-  }
-
   const augmented: SubagentConfig = {
     ...baseConfig,
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(schemaSystemPrompt !== undefined
       ? { systemPrompt: schemaSystemPrompt }
       : {}),
-    ...(requestedPool !== undefined
-      ? { tools: requestedPool }
-      : schemaTools !== undefined
-        ? { tools: schemaTools }
-        : {}),
+    ...(schemaTools !== undefined ? { tools: schemaTools } : {}),
     disallowedTools: Array.from(
       new Set([
         ...(baseConfig.disallowedTools ?? []),
@@ -1426,13 +1414,18 @@ async function runOverridePath(
         ...(effort !== undefined
           ? { modelConfigOverrides: { reasoningEffort: effort } }
           : {}),
-        // Filtering the declarations only hides the tools: a call for one the
-        // agent was never shown still executes, because the execution gate is
-        // open when no allowlist is set (`AgentCore.isToolExecutionAllowed`).
-        // A per-call narrowing has to hold at both layers, so the same pool
-        // that shaped the declarations closes the gate.
-        ...(requestedPool !== undefined
-          ? { executionAllowedTools: requestedPool }
+        // Resolve against the per-agent registry after MCP discovery. The
+        // execution gate uses the same exact pool as defence in depth.
+        ...(requestedTools.length > 0
+          ? {
+              toolConfigResolver: (context: Config, tools: ToolConfig) =>
+                narrowDispatchTools(
+                  context,
+                  tools,
+                  requestedTools,
+                  opts.schema !== undefined,
+                ),
+            }
           : {}),
         eventEmitter,
         taskName: String(ctx.get('task_prompt')),

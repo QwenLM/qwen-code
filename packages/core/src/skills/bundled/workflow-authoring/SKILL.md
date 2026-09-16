@@ -161,8 +161,10 @@ say explicitly what each one should read and whether it may edit files.
   call to null with the reason recorded, rather than dispatching an agent with
   no tools. Under `schema` the agent keeps `structured_output` either way. The
   narrowing holds at both layers: the tools are not declared, and a call for
-  one outside the list is refused before it runs. The resume cache key depends
-  on which tools are allowed, not on their order, duplicates, or spelling.
+  one outside the list is refused before it runs. In code mode, `exec` remains
+  available and the allowlist narrows the tools it can call. The resume cache
+  key depends on which tools are allowed, not on their order, duplicates, or
+  spelling.
 - `disallowedTools` (string[]) — tools this agent may not call, on top of the
   floor below; it can only narrow the agent's tools, never re-enable one. Name a
   tool by its tool name (`run_shell_command`, `write_file`, `edit`) or its

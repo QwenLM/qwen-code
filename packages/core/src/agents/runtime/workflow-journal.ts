@@ -31,8 +31,8 @@
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
  * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
- * `disallowedTools`) with object keys sorted, so cosmetic opt differences (a
- * re-ordered schema, a `label` change) don't bust the cache.
+ * `tools`, `disallowedTools`) with object keys sorted, so cosmetic opt
+ * differences (a re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`

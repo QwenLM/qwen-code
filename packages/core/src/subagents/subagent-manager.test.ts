@@ -14,7 +14,7 @@ import {
   SubagentError,
   SubagentErrorCode,
 } from './types.js';
-import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -3458,6 +3458,83 @@ bad`);
           mockAgentHeadlessCreate.mock.calls[0],
         );
         expect(runtimeView).toBeUndefined();
+      });
+    });
+
+    describe('createAgentHeadless — post-discovery tool narrowing', () => {
+      const agentConfig: SubagentConfig = {
+        name: 'warehouse',
+        description: 'query stock',
+        systemPrompt: 'query stock',
+        level: 'session',
+        mcpServers: { warehouse: { command: 'unused-test-server' } },
+      };
+
+      it('passes the discovered isolated registry to the resolver before creating the agent', async () => {
+        const discoveredRegistries: ToolRegistry[] = [];
+        const discovery = vi
+          .spyOn(ToolRegistry.prototype, 'discoverToolsForServer')
+          .mockImplementation(async function (this: ToolRegistry, name) {
+            expect(name).toBe('warehouse');
+            discoveredRegistries.push(this);
+          });
+        const stop = vi
+          .spyOn(ToolRegistry.prototype, 'stop')
+          .mockResolvedValue();
+        mockAgentHeadlessCreate.mockResolvedValue({});
+        const narrowed = {
+          tools: ['mcp__warehouse__query'],
+          executionAllowedTools: ['mcp__warehouse__query'],
+          requiredTools: ['mcp__warehouse__query'],
+        };
+        try {
+          const result = await manager.createAgentHeadless(
+            agentConfig,
+            mockConfig,
+            {
+              toolConfigResolver: async (context) => {
+                expect(discovery).toHaveBeenCalledOnce();
+                expect(context.getToolRegistry()).toBe(discoveredRegistries[0]);
+                expect(context.getToolRegistry()).not.toBe(mockToolRegistry);
+                return narrowed;
+              },
+            },
+          );
+          expect(
+            destructureAgentHeadlessCall(
+              mockAgentHeadlessCreate.mock.calls.at(-1)!,
+            ).toolConfig,
+          ).toEqual(narrowed);
+          await result.dispose();
+          expect(stop).toHaveBeenCalledOnce();
+        } finally {
+          discovery.mockRestore();
+          stop.mockRestore();
+        }
+      });
+
+      it('stops the per-agent registry when post-discovery narrowing rejects', async () => {
+        const discovery = vi
+          .spyOn(ToolRegistry.prototype, 'discoverToolsForServer')
+          .mockResolvedValue();
+        const stop = vi
+          .spyOn(ToolRegistry.prototype, 'stop')
+          .mockResolvedValue();
+        mockAgentHeadlessCreate.mockClear();
+        try {
+          await expect(
+            manager.createAgentHeadless(agentConfig, mockConfig, {
+              toolConfigResolver: async () => {
+                throw new Error('agent({tools}): no tools at all');
+              },
+            }),
+          ).rejects.toThrow('no tools at all');
+          expect(stop).toHaveBeenCalledOnce();
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        } finally {
+          discovery.mockRestore();
+          stop.mockRestore();
+        }
       });
     });
 

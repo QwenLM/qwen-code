@@ -104,6 +104,9 @@ export interface ToolConfig {
    */
   executionAllowedTools?: string[];
 
+  /** A per-call narrowing must retain at least one of these tools after filtering. */
+  requiredTools?: string[];
+
   /**
    * Optional list of tool names to exclude from the agent's tool pool.
    * Applied after the allowlist and MCP bypass. Supports MCP server-level

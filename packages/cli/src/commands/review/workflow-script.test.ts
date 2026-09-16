@@ -47,6 +47,7 @@ const KNOWN_AGENT_OPTS = [
   'agentType',
   'stallMs',
   'workingDir',
+  'tools',
   'disallowedTools',
 ];
 
@@ -372,13 +373,20 @@ describe('the review harness option mirror', () => {
       'export const meta = {',
       "  name: 'probe',",
       '};',
-      "await agent('p', { effort: 'low', disallowedTools: ['write_file'] });",
+      "await agent('p', { effort: 'low', tools: ['read_file'], disallowedTools: ['write_file'] });",
       "return 'ok';",
     ].join('\n');
     const { result, dispatched } = await runScript(script, async () => 'done');
     expect(result).toBe('ok');
     expect(dispatched).toEqual([
-      { prompt: 'p', opts: { effort: 'low', disallowedTools: ['write_file'] } },
+      {
+        prompt: 'p',
+        opts: {
+          effort: 'low',
+          tools: ['read_file'],
+          disallowedTools: ['write_file'],
+        },
+      },
     ]);
   });
 });

@@ -22,6 +22,7 @@ import {
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
+import type { ToolConfig } from './agent-types.js';
 import type {
   ApprovalMode,
   Config,
@@ -3550,6 +3551,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     transcriptDir?: string;
     /** What `getAllTools()` answers; an allowlist expands MCP patterns here. */
     registeredTools?: string[];
+    agentTools?: Array<{
+      name: string;
+      serverName: string;
+      serverToolName: string;
+    }>;
+    mcpTools?: Array<{
+      displayName?: string;
+      name: string;
+      serverName: string;
+      serverToolName: string;
+    }>;
+
     findSubagentByName?: (name: string) => Promise<{
       name: string;
       description: string;
@@ -3600,7 +3613,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       copyDiscoveredToolsFrom: () => {},
       registerTool: () => {},
       warmAll: async () => {},
-      getAllTools: () => registeredToolNames.map((name) => ({ name })),
+      getAllTools: () => [
+        ...registeredToolNames.map((name) => ({
+          name,
+          ...(name.startsWith('mcp__')
+            ? {
+                serverName: name.split('__')[1],
+                serverToolName: name.split('__').slice(2).join('__'),
+              }
+            : {}),
+        })),
+        ...(opts.mcpTools ?? []),
+      ],
     };
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
@@ -3651,7 +3675,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           names.filter(
             (name) =>
               !name.startsWith('mcp__') &&
-              resolveBuiltinToolName(name) === undefined,
+              resolveBuiltinToolName(name) === undefined &&
+              !fakeRegistry
+                .getAllTools()
+                .some(
+                  (tool) =>
+                    tool.name === name ||
+                    ('displayName' in tool && tool.displayName === name),
+                ),
           ),
         createAgentHeadless: async (
           subagentConfig: {
@@ -3666,12 +3697,35 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             runConfigOverrides?: unknown;
             modelConfigOverrides?: unknown;
             executionAllowedTools?: string[];
+            toolConfigResolver?: (
+              context: Config,
+              tools: ToolConfig,
+            ) => Promise<ToolConfig>;
             taskName?: string;
             subagentId?: string;
           },
         ) => {
+          const runtimeTools = opts.agentTools ?? fakeRegistry.getAllTools();
+          const resolved = await options?.toolConfigResolver?.(
+            {
+              getToolRegistry: () => ({
+                warmAll: async () => {},
+                getAllTools: () => runtimeTools,
+              }),
+            } as unknown as Config,
+            {
+              tools: (subagentConfig.tools ?? ['*']).map(
+                (name) => resolveBuiltinToolName(name) ?? name,
+              ),
+              disallowedTools: subagentConfig.disallowedTools?.map(
+                (name) => resolveBuiltinToolName(name) ?? name,
+              ),
+            },
+          );
           const call: StubSubagentCall = {
-            config: subagentConfig,
+            config: resolved
+              ? { ...subagentConfig, tools: resolved.tools as string[] }
+              : subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
             runtimeContext,
             runtimeTargetDir: runtimeContext.getTargetDir(),
@@ -3681,7 +3735,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               modelConfigOverrides: options?.modelConfigOverrides,
-              executionAllowedTools: options?.executionAllowedTools,
+              executionAllowedTools:
+                resolved?.executionAllowedTools ??
+                options?.executionAllowedTools,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -4524,7 +4580,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         tools: ['run_shell_command'],
       }),
     ).rejects.toThrow(
-      /none of "run_shell_command" is among the tools agent type 'Scanner' allows \("read_file"\)/,
+      /none of "run_shell_command" is among the tools the agent type allows \("read_file"\)/,
     );
     expect(calls).toHaveLength(0);
   });
@@ -4580,6 +4636,147 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       'read_file',
     ]);
   });
+
+  it.each(['mcp__ext', 'mcp__ext__*'])(
+    'keeps raw MCP server identity for %s',
+    async (pattern) => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: ['mcp__ext__list'],
+        mcpTools: [
+          {
+            name: 'mcp__ext__github__delete_hash',
+            serverName: 'ext::github',
+            serverToolName: 'delete',
+          },
+        ],
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      await createProductionDispatch(config)('query', { tools: [pattern] });
+      expect(calls[0]!.config.tools).toEqual(['mcp__ext__list']);
+    },
+  );
+
+  it('resolves an agent-only MCP server after discovery', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: ['read_file'],
+      agentTools: [
+        {
+          name: 'mcp__warehouse__query',
+          serverName: 'warehouse',
+          serverToolName: 'query',
+        },
+      ],
+      findSubagentByName: async () => ({
+        name: 'warehouse',
+        description: 'query',
+        systemPrompt: 'query',
+        level: 'project',
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(config)('query', {
+      agentType: 'warehouse',
+      tools: ['mcp__warehouse'],
+    });
+    expect(calls[0]!.config.tools).toEqual(['mcp__warehouse__query']);
+  });
+
+  it('subtracts a registered MCP display-name deny', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: [],
+      mcpTools: [
+        {
+          name: 'mcp__warehouse__query',
+          displayName: 'query (warehouse MCP Server)',
+          serverName: 'warehouse',
+          serverToolName: 'query',
+        },
+      ],
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await expect(
+      createProductionDispatch(config)('query', {
+        tools: ['mcp__warehouse'],
+        disallowedTools: ['query (warehouse MCP Server)'],
+      }),
+    ).rejects.toThrow(/is denied for this dispatch/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('uses replacement MCP tools rather than the host server snapshot', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: ['mcp__warehouse__old'],
+      agentTools: [
+        {
+          name: 'mcp__warehouse__new',
+          serverName: 'warehouse',
+          serverToolName: 'new',
+        },
+      ],
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(config)('query', {
+      tools: ['mcp__warehouse'],
+    });
+    expect(calls[0]!.config.tools).toEqual(['mcp__warehouse__new']);
+    expect(calls[0]!.options?.executionAllowedTools).toEqual([
+      'mcp__warehouse__new',
+    ]);
+  });
+
+  it('bounds the allowlist by raw agent-type server identity', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: ['mcp__ext__list'],
+      mcpTools: [
+        {
+          name: 'mcp__ext__github__delete_hash',
+          serverName: 'ext::github',
+          serverToolName: 'delete',
+        },
+      ],
+      findSubagentByName: async () => ({
+        name: 'scanner',
+        description: 'scan',
+        systemPrompt: 'scan',
+        level: 'project',
+        tools: ['mcp__ext'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await expect(
+      createProductionDispatch(config)('query', {
+        agentType: 'scanner',
+        tools: ['mcp__ext::github'],
+      }),
+    ).rejects.toThrow(/no tools at all/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects the undocumented all-server wildcard', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: ['mcp__warehouse__query'],
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await expect(
+      createProductionDispatch(config)('query', { tools: ['mcp__*'] }),
+    ).rejects.toThrow(/matches no tool/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([[], 'read_file', [' read_file'], [42], ['']])(
+    'rejects malformed host allowlist %j',
+    async (tools) => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      await expect(
+        createProductionDispatch(config)('query', {
+          tools: tools as unknown as string[],
+        }),
+      ).rejects.toThrow(/must (name at least one tool|be an array)/);
+      expect(calls).toHaveLength(0);
+    },
+  );
 
   it('refuses an MCP pattern that matches no registered tool', async () => {
     const { config, calls } = fakeConfigWithMgr({

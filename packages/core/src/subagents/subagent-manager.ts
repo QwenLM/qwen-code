@@ -895,6 +895,11 @@ export class SubagentManager {
        * normalization untouched.
        */
       executionAllowedTools?: string[];
+      /** Resolve a per-call narrowing after the agent's MCP discovery. */
+      toolConfigResolver?: (
+        context: Config,
+        tools: ToolConfig,
+      ) => Promise<ToolConfig>;
       /** Business/task name used for local per-invocation usage labels. */
       taskName?: string;
       /** Stable id used to keep one invocation grouped across resume. */
@@ -992,6 +997,7 @@ export class SubagentManager {
           ['runtimeAuthOverrides', options?.runtimeAuthOverrides],
           ['toolConfigOverride', options?.toolConfigOverride],
           ['executionAllowedTools', options?.executionAllowedTools],
+          ['toolConfigResolver', options?.toolConfigResolver],
           [
             'promptConfigOverrides.renderedSystemPrompt',
             options?.promptConfigOverrides?.renderedSystemPrompt,
@@ -1076,7 +1082,7 @@ export class SubagentManager {
       const executionAllowedTools =
         options?.executionAllowedTools ??
         configuredToolConfig?.executionAllowedTools;
-      const toolConfig: ToolConfig = {
+      let toolConfig: ToolConfig = {
         tools: configuredToolConfig?.tools ?? ['*'],
         ...(executionAllowedTools !== undefined
           ? {
@@ -1143,6 +1149,12 @@ export class SubagentManager {
       }
 
       try {
+        if (options?.toolConfigResolver) {
+          toolConfig = await options.toolConfigResolver(
+            subagentContext,
+            toolConfig,
+          );
+        }
         const subagent = await AgentHeadless.create(
           config.name,
           subagentContext,

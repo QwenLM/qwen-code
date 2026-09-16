@@ -1244,6 +1244,52 @@ describe('AgentCore.prepareTools', () => {
     };
   }
 
+  it.each(['todo_write', 'workflow', 'image_gen'])(
+    'rejects an empty required pool after filtering %s',
+    async (name) => {
+      const { core } = buildAgentForTools(
+        {
+          tools: [name, 'structured_output'],
+          requiredTools: [name],
+        },
+        [
+          { name: 'todo_write' },
+          { name: 'workflow' },
+          { name: 'structured_output' },
+        ],
+      );
+      await expect(
+        runWithAgentContext('workflow-subagent', () => core.prepareTools()),
+      ).rejects.toThrow(/no tools at all/);
+    },
+  );
+
+  it('accepts usable tools beside filtered control-plane entries', async () => {
+    const { core } = buildAgentForTools(
+      {
+        tools: ['read_file', 'todo_write'],
+        requiredTools: ['read_file', 'todo_write'],
+      },
+      [{ name: 'read_file' }, { name: 'todo_write' }],
+    );
+    await expect(
+      runWithAgentContext('workflow-subagent', () => core.prepareTools()),
+    ).resolves.toEqual([{ name: 'read_file' }]);
+  });
+
+  it('rejects a required pool hidden by the eager allowlist', async () => {
+    const { core, isPermissionDeferredSpy, isDeferredAndHiddenSpy } =
+      buildAgentForTools(
+        { tools: ['read_file'], requiredTools: ['read_file'] },
+        [{ name: 'read_file' }],
+      );
+    isPermissionDeferredSpy.mockReturnValue(true);
+    isDeferredAndHiddenSpy.mockReturnValue(true);
+    await expect(
+      runWithAgentContext('workflow-subagent', () => core.prepareTools()),
+    ).rejects.toThrow(/no tools at all/);
+  });
+
   it('wildcard tools:["*"] inherits deferred tools (passes includeDeferred: true)', async () => {
     const fnDecls: FunctionDeclaration[] = [
       { name: 'core_tool', description: 'core' } as FunctionDeclaration,

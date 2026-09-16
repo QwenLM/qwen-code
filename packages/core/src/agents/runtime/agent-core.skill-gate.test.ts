@@ -310,6 +310,7 @@ describe('AgentCore skill-gate inputs', () => {
         {
           tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE],
           executionAllowedTools: [ToolNames.READ_FILE],
+          requiredTools: [ToolNames.READ_FILE],
         },
       );
 
@@ -329,6 +330,27 @@ describe('AgentCore skill-gate inputs', () => {
           }
         ).codeModeAllowedToolNames,
       ).toEqual([ToolNames.READ_FILE]);
+    });
+
+    it('refuses code mode when a required pool has no callable bindings', async () => {
+      const config = makeFakeConfig({ codeModeOnly: true });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.TODO_WRITE }));
+      const core = new AgentCore(
+        'empty-code-mode',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        {
+          tools: [ToolNames.TODO_WRITE],
+          executionAllowedTools: [ToolNames.TODO_WRITE],
+          requiredTools: [ToolNames.TODO_WRITE],
+        },
+      );
+      await expect(core.prepareTools()).rejects.toThrow(/no tools at all/);
     });
 
     it('narrows an inherited fork exec surface to its execution allowlist', async () => {
