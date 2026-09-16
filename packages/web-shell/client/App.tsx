@@ -1199,6 +1199,8 @@ export interface WebShellProps {
   onWorkspaceFileOpen?: (path: string) => void;
   /** Open a completed Insight report in a host-native surface. */
   onInsightReportOpen?: (path: string) => void;
+  /** Open context usage details in the host instead of the built-in panel. */
+  onContextUsageOpen?: (sessionId: string) => void;
   /**
    * Controls which turn output cards appear below messages. Defaults to all.
    */
@@ -3052,6 +3054,7 @@ export function App({
   onFileReviewOpen,
   onWorkspaceFileOpen,
   onInsightReportOpen,
+  onContextUsageOpen,
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
@@ -5400,6 +5403,10 @@ export function App({
       sourceSessionActions?: DaemonSessionActions,
       closeWithPane = false,
     ) => {
+      if (onContextUsageOpen) {
+        onContextUsageOpen(sourceSessionId);
+        return;
+      }
       const tab: ArtifactPanelTab = {
         id: `context-usage:${sourceSessionId}`,
         kind: 'context_usage',
@@ -5421,7 +5428,7 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [getDefaultReviewPanelWidth, onContextUsageOpen, t],
   );
   const openCurrentContextUsagePanel = useCallback(() => {
     if (connection.sessionId)
