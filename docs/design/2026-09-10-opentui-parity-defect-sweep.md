@@ -565,8 +565,8 @@ recomputed on every render, because answering changes the marks.
 ink's overhead terms were taken line for line. The width they are subtracted
 from was carried over too, and a review round found that second number wrong:
 it belongs to the box ink draws the row in, and this row sits in another one,
-which spends two columns of margin and one of padding on each side — the
-padding already being one of the overheads above. Charging that padding twice
+which spends two columns of margin on the left and one of padding on each side —
+the padding already being one of the overheads above. Charging that padding twice
 and ink's transcript indent besides took eight columns off a row that spends
 four, so a header was ellipsized where the row still had room. That the
 corrected base is the row's real width, and not merely a larger number, was
@@ -899,6 +899,18 @@ those did not pin was the timer itself — a row that went on ticking but kept
 printing the same frame passed — so the parked test now asserts that no interval
 is left running, which is the cost this decision measured on a machine.
 
+The row's elapsed counter needed the same treatment, and the obvious wiring is
+wrong. The shared timer zeroes what it has accumulated on a false-to-true edge of
+its active flag, so handing it `streaming && !waiting` — which is what dropping the
+suffix suggests — restarts the count when the parked call resumes, and a turn that
+has been running for half a minute reports itself as four seconds old. It is handed
+the timer's separate paused flag instead, which holds the accumulated time and
+carries on from it. A test pins the difference: it parks a call three seconds in,
+holds it for thirty, resumes it and reads four seconds one tick later, and the
+wiring above fails that test with `(1s` where it asserts `(4s`. The row prints no
+elapsed time while parked, as recorded above, so this is what the user sees once
+they have answered rather than while the dialog is open.
+
 Re-running the full matrix afterwards confirms it on the machine rather than in a
 test: eleven checkpoints taken while a dialog is parked each shed one row on both
 sides, from four divergent rows to three, and the rows left there are the
@@ -1151,9 +1163,10 @@ The caret lands in the same column both ways, and what is displayed took this
 shape before the caret existed at all — ink showing a value its flow has already
 discarded is recorded as a follow-up rather than reproduced here.
 
-Coverage is twenty-three new unit tests in three suites — thirteen of them the
-model compared against ink, the rest the fields that use it — plus eleven
-mutations, each failing the tests that own the behaviour taken away: a left
+Coverage is the model's own suite — fifteen new tests in a file this branch adds
+whole, each compared against ink — plus the tests of the fields that use it, counted
+under Decisions 33 and 37, and eleven mutations, each failing the tests that own the
+behaviour taken away: a left
 arrow that moves nothing, the context-window field's typing branch, the two
 end-of-line jumps, forward delete, a modified Delete that erases a character
 instead of passing through, ctrl+W, a row that stops re-mounting, a bare End
@@ -1236,13 +1249,12 @@ field and tick a list row — the two branches are chosen by a focus the batch i
 cannot change — and a manual tab move puts the cursor on the first row, which is
 the free-text row only for a question with no predefined options, which the tool's
 own validation rejects. They are kept so that a handler has exactly one source for
-each fact. Two siblings are recorded instead of fixed, both still read from state:
-whether a multi-select's typed entry counts, so a read that types into the
-free-text row, steps off it and submits leaves that entry out of the answer; and
-the picked answers behind the review tab's submit, so a read that answers a
-question, steps to the review tab and submits leaves that answer out. Each needs
-three keystrokes in one read to show, which no scenario on either leg produces;
-closing them adds one mirror each and joins the follow-ups.
+each fact. Two siblings of the same family were closed rather than recorded: whether
+a multi-select's typed entry counts, and the picked answers behind the review tab's
+submit. Each took one mirror, and each is pinned by a test that puts the three
+keystrokes in one read — type into a multi-select's free-text row, commit it, submit
+from the review tab; answer a question, walk to the review tab, submit there. No
+scenario on either leg produces that ordering, so both rest on the unit suite alone.
 
 This change stops at the handlers the round was asked about, and the class is
 wider than they are. Every other list in this renderer reads its cursor the same
@@ -1257,13 +1269,16 @@ arrow moves one row per read instead of one per key. Closing it belongs to those
 widgets together rather than to either dialog fixed here, and is recorded under
 Follow-up.
 
-Coverage is fourteen new unit tests, five in the authentication suite and nine
-in the confirmation dialog's, and eleven mutations, nine of which fail the tests that
-own the behaviour taken away: a line editor back to a render snapshot, an Enter
+Coverage is sixteen new unit tests, five in the authentication suite and eleven
+in the confirmation dialog's, and thirteen mutations, eleven of which fail the tests
+that own the behaviour taken away: a line editor back to a render snapshot, an Enter
 submitting the prop value, the models step's check set read twice over (the tick
 and the submission) with its field's live text read at the submission as well, a
 question handler working from rendered state, the option reads of the Space
-and Enter branches, and a burst that moves tab editing the question it left behind.
+and Enter branches, a burst that moves tab editing the question it left behind, the
+picked-answer mirror behind the review tab's submit — which without it fails the
+answer-lock test of Decision 37 as well, since both read an answer the same burst
+recorded — and the typed-entry mirror a multi-select's submit asks for.
 The two surviving mutations are the unreachable reads above.
 What no evidence reaches is a machine: the acceptance harness types one character
 per write on purpose, so a keystroke lands in its own read, and it never pastes
@@ -1393,7 +1408,17 @@ whose auth failed a step later — is editable again on the next render.
 
 What stays un-latched is deliberate. The question dialog's tab arrows keep working
 inside the pause Decision 34 protects, because there the keystroke is the user's answer
-to "which question am I on"; only the field stops taking keys, not the dialog.
+to "which question am I on"; the field's latch stops the field, not the dialog around it.
+
+The dialog takes one stop of its own there, on answers rather than navigation, for as
+long as a swap is armed. The field's
+own latch reaches only its insert branch, and the row the armed swap settled is still
+drawn and still owns the keys, so the rest of one read answered the same question a
+second time and quietly replaced the answer already recorded — a digit on the option
+branch, or a Space that a multi-select rebuilds its answer from at submit. Navigation is
+left alone, and so is every key after the swap runs. The last question tab arms no swap
+at all, clamped as it is, so it gets no lock; a trailing key there still lands on the row
+it reaches.
 
 ink cannot reach this leak. Its buffer notifies the parent from an effect run at commit
 (`text-buffer.ts`), so a keystroke handled after the Enter never gets a commit where its
@@ -1401,14 +1426,17 @@ step is still mounted, and its text never reaches the state the plan is built fr
 writes through the setter synchronously, which is what makes a mid-read submit read the
 live text at all, so it needs the explicit stop.
 
-Coverage is five new unit tests, four in the authentication suite and one in the
-confirmation dialog's, and five mutations (M15–M19). Each fails exactly the test that
+Coverage is seven new unit tests, four in the authentication suite and three in the
+confirmation dialog's, and seven mutations (M15–M21). Each fails exactly the test that
 owns the behaviour taken away: the endpoint and key field's guard, the guard armed on a
-refused Enter as well, the model-ID step's guard, the advanced-config step's guard, and
-the settled clause of the free-text row's burst-ownership guard. M2's anchor moved with
-the line it rewrote. Nothing here was reached on a machine, for the reason recorded in
-Decision 33: the acceptance harness writes one character per write and never pastes into
-these dialogs.
+refused Enter as well, the model-ID step's guard, the advanced-config step's guard, the
+settled clause of the free-text row's burst-ownership guard, the answer lock's guard on
+the answer path — which without it lets a trailing digit report `"staging"` over the
+`"xyz"` the Enter it trailed had just recorded — and the same lock's clause on the Space
+branch, which without it lets a trailing tick widen an answer already given. M2's anchor
+moved with the line it rewrote. Nothing here was reached on a machine, for the reason
+recorded in Decision 33: the acceptance harness writes one character per write and never
+pastes into these dialogs.
 
 ## Decision 38 — the transcript region is not a focus target
 
@@ -1598,11 +1626,12 @@ What was verified, and how far the verification reaches:
   at the suite's own five-second wait, all thirteen among the guarded ones. Six runs
   at this head gave five copies of that same set and one run twelve of its names, so
   the count moves with the machine while no failure lands outside the guarded
-  family. A one-variable control says this round's edit to the shared provider-setup
-  hook is not what does it: the same thirteen names failed, in the same list, with
-  that file back at the version it has on `origin/main` — which is also the version
-  this branch's commits leave it at, read off an empty diff against that ref. What
-  was not observed is a clean upstream checkout in this environment: a separate
+  family. A one-variable control says this round's edit to the shared
+  provider-setup hook is not what does it: the same thirteen names failed, in the
+  same list, with `packages/cli/src/ui/auth/useProviderSetupFlow.ts` — the one
+  file that edit touches, and the one this suite reaches — restored to its
+  `origin/main` version for the run, the tree verified byte-identical after it.
+  What was not observed is a clean upstream checkout in this environment: a separate
   worktree stops at the workspace build prerequisite before any test runs, so "these
   fail there too" is inferred from the arms above rather than measured.
 - **The thought toggle's keystroke is not covered at all.** The entry's own test
@@ -1762,15 +1791,6 @@ What was verified, and how far the verification reaches:
   scope for a sweep that measures itself against ink's behaviour as it stands;
   it is recorded here so the divergence between the two renderers is not
   re-reported as a porting gap.
-- Two reads of the answer still come from rendered state. A single stdin read that
-  types into a multi-select's free-text row, steps off it and submits can leave that
-  entry out of the answer, because the branch deciding whether the text counts
-  consults what the last render drew rather than a mirror; and one that answers a
-  question, steps to the review tab and submits can leave that answer out, for the
-  same reason on the picked set. Decision 33 mirrors the four pieces of state that
-  handler reads to place a keystroke; these are the fifth and sixth, recorded rather
-  than fixed because no scenario on either leg can put three keystrokes into one
-  read, so either change would ship unobservable.
 - The stale-cursor class is open everywhere except the two handlers Decision 33
   touched. Read from the source: the shared select hook, the arena dialog's model
   list, the composer's completion rows, and the auth wizard's four list steps plus
