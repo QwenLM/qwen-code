@@ -5660,6 +5660,12 @@ export function App({
               ...sessionActions,
               getTasks: () =>
                 workspace.client.sessionTasks(tab.sourceSessionId),
+              getTaskOutput: (taskId, kind) =>
+                workspace.client.sessionTaskOutput(
+                  tab.sourceSessionId,
+                  taskId,
+                  kind,
+                ),
               cancelTask: (taskId, kind) =>
                 workspace.client.sessionTaskCancel(
                   tab.sourceSessionId,

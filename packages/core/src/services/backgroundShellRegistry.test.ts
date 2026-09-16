@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   constants as fsConstants,
@@ -22,8 +23,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
+  MAX_TASK_OUTPUT_TAIL_BYTES,
+  readTaskOutputTail,
   MAX_RETAINED_TERMINAL_SHELLS,
   statusFilePathFor,
+  stripOutputControlChars,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
@@ -68,6 +72,274 @@ function makeTempDir(): string {
   tmpDirs.push(dir);
   return dir;
 }
+
+describe('readTaskOutputTail', () => {
+  it('returns the sanitized tail and reports truncation', () => {
+    const outputFile = makeOutputFile('prefix\u001b[31msafe\u001b[0m-tail');
+
+    expect(readTaskOutputTail(outputFile, 5)).toEqual({
+      text: '-tail',
+      truncated: true,
+    });
+  });
+
+  it('strips whole ANSI sequences instead of just their ESC byte', () => {
+    const outputFile = makeOutputFile('\u001b[31mred\u001b[0m done');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'red done',
+      truncated: false,
+    });
+  });
+
+  it('keeps real lines after an OSC leader whose terminator was lost', () => {
+    // An OSC payload can never cross a newline, so a leader whose BEL was
+    // lost can no longer swallow the real lines that follow it; the
+    // malformed leader is stripped whole, payload included, and only the
+    // stray BEL is removed from what remains.
+    const outputFile = makeOutputFile(
+      '\u001b]2;stale line1\nline2\nline3\n\u0007after\n',
+    );
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: '\nline2\nline3\nafter',
+      truncated: false,
+    });
+  });
+
+  it('strips an unterminated string leader whose payload reaches a newline', () => {
+    // A DCS/SOS/PM/APC payload can never cross a newline, so a leader
+    // whose terminator was lost is stripped whole at the line end
+    // instead of leaking its leader byte and payload as text.
+    const outputFile = makeOutputFile('\u001bPq#0;2;0;0;0!~\nreal line\n');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: '\nreal line',
+      truncated: false,
+    });
+  });
+
+  it('strips BEL-terminated string sequences whole', () => {
+    // BEL is a valid string terminator: the payload stops at it and the
+    // real output after it survives.
+    const outputFile = makeOutputFile('AAA\u001bP0;title\u0007BBB\n');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'AAABBB',
+      truncated: false,
+    });
+  });
+
+  it('deletes only the ESC of a residual lone ESC, keeping the byte after it', () => {
+    // A bare ESC that survives to the capture file (a child writing one,
+    // or the tail window opening mid-escape) is not an Fe leader, so the
+    // per-character backstop removes just the ESC and the real character
+    // that followed it survives.
+    const outputFile = makeOutputFile('alpha\u001bW313 beta\n');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'alphaW313 beta',
+      truncated: false,
+    });
+  });
+
+  it('strips CSI byte-class forms, string payloads, and Fe escapes', () => {
+    // ECMA-48 parameter bytes (private and colon sub-parameters) and
+    // intermediate bytes, DCS/SOS/PM/APC payloads with their ST, and
+    // two-byte Fe escapes (charset designations, RIS).
+    expect(
+      readTaskOutputTail(
+        makeOutputFile('build ok\n\u001b[1 q\u001b[>4;2mvim exited\n'),
+        MAX_TASK_OUTPUT_TAIL_BYTES,
+      ),
+    ).toEqual({ text: 'build ok\nvim exited', truncated: false });
+    expect(
+      readTaskOutputTail(
+        makeOutputFile('abc\u001bPq#0;2;0;0;0!~\u001b\\def'),
+        MAX_TASK_OUTPUT_TAIL_BYTES,
+      ),
+    ).toEqual({ text: 'abcdef', truncated: false });
+    expect(
+      readTaskOutputTail(
+        makeOutputFile('plain\n\u001b(B)done\n'),
+        MAX_TASK_OUTPUT_TAIL_BYTES,
+      ),
+    ).toEqual({ text: 'plain\n)done', truncated: false });
+  });
+
+  it('collapses carriage-return redraw frames to the latest frame per line', () => {
+    const outputFile = makeOutputFile(
+      'frame 10%\rframe 45%\rframe 99%\ndone\n',
+    );
+
+    // Collapsing redraw frames discards real bytes inside the served
+    // window, so the tail reports the loss instead of certifying the
+    // window as complete.
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'frame 99%\ndone',
+      truncated: true,
+    });
+  });
+
+  it('keeps CRLF newlines as line breaks and a redraw trailing the file', () => {
+    const outputFile = makeOutputFile('first\r\nsecond\rthird');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'first\nthird',
+      truncated: true,
+    });
+  });
+
+  it('flags collapsed carriage-return records as truncated', () => {
+    // Bare CR as a record separator (a tr '\n' '\r' log, a serial or
+    // device logger): the collapse keeps only the final record, so the
+    // flag must say the window is not everything the command wrote.
+    const outputFile = makeOutputFile('rec 1\rrec 2\rrec 3');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'rec 3',
+      truncated: true,
+    });
+  });
+
+  it('serves the real frame when a redraw erases it with a whitespace pad', () => {
+    // A child clearing a progress line by padding it with spaces leaves a
+    // final frame that is all whitespace: the pad is not the frame the
+    // redraw drew, so the collapse must keep the real frame. When the pad
+    // is the window's only content a length-only check returns undefined,
+    // reporting a task that produced output as a task that produced none.
+    const outputFile = makeOutputFile('working\r ');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'working',
+      truncated: false,
+    });
+  });
+
+  it('pins the multi-segment carriage-return collapse shape', () => {
+    // Two segments collapsing in one window: the first drops a real frame
+    // (truncated), the second ends on a lone CR and falls back to the
+    // frame it drew.
+    const outputFile = makeOutputFile('a\rb\r\nc\r');
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'b\nc',
+      truncated: true,
+    });
+  });
+
+  it('reconstitutes the sequence when the served window opens mid-escape', () => {
+    // The window opens one byte after an ESC, between the leader and its
+    // parameters: the look-back prepends the leader so the stripper
+    // removes the whole sequence and the real first line survives,
+    // instead of dropping the line or serving the leaderless residue.
+    const tail = '[31mBuild failed\n' + 'y'.repeat(60) + '\n';
+    const outputFile = makeOutputFile('pad\u001b' + tail);
+
+    expect(readTaskOutputTail(outputFile, Buffer.byteLength(tail))).toEqual({
+      text: 'Build failed\n' + 'y'.repeat(60),
+      truncated: true,
+    });
+  });
+
+  it.each([2, 9])(
+    'reconstitutes the sequence when the window opens %i bytes into it',
+    (k) => {
+      // The capture writer strips per pipe chunk, so a reconstituted CSI
+      // can sit anywhere in the file and the window boundary sweeps every
+      // byte position of it as the file grows: no interior position may
+      // serve the sequence's parameters as the tail's first line.
+      const content =
+        'x'.repeat(40) + '\u001b[38;5;208mBuild failed\n' + 'y'.repeat(80);
+      const outputFile = makeOutputFile(content);
+      const maxBytes = Buffer.byteLength(content) - 40 - k;
+
+      expect(readTaskOutputTail(outputFile, maxBytes)).toEqual({
+        text: 'Build failed\n' + 'y'.repeat(80),
+        truncated: true,
+      });
+    },
+  );
+
+  it('serves a window with no line break that opens right after an ESC', () => {
+    // One long record with no CR or LF anywhere: dropping to the first
+    // break would empty the window and report a task that produced a full
+    // window of output as one that produced none.
+    const n = 100;
+    const outputFile = makeOutputFile('pad\u001b' + 'x'.repeat(n));
+
+    expect(readTaskOutputTail(outputFile, n)).toEqual({
+      text: 'x'.repeat(n),
+      truncated: true,
+    });
+  });
+
+  it('does not start the served tail on a blank line when the cut lands on a CRLF', () => {
+    const tail = '[0m\r\nsecond line';
+    const outputFile = makeOutputFile('pad\u001b' + tail);
+
+    expect(readTaskOutputTail(outputFile, Buffer.byteLength(tail))).toEqual({
+      text: 'second line',
+      truncated: true,
+    });
+  });
+
+  it('strips a CSI leader cut by a line break whole', () => {
+    // A log line cut mid-CSI: the sequence can never continue past the
+    // line break, so the leader and its parameters strip whole instead of
+    // leaking as the next line's text.
+    const outputFile = makeOutputFile(
+      'build ok\n\u001b[38;5;208\nERROR: real\n',
+    );
+
+    expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
+      text: 'build ok\n\nERROR: real',
+      truncated: false,
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'returns undefined instead of blocking when the output path is a FIFO',
+    () => {
+      // Without O_NONBLOCK the no-follow open blocks in open(2) until a
+      // writer appears, so this case can only go red by hanging — that is
+      // the witness for the daemon-thread DoS a planted FIFO causes.
+      const dir = makeTempDir();
+      const fifoPath = join(dir, 'shell.output');
+      execFileSync('mkfifo', [fifoPath]);
+
+      expect(
+        readTaskOutputTail(fifoPath, MAX_TASK_OUTPUT_TAIL_BYTES),
+      ).toBeUndefined();
+    },
+  );
+});
+
+describe('stripOutputControlChars', () => {
+  it('strips two-byte escapes with no intermediate byte', () => {
+    // SS2/SS3 (`ESC N` / `ESC O`), the Fe single functions (IND, NEL,
+    // HTS, RI, DECID), the DEC private pairs (DECBI/DECFI, DECSC/DECRC,
+    // DECKPAM/DECKPNM), RIS, and the locking shifts: an escape with no
+    // intermediate byte used to leave its final letter behind as readable
+    // text.
+    expect(stripOutputControlChars('A\u001bOAB')).toBe('AAB');
+    expect(stripOutputControlChars('a\u001bc\u001b7b\u001bMc\n')).toBe('abc\n');
+    expect(
+      stripOutputControlChars(
+        '\u001bD\u001bE\u001bH\u001bZ\u001bN\u001b6\u001b8\u001b9\u001b=\u001b>\u001bn\u001bo\u001b|\u001b}\u001b~x',
+      ),
+    ).toBe('x');
+  });
+
+  it('deletes only the ESC of a residual lone ESC that leads no assigned escape', () => {
+    // Unassigned finals are not escapes: a bare ESC before one costs only
+    // the ESC byte, so a window that opens right after a stray ESC keeps
+    // the real byte that followed it.
+    expect(stripOutputControlChars('alpha\u001bW313 beta\n')).toBe(
+      'alphaW313 beta\n',
+    );
+  });
+});
 
 function makeEntry(
   overrides: Partial<ShellTaskRegistration> = {},
@@ -605,7 +877,7 @@ describe('BackgroundShellRegistry', () => {
     );
 
     it('skips output-tail when the output file does not exist', () => {
-      // Guards the catch branch in `readOutputTail`. If the try/catch
+      // Guards the catch branch in `readTaskOutputTail`. If the try/catch
       // ever regresses to throwing, `complete()` would propagate the
       // error and the entry would never reach a terminal status.
       const reg = new BackgroundShellRegistry();
@@ -628,7 +900,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('skips output-tail when outputPath is a directory (not a regular file)', () => {
-      // Guards the `!stat.isFile()` early-return in `readOutputTail`.
+      // Guards the `!stat.isFile()` early-return in `readTaskOutputTail`.
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const dir = makeTempDir();
@@ -647,7 +919,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('skips output-tail when the output file is empty (stat.size === 0)', () => {
-      // Guards the `stat.size <= 0` early-return in `readOutputTail`.
+      // Guards the `stat.size <= 0` early-return in `readTaskOutputTail`.
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const outputPath = makeOutputFile('');

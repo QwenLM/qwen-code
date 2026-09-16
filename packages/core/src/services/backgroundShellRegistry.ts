@@ -35,13 +35,61 @@ import { escapeXml } from '../utils/xml.js';
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
+export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
+// How far ahead of the served window readTaskOutputTail scans for the
+// leader of an escape sequence the window opens inside. A sequence never
+// crosses a line break, so the scan also stops at the previous line
+// break; the byte cap keeps the extra read bounded when one over-long
+// line fills the whole window.
+const MAX_TAIL_SEQUENCE_LOOKBACK_BYTES = 4096;
 
-function stripOutputControlChars(text: string): string {
+/* eslint-disable no-control-regex */
+// Tail-local ECMA-48 byte classes: a string sequence can never cross a
+// control byte or a newline, so an unterminated leader (a log line cut
+// mid-escape, a child killed mid-sequence) swallows at most the
+// remainder of its own line instead of every real line up to the next
+// terminator. Scoped to this strip rather than the shared
+// TERMINAL_*_REGEX constants, whose banner/label consumers replace with
+// a space and pin the narrower grammar.
+// The OSC and string rules share one shape: BEL is a terminator and
+// outside the payload class, and the newline lookahead strips an
+// unterminated leader whole, payload included, instead of leaking it as
+// text. In the terminator group `\x1b\\` must stay first: putting the
+// lookahead ahead of it matches at the ST's own ESC and leaks the
+// backslash as text. The CSI and Fe rules carry the same newline
+// lookahead and also accept end-of-input as a terminator, so a leader
+// cut by a line break, a teardown chunk, or a served window boundary
+// strips whole instead of persisting its bracket and parameters as text.
+// The two-byte rule covers the assigned escapes that have no intermediate
+// byte (SS2/SS3, the Fe single functions, the DEC private pairs, RIS, and
+// the locking shifts); anything else after a bare residual ESC keeps its
+// byte, falling to the per-character backstop, which deletes only the ESC
+// instead of eating the real byte after it.
+const TAIL_OSC_REGEX =
+  /\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
+const TAIL_STRING_REGEX =
+  /\x1b[PX^_][^\x07\x1b\n\r]*(?:\x07|\x1b\\|(?=[\x1b\n\r])|$)/g;
+const TAIL_CSI_REGEX =
+  /\x1b\[[\x30-\x3f]*[\x20-\x2f]*(?:[\x40-\x7e]|(?=[\x1b\n\r])|$)/g;
+const TAIL_FE_ESC_REGEX = /\x1b[\x20-\x2f]+(?:[\x30-\x7e]|(?=[\x1b\n\r])|$)/g;
+const TAIL_TWO_BYTE_ESC_REGEX = /\x1b(?:[DEHMNOZ]|[6-9=>]|[cno|}~])/g;
+/* eslint-enable no-control-regex */
+
+export function stripOutputControlChars(text: string): string {
+  // Whole sequences first: the per-character loop below only deletes the
+  // ESC byte, so a sequence reaching it would leave its bracket,
+  // parameters, and final letter behind as readable text.
+  const withoutSequences = text
+    .replace(TAIL_OSC_REGEX, '')
+    .replace(TAIL_STRING_REGEX, '')
+    .replace(TAIL_CSI_REGEX, '')
+    .replace(TAIL_FE_ESC_REGEX, '')
+    .replace(TAIL_TWO_BYTE_ESC_REGEX, '');
   let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
+  for (let i = 0; i < withoutSequences.length; i++) {
+    const code = withoutSequences.charCodeAt(i);
     if (code === 0x09 || code === 0x0a || code === 0x0d) {
-      out += text[i];
+      out += withoutSequences[i];
       continue;
     }
     if (code < 0x20) continue;
@@ -49,17 +97,63 @@ function stripOutputControlChars(text: string): string {
     // Same bidi set as the shared display helper, in its own loop only
     // because the tail must keep \n and \r, which that helper strips.
     if (isBidiControlChar(code)) continue;
-    out += text[i];
+    out += withoutSequences[i];
   }
   return out;
 }
 
-type OutputTailResult =
+/**
+ * Normalize carriage returns for non-TTY consumers of the tail. CRLF is a
+ * real newline and collapses to LF; a lone CR redraws the current line
+ * (`npm --progress`, `curl -#`, pip), so each LF-delimited segment keeps
+ * only the frame after its last CR — with a fallback to the latest
+ * non-blank frame so a line that ends right after a redraw's final CR
+ * still shows the frame it drew. A whitespace-only frame is an erase pad
+ * (a progress bar clearing its own line), not a drawn frame, so it is
+ * never kept and never counts as dropped.
+ *
+ * `droppedFrames` reports whether the collapse discarded any non-blank
+ * frame. A redraw stream drops frames by design, but the same collapse
+ * applied to CR-delimited records destroys whole records — nothing
+ * separates the two shapes, so the loss is reported and folded into
+ * `truncated` rather than guessed at.
+ */
+function normalizeOutputCarriageReturns(text: string): {
+  text: string;
+  droppedFrames: boolean;
+} {
+  if (!text.includes('\r')) return { text, droppedFrames: false };
+  let droppedFrames = false;
+  const normalized = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => {
+      if (!line.includes('\r')) return line;
+      const frames = line.split('\r');
+      let kept: string | undefined;
+      for (let i = frames.length - 1; i >= 0; i--) {
+        if (frames[i]!.trim().length === 0) continue;
+        if (kept === undefined) {
+          kept = frames[i]!;
+        } else {
+          droppedFrames = true;
+        }
+      }
+      return kept ?? '';
+    })
+    .join('\n');
+  return { text: normalized, droppedFrames };
+}
+
+export type TaskOutputTailResult =
   | { text: string; truncated: boolean }
   | { error: string }
   | undefined;
 
-function readOutputTail(outputFile: string): OutputTailResult {
+export function readTaskOutputTail(
+  outputFile: string,
+  maxBytes = MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
+): TaskOutputTailResult {
   let fd: number | undefined;
   try {
     // O_NOFOLLOW (or the compensating identity check where the flag does
@@ -69,14 +163,28 @@ function readOutputTail(outputFile: string): OutputTailResult {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0) return undefined;
 
-    const length = Math.min(stat.size, MAX_NOTIFICATION_OUTPUT_TAIL_BYTES);
+    const length = Math.min(stat.size, maxBytes, MAX_TASK_OUTPUT_TAIL_BYTES);
     const start = stat.size - length;
-    const buffer = Buffer.allocUnsafe(length);
-    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    // Look back a bounded prefix ahead of the window: a window that opens
+    // mid-sequence serves the sequence's leaderless residue as its first
+    // line unless the leader is reconstituted for the stripper.
+    const lookback = Math.min(MAX_TAIL_SEQUENCE_LOOKBACK_BYTES, start);
+    const buffer = Buffer.allocUnsafe(lookback + length);
+    const bytesRead = fs.readSync(
+      fd,
+      buffer,
+      0,
+      buffer.length,
+      start - lookback,
+    );
+    if (bytesRead <= lookback) {
+      // The file shrank under the read before the window was reached.
+      return undefined;
+    }
 
     // When the read offset lands mid-codepoint (truncated read), skip
     // leading UTF-8 continuation bytes to avoid U+FFFD replacement chars.
-    let sliceOffset = 0;
+    let sliceOffset = lookback;
     if (start > 0) {
       while (
         sliceOffset < bytesRead &&
@@ -86,17 +194,43 @@ function readOutputTail(outputFile: string): OutputTailResult {
       }
     }
 
-    const text = stripOutputControlChars(
-      buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
+    let windowText = buffer.subarray(sliceOffset, bytesRead).toString('utf8');
+    let prepended = false;
+    if (lookback > 0) {
+      // The nearest ESC before the window with no line break between them
+      // is the leader of the sequence the window opens inside; prepending
+      // from it lets the stripper remove the whole sequence. A lone
+      // residual ESC matches no sequence rule and falls to the stripper's
+      // per-character backstop, costing only the ESC byte.
+      for (let i = lookback - 1; i >= 0; i--) {
+        const byte = buffer[i]!;
+        if (byte === 0x0a || byte === 0x0d) break;
+        if (byte === 0x1b) {
+          windowText =
+            buffer.subarray(i, lookback).toString('utf8') + windowText;
+          prepended = true;
+          break;
+        }
+      }
+    }
+
+    const { text, droppedFrames } = normalizeOutputCarriageReturns(
+      stripOutputControlChars(windowText),
+    );
+    // A line break immediately after a reconstituted sequence closed the
+    // line the window opened inside; serving it would start the tail on
+    // a blank line.
+    const trimmed = (
+      prepended && text.startsWith('\n') ? text.slice(1) : text
     ).trimEnd();
 
-    if (!text) return undefined;
+    if (!trimmed) return undefined;
     return {
-      text,
-      truncated: start > 0,
+      text: trimmed,
+      truncated: start > 0 || droppedFrames,
     };
   } catch (error) {
-    debugLogger.warn(`Failed to read shell output tail:`, error);
+    debugLogger.warn(`Failed to read task output tail:`, error);
     return {
       error: error instanceof Error ? error.message : String(error),
     };
@@ -537,7 +671,7 @@ export class BackgroundShellRegistry {
         `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
       );
     }
-    const outputTail = readOutputTail(entry.outputFile);
+    const outputTail = readTaskOutputTail(entry.outputFile);
     if (outputTail) {
       if ('error' in outputTail) {
         xmlParts.push(`<output-tail error="unreadable" />`);

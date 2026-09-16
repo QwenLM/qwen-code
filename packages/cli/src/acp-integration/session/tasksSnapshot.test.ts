@@ -546,6 +546,39 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 
     expect(task.toolUseId).toBe('monitor-call-1');
   });
+
+  it('serves a monitor output capture failure', () => {
+    const task = serializedMonitor({
+      kind: 'monitor',
+      id: 'mon_0123456789abcdef',
+      description: 'watch logs',
+      status: 'completed',
+      startTime: 1_000,
+      command: 'tail -f app.log',
+      eventCount: 3,
+      lastEventTime: 1_000,
+      droppedLines: 0,
+      outputCaptureError: 'ENOSPC: no space left on device',
+    } as MonitorTask);
+
+    expect(task.outputCaptureError).toBe('ENOSPC: no space left on device');
+  });
+
+  it('omits the output capture failure key when no write failed', () => {
+    const task = serializedMonitor({
+      kind: 'monitor',
+      id: 'mon_0123456789abcdef',
+      description: 'watch logs',
+      status: 'completed',
+      startTime: 1_000,
+      command: 'tail -f app.log',
+      eventCount: 3,
+      lastEventTime: 1_000,
+      droppedLines: 0,
+    } as MonitorTask);
+
+    expect('outputCaptureError' in task).toBe(false);
+  });
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {

@@ -177,6 +177,7 @@ function serializeMonitorTask(
     eventCount: entry.eventCount,
     lastEventTime: entry.lastEventTime,
     droppedLines: entry.droppedLines,
+    ...optionalField('outputCaptureError', entry.outputCaptureError),
     ...optionalField('endTime', entry.endTime),
     ...optionalField('pid', entry.pid),
     ...optionalField('exitCode', entry.exitCode),

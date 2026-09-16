@@ -314,18 +314,26 @@ describe('AppContainer State Management', () => {
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
-  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
-  // runners — including the review-address verification gate's clean child —
-  // inherit a HOME the test process cannot write to. Ordinary CI already
-  // overrides HOME, so point it at a scratch directory for this suite, and
-  // leave that directory alone: the mount effect's initialize() is un-awaited,
-  // so store work can still be in flight at afterAll, and deleting the tree
-  // there fails it with ENOENT — an unhandled rejection that fails the run.
+  // Every render runs the real config.initialize() in an un-awaited mount
+  // IIFE whose extension-store I/O lands under the qwen home dir. Point both
+  // QWEN_HOME and HOME at one private scratch dir: the QWEN_HOME pin covers
+  // jobs that set QWEN_HOME job-wide (a shared store lock fails the suite
+  // with ELOCKED, and getGlobalQwenDir prefers it over HOME), the HOME pin
+  // covers runners whose inherited HOME is unwritable or reclaimed
+  // mid-flight (EACCES/ENOENT). The dir is never deleted: that store work
+  // can still be in flight at afterAll, and deleting the tree under it is
+  // the same race again.
+  const savedQwenHome = process.env['QWEN_HOME'];
   const savedHome = process.env['HOME'];
   const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
+  process.env['QWEN_HOME'] = suiteHome;
   process.env['HOME'] = suiteHome;
-
   afterAll(() => {
+    if (savedQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = savedQwenHome;
+    }
     if (savedHome === undefined) {
       delete process.env['HOME'];
     } else {
