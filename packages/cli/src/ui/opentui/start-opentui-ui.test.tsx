@@ -192,14 +192,19 @@ describe('startOpenTuiUI fallback contract', () => {
   });
 
   // root.render is mocked, so the tree is never executed; the boot-computed
-  // initialDialog is read straight off the captured SessionStatsProvider
-  // element (children = the OpenTuiEntryApp element).
+  // initialDialog is read through SessionStatsProvider and FocusModeProvider.
   function renderedInitialDialog(): unknown {
     const calls = mocks.state.root.render.mock.calls;
     const provider = calls[calls.length - 1]?.[0] as
-      | { props?: { children?: { props?: Record<string, unknown> } } }
+      | {
+          props?: {
+            children?: {
+              props?: { children?: { props?: Record<string, unknown> } };
+            };
+          };
+        }
       | undefined;
-    return provider?.props?.children?.props?.['initialDialog'];
+    return provider?.props?.children?.props?.children?.props?.['initialDialog'];
   }
 
   it('returns false when the renderer cannot be created', async () => {

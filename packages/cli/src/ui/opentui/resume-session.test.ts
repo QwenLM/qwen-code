@@ -20,6 +20,7 @@ import {
 import { foldLiveEvent } from './live-session-model.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 
 const CALL_ID = 'call_1bd0c3272fc749f6a25cd2c8';
 
@@ -59,6 +60,65 @@ function sampleMessages(): unknown[] {
 }
 
 describe('opentui resume mapping', () => {
+  it('replays successful memory metadata and structured disclosures', () => {
+    const root = '/tmp/focus-resume-project';
+    const events = resumeEventsFromSession(
+      {
+        conversation: {
+          messages: [
+            {
+              type: 'assistant',
+              message: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: CALL_ID,
+                      name: 'read_file',
+                      args: {
+                        file_path: `${getAutoMemoryRoot(root)}/MEMORY.md`,
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              type: 'tool_result',
+              message: {
+                parts: [
+                  {
+                    functionResponse: {
+                      name: 'read_file',
+                      response: { output: 'BODY' },
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: CALL_ID,
+                status: 'success',
+                resultDisplay: {
+                  type: 'vision_bridge_notice',
+                  summary: 'Read PDF',
+                  notice: 'EGRESS',
+                },
+              },
+            },
+          ],
+        },
+      },
+      { getTargetDir: () => root } as Config,
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-result',
+        isMemoryOp: 'read',
+        hasNotice: true,
+        detailedDisplay: 'BODY',
+        display: 'Read PDF\nEGRESS',
+      }),
+    );
+  });
   it('replays user / thought / tool-call / tool-result / assistant turns', () => {
     const events = resumeEventsFromSession({
       conversation: { messages: sampleMessages() },
@@ -74,7 +134,7 @@ describe('opentui resume mapping', () => {
         tool: 'read_file',
         title: 'read_file',
       },
-      { type: 'tool-output', id: CALL_ID, output: '# README\nhello' },
+      { type: 'tool-result', id: CALL_ID, display: '# README\nhello' },
       { type: 'tool-end', id: CALL_ID, success: true, summary: 'ok' },
       { type: 'text', delta: 'README 内容已读取。' },
       { type: 'done' },

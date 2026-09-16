@@ -27,6 +27,7 @@ export type FakeOpenAIToolCall = {
 
 export type FakeOpenAIResponse = {
   model?: string;
+  reasoning?: string;
   content?: string;
   contentChunks?: string[];
   errorContent?: string;
@@ -54,6 +55,7 @@ export type FakeOpenAIResponse = {
 
 export type FakeOpenAIChoice = {
   index: number;
+  reasoning?: string;
   content?: string;
   contentChunks?: string[];
   /**
@@ -270,6 +272,9 @@ function writeNonStreamed(
         message: {
           role: 'assistant',
           content: choice.content ?? choice.contentChunks?.join('') ?? null,
+          ...(choice.reasoning !== undefined
+            ? { reasoning_content: choice.reasoning }
+            : {}),
           ...(choice.toolCalls ? { tool_calls: choice.toolCalls } : {}),
         },
         finish_reason: finishReason(choice),
@@ -322,6 +327,9 @@ async function writeStreamed(
   const choices = responseChoices(message);
   for (const [choicePosition, choice] of choices.entries()) {
     send(chunk(choice.index, { role: 'assistant' }));
+    if (choice.reasoning !== undefined) {
+      send(chunk(choice.index, { reasoning_content: choice.reasoning }));
+    }
     if (choice.errorContent !== undefined) {
       send(
         chunk(choice.index, { content: choice.errorContent }, 'error_finish'),
@@ -401,6 +409,7 @@ function responseChoices(message: FakeOpenAIResponse): FakeOpenAIChoice[] {
     message.choices ?? [
       {
         index: 0,
+        reasoning: message.reasoning,
         content: message.content,
         contentChunks: message.contentChunks,
         errorContent: message.errorContent,

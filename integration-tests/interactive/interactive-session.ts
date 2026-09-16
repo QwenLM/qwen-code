@@ -140,6 +140,11 @@ export class InteractiveSession {
     this.ptyProcess.write('\r');
   }
 
+  /** Send a key sequence without appending Enter. */
+  sendKey(sequence: string): void {
+    this.ptyProcess.write(sequence);
+  }
+
   /** Wait for text to appear in raw output. */
   async waitFor(text: string, timeout = 120_000): Promise<void> {
     const start = Date.now();
@@ -192,6 +197,11 @@ export class InteractiveSession {
       lines.pop();
     }
     return lines.join('\n');
+  }
+
+  async screenBufferType(): Promise<'normal' | 'alternate'> {
+    await this.flush();
+    return this.terminal.buffer.active.type;
   }
 
   /**

@@ -165,6 +165,7 @@ describe('executeUserShell', () => {
         type: 'tool-description',
         id: expect.any(String),
         description: 'echo hello',
+        isUserInitiated: true,
       },
       {
         type: 'tool-output',

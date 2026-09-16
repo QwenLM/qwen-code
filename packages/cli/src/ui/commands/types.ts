@@ -111,6 +111,12 @@ export interface CommandContext {
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
+    /**
+     * Toggles focus mode via FocusModeContext so the transcript re-renders
+     * immediately. Hosts without focus rendering omit it.
+     * Returns null when a higher-precedence setting prevents the toggle.
+     */
+    toggleFocusMode?: () => Promise<boolean | null>;
     setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;

@@ -9,10 +9,140 @@ import {
   renderResultDisplay,
   toolResultEvent,
 } from './event-adapter.js';
+import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('classifies a successful memory write using the mapper project root', () => {
+    const projectRoot = '/tmp/focus-adapter-project';
+    const map = createEventMapper({ projectRoot });
+    map({
+      type: 'tool_call_request',
+      value: {
+        callId: 'memory1',
+        name: 'write_file',
+        args: { file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md` },
+      },
+    } as unknown as AnyEv);
+    const events = map({
+      type: 'tool_call_response',
+      value: {
+        callId: 'memory1',
+        resultDisplay: 'written',
+        executionStatus: 'success',
+      },
+    } as unknown as AnyEv);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-result',
+        id: 'memory1',
+        isMemoryOp: 'write',
+      }),
+    );
+  });
+  it.each([
+    { error: 'failed' },
+    { executionStatus: 'error' },
+    { executionStatus: 'cancelled' },
+  ])('does not count failed memory operations: %j', (failure) => {
+    const projectRoot = '/tmp/focus-adapter-project';
+    const map = createEventMapper({ projectRoot });
+    map({
+      type: 'tool_call_request',
+      value: {
+        callId: 'memory1',
+        name: 'write_file',
+        args: { file_path: `${getAutoMemoryRoot(projectRoot)}/MEMORY.md` },
+      },
+    } as unknown as AnyEv);
+    const events = map({
+      type: 'tool_call_response',
+      value: { callId: 'memory1', resultDisplay: 'WRITE_FAILED', ...failure },
+    } as unknown as AnyEv);
+    const result = events.find((event) => event.type === 'tool-result');
+    expect(result).toBeDefined();
+    expect(result).not.toHaveProperty('isMemoryOp');
+    expect(events).toContainEqual({
+      type: 'tool-end',
+      id: 'memory1',
+      success: false,
+      summary:
+        'executionStatus' in failure && failure.executionStatus === 'cancelled'
+          ? 'cancelled'
+          : 'error',
+    });
+  });
+  it.each([true, false])(
+    'retains cross-segment requests only when enabled: %s',
+    (retainToolRequests) => {
+      const map = createEventMapper({ retainToolRequests });
+      map({
+        type: 'tool_call_request',
+        value: { callId: 'read1', name: 'read_file' },
+      } as unknown as AnyEv);
+      map({ type: 'finished', value: {} } as unknown as AnyEv);
+      const events = map({
+        type: 'tool_call_response',
+        value: {
+          callId: 'read1',
+          resultDisplay: 'summary',
+          responseParts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'BODY' },
+              },
+            },
+          ],
+        },
+      } as unknown as AnyEv);
+      const result = events.find((event) => event.type === 'tool-result');
+      if (retainToolRequests)
+        expect(result).toHaveProperty('detailedDisplay', 'BODY');
+      else expect(result).not.toHaveProperty('detailedDisplay');
+    },
+  );
+  it.each(['Read 1 line', ''])(
+    'carries response metadata with display %j',
+    (resultDisplay) => {
+      const map = createEventMapper();
+      map({
+        type: 'tool_call_request',
+        value: {
+          callId: 'read1',
+          name: 'read_file',
+          args: { file_path: 'main.ts' },
+        },
+      } as unknown as AnyEv);
+      const events = map({
+        type: 'tool_call_response',
+        value: {
+          callId: 'read1',
+          resultDisplay,
+          responseParts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'FULL_READ' },
+                parts: [
+                  { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+                ],
+              },
+            },
+          ],
+        },
+      } as unknown as AnyEv);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'tool-result',
+          id: 'read1',
+          detailedDisplay: 'FULL_READ\n<media: image/png>',
+          imageMimeTypes: ['image/png'],
+        }),
+      );
+    },
+  );
   it('maps content to text delta', () => {
     const map = createEventMapper();
     expect(
