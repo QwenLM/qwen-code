@@ -72,6 +72,7 @@ import {
   tailWindowPhysical,
 } from './messages.js';
 import {
+  cpLen,
   getCachedStringWidth,
   sanitizeTerminalText,
   truncateToWidth,
@@ -94,6 +95,39 @@ export interface PendingToolConfirmation {
 
 /** Max body rows before the tail window truncates (keeps dialogs bounded). */
 const MAX_BODY_ROWS = 20;
+
+/**
+ * Cells the free-text answer row may draw. ink holds this exact field in a
+ * TextInput with `inputWidth={50}` and no height — one physical row inside a
+ * fixed window — and the confirmation this dialog lives in has no body window
+ * of its own, so an unbounded row lets a single long paste grow the dialog past
+ * the terminal height and push the options the user still has to pick off
+ * screen. Submission is untouched: it reads the stored value, not the drawing.
+ */
+const CUSTOM_FIELD_WIDTH = 50;
+
+/**
+ * The caret's logical line inside that window, and whether the caret cell still
+ * falls inside it. One cell is held back for the cursor the selected row draws.
+ */
+function customFieldWindow(
+  line: string,
+  caret: number,
+  cap: number,
+): {
+  line: string;
+  before: string;
+  at: string;
+  after: string;
+  caretInside: boolean;
+} {
+  const drawn = truncateToWidth(line, Math.max(1, cap - 1));
+  return {
+    line: drawn,
+    ...caretSpans({ text: drawn, cursor: caret }),
+    caretInside: caret <= cpLen(drawn),
+  };
+}
 
 /**
  * Rows reserved around an EXPANDED body: the inline confirmation's chrome
@@ -843,6 +877,14 @@ function AskUserQuestionFlow(props: {
     width - 2 - rowOverhead,
   );
 
+  // The field re-seeds its buffer during render, so a tab move inside one burst
+  // leaves it holding the question that render drew. A keystroke handled now
+  // would append to that text and store it under the new tab, so the row keeps
+  // its keys only while the burst still stands on the tab it drew — and none at
+  // all once its answer has been given. One stdin read carries pastes beside
+  // keys, so both paths ask this rather than only the one that dispatches keys.
+  const fieldIsMine = () => tabRef.current === tab && !custom.settled;
+
   useKeyboard((key) => {
     const original = toOriginalKey(key);
     // One stdin burst runs every key it carries against this one closure, so
@@ -855,13 +897,6 @@ function AskUserQuestionFlow(props: {
       totalOptions: optionCount,
       isCustomRow: onCustomRow,
     } = viewOf(tabRef.current, selectedRef.current);
-
-    // The field re-seeds its buffer during render, so a tab move inside this
-    // burst leaves it holding the question that render drew. A keystroke handled
-    // now would append to that text and store it under the new tab, so the row
-    // keeps its keys only while the burst still stands on the tab it drew — and
-    // none at all once its answer has been given.
-    const fieldIsMine = tabRef.current === tab && !custom.settled;
 
     if (onCustomRow) {
       // Bare letters belong to the input and ←/→ must not switch tabs while it
@@ -876,7 +911,7 @@ function AskUserQuestionFlow(props: {
       } else if (original.name === 'return') {
         submitCustomRow();
       } else if (
-        fieldIsMine &&
+        fieldIsMine() &&
         !custom.handleKey(original) &&
         isPrintableKeyInput(key)
       ) {
@@ -953,9 +988,15 @@ function AskUserQuestionFlow(props: {
 
   // Bracketed pastes arrive as one event with no keypress per character, and
   // the composer that would otherwise consume them is unmounted while a
-  // confirmation owns the screen.
+  // confirmation owns the screen. The write path stores under the live tab, so
+  // this asks for the live position too: one read can carry the keys that moved
+  // the cursor and the paste that trails them.
   usePaste((event: PasteEvent) => {
-    if (!isCustomRow) return;
+    const { isCustomRow: onCustomRow } = viewOf(
+      tabRef.current,
+      selectedRef.current,
+    );
+    if (!onCustomRow || !fieldIsMine() || answerIsLocked()) return;
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
@@ -1049,7 +1090,19 @@ function AskUserQuestionFlow(props: {
   const customEmphasis = isCustomAnswer || typedChecked[tab] === true;
   const customLabel = `${question.options.length + 1}. `;
   const placeholder = t('Type something...');
-  const customSpans = caretSpans({ text: customValue, cursor: custom.caret });
+  const caretLine = caretSpans({ text: customValue, cursor: custom.caret });
+  const fieldCap = Math.max(
+    1,
+    Math.min(
+      CUSTOM_FIELD_WIDTH,
+      width - 2 - getCachedStringWidth(`❯ ${customMark}${customLabel}> `),
+    ),
+  );
+  const customField = customFieldWindow(
+    caretLine.before + caretLine.at + caretLine.after,
+    cpLen(caretLine.before),
+    fieldCap,
+  );
 
   return (
     <>
@@ -1105,13 +1158,17 @@ function AskUserQuestionFlow(props: {
             {customValue ? (
               <>
                 <text fg={C.text}>
-                  {sanitizeTerminalText(customSpans.before)}
+                  {sanitizeTerminalText(customField.before)}
                 </text>
                 {/* ink's software cursor: a background-filled cell at the
-                    caret, which a text frame cannot show. */}
-                <text bg={C.accent}>{customSpans.at || ' '}</text>
+                    caret, which a text frame cannot show. Past the window the
+                    cell has nowhere to go, exactly as in ink's fixed-width
+                    TextInput. */}
+                {customField.caretInside ? (
+                  <text bg={C.accent}>{customField.at || ' '}</text>
+                ) : null}
                 <text fg={C.text}>
-                  {sanitizeTerminalText(customSpans.after)}
+                  {sanitizeTerminalText(customField.after)}
                 </text>
               </>
             ) : (
@@ -1126,10 +1183,14 @@ function AskUserQuestionFlow(props: {
             fg={customEmphasis ? C.accent : customValue ? C.text : C.dim}
             attributes={customEmphasis ? 1 : 0}
           >
+            {/* The echo is bounded like the row it stands in for: the value it
+                prints is the one a paste can make arbitrarily long. */}
             {'  ' +
               customMark +
               customLabel +
-              (customValue ? sanitizeTerminalText(customValue) : placeholder) +
+              (customValue
+                ? sanitizeTerminalText(customField.line)
+                : placeholder) +
               (isCustomAnswer ? ' ✓' : '')}
           </text>
         )}

@@ -660,10 +660,35 @@ describe('OpenTuiToolConfirmation', () => {
       expect(container.textContent ?? '').not.toContain('alpha');
       expect(container.textContent ?? '').toContain('beta');
       expect(cursorCell(container)).toBe('a');
+      press({ name: 'up' });
+      // The collapsed row echoes the same window: it stands in for the row the
+      // cursor left, so the hidden half of the answer cannot grow the dialog
+      // from there either.
+      expect(container.textContent ?? '').not.toContain('alpha');
+      press({ name: 'down' });
       press({ name: 'return', sequence: '\r' });
       expect(onConfirm).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnce,
         { answers: { '0': 'alpha\nbeta' } },
+      );
+    });
+
+    it('keeps a long answer inside the width the row has', () => {
+      // ink holds this exact field in a TextInput 50 cells wide and one row
+      // tall. Without that window a single long paste grows the dialog past the
+      // terminal height and pushes the options still to be picked off screen.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      const long = 'x'.repeat(120);
+      paste(long);
+      expect(container.textContent ?? '').not.toContain('x'.repeat(50));
+      expect(container.textContent ?? '').toContain('…');
+      // The bound is on the drawing only: the answer keeps every character.
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': long } },
       );
     });
 
@@ -1125,6 +1150,61 @@ describe('OpenTuiToolConfirmation', () => {
       press({ name: 'right' });
       press({ name: 'right' });
       expect(container.textContent ?? '').toContain('Region: (not answered)');
+    });
+
+    it('drops a paste that trails the keys of one read onto another tab', () => {
+      // One stdin read carries both: the arrows move the live cursor onto
+      // another question's free-text row while the paste handler still sees the
+      // render that drew this one, and the write path files under the live tab.
+      // Left unguarded, one question's half-typed answer is concatenated with
+      // the paste and submitted as another question's.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'down' });
+      press({ name: 'down' });
+      typeChars('ab');
+      act(() => {
+        // The row owns ←/→ for in-field caret movement, so the ↑ that leaves it
+        // has to be part of the same read for the arrows to become tab moves.
+        const keys = [
+          { name: 'up' },
+          { name: 'right' },
+          { name: 'down' },
+          { name: 'down' },
+        ];
+        for (const key of keys) {
+          for (const handler of mocks.state.keyboardHandlers) handler(key);
+        }
+        for (const handler of mocks.state.pasteHandlers) {
+          handler({
+            bytes: new TextEncoder().encode('xyz'),
+            preventDefault: () => {},
+          });
+        }
+      });
+      expect(container.textContent ?? '').not.toContain('abxyz');
+      press({ name: 'up' });
+      press({ name: 'right' });
+      press({ name: 'right' });
+      expect(container.textContent ?? '').toContain('Region: (not answered)');
+    });
+
+    it('drops a paste that trails an answer the pause is still holding', () => {
+      // The row the answer came from stays drawn and focused for ink's 150 ms
+      // pause, so a paste in that window would widen an answer already
+      // recorded — here a multi-select box whose ticks made the answer.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'space', sequence: ' ' });
+      press({ name: 'return', sequence: '\r' });
+      press({ name: 'down' });
+      press({ name: 'down' });
+      paste('xyz');
+      settleAdvance();
+      expect(container.textContent ?? '').toContain('Notify: mail');
+      expect(container.textContent ?? '').not.toContain('mail, xyz');
     });
 
     it('reviews every answer on the Submit tab and cancels from its second row', () => {

@@ -275,6 +275,21 @@ async function runCustomProviderFlow(): Promise<{
   return { onClose, notify };
 }
 
+/**
+ * Drive main → Third-party → DeepSeek to its model-IDs step, and type into the
+ * custom-ID field. Models is the terminal step of every preset flow, so the
+ * Enter that leaves it fires the install rather than another step.
+ */
+async function runPresetFlowToTerminalModels(): Promise<void> {
+  renderDialog();
+  await press('down'); // main: THIRD_PARTY_PROVIDERS
+  await press('return'); // → thirdparty-select, DeepSeek on top
+  await press('return'); // DeepSeek → apiKey
+  await typeText('sk-test');
+  await press('return'); // apiKey → models (custom-ID input focused)
+  await typeText('mod');
+}
+
 describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
@@ -452,6 +467,61 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       expect.anything(),
       expect.objectContaining({ status: 'error' }),
     );
+  });
+
+  it('takes the read again after a preset flow’s terminal submit fails', async () => {
+    // Models is the last step of every preset flow, so its Enter only fires the
+    // install and reports nothing about how it went. A rejected install leaves
+    // this very step on screen, where the latch that Enter armed would swallow
+    // every key — the user could neither correct the field nor retry, and Esc
+    // out of the wizard was the only way left.
+    core.applyProviderInstallPlan.mockRejectedValueOnce(new Error('401'));
+    await runPresetFlowToTerminalModels();
+    await press('return'); // fires the install → rejects
+
+    await vi.waitFor(() => {
+      expect(screen.getByText(/Failed to authenticate/)).toBeTruthy();
+    });
+    expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
+    await press('return');
+    await vi.waitFor(() => {
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('takes the read again after a submit that saved no conversation model', async () => {
+    // The other path that keeps the dialog open on the step that submitted: the
+    // install succeeded but saved only service models, so the wizard stays where
+    // it was and the field has to take keys again just the same.
+    const servicePlan = coreRuntime.buildInstallPlan(
+      coreRuntime.minimaxProvider,
+      {
+        baseUrl: coreRuntime.resolveBaseUrl(coreRuntime.minimaxProvider),
+        apiKey: 'test-image',
+        modelIds: ['image-01'],
+      },
+    );
+    const build = vi
+      .spyOn(coreRuntime, 'buildInstallPlan')
+      .mockReturnValue(servicePlan);
+    try {
+      await runPresetFlowToTerminalModels();
+      await press('return');
+      await vi.waitFor(() => {
+        expect(
+          screen.getByText(
+            'Service models saved. Configure a conversation model to start chatting.',
+          ),
+        ).toBeTruthy();
+      });
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
+      await press('return');
+      await vi.waitFor(() => {
+        expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      build.mockRestore();
+    }
   });
 });
 

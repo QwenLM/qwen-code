@@ -283,14 +283,17 @@ function InputLine({
  * Shared single-line text-input key handling (backend ask-user parity). Returns
  * the caret offset so the row can put its cursor cell where ink's would be. The
  * submit's own verdict is what settles the field, so a step that reports nothing
- * cannot leave the latch unarmed.
+ * cannot leave the latch unarmed. `retrySeq` re-arms it: on the last step a
+ * `true` only means the install was fired, and when that install fails the same
+ * step stays mounted for the rest of the dialog's life.
  */
 function useLineInputKeys(
   value: string,
   onChange: (next: string) => void,
   onSubmit: (text: string) => boolean,
+  retrySeq: number,
 ): number {
-  const line = useLineEdit(value, onChange);
+  const line = useLineEdit(value, onChange, retrySeq);
   useKeyboard((key) => {
     if (line.settled) return;
     const o = toOriginalKey(key);
@@ -395,14 +398,17 @@ function BaseUrlSelectStep({
 function BaseUrlInputStep({
   flow,
   documentationUrl,
+  retrySeq,
 }: {
   flow: ProviderSetupFlow;
   documentationUrl?: string;
+  retrySeq: number;
 }) {
   const caret = useLineInputKeys(
     flow.state.baseUrl,
     flow.changeBaseUrl,
     (text) => flow.submitBaseUrl(text),
+    retrySeq,
   );
   return (
     <box flexDirection="column" marginTop={1}>
@@ -437,13 +443,18 @@ function BaseUrlInputStep({
 function ApiKeyStep({
   provider,
   flow,
+  retrySeq,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
+  retrySeq: number;
 }) {
   const docUrl = resolveDocumentationUrl(provider, flow.state.baseUrl);
-  const caret = useLineInputKeys(flow.state.apiKey, flow.changeApiKey, (text) =>
-    flow.submitApiKey(text),
+  const caret = useLineInputKeys(
+    flow.state.apiKey,
+    flow.changeApiKey,
+    (text) => flow.submitApiKey(text),
+    retrySeq,
   );
   return (
     <box flexDirection="column" marginTop={1}>
@@ -484,9 +495,11 @@ function uniqueIds(ids: string[]): string[] {
 function ModelsStep({
   provider,
   flow,
+  retrySeq,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
+  retrySeq: number;
 }) {
   const modelOptions = useMemo(
     () => provider.models?.map((m) => m.id) ?? [],
@@ -529,8 +542,11 @@ function ModelsStep({
   );
 
   // ink keeps this field in a TextInput whose buffer survives the list taking
-  // focus, so the caret is still where it was left when Tab comes back.
-  const custom = useLineEdit(customText, updateCustom);
+  // focus, so the caret is still where it was left when Tab comes back. The
+  // retry counter is the mount key: models is the last step of every preset
+  // flow, so its Enter only fires the install, and a rejected install leaves
+  // this very step mounted with the latch that Enter armed.
+  const custom = useLineEdit(customText, updateCustom, retrySeq);
 
   const toggleRecommended = useCallback(
     (id: string) => {
@@ -803,7 +819,13 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }) {
   );
 }
 
-function SetupSteps({ flow }: { flow: ProviderSetupFlow }) {
+function SetupSteps({
+  flow,
+  retrySeq,
+}: {
+  flow: ProviderSetupFlow;
+  retrySeq: number;
+}) {
   const { provider, step } = flow.state;
   if (!provider || !step) return null;
   switch (step) {
@@ -819,12 +841,13 @@ function SetupSteps({ flow }: { flow: ProviderSetupFlow }) {
             provider,
             flow.state.baseUrl,
           )}
+          retrySeq={retrySeq}
         />
       );
     case 'apiKey':
-      return <ApiKeyStep provider={provider} flow={flow} />;
+      return <ApiKeyStep provider={provider} flow={flow} retrySeq={retrySeq} />;
     case 'models':
-      return <ModelsStep provider={provider} flow={flow} />;
+      return <ModelsStep provider={provider} flow={flow} retrySeq={retrySeq} />;
     case 'advancedConfig':
       return <AdvancedConfigStep flow={flow} />;
     case 'review':
@@ -876,6 +899,12 @@ function AuthDialogFlow({
   const [errorMessage, setErrorMessage] = useState<string | null>(
     initialError ?? null,
   );
+  // Every text field latches itself shut on the Enter that submits it, and only
+  // a mount-key change clears that latch. On the last step the submit is async,
+  // so a rejected install — or one that saved service models without a
+  // conversation model — leaves the very same step on screen with every key
+  // dead. Bumping this hands the field back.
+  const [retrySeq, setRetrySeq] = useState(0);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
   const [mainIndex, setMainIndex] = useState<number | null>(null);
@@ -910,6 +939,7 @@ function AuthDialogFlow({
               'Service models saved. Configure a conversation model to start chatting.',
             ),
           );
+          setRetrySeq((n) => n + 1);
           return;
         }
         notify?.(
@@ -930,6 +960,7 @@ function AuthDialogFlow({
           message: getErrorMessage(error),
         });
         setErrorMessage(msg);
+        setRetrySeq((n) => n + 1);
         logAuth(config, new AuthEvent(protocol, 'manual', 'error', msg));
       }
     },
@@ -1182,7 +1213,9 @@ function AuthDialogFlow({
         </>
       )}
 
-      {viewLevel === 'provider-setup' && <SetupSteps flow={setupFlow} />}
+      {viewLevel === 'provider-setup' && (
+        <SetupSteps flow={setupFlow} retrySeq={retrySeq} />
+      )}
 
       {errorMessage && (
         <box marginTop={1}>
