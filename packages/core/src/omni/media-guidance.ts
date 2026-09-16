@@ -33,6 +33,7 @@ import { resolveMediaPolicyModelAccess } from './policy/model-access.js';
 import {
   OMNI_DISCLOSURE_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
+  OMNI_RESOURCE_PATH_TEXT_PREFIX,
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
 } from './disclosure.js';
@@ -133,20 +134,27 @@ export function buildOmniMediaGuidanceSection(config: Config): string | null {
     ([name]) => resolveMediaPolicyModelAccess(config, name).enabled,
   );
 
-  // Active-mode recall guidance. The handle annotation is emitted with
-  // every memory-known delivery, but the tool that consumes it is deferred
-  // (it surfaces via ToolSearch), so without this the model can receive
-  // 【媒体资源】 markers with no explanation anywhere in context — and the
-  // rest of this section actively tells it to gather evidence with the
-  // policy tools, i.e. to reprocess from scratch what memory already holds.
-  // Only stated when recall.mode is 'active': in sideQuery mode the harness
-  // injects recalled memory itself and the model must not call the tool.
+  // How the model references delivered media. Emitted in BOTH recall modes:
+  // a 【媒体路径】 / 【媒体资源】 marker rides every memory-known delivery,
+  // and the media tools below take a path/handle regardless of recall mode,
+  // so the model needs this to use them. (Its absence in sideQuery mode left
+  // the stale per-tool schema text as the model's only instruction.)
+  const referenceGuidance = `
+- ${OMNI_RESOURCE_PATH_TEXT_PREFIX}<absolute path>: how a local file you read is referenced. The path is shown VERBATIM — byte-for-byte the real on-disk path — so you can re-read it or point the media tools at it directly.
+- ${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}<name>：<handle>: how media with no path you can see (tool results, URLs, recalled memory) is referenced — <handle> is an opaque session handle.
+- Pass whichever reference you were shown to the media tools below: an absolute path as \`inputPath\`, an opaque session handle as \`resourceId\`.`;
+
+  // The active recall tool is the ONE consumer that is mode-specific: it is
+  // deferred (surfaces via ToolSearch), so without this the model can receive
+  // 【媒体路径】 / 【媒体资源】 markers and — told by the rest of this section
+  // to gather evidence with the policy tools — reprocess from scratch what
+  // memory already holds. Only stated when recall.mode is 'active': in
+  // sideQuery mode the harness injects recalled memory itself and the model
+  // must not call it.
   const recallGuidance =
     config.getOmniMemoryConfig?.()?.recall.mode === 'active'
       ? `
-- ${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}<file>: an opaque session handle for that media. It is the ONLY identity you can use to reference the file — you will never be given its real path.
-- BEFORE reprocessing media (extracting frames, transcribing, clipping), call \`${ToolNames.OMNI_RECALL_MEDIA_MEMORY}\` with that handle: earlier sessions may already have produced the transcript, keyframes or excerpt you need, and it returns instantly. It also reports honest gaps — which channels were never processed — and can suggest which tool closes them.
-- Handles also work as the \`resourceId\` argument of the media tools below, in place of a path.`
+- BEFORE reprocessing media (extracting frames, transcribing, clipping), call \`${ToolNames.OMNI_RECALL_MEDIA_MEMORY}\` with that <ref>: earlier sessions may already have produced the transcript, keyframes or excerpt you need, and it returns instantly. It also reports honest gaps — which channels were never processed — and can suggest which tool closes them.`
       : '';
 
   // Active preprocessing contract, authored per policy in settings and
@@ -177,8 +185,7 @@ Media files in this session reach you through a preprocessing pipeline that must
 - ${OMNI_DISCLOSURE_TEXT_PREFIX}<file>: the adjacent media is a degraded derivative (clipped, downscaled, resampled, or keyframes); the marker states exactly what was reduced.
 - ${OMNI_OMISSION_TEXT_PREFIX}<file>: the media could not be delivered at all; the notice stands in its place.
 - ${OMNI_TRANSCRIPT_TEXT_PREFIX}<file>: text derived from the media (e.g. a speech transcript), possibly delivered instead of the media itself.
-
-${recallGuidance}
+${referenceGuidance}${recallGuidance}
 
 Interpret delivered media under this contract:
 
