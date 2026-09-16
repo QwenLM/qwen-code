@@ -33,11 +33,16 @@ import {
   WorkflowStartCancelledError,
 } from './workflow-runner.js';
 import { compileWorkflowScript } from './workflow-sandbox.js';
+import {
+  WORKFLOW_SIZE_GUIDELINE_AGENTS,
+  WORKFLOW_SIZE_WARNING_AGENTS_ENV,
+} from './workflow-size.js';
 
 const {
   createProductionDispatchMock,
   journalWrites,
   logWorkflowRunMock,
+  logWorkflowSizeWarningMock,
   persistInlineWorkflowScriptMock,
   resolveSavedWorkflowScriptMock,
   writeLineMock,
@@ -46,6 +51,7 @@ const {
   createProductionDispatchMock: vi.fn(),
   journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  logWorkflowSizeWarningMock: vi.fn(),
   persistInlineWorkflowScriptMock: vi.fn(),
   resolveSavedWorkflowScriptMock: vi.fn(),
   writeLineMock: vi.fn(),
@@ -54,6 +60,7 @@ const {
 
 vi.mock('../../telemetry/loggers.js', () => ({
   logWorkflowRun: logWorkflowRunMock,
+  logWorkflowSizeWarning: logWorkflowSizeWarningMock,
 }));
 
 vi.mock('../workflow-snapshot.js', () => ({
@@ -2022,5 +2029,116 @@ describe('WorkflowRunner', () => {
     expect(handle.budget.source).toBe('directive');
     expect(handle.budget.total).toBe(250_000);
     expect(registry.get(handle.runId)?.tokenBudgetTotal).toBeNull();
+  });
+});
+
+// ── Workflow size ─────────────────────────────────────────────────────
+//
+// The runner is the one place a run's size is evaluated: it reads the
+// guideline once, checks on every scheduled agent and every spend update, and
+// hands the first warning to the registry. The thresholds themselves are
+// covered in workflow-size.test.ts; these pin the wiring.
+describe('WorkflowRunner — workflow size', () => {
+  beforeEach(() => {
+    logWorkflowSizeWarningMock.mockClear();
+  });
+
+  function fanOut(count: number): string {
+    return `return await parallel(Array.from({ length: ${count} }, (_, i) => () => agent('item ' + i)))`;
+  }
+
+  it('flags a run that schedules more agents than the default guideline, once', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: fanOut(WORKFLOW_SIZE_GUIDELINE_AGENTS.medium + 5),
+      args: undefined,
+      dispatch: async () => 'ok',
+    });
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    expect(registry.get(handle.runId)?.sizeWarning).toMatchObject({
+      axis: 'agents',
+      scheduledAgents: WORKFLOW_SIZE_GUIDELINE_AGENTS.medium + 1,
+      agentCap: WORKFLOW_SIZE_GUIDELINE_AGENTS.medium,
+      capFromGuideline: true,
+    });
+    expect(logWorkflowSizeWarningMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes the agent threshold from a configured guideline', async () => {
+    const { config, registry } = configWithRegistry();
+    Object.assign(config, {
+      getWorkflowSizeGuideline: () => ({ size: 'small', isDefault: false }),
+    });
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: fanOut(WORKFLOW_SIZE_GUIDELINE_AGENTS.small + 1),
+      args: undefined,
+      dispatch: async () => 'ok',
+    });
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.sizeWarning).toMatchObject({
+      axis: 'agents',
+      agentCap: WORKFLOW_SIZE_GUIDELINE_AGENTS.small,
+    });
+  });
+
+  it('stays quiet within bounds, and lets the env raise the threshold', async () => {
+    vi.stubEnv(WORKFLOW_SIZE_WARNING_AGENTS_ENV, '100');
+    try {
+      const { config, registry } = configWithRegistry();
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        // Past the default guideline, under the env threshold, and under the
+        // token projection (20 × 70k < 1.5M).
+        script: fanOut(20),
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await handle.completion;
+
+      expect(registry.get(handle.runId)?.sizeWarning).toBeUndefined();
+      expect(logWorkflowSizeWarningMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  // A resume replays agents by call sequence; a clock or a random draw changes
+  // the sequence. Refused before launch, with its own cause rather than the
+  // syntax hint a compile failure carries.
+  it('refuses a script that reads the clock before any agent runs', async () => {
+    const { config } = configWithRegistry();
+    const dispatch = vi.fn(async () => 'ok');
+    const start = WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: "await agent('first')\nreturn await agent('stamp ' + Date.now())",
+      args: undefined,
+      dispatch,
+    });
+
+    await expect(start).rejects.toBeInstanceOf(WorkflowScriptNotLaunchedError);
+    await expect(start).rejects.toThrow(/Date\.now\(\) on line 2/);
+    await expect(start).rejects.not.toThrow(/TypeScript syntax/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps the syntax hint on a compile failure', async () => {
+    const { config } = configWithRegistry();
+    await expect(
+      WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: "const target: string = 'x'\nawait agent(target)",
+        args: undefined,
+        dispatch: async () => 'ok',
+      }),
+    ).rejects.toThrow(/TypeScript syntax/);
   });
 });

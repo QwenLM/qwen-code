@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { RequestError } from '@agentclientprotocol/sdk';
 import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
@@ -61,6 +62,41 @@ describe('capacity RPC errors', () => {
 });
 
 describe('toRpcError', () => {
+  it.each(['request', 'wire'] as const)(
+    'preserves workflow parameter details from a %s error',
+    (transport) => {
+      const source = RequestError.invalidParams(
+        { errorKind: 'workflow_invalid_params' },
+        '`sourceRef` must contain non-empty id and revision strings',
+      );
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
+
+      expect(toRpcError(error)).toEqual({
+        code: RPC.INVALID_PARAMS,
+        message: source.message,
+        data: { errorKind: 'workflow_invalid_params', httpStatus: 400 },
+      });
+    },
+  );
+
+  it.each([
+    new Error('Unexpected workflow failure'),
+    RequestError.invalidParams(undefined, 'Unclassified parameter error'),
+    RequestError.internalError(
+      { errorKind: 'unknown_workflow_error' },
+      'Unexpected workflow failure',
+    ),
+  ])('keeps unclassified errors as internal failures: %s', (error) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: 'Internal error',
+      data: { errorKind: 'internal' },
+    });
+  });
+
   it('maps sealed maintenance to a JSON-RPC server error', () => {
     expect(toRpcError(new DaemonDrainingError())).toEqual({
       code: RPC.INTERNAL_ERROR,

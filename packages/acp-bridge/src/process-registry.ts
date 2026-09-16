@@ -729,9 +729,32 @@ function collectOwnership(
 function queryProcessTable(
   timeoutMs = PROCESS_QUERY_TIMEOUT_MS,
 ): Promise<string> {
-  return runExecFile(POSIX_PS, posixPsArgs(), {
-    ...STRING_EXEC_OPTIONS,
-    timeout: Math.max(1, Math.min(PROCESS_QUERY_TIMEOUT_MS, timeoutMs)),
+  let timer: NodeJS.Timeout | undefined;
+  const query = new Promise<string>((resolve, reject) => {
+    // execFile's timeout discards unread output even if ps already exited 0.
+    // Signal the child without destroying the pipes so snapshots stay complete.
+    const child = execFile(
+      POSIX_PS,
+      posixPsArgs(),
+      { ...STRING_EXEC_OPTIONS, timeout: 0 },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      },
+    );
+    timer = setTimeout(
+      () => {
+        try {
+          child.kill('SIGTERM');
+        } catch (error) {
+          reject(error);
+        }
+      },
+      Math.max(1, Math.min(PROCESS_QUERY_TIMEOUT_MS, timeoutMs)),
+    );
+  });
+  return query.finally(() => {
+    if (timer) clearTimeout(timer);
   });
 }
 
