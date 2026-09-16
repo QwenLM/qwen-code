@@ -88,6 +88,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
+  ToolErrorType,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
@@ -524,13 +525,18 @@ async function startSessionOwnedWorkflow(
     invocation = tool.buildSessionOwnedBackground(params, workflowName);
   } catch (error) {
     throw RequestError.invalidParams(
-      undefined,
+      { errorKind: 'workflow_invalid_params' },
       error instanceof Error ? error.message : String(error),
     );
   }
-  return (await invocation.execute(
-    new AbortController().signal,
-  )) as WorkflowToolResult;
+  const result = await invocation.execute(new AbortController().signal);
+  if (result.error?.type === ToolErrorType.INVALID_TOOL_PARAMS) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      result.error.message,
+    );
+  }
+  return result;
 }
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -12679,7 +12685,7 @@ class QwenAgent implements Agent {
           const script = params['script'];
           if (typeof script !== 'string' || script.length === 0) {
             throw RequestError.invalidParams(
-              undefined,
+              { errorKind: 'workflow_invalid_params' },
               '`script` is required for the "run-script" action',
             );
           }

@@ -439,6 +439,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     SHELL: 'run_shell_command',
     MONITOR: 'monitor',
   },
+  ToolErrorType: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).ToolErrorType,
   FORK_SUBAGENT_TYPE: 'fork',
   IMAGE_CAPABILITY: Object.freeze({
     autoHandlesWrongModel: true,
@@ -16303,23 +16306,35 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  // Both refusals are the caller's request being wrong, not the daemon
+  // These refusals are the caller's request being wrong, not the daemon
   // failing: an internal error would send a host looking at daemon logs.
-  it('refuses a run-script call with no script, and a malformed sourceRef, as parameter problems', async () => {
+  it('reports workflow start validation and compile errors as parameter problems', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
-    const execute = vi.fn();
-    const buildSessionOwnedBackground = vi.fn().mockImplementation(() => {
-      throw new Error(
-        'Workflow sourceRef must contain only id and revision, each a non-empty string.',
-      );
-    });
+    const sdk = await vi.importActual<
+      typeof import('@agentclientprotocol/sdk')
+    >('@agentclientprotocol/sdk');
+    const { WorkflowRunRegistry } = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core')
+    >('@qwen-code/qwen-code-core');
+    const { WorkflowTool } = await import(
+      '@qwen-code/qwen-code-core/tools/workflow/workflow.js'
+    );
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const workflowTool = new WorkflowTool({
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config);
+    const buildSessionOwnedBackground = vi.spyOn(
+      workflowTool,
+      'buildSessionOwnedBackground',
+    );
     Object.assign(innerConfig, {
       isWorkflowsEnabled: vi.fn().mockReturnValue(true),
-      getWorkflowRunRegistry: vi.fn().mockReturnValue({ get: vi.fn() }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn((name: string) =>
-          name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
+          name === 'workflow' ? workflowTool : undefined,
         ),
       }),
     });
@@ -16337,32 +16352,73 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+      sdk.RequestError.invalidParams,
+    );
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
         sessionId,
         taskId: 'definition-7',
         action: 'run-script',
       }),
-    ).rejects.toThrow('`script` is required for the "run-script" action');
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'workflow_invalid_params' },
+      message: expect.stringContaining('`script` is required'),
+    });
     expect(buildSessionOwnedBackground).not.toHaveBeenCalled();
 
+    for (const { input, message } of [
+      {
+        input: { script: 'return 1', sourceRef: { id: 'definition-7' } },
+        message: 'sourceRef',
+      },
+      {
+        input: { script: 'return (' },
+        message: 'invalid and was not launched',
+      },
+      { input: { script: 'return Date.now()' }, message: 'Date.now' },
+    ]) {
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+          sessionId,
+          taskId: 'definition-7',
+          action: 'run-script',
+          ...input,
+        }),
+      ).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_invalid_params' },
+        message: expect.stringContaining(message),
+      });
+    }
+    expect(registry.list()).toEqual([]);
+
+    buildSessionOwnedBackground.mockReturnValueOnce({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      }),
+    } as unknown as ReturnType<
+      typeof workflowTool.buildSessionOwnedBackground
+    >);
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
         sessionId,
         taskId: 'definition-7',
         action: 'run-script',
         script: 'return 1',
-        sourceRef: { id: 'definition-7' },
       }),
-    ).rejects.toThrow('Workflow sourceRef must contain only id and revision');
-    expect(execute).not.toHaveBeenCalled();
+    ).resolves.toEqual({ changed: false });
 
     mockConnectionState.resolve();
     await agentPromise;
   });
 
-  // A host retrying a start it is unsure landed must not get two runs of the
-  // same compiled definition.
+  // Only overlapping starts share a claim; the key is released on return.
   it('starts one run when two run-script calls share a start key', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

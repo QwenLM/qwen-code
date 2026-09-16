@@ -2284,12 +2284,17 @@ action that took effect, and `{"changed": false}` when nothing happened:
 Workflow is unavailable for the session (disabled, bare mode, untrusted
 folder), the workspace is untrusted, the saved workflow name is unknown, the
 run id is unknown, or another start is already in flight under the same
-`taskId`. That last one makes a retried start idempotent per key: two
-concurrent `run-script` calls under one `taskId` start one run.
+`taskId`. Only overlapping starts are deduplicated: two concurrent
+`run-script` calls under one `taskId` start one run. Once that start returns,
+the key is released; submitting it again can start another run, even if the
+first run is still active. The key does not provide retry idempotency after
+a lost response.
 
 A rejected parameter is a `400` (`-32602` over ACP), not a started run: an
-unknown `action`, a `run-script` with no `script`, or a `sourceRef` that is not
-`{id, revision}` of non-empty strings.
+unknown `action`, a `run-script` with no `script`, a `sourceRef` that is not
+`{id, revision}` of non-empty strings, or a script rejected before launch
+because of invalid syntax or a determinism violation. Workflow start input
+errors carry `workflow_invalid_params` and retain the rejection message.
 
 `workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
 `runSavedArgs` and `runScript`; a daemon without them accepts neither the start
