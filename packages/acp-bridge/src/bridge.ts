@@ -55,7 +55,11 @@ import {
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
-import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
+import type {
+  AcpChannel,
+  AcpChannelTransportGuard,
+  ChannelFactoryStartupContext,
+} from './channel.js';
 import { channelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import {
   EventBus,
@@ -964,6 +968,7 @@ function takeRestoreAskUserQuestionHint(state: BridgeSessionState): {
 
 interface ChannelInfo {
   id: string;
+  lastUsedAt: number;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
@@ -3146,6 +3151,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   let activePromptCounter = 0;
   function touchActivity(): void {
     lastActivityTimestamp = Date.now();
+    if (channelInfo && !channelInfo.isDying) {
+      channelInfo.lastUsedAt = lastActivityTimestamp;
+    }
   }
 
   /**
@@ -3957,6 +3965,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   function finishWorkspaceMcpDiscovery(ci: ChannelInfo): void {
+    ci.lastUsedAt = Date.now();
     ci.workspaceMcpDiscoveryInFlight = false;
     if (ci.workspaceMcpDiscoveryTimer) {
       clearTimeout(ci.workspaceMcpDiscoveryTimer);
@@ -4103,8 +4112,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function withWorkspaceControl<T>(
     ci: ChannelInfo,
     fn: () => Promise<T>,
+    recordUse = true,
   ): Promise<T> {
     if (liveChannelInfo() === ci) cancelIdleTimer();
+    if (recordUse) ci.lastUsedAt = Date.now();
     ci.workspaceControlInFlight++;
     try {
       return await fn();
@@ -4112,6 +4123,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       await retireChannelOnTimeout(ci, error, 'workspace control timeout');
       throw error;
     } finally {
+      if (recordUse) ci.lastUsedAt = Date.now();
       ci.workspaceControlInFlight = Math.max(
         0,
         ci.workspaceControlInFlight - 1,
@@ -4139,7 +4151,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ci: ChannelInfo,
     fn: () => Promise<T>,
   ): Promise<T> {
-    return withWorkspaceControl(ci, fn);
+    return withWorkspaceControl(ci, fn, false);
   }
 
   function startSessionReaper(): void {
@@ -4667,6 +4679,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const acpChannelId = randomUUID();
       const startupStartedAt = Date.now();
       const startupAbort = new AbortController();
+      const startup: ChannelFactoryStartupContext = {};
       const factoryPromise = telemetry.withSpan(
         'channel.spawn',
         {
@@ -4682,6 +4695,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
             },
             startupAbort.signal,
+            startup,
           ),
       );
       let channel: AcpChannel;
@@ -4692,7 +4706,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel factory',
         );
       } catch (error) {
-        startupAbort.abort(error);
+        const failure =
+          error instanceof BridgeTimeoutError
+            ? (startup.getTimeoutError?.() ?? error)
+            : error;
+        startupAbort.abort(failure);
         void factoryPromise.then(
           (lateChannel) =>
             terminateChannel(lateChannel, 'late channel factory result').catch(
@@ -4704,7 +4722,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
           () => undefined,
         );
-        throw error;
+        throw failure;
       }
       const sessionIds = new Set<string>();
       const infoRef: { current?: ChannelInfo } = {};
@@ -4920,6 +4938,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // handshaking channel.
       const info: ChannelInfo = {
         id: acpChannelId,
+        lastUsedAt: Date.now(),
         channel,
         connection,
         client,
@@ -5306,6 +5325,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw epochError;
       }
       runtimeEpoch = nextRuntimeEpoch;
+      info.lastUsedAt = Date.now();
       channelInfo = info;
       info.handshakeComplete = true;
       if (channelLivenessNegotiated) {
@@ -6617,6 +6637,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             server.authenticationState !== 'pending'
           ) {
             info.workspaceMcpAuthenticationServerNames.delete(serverName);
+            info.lastUsedAt = Date.now();
             const timer = info.workspaceMcpAuthenticationTimers.get(serverName);
             if (timer) clearTimeout(timer);
             info.workspaceMcpAuthenticationTimers.delete(serverName);
@@ -9876,6 +9897,46 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         runtimeEpoch: runtimeLive ? runtimeEpoch : sourceRuntimeEpoch,
         activeWork,
       };
+    },
+
+    getIdleChannelCandidate() {
+      const info = liveChannelInfo();
+      if (
+        shuttingDown ||
+        !info ||
+        byId.size > 0 ||
+        channelShouldReapWhenIdle(info) ||
+        bridgeApi.getWorkspaceRuntimeLifecycleSnapshot!().activeWork
+      ) {
+        return undefined;
+      }
+      return {
+        channelId: info.id,
+        runtimeEpoch,
+        lastUsedAt: info.lastUsedAt,
+      };
+    },
+
+    async reclaimIdleChannel(candidate, signal) {
+      if (signal?.aborted) return false;
+      const current = bridgeApi.getIdleChannelCandidate!();
+      if (
+        !current ||
+        current.channelId !== candidate.channelId ||
+        current.runtimeEpoch !== candidate.runtimeEpoch ||
+        current.lastUsedAt !== candidate.lastUsedAt
+      ) {
+        return false;
+      }
+      const info = liveChannelInfo()!;
+      // Retire only this child; shutdown would permanently seal the bridge.
+      info.isDying = true;
+      cancelIdleTimer();
+      keepAliveUntil = 0;
+      info.channelLiveness?.stop();
+      writeStderrLine(`qwen serve: reclaiming idle ACP channel ${info.id}`);
+      await terminateChannel(info.channel, 'capacity reclamation');
+      return true;
     },
 
     get pendingPermissionCount() {
@@ -15553,7 +15614,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel.preheat',
           { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
           async () => {
-            await ensureChannel();
+            const info = await ensureChannel();
+            info.lastUsedAt = Date.now();
             if (keepAliveMs !== undefined) {
               keepAliveUntil = Math.max(
                 keepAliveUntil,
