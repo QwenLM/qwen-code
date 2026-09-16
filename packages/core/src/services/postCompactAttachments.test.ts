@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
-import { extractRecentFilePaths } from './postCompactAttachments.js';
+import {
+  extractRecentFilePaths,
+  stripAnalysisBlock,
+} from './postCompactAttachments.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 function fileReadCall(path: string): Content {
@@ -1512,5 +1515,54 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     const lateIdx = flat.indexOf('late');
     expect(earlyIdx).toBeLessThan(midIdx);
     expect(midIdx).toBeLessThan(lateIdx);
+  });
+});
+
+describe('stripAnalysisBlock', () => {
+  it('strips matched analysis pairs and keeps the summary after them', () => {
+    expect(stripAnalysisBlock('<analysis>r</analysis>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('strips a block closed with the model native think tag (#11969)', () => {
+    // A thinking model instructed to open <analysis> often closes with its
+    // native </think>; the whole answer must not count as unterminated.
+    expect(stripAnalysisBlock('<analysis>r</think>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('strips thinking and reasoning tag pairs', () => {
+    expect(stripAnalysisBlock('<thinking>r</thinking>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+    expect(stripAnalysisBlock('<reasoning>r</reasoning>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('accepts cross-pair closers like <analysis>...</think>', () => {
+    expect(stripAnalysisBlock('<analysis>r</think>REAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('still swallows a block truncated before any summary exists', () => {
+    // Truncation inside the scratchpad produces no summary at all, and the
+    // upstream emptiness check must keep failing honestly on it.
+    expect(stripAnalysisBlock('<analysis>r cut off mid-')).toBe('');
+  });
+
+  it('still swallows a truncated native think block', () => {
+    expect(stripAnalysisBlock('<think>r cut off mid-')).toBe('');
+  });
+
+  it('returns an empty string for an all-analysis summary', () => {
+    expect(
+      stripAnalysisBlock(
+        '<analysis>thinking, but I never produced a state_snapshot</analysis>',
+      ),
+    ).toBe('');
   });
 });

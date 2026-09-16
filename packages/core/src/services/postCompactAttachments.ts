@@ -515,20 +515,37 @@ const RESUME_TRAILER =
  *    nested `<analysis>` tags, this pattern will leak content. The
  *    compression prompt is under our control, so we keep the pattern
  *    strict rather than over-engineering.
+ *  - The closed-block pattern accepts the reasoning tags thinking models
+ *    actually close with (`</think>` and friends), not just the literal
+ *    `</analysis>` the prompt asks for: a thinking model instructed to open
+ *    `<analysis>` often emits its native closer, and a strict single-tag
+ *    pattern then treats the whole answer as unterminated and swallows the
+ *    real summary after it (#11969). Cross-pair closers like
+ *    `<analysis>...</think>` are accepted for the same reason.
  *  - The unclosed-tag fallback (`<analysis>[\s\S]*$`) catches the case
  *    where the model started an `<analysis>` block and ran out of
  *    output tokens before closing it. Without this, the closed-tag
  *    regex above misses and the entire scratchpad leaks into history
  *    via the fallback path in `postProcessSummary`.
  */
+const REASONING_TAG_NAMES = '(?:analysis|think|thinking|reasoning)';
+const CLOSED_REASONING_BLOCK = new RegExp(
+  `<${REASONING_TAG_NAMES}>[\\s\\S]*?<\\/${REASONING_TAG_NAMES}>\\s*`,
+  'gi',
+);
+const UNCLOSED_REASONING_BLOCK = new RegExp(
+  `<${REASONING_TAG_NAMES}>[\\s\\S]*$`,
+  'gi',
+);
+
 export function stripAnalysisBlock(rawSummary: string): string {
-  // First pass: strip well-formed `<analysis>...</analysis>` blocks
-  // (handles multiple via `/g`, newlines via `[\s\S]`).
-  let result = rawSummary.replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '');
-  // Second pass: strip any remaining unclosed `<analysis>` tag (the
-  // model ran out of output tokens before closing). Uses an
-  // end-of-string anchor since there's no closing tag to stop at.
-  result = result.replace(/<analysis>[\s\S]*$/g, '');
+  // First pass: strip well-formed reasoning blocks (handles multiple via
+  // `/g`, newlines via `[\s\S]`, any of the native closer tags above).
+  let result = rawSummary.replace(CLOSED_REASONING_BLOCK, '');
+  // Second pass: strip any remaining unclosed reasoning tag (the model ran
+  // out of output tokens before closing). Uses an end-of-string anchor
+  // since there's no closing tag to stop at.
+  result = result.replace(UNCLOSED_REASONING_BLOCK, '');
   return result.trim();
 }
 
