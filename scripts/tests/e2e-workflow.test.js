@@ -312,12 +312,14 @@ describe('e2e workflow', () => {
   });
 
   describe('docker lock cache ownership heal', () => {
-    // Run 35039618620 (#11973) died in the same second its test step
-    // started: `exec 9>` on ~/.cache/qwen-code-ci/docker-sandbox-daemon.lock
-    // failed with EACCES — a root-owned leftover in the runner's home, not
-    // disk pressure — and the prune step died on the same file. The
-    // workspace heal only chowns $GITHUB_WORKSPACE; the lock directory
-    // lives outside it, so the heal must reach it too.
+    // Run 35054004633 (#11990) failed exactly the two steps that open
+    // ~/.cache/qwen-code-ci/docker-sandbox-daemon.lock — 'Run E2E tests'
+    // (via run-e2e-tests.sh) and 'Prune dangling docker images' — while
+    // the container-runtime preflight passed. Run 35039618620 (#11973)
+    // showed why: `exec 9>` on that lock fails with EACCES when a
+    // root-owned leftover sits in the runner's home, and both steps die
+    // on the same file. The workspace heal only chowns $GITHUB_WORKSPACE;
+    // the lock directory lives outside it, so the heal must reach it too.
     const steps = yml.jobs['e2e-test-linux'].steps;
     const heal = steps.find(
       (step) => step.name === 'Restore workspace ownership',
@@ -329,7 +331,7 @@ describe('e2e workflow', () => {
       // The whole fallback chain as one contiguous pin: each half alone
       // contains the short pin, so dropping `-R` from the unprivileged
       // attempt or dropping the `sudo -n` fallback leaves a substring pin
-      // green while the heal dies on the pool (measured on #11974).
+      // green while the heal dies on the pool.
       expect(heal.run).toContain(
         'chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci"',
       );

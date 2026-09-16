@@ -462,8 +462,10 @@ function formatDescriptionPaths(
     return pathForDisplay(trimmed, workspaceCwd);
   }
 
-  return trimmed.replace(/(?:[A-Za-z]:)?\/[^\s'")]+/g, (match) =>
-    pathForDisplay(match, workspaceCwd),
+  return trimmed.replace(
+    /(^|[\s'"(])((?:[A-Za-z]:)?\/[^\s'")]+)/g,
+    (_match, prefix: string, filePath: string) =>
+      prefix + pathForDisplay(filePath, workspaceCwd),
   );
 }
 

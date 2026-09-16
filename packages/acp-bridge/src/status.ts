@@ -216,6 +216,12 @@ export const SERVE_CONTROL_EXT_METHODS = {
   userLanguage: 'qwen/control/user/language',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  /**
+   * Control a workflow run, delete its history, or start a new run from a
+   * saved definition or a caller-supplied script. Params:
+   * `{ sessionId, taskId, action }` plus the optional start input
+   * ({@link ServeWorkflowActionInput}) the two start actions read.
+   */
   sessionWorkflowTaskAction: 'qwen/control/session/task/workflow-action',
   sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
@@ -699,6 +705,10 @@ export interface ServeSessionSupportedCommandsStatus {
     sourceRef: boolean;
     agentStepId: boolean;
     workflowStepId: boolean;
+    /** Whether `run-saved` reads `args` and `sourceRef` from the request. */
+    runSavedArgs?: boolean;
+    /** Whether the `run-script` action exists. */
+    runScript?: boolean;
   };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
@@ -962,6 +972,51 @@ export interface ServeWorkflowCallTrace {
   startedAt: number;
   endedAt?: number;
   error?: string;
+}
+
+/**
+ * Start input for the `run-saved` and `run-script` workflow actions: what to
+ * run beyond the definition itself. The control actions (`pause`, `resume`,
+ * `retry`, `rerun`, `delete-history`) ignore it — a retry or rerun replays the
+ * original run's own `args` and `sourceRef`, which is what makes it the same
+ * run rather than a new one.
+ */
+export interface ServeWorkflowActionInput {
+  /** Bound to the script's `args` global; any JSON value. */
+  args?: unknown;
+  /**
+   * The caller's own definition id and revision, recorded on the run, its
+   * journal and its snapshot so a host can tie a run back to what it built.
+   */
+  sourceRef?: { id: string; revision: string };
+  /** `run-script` only: the script source to run. */
+  script?: string;
+}
+
+/**
+ * The start input a workflow-action request carries, or `undefined` when it
+ * carries none — in which case the request reaching the session runtime is
+ * byte-identical to one sent before start input existed.
+ *
+ * Values are forwarded verbatim rather than checked here: the session runtime
+ * that starts the run validates them against the workflow tool's own rules, so
+ * every entry point refuses a malformed `sourceRef` with the same text.
+ */
+export function readServeWorkflowActionInput(
+  body: Record<string, unknown>,
+): ServeWorkflowActionInput | undefined {
+  const input: ServeWorkflowActionInput = {};
+  // `args` is any JSON value, `null` included, so presence decides.
+  if (Object.hasOwn(body, 'args')) input.args = body['args'];
+  if (Object.hasOwn(body, 'sourceRef')) {
+    input.sourceRef = body[
+      'sourceRef'
+    ] as ServeWorkflowActionInput['sourceRef'];
+  }
+  if (Object.hasOwn(body, 'script')) {
+    input.script = body['script'] as ServeWorkflowActionInput['script'];
+  }
+  return Object.keys(input).length > 0 ? input : undefined;
 }
 
 export interface ServeSessionWorkflowTaskStatus {
