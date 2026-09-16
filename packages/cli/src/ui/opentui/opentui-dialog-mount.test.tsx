@@ -208,7 +208,11 @@ vi.mock('./dialogs-misc.js', () => ({
   OpenTuiTrustDialog: mocks.stub('trust'),
 }));
 
-const CONFIG = { getModel: () => 'fake-model' } as unknown as Config;
+const recordSlashCommand = vi.fn();
+const CONFIG = {
+  getModel: () => 'fake-model',
+  getChatRecordingService: () => ({ recordSlashCommand }),
+} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const addItem = vi.fn();
 const HOST = {
@@ -461,6 +465,15 @@ describe('OpenTuiDialogMount routing', () => {
     expect(addItem.mock.calls[0]![0]).toMatchObject({
       text: expect.stringContaining('Kept model as'),
     });
+    // ink ModelDialog records the row it adds, so a resumed session replays it.
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'info', text: expect.stringContaining('Kept model as') },
+      ],
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -477,11 +490,17 @@ describe('OpenTuiDialogMount routing', () => {
     dialogProp('model', 'onSelect')('fake-model');
     dialogProp('model', 'onClose')();
     expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     await act(async () => {
       settle({ ok: true, message: 'Model set to fake-model' });
     });
     expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [{ type: 'info', text: 'Model set to fake-model' }],
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -508,7 +527,24 @@ describe('OpenTuiDialogMount routing', () => {
     select('fake-model');
     expect(applyModelSelection).toHaveBeenCalledTimes(1);
     expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('records nothing for a pick that fails to apply', async () => {
+    vi.mocked(applyModelSelection).mockImplementationOnce(async () => ({
+      ok: false,
+      error: 'Selected model is unavailable.',
+    }));
+    const onClose = vi.fn();
+    mount({ dialog: 'model', mode: 'primary' }, { onClose });
+    dialogProp('model', 'onSelect')('fake-model');
+    await act(async () => {});
+    // ink keeps the dialog open with the error: a row here would let a resume
+    // replay a switch that never landed.
+    expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('throws for an unhandled dialog kind', () => {

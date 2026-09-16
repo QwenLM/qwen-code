@@ -9,8 +9,9 @@
  * Mount coverage for the transcript view's review-round behaviors: an
  * awaiting-approval card keeps its (capped) description — the confirmation
  * dialog does not carry the payload for every type, so an MCP call stays
- * approvable with its arguments on screen — and the `!` shell row carries
- * ink's `$ ` prefix.
+ * approvable with its arguments on screen — the `!` shell row carries ink's
+ * `$ ` prefix, and `ui.showToolCallArgs` adds ink's inline arguments row
+ * under the card header.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -76,6 +77,7 @@ describe('OpenTuiTranscriptView', () => {
     // args — so the card is the only surface that carries the arguments.
     const { container } = render(
       <OpenTuiTranscriptView
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -86,7 +88,7 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(container.textContent).toContain('SECRET_PAYLOAD');
-    expect(container.textContent).toContain('awaiting approval');
+    expect(container.textContent).toContain('←');
   });
 
   it('keeps a long pending payload approvable and caps it once settled (R5-9)', () => {
@@ -102,6 +104,7 @@ describe('OpenTuiTranscriptView', () => {
     const pending = render(
       <OpenTuiTranscriptView
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -112,12 +115,13 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(pending.container.textContent).toContain('TAIL_MARKER');
-    expect(pending.container.textContent).toContain('awaiting approval');
+    expect(pending.container.textContent).toContain('←');
     pending.unmount();
 
     const settled = render(
       <OpenTuiTranscriptView
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -128,6 +132,7 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     expect(settled.container.textContent).not.toContain('TAIL_MARKER');
+    expect(settled.container.textContent).not.toContain('←');
     expect(settled.container.textContent).toContain('... last');
   });
 
@@ -142,6 +147,7 @@ describe('OpenTuiTranscriptView', () => {
     const { container } = render(
       <OpenTuiTranscriptView
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -154,17 +160,16 @@ describe('OpenTuiTranscriptView', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('... last');
     expect(text).not.toContain('PAYLOAD_TAIL');
-    expect(text).toContain('awaiting approval');
+    expect(text).toContain('←');
   });
 
   it('yields pending rows a hook-confirmation dialog needs when expanded (mem0 e2e)', () => {
-    // The mem0 confirmation duplicates the card's description inside its
-    // dialog body: once ctrl-s expands it, the whole payload plus dialog
-    // chrome must fit the viewport, so a ~4k-char payload must shrink the
-    // card BELOW the collapsed-dialog bound (34 rows ≈ 3523 visible chars
-    // at 110 columns). A marker placed past the yielded budget pins the
-    // shrink — that bound alone would still show it and the e2e expansion
-    // stage would stay red.
+    // The mem0 confirmation duplicates the card's description inside its own
+    // body: once ctrl-s expands it, the whole payload plus the confirmation's
+    // chrome must fit the viewport, so a ~4k-char payload must shrink the card
+    // BELOW the collapsed bound (37 rows at h=80). A marker placed past the
+    // yielded budget pins the shrink — that bound alone would still show it
+    // and the e2e expansion stage would stay red.
     const description =
       '{"content":"' +
       'a'.repeat(2500) +
@@ -175,6 +180,7 @@ describe('OpenTuiTranscriptView', () => {
       <OpenTuiTranscriptView
         availableWidth={110}
         availableTerminalHeight={80}
+        awaitingCallId="t1"
         items={[
           toolItem({
             tool: 'mcp__fs__write_file',
@@ -185,7 +191,7 @@ describe('OpenTuiTranscriptView', () => {
       />,
     );
     const text = container.textContent ?? '';
-    expect(text).toContain('awaiting approval');
+    expect(text).toContain('←');
     expect(text).toContain('... last');
     expect(text).not.toContain('MID_MARKER');
   });
@@ -224,6 +230,154 @@ describe('OpenTuiTranscriptView', () => {
     );
     expect(container.textContent).toContain('echo visible now');
     expect(container.textContent).toContain('done shows too');
+  });
+
+  describe("ink's inline arguments row (ui.showToolCallArgs)", () => {
+    const argsItem = (overrides: Partial<LiveToolItem> = {}) =>
+      toolItem({
+        tool: 'write_file',
+        title: 'write_file',
+        args: '{"file_path":"/x","content":"ARGS_ROW_MARKER"}',
+        confirm: 'approved',
+        done: true,
+        ...overrides,
+      });
+
+    it('stays off unless the setting is enabled', () => {
+      const { container } = render(
+        <OpenTuiTranscriptView items={[argsItem()]} />,
+      );
+      // ink reads the same setting; off is the schema default, so the header
+      // alone carries the call (the file path is ink's description).
+      expect(container.textContent).not.toContain('ARGS_ROW_MARKER');
+    });
+
+    it('draws the raw JSON on its own line under the header', () => {
+      const { container } = render(
+        <OpenTuiTranscriptView items={[argsItem()]} showToolCallArgs />,
+      );
+      const text = container.textContent ?? '';
+      expect(text).toContain('{"file_path":"/x","content":"ARGS_ROW_MARKER"}');
+      // The row follows the header it belongs to, not the card body.
+      expect(text.indexOf('ARGS_ROW_MARKER')).toBeGreaterThan(
+        text.indexOf('write_file'),
+      );
+    });
+
+    it('skips the row when the header already prints the args (MCP dedup)', () => {
+      const json = '{"path":"/x","content":"SECRET_PAYLOAD"}';
+      const payloadRows = (text: string) =>
+        text.match(/SECRET_PAYLOAD/g)?.length ?? 0;
+      const deduped = render(
+        <OpenTuiTranscriptView
+          items={[
+            argsItem({
+              tool: 'mcp__fs__write_file',
+              description: json,
+              args: json,
+            }),
+          ]}
+          showToolCallArgs
+        />,
+      );
+      // MCP tools describe themselves as their own arguments, so both surfaces
+      // would print the same payload.
+      expect(payloadRows(deduped.container.textContent ?? '')).toBe(1);
+      deduped.unmount();
+
+      // Positive control: a header that carries the payload without *being* it
+      // keeps both lines, so the one above is the dedup dropping the row — not
+      // the row failing to render at all.
+      const other = render(
+        <OpenTuiTranscriptView
+          items={[
+            argsItem({
+              tool: 'mcp__fs__write_file',
+              description: `write_file ${json}`,
+              args: json,
+            }),
+          ]}
+          showToolCallArgs
+        />,
+      );
+      expect(payloadRows(other.container.textContent ?? '')).toBe(2);
+    });
+
+    it('caps the row at two wrapped rows and names ctrl+o as the valve', () => {
+      // ink bounds the row against the header's inner width (80 columns minus
+      // the status glyph), so a WriteFile `content` arg cannot bury the
+      // conversation; the marker advertises what ctrl+O reveals.
+      const json = '{"file_path":"/x","content":"' + 'z'.repeat(400) + 'TAIL"}';
+      const { container } = render(
+        <OpenTuiTranscriptView
+          items={[argsItem({ args: json })]}
+          showToolCallArgs
+        />,
+      );
+      const text = container.textContent ?? '';
+      expect(text).toContain('… +');
+      expect(text).toContain('chars (ctrl+o)');
+      expect(text).not.toContain('TAIL');
+    });
+
+    it("uncaps the row on ink's ctrl+O full-detail flag", () => {
+      const json = '{"file_path":"/x","content":"' + 'z'.repeat(400) + 'TAIL"}';
+      const { container } = render(
+        <OpenTuiTranscriptView
+          items={[argsItem({ args: json })]}
+          showToolCallArgs
+          thoughtsExpanded
+        />,
+      );
+      const text = container.textContent ?? '';
+      expect(text).toContain('TAIL');
+      expect(text).not.toContain('ctrl+o)');
+    });
+  });
+
+  it("marks only the first awaiting call with ink's ← indicator", () => {
+    // ink's TrailingIndicator sits on `toolAwaitingApproval`, the first call in
+    // confirming status — opentui renders only that card's dialog, so arrows on
+    // every pending row would point at calls with nothing on screen to answer.
+    const { container } = render(
+      <OpenTuiTranscriptView
+        awaitingCallId="t1"
+        items={[
+          toolItem({ description: 'echo one', confirm: 'pending' }),
+          toolItem({
+            id: 't2',
+            description: 'echo two',
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text.split('←')).toHaveLength(2);
+    expect(text.indexOf('←')).toBeLessThan(text.indexOf('echo two'));
+  });
+
+  it('marks the awaiting call the queue names, not the first pending row', () => {
+    // A PreToolUse `ask` hook re-arms a call that already left the queue: it is
+    // appended behind the call still waiting, while its own card goes back to
+    // pending where it sits in the transcript. The dialog on screen is the
+    // queue's head, so that is the card carrying the arrow.
+    const { container } = render(
+      <OpenTuiTranscriptView
+        awaitingCallId="t2"
+        items={[
+          toolItem({ description: 'echo one', confirm: 'pending' }),
+          toolItem({
+            id: 't2',
+            description: 'echo two',
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text.split('←')).toHaveLength(2);
+    expect(text.indexOf('←')).toBeGreaterThan(text.indexOf('echo two'));
   });
 
   it('renders the ! shell row with the ink $ prefix', () => {

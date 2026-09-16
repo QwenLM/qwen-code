@@ -168,25 +168,25 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(maxHistoryItemRows(50)).toBe(200);
   });
 
-  it('budgets a pending card below the confirmation dialog footprint', () => {
+  it('budgets a pending card below the inline confirmation footprint', () => {
     // At 80 rows the ink-parity cap is 320 — 4x past the viewport. The
-    // pending budget is bounded by the collapsed dialog footprint, and by
-    // the payload the dialog renders expanded: a hook-forced confirmation
+    // pending budget is bounded by the collapsed confirmation footprint, and
+    // by the payload it renders expanded: a hook-forced confirmation
     // duplicates the card's description in its body, so a wide payload
-    // shrinks the card or ctrl-s expansion pushes the dialog off screen
+    // shrinks the card or ctrl-s expansion pushes the options off screen
     // (mem0 e2e regression).
     expect(maxHistoryItemRows(80)).toBe(320);
-    // No payload: the collapsed-dialog bound (80 - 46) is the tight one.
-    expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
-    expect(pendingCardMaxRows(100, 0, 110)).toBe(51);
-    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the
-    // expanded-dialog bound leaves (80 - 26 - 37) * 0.7 = 11 card rows.
-    expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
+    // No payload: the collapsed-confirmation bound (80 - 43) is the tight one.
+    expect(pendingCardMaxRows(80, 0, 110)).toBe(37);
+    expect(pendingCardMaxRows(100, 0, 110)).toBe(57);
+    // A ~3.9k-char payload wraps to ~37 confirmation rows at 110 columns; the
+    // expanded bound leaves (80 - 18 - 37) * 0.7 = 17 card rows.
+    expect(pendingCardMaxRows(80, 3900, 110)).toBe(17);
   });
 
   it('falls back to the settled cap on short terminals', () => {
     expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
-    expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    expect(pendingCardMaxRows(48, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
   });
 
   it('keeps everything when the content fits', () => {
@@ -412,6 +412,27 @@ describe('message meta (ink glyph/color parity)', () => {
     expect(meta.strikethrough).toBe(true);
     expect(meta.glyph).toBe(TOOL_STATUS.CANCELED);
     expect(meta.color).not.toBe(C.red);
+  });
+
+  it("shows an approved call that has not started with ink's pending glyph", () => {
+    // The scheduler holds an approved call in 'scheduled' while a sibling
+    // still awaits its own approval; ink draws that as pending, not running.
+    const item = {
+      kind: 'tool',
+      id: 't',
+      tool: 'run_shell_command',
+      title: 'Shell touch a',
+      output: '',
+      done: false,
+      confirm: 'approved',
+      queued: true,
+    } as unknown as LiveToolItem;
+    const queued = toolStatusMeta(item);
+    expect(queued.glyph).toBe(TOOL_STATUS.PENDING);
+    expect(queued.color).toBe(C.green);
+    expect(toolStatusMeta({ ...item, queued: false }).glyph).toBe(
+      TOOL_STATUS.EXECUTING,
+    );
   });
 });
 
