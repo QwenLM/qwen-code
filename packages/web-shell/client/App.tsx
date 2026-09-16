@@ -1155,9 +1155,9 @@ export interface WebShellProps {
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
-   * Called when no `language` prop was provided and the shell resolved a UI
-   * language from the daemon's effective `general.language` setting. Same
-   * observe-but-do-not-persist contract as `onThemeResolved`.
+   * Called when the effective UI language changes without becoming a host
+   * opinion, including settings resolution and optimistic changes or rollbacks.
+   * Hosts may mirror document chrome but must not persist this value.
    */
   onLanguageResolved?: (language: WebShellLanguage) => void;
   /**
@@ -11814,10 +11814,15 @@ export function App({
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
         .then(() => {
           if (!owner.current.isCurrent()) return;
-          // Confirmed by the daemon: the choice now becomes the host's own
-          // opinion (persisted, wins over settings on later loads).
-          handleLanguageChange(nextLanguage);
-          return refreshSettings();
+          if (scope === 'user') {
+            // A user-scoped choice becomes the host's persisted opinion. A
+            // workspace choice remains settings-owned for that workspace.
+            handleLanguageChange(nextLanguage);
+          }
+          return refreshSettings().catch((error: unknown) => {
+            if (!owner.current.isCurrent()) return;
+            reportError(error, 'Failed to refresh settings after /language');
+          });
         })
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
@@ -15154,13 +15159,15 @@ export function App({
               }
               const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
+              const previousLanguage = selectedLanguage;
               // The daemon sync is what keeps the agent answering in the
               // language the chrome just switched to, so when it cannot run
               // (turn in flight, or a Goal owning the session) refuse the
               // command instead of switching the UI alone — the language
               // picker treats the identical condition the same way.
               if (commandBlocked) return blockCommand();
-              handleLanguageChange(nextLanguage);
+              setSelectedLanguage(nextLanguage);
+              onLanguageResolvedRef.current?.(nextLanguage);
               {
                 const deferComposerCommit =
                   Boolean(
@@ -15182,10 +15189,21 @@ export function App({
                 )
                   .then(() => {
                     if (!owner.current.isCurrent()) return;
-                    return sessionActions.refreshCommands();
+                    handleLanguageChange(nextLanguage);
+                    return sessionActions
+                      .refreshCommands()
+                      .catch((error: unknown) => {
+                        if (!owner.current.isCurrent()) return;
+                        reportError(
+                          error,
+                          'Failed to refresh commands after /language',
+                        );
+                      });
                   })
                   .catch((error: unknown) => {
                     if (!owner.current.isCurrent()) return;
+                    setSelectedLanguage(previousLanguage);
+                    onLanguageResolvedRef.current?.(previousLanguage);
                     reportError(error, 'Failed to sync /language command');
                   });
                 return clearComposerOnPromptStart ? false : true;

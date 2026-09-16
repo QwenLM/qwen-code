@@ -34849,7 +34849,8 @@ describe('App session callbacks', () => {
   });
 
   it('sends /language ui --project for a workspace-scoped language change from Settings', async () => {
-    const { container } = renderApp();
+    const onLanguageChange = vi.fn();
+    const { container } = renderApp({ onLanguageChange });
     await flush();
     testState.prompt = '/settings';
     await clickSubmit(container);
@@ -34870,6 +34871,7 @@ describe('App session callbacks', () => {
         (c) => c[0] === '/language ui en --project',
       ),
     ).toBe(true);
+    expect(onLanguageChange).not.toHaveBeenCalled();
   });
 
   it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
@@ -39950,6 +39952,52 @@ describe('settings-derived theme and language (#11955)', () => {
     await flush();
 
     // The optimistic pick and the rollback both steer document chrome only.
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+    expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('does not roll back an accepted language pick when settings refresh fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    testState.settings = [languageSetting('zh')];
+    const onLanguageResolved = vi.fn();
+    const { container } = renderApp({ onLanguageResolved });
+    await flush();
+    mockSessionActions.refreshCommands.mockRejectedValueOnce(
+      new Error('refresh failed'),
+    );
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('en');
+  });
+
+  it('does not persist a composer language pick rejected by the daemon', async () => {
+    testState.settings = [languageSetting('zh')];
+    const onLanguageChange = vi.fn();
+    const onLanguageResolved = vi.fn();
+    renderApp({ onLanguageChange, onLanguageResolved });
+    await flush();
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new Error('daemon refused'),
+    );
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/language ui en');
+      await Promise.resolve();
+    });
+    await flush();
+
     expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
     expect(onLanguageChange).not.toHaveBeenCalled();
   });

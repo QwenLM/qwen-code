@@ -27,12 +27,6 @@ import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
 
-// The loading and error surfaces below render before (or instead of) App, so
-// they never see the settings-resolved values App reports through
-// onThemeResolved/onLanguageResolved. When the host passes no opinion
-// (undefined since #11955), fall back the way the standalone entry did before
-// that change: the pre-paint dark default and the browser locale — never
-// light tokens on the dark pre-paint page, never unconditional English.
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
 }
@@ -41,6 +35,18 @@ function surfaceLanguage(
   language: WebShellProps['language'],
 ): WebShellLanguage {
   return normalizeLanguage(language ?? navigator.language);
+}
+
+function withChrome(
+  props: WebShellProps,
+  theme: WebShellTheme | undefined,
+  language: WebShellLanguage | undefined,
+): WebShellProps {
+  return {
+    ...props,
+    theme: props.theme ?? theme,
+    language: props.language ?? language,
+  };
 }
 
 interface WorkspaceSessionProviderProps {
@@ -52,6 +58,8 @@ interface WorkspaceSessionProviderProps {
   clientId?: string;
   restartSseOnPrompt?: boolean;
   historyPageSize?: number;
+  chromeTheme?: WebShellTheme;
+  chromeLanguage?: WebShellLanguage;
   webShellProps: WebShellProps;
 }
 
@@ -62,9 +70,12 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
     workspaceCwd,
     sessionContext,
     lockWorkspaceCwd,
-    webShellProps,
+    chromeTheme,
+    chromeLanguage,
+    webShellProps: appProps,
   } = props;
-  const onSessionIdChange = webShellProps.onSessionIdChange;
+  const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
+  const onSessionIdChange = appProps.onSessionIdChange;
   const attachedStandaloneSessionIdRef = useRef<string | undefined>(undefined);
   // Keep an initially-needed standalone gate mounted so later context switches
   // preserve the provider and App subtree it resolved.
@@ -121,7 +132,7 @@ export function WorkspaceSessionProvider(props: WorkspaceSessionProviderProps) {
   const routedProps = {
     ...props,
     webShellProps: {
-      ...webShellProps,
+      ...appProps,
       onSessionIdChange: onSessionIdChange ? handleSessionIdChange : undefined,
     },
   };
@@ -147,8 +158,11 @@ function WorkspaceSessionProviderWorkspace({
   clientId,
   restartSseOnPrompt,
   historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
-  webShellProps,
+  chromeTheme,
+  chromeLanguage,
+  webShellProps: appProps,
 }: WorkspaceSessionProviderProps) {
+  const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
   const workspaceActions = useWorkspaceActions();
   const [usePrimaryNewSession, setUsePrimaryNewSession] = useState(false);
@@ -377,7 +391,7 @@ function WorkspaceSessionProviderWorkspace({
       restartEventStreamOnPrompt={restartSseOnPrompt}
     >
       <App
-        {...webShellProps}
+        {...appProps}
         historyPageSize={historyPageSize}
         restartSseOnPrompt={restartSseOnPrompt}
         initialSelectedWorkspaceCwd={
@@ -406,11 +420,14 @@ function StandaloneSessionGate({
   sessionId,
   sessionContext,
   attachedSessionId,
-  webShellProps,
+  chromeTheme,
+  chromeLanguage,
+  webShellProps: appProps,
   ...workspaceProviderProps
 }: WorkspaceSessionProviderProps & {
   attachedSessionId?: string;
 }) {
+  const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
   const [attempt, setAttempt] = useState(0);
   const [resolution, setResolution] = useState<StandaloneResolution>(() =>
@@ -506,7 +523,9 @@ function StandaloneSessionGate({
     ...workspaceProviderProps,
     sessionId,
     sessionContext,
-    webShellProps,
+    chromeTheme,
+    chromeLanguage,
+    webShellProps: appProps,
   };
   if (sessionContext?.kind !== 'standalone') {
     return <WorkspaceSessionProviderWorkspace {...routedProps} />;

@@ -13,6 +13,8 @@ interface CapturedWorkspaceSessionProps {
   sessionId?: string;
   workspaceId?: string;
   sessionContext?: DaemonProductSessionContext;
+  chromeTheme?: WebShellProps['theme'];
+  chromeLanguage?: WebShellProps['language'];
   webShellProps: WebShellProps;
 }
 
@@ -223,16 +225,10 @@ describe('StandaloneApp', () => {
 
   it('syncs document chrome to settings-resolved values without adopting them as its opinion', () => {
     window.localStorage.clear();
-    // The jsdom document is shared across tests in this file; start from the
-    // pre-paint-less state a fresh load would have.
-    document.documentElement.classList.remove(
-      'theme-dark',
-      'theme-light',
-      'dark',
-    );
+    document.documentElement.classList.add('theme-dark', 'dark');
     act(() => root.render(<StandaloneApp daemonToken="token" />));
-    expect(document.documentElement.classList.contains('theme-light')).toBe(
-      false,
+    expect(document.documentElement.classList.contains('theme-dark')).toBe(
+      true,
     );
 
     act(() => {
@@ -247,6 +243,7 @@ describe('StandaloneApp', () => {
     // prop and never written to localStorage, or the next settings.json
     // edit would be shadowed by the stale copy.
     expect(testState.props?.webShellProps.theme).toBeUndefined();
+    expect(testState.props?.chromeTheme).toBe('light');
     expect(window.localStorage.getItem('qwen-code-web-shell-theme')).toBeNull();
 
     act(() => {
@@ -254,6 +251,7 @@ describe('StandaloneApp', () => {
     });
 
     expect(testState.props?.webShellProps.language).toBeUndefined();
+    expect(testState.props?.chromeLanguage).toBe('zh-CN');
     expect(
       window.localStorage.getItem('qwen-code-web-shell-language'),
     ).toBeNull();

@@ -364,6 +364,8 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             sessionId={sessionId}
             workspaceId={workspaceId}
             sessionContext={sessionContext}
+            chromeTheme={documentTheme}
+            chromeLanguage={documentLanguage}
             webShellProps={{
               theme,
               onThemeChange: handleThemeChange,
