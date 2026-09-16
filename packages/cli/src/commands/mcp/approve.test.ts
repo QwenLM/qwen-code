@@ -23,6 +23,11 @@ import {
   MCP_APPROVALS_FILENAME,
 } from '../../config/mcpApprovals.js';
 import { loadProjectMcpServers } from '../../config/mcpJson.js';
+import {
+  buildWorkspaceEnvSnapshot,
+  resetEnvironmentTrackingForTesting,
+} from '../../config/environment.js';
+import { loadSettings } from '../../config/settings.js';
 
 describe('qwen mcp approve / reject', () => {
   let dir: string;
@@ -66,9 +71,16 @@ describe('qwen mcp approve / reject', () => {
       JSON.stringify({ mcpServers: servers }),
     );
 
+  /** What a normal boot loads: expanded against this workspace's snapshot. */
+  const bootView = () =>
+    loadProjectMcpServers(dir, {
+      expandEnv: true,
+      env: buildWorkspaceEnvSnapshot(loadSettings(dir).merged, dir),
+    });
+
   const stateOf = (name: string) => {
     resetMcpApprovalsForTesting();
-    const { servers } = loadProjectMcpServers(dir);
+    const { servers } = bootView();
     return loadMcpApprovals().getState(dir, name, servers[name]!);
   };
 
@@ -146,5 +158,63 @@ describe('qwen mcp approve / reject', () => {
     // Edit the server's command — approval must no longer apply.
     writeMcpJson({ slack: { command: 'curl', args: ['slack.js'] } });
     expect(stateOf('slack')).toBe('pending');
+  });
+
+  // Digest is of the resolved config: approve hashes what boot hashes; rotation re-opens.
+  it('hashes the resolved config: rotating a referenced variable, file untouched, reverts to pending', async () => {
+    process.env['MCPAPPROVE_ROT'] = 'a';
+    try {
+      writeMcpJson({
+        slack: {
+          httpUrl: 'https://h.example/mcp',
+          headers: { Authorization: 'Bearer ${MCPAPPROVE_ROT}' },
+        },
+      });
+      await run(approveCommand, { name: 'slack', all: false });
+      expect(stateOf('slack')).toBe('approved');
+
+      process.env['MCPAPPROVE_ROT'] = 'b';
+      expect(stateOf('slack')).toBe('pending');
+    } finally {
+      delete process.env['MCPAPPROVE_ROT'];
+    }
+  });
+
+  it('hashes the same form a boot does when the variable comes from the workspace .env', async () => {
+    // Another workspace's `.env` has already put a different value for the
+    // same name into process.env (file-sourced, no-override), so a digest over
+    // process.env would differ from the snapshot's.
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-approve-other-'));
+    try {
+      fs.mkdirSync(path.join(other, '.qwen'), { recursive: true });
+      fs.writeFileSync(
+        path.join(other, '.qwen', '.env'),
+        'MCPAPPROVE_FILE_TOKEN=from-other-workspace\n',
+      );
+      loadSettings(other);
+      expect(process.env['MCPAPPROVE_FILE_TOKEN']).toBe('from-other-workspace');
+
+      fs.mkdirSync(path.join(dir, '.qwen'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.qwen', '.env'),
+        'MCPAPPROVE_FILE_TOKEN=from-file\n',
+      );
+      writeMcpJson({
+        slack: {
+          httpUrl: 'https://h.example/mcp',
+          headers: { Authorization: 'Bearer ${MCPAPPROVE_FILE_TOKEN}' },
+        },
+      });
+      await run(approveCommand, { name: 'slack', all: false });
+
+      expect(bootView().servers['slack']!.headers).toEqual({
+        Authorization: 'Bearer from-file',
+      });
+      expect(stateOf('slack')).toBe('approved');
+    } finally {
+      delete process.env['MCPAPPROVE_FILE_TOKEN'];
+      resetEnvironmentTrackingForTesting();
+      fs.rmSync(other, { recursive: true, force: true });
+    }
   });
 });
