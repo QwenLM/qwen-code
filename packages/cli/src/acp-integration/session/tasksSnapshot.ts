@@ -224,6 +224,10 @@ function serializeWorkflowTask(
     agentsDispatched: entry.agentsDispatched,
     agentsCompleted: entry.agentsCompleted,
     agentsRespawned: entry.agentsRespawned ?? 0,
+    ...optionalField(
+      'sizeWarning',
+      entry.sizeWarning ? { ...entry.sizeWarning } : undefined,
+    ),
     tokensSpent: entry.tokensSpent,
     tokenBudgetTotal: entry.tokenBudgetTotal,
     recentLogs: [...entry.recentLogs],
@@ -281,6 +285,10 @@ function serializeWorkflowSnapshot(
     agentsDispatched: snapshot.agentsDispatched,
     agentsCompleted: snapshot.agentsCompleted,
     agentsRespawned: snapshot.agentsRespawned ?? 0,
+    ...optionalField(
+      'sizeWarning',
+      snapshot.sizeWarning ? { ...snapshot.sizeWarning } : undefined,
+    ),
     tokensSpent: snapshot.tokensSpent,
     tokenBudgetTotal: snapshot.tokenBudgetTotal,
     recentLogs: [...snapshot.recentLogs],

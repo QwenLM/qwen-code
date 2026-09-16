@@ -1066,6 +1066,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新打开此菜单可重新加载 Hook 定义。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制项和 HTTP 安全设置需要重启后生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新加载 Hook 定义失败：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
   // Hooks - Detail Step
   'Exit codes:': '退出码：',
@@ -2355,6 +2361,11 @@ export default {
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
   'needs approval': '待审批',
+  'Large workflow': '大型工作流',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流：已排定 {{agents}} 个 agent（告警阈值 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流：预计输出 ~{{tokens}} 个 token（告警阈值 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',

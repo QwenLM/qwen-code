@@ -6,8 +6,14 @@
 
 import { randomBytes } from 'node:crypto';
 import type { Config } from '../../config/config.js';
-import { logWorkflowRun } from '../../telemetry/loggers.js';
-import { WorkflowRunEvent } from '../../telemetry/types.js';
+import {
+  logWorkflowRun,
+  logWorkflowSizeWarning,
+} from '../../telemetry/loggers.js';
+import {
+  WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
+} from '../../telemetry/types.js';
 import {
   createAbortController,
   createChildAbortController,
@@ -35,6 +41,15 @@ import {
   type WorkflowRunOutcome,
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
+import {
+  describeWorkflowDeterminismViolations,
+  scanWorkflowScriptShape,
+} from './workflow-script-shape.js';
+import {
+  evaluateWorkflowSize,
+  resolveWorkflowSizeCaps,
+  resolveWorkflowSizeGuidelineSetting,
+} from './workflow-size.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import {
@@ -129,8 +144,14 @@ export class WorkflowRunHandle {
   }
 }
 
+const WORKFLOW_SCRIPT_SYNTAX_HINT =
+  'Workflow scripts must be plain JavaScript — the usual causes are ' +
+  'TypeScript syntax (type annotations, interfaces, generics) and ' +
+  'broken string quoting or escaping. Metadata must use literal values.';
+
 /**
- * The script never compiled, so no run was created.
+ * The script was refused before a run was created: it did not compile, or it
+ * calls something a resumable workflow cannot replay.
  *
  * Distinct from `WorkflowExecutionError` on purpose: that one describes a run
  * that existed and failed, and callers report it as such. This one means there
@@ -139,12 +160,20 @@ export class WorkflowRunHandle {
  * than that it failed.
  */
 export class WorkflowScriptNotLaunchedError extends Error {
-  constructor(readonly detail: string) {
+  /**
+   * @param detail What is wrong with the script.
+   * @param hint The usual causes, appended after `detail`. Defaults to the
+   *   syntax causes of a compile failure; a refusal with a cause of its own
+   *   passes an empty hint, so the reader is not sent looking for TypeScript
+   *   syntax that is not there.
+   */
+  constructor(
+    readonly detail: string,
+    hint: string = WORKFLOW_SCRIPT_SYNTAX_HINT,
+  ) {
     super(
-      `Workflow script is invalid and was not launched:\n${detail}\n\n` +
-        `Workflow scripts must be plain JavaScript — the usual causes are ` +
-        `TypeScript syntax (type annotations, interfaces, generics) and ` +
-        `broken string quoting or escaping. Metadata must use literal values.`,
+      `Workflow script is invalid and was not launched:\n${detail}` +
+        (hint ? `\n\n${hint}` : ''),
     );
     this.name = 'WorkflowScriptNotLaunchedError';
   }
@@ -191,6 +220,12 @@ export class WorkflowRunner {
     const config = options.config;
     const runInBackground = options.runInBackground === true;
     const budget = WorkflowBudgetImpl.fromConfig(config);
+    // Read once per run: a guideline the user changes mid-run applies from the
+    // next run, the same way the tool description does.
+    const sizeCaps = resolveWorkflowSizeCaps(
+      config.getWorkflowSizeGuideline?.() ??
+        resolveWorkflowSizeGuidelineSetting(undefined),
+    );
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const registry = config.getWorkflowRunRegistry?.();
@@ -264,6 +299,17 @@ export class WorkflowRunner {
             error,
             script.split(/\r\n|[\n\r\u2028\u2029]/).length,
           ),
+        );
+      }
+      // A script that reads a clock or a random source cannot be replayed on
+      // resume. Refused here, before any agent spends a token, rather than on
+      // whichever call reaches the sandbox guard first.
+      const determinismViolations =
+        scanWorkflowScriptShape(script).determinismViolations;
+      if (determinismViolations.length > 0) {
+        throw new WorkflowScriptNotLaunchedError(
+          describeWorkflowDeterminismViolations(determinismViolations),
+          '',
         );
       }
 
@@ -411,6 +457,36 @@ export class WorkflowRunner {
         // UI refresh failures must not affect workflow execution.
       }
     };
+    // The large-run flag. Checked whenever the run schedules an agent or
+    // records spend; the registry keeps only the first warning.
+    const maybeWarnSize = (): void => {
+      const current = registry?.get(runId);
+      if (!registry || !current || current.sizeWarning !== undefined) return;
+      let scheduledAgents = 0;
+      let settledAgents = 0;
+      for (const dispatch of current.dispatches) {
+        // A journal replay spends nothing and schedules no agent.
+        if (dispatch.status === 'cached') continue;
+        scheduledAgents++;
+        if (
+          dispatch.status === 'completed' ||
+          dispatch.status === 'failed' ||
+          dispatch.status === 'cancelled'
+        ) {
+          settledAgents++;
+        }
+      }
+      const warning = evaluateWorkflowSize(
+        { scheduledAgents, settledAgents, tokensSpent: current.tokensSpent },
+        sizeCaps,
+      );
+      if (!warning || !registry.onSizeWarning(runId, warning)) return;
+      try {
+        logWorkflowSizeWarning(config, new WorkflowSizeWarningEvent(warning));
+      } catch {
+        // Telemetry must never disturb the run it describes.
+      }
+    };
     const emitter: WorkflowOrchestratorEmitter = {
       workflowCallUpdated: (call) => {
         if (!isCurrentEntry()) return;
@@ -441,6 +517,7 @@ export class WorkflowRunner {
       dispatchQueued: (event) => {
         if (!isCurrentEntry()) return;
         registry?.onDispatchQueued(runId, event);
+        maybeWarnSize();
         emitUpdate();
       },
       dispatchStarted: (dispatchId, startedAt) => {
@@ -468,6 +545,7 @@ export class WorkflowRunner {
       budgetUpdated: (spent, total) => {
         if (!isCurrentEntry()) return;
         registry?.onBudgetUpdated(runId, spent, total);
+        maybeWarnSize();
         emitUpdate();
       },
       resumeRespawn: (line) => {

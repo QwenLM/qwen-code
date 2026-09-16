@@ -1101,6 +1101,7 @@ export async function runNonInteractive(
         config,
         sessionId,
         permissionMode,
+        settings,
       );
       adapter.emitMessage(systemMessage);
 
@@ -1141,6 +1142,7 @@ export async function runNonInteractive(
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
           apiHistory: llmClient.getChat().getHistory(),
+          completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
