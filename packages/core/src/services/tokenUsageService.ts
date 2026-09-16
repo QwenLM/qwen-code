@@ -10,7 +10,11 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import type { ApiResponseEvent } from '../telemetry/types.js';
+import type {
+  ApiCancelEvent,
+  ApiErrorEvent,
+  ApiResponseEvent,
+} from '../telemetry/types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
 const debugLogger = createDebugLogger('TOKEN_USAGE');
@@ -18,7 +22,88 @@ const USAGE_DIR_NAME = 'usage';
 const FILE_PREFIX = 'token-usage-';
 const FILE_EXTENSION = '.jsonl';
 const SCHEMA_VERSION = 1;
+const OUTCOME_SCHEMA_VERSION = 1;
 const UNKNOWN_AUTH_TYPE = 'unknown';
+const USAGE_EVENTS_FILE_PREFIX = 'usage-events-';
+const UNKNOWN_USAGE_STATUS = 'unknown';
+const SAFE_STRING_MAX_LENGTH = 128;
+
+export type TokenUsageFeature =
+  | 'main'
+  | 'subagent'
+  | 'prompt_suggestion'
+  | 'forked_query'
+  | 'speculation'
+  | 'side_query';
+export type TokenUsageStatus = 'reported' | 'unknown';
+
+const INTERNAL_FEATURES: ReadonlyMap<string, TokenUsageFeature> = new Map([
+  ['prompt_suggestion', 'prompt_suggestion'],
+  ['forked_query', 'forked_query'],
+  ['speculation', 'speculation'],
+]);
+const VALID_FEATURES: ReadonlySet<TokenUsageFeature> = new Set([
+  'main',
+  'subagent',
+  'prompt_suggestion',
+  'forked_query',
+  'speculation',
+  'side_query',
+]);
+
+function readOwnProperty(value: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+}
+
+function readBoundedString(value: object, key: string): string | undefined {
+  const candidate = readOwnProperty(value, key);
+  if (
+    typeof candidate !== 'string' ||
+    candidate.length === 0 ||
+    candidate.length > SAFE_STRING_MAX_LENGTH ||
+    [...candidate].some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    })
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function readSafeIdentity(value: object, key: string): string | undefined {
+  const candidate = readBoundedString(value, key);
+  if (
+    !candidate ||
+    !/^[A-Za-z0-9._:@+/-]+$/.test(candidate) ||
+    candidate.includes('://') ||
+    /\s/.test(candidate) ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:\/\//i.test(candidate) ||
+    /^(?:[A-Za-z]:[\\/]|[\\/]|~[\\/]|\.\.?[\\/])/.test(candidate)
+  ) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function getFeature(event: object): TokenUsageFeature {
+  const promptIdValue = readOwnProperty(event, 'prompt_id');
+  const promptId =
+    typeof promptIdValue === 'string' ? promptIdValue : undefined;
+  const internalFeature = promptId
+    ? (INTERNAL_FEATURES.get(promptId) ??
+      (promptId.startsWith('side-query:') ? 'side_query' : undefined))
+    : undefined;
+  if (internalFeature) return internalFeature;
+  return readBoundedString(event, 'subagent_name') ? 'subagent' : 'main';
+}
+
+function getSource(event: object, feature: TokenUsageFeature): string {
+  const subagentName = readSafeIdentity(event, 'subagent_name');
+  if (subagentName) return subagentName;
+  return feature === 'main' ? MAIN_SOURCE : feature;
+}
 
 export type TokenUsagePeriod = 'day' | 'month';
 export type TokenUsageExportFormat = 'json' | 'csv';
@@ -41,6 +126,8 @@ export interface TokenUsageRecord {
   model: string;
   authType: string;
   source: string;
+  feature?: TokenUsageFeature;
+  usageStatus?: TokenUsageStatus;
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
@@ -70,6 +157,12 @@ export interface TokenUsageGroupSummary extends TokenUsageTotals {
   source?: string;
 }
 
+export interface TokenUsageCoverage {
+  reported: number;
+  unknown: number;
+  legacy: number;
+}
+
 export interface TokenUsageSummary {
   period: TokenUsagePeriod;
   value: string;
@@ -79,6 +172,7 @@ export interface TokenUsageSummary {
   byAuthType: TokenUsageGroupSummary[];
   byModelAndAuthType: TokenUsageGroupSummary[];
   bySource: TokenUsageGroupSummary[];
+  usageCoverage?: TokenUsageCoverage;
 }
 
 export interface TokenUsageQuery {
@@ -123,6 +217,14 @@ function getLocalDateParts(date: Date): { date: string; month: string } {
     date: `${year}-${monthNumber}-${day}`,
     month: `${year}-${monthNumber}`,
   };
+}
+
+function getSafeTimestamp(value: object): string {
+  const supplied = readBoundedString(value, 'event.timestamp');
+  if (supplied && !Number.isNaN(new Date(supplied).getTime())) {
+    return new Date(supplied).toISOString();
+  }
+  return new Date().toISOString();
 }
 
 function currentPeriodValue(period: TokenUsagePeriod): string {
@@ -206,53 +308,82 @@ function toNonNegativeInteger(value: number | undefined): number {
   return Math.trunc(value);
 }
 
-function calculateInputTokens(event: ApiResponseEvent): number {
-  const inputTokens = toNonNegativeInteger(event.input_token_count);
+function calculateInputTokens(event: object): number {
+  const inputTokens = toNonNegativeInteger(
+    readOwnNumber(event, 'input_token_count'),
+  );
   if (inputTokens > 0) {
     return inputTokens;
   }
   // When the API omits prompt tokens, cached tokens are only a lower-bound
   // proxy for input usage and can undercount the actual input.
-  return toNonNegativeInteger(event.cached_content_token_count);
+  return toNonNegativeInteger(
+    readOwnNumber(event, 'cached_content_token_count'),
+  );
 }
 
-function calculateTotalTokens(event: ApiResponseEvent): number {
-  const total = toNonNegativeInteger(event.total_token_count);
+function calculateTotalTokens(event: object): number {
+  const total = toNonNegativeInteger(readOwnNumber(event, 'total_token_count'));
   if (total > 0) {
     return total;
   }
   return (
     calculateInputTokens(event) +
-    toNonNegativeInteger(event.output_token_count) +
-    toNonNegativeInteger(event.thoughts_token_count)
+    toNonNegativeInteger(readOwnNumber(event, 'output_token_count')) +
+    toNonNegativeInteger(readOwnNumber(event, 'thoughts_token_count'))
   );
+}
+
+function readOwnNumber(value: object, key: string): number | undefined {
+  const candidate = readOwnProperty(value, key);
+  return typeof candidate === 'number' ? candidate : undefined;
+}
+
+function hasReportedUsage(event: object): boolean {
+  return [
+    'input_token_count',
+    'output_token_count',
+    'cached_content_token_count',
+    'thoughts_token_count',
+    'total_token_count',
+  ].some((key) => toNonNegativeInteger(readOwnNumber(event, key)) > 0);
 }
 
 export function apiResponseEventToTokenUsageRecord(
   config: Config,
   event: ApiResponseEvent,
+  sessionId?: string,
 ): TokenUsageRecord {
-  const timestamp = event['event.timestamp'] || new Date().toISOString();
+  const timestamp = getSafeTimestamp(event);
   const date = new Date(timestamp);
   const localParts = getLocalDateParts(
     Number.isNaN(date.getTime()) ? new Date() : date,
   );
+  const feature = getFeature(event);
   return {
     schemaVersion: SCHEMA_VERSION,
     id: randomUUID(),
     timestamp,
     localDate: localParts.date,
     localMonth: localParts.month,
-    sessionId: config.getSessionId(),
-    model: event.model || 'unknown',
-    authType: event.auth_type || UNKNOWN_AUTH_TYPE,
-    source: event.subagent_name || MAIN_SOURCE,
+    sessionId: sessionId === undefined ? config.getSessionId() : sessionId,
+    model: readSafeIdentity(event, 'model') ?? 'unknown',
+    authType: readSafeIdentity(event, 'auth_type') ?? UNKNOWN_AUTH_TYPE,
+    source: getSource(event, feature),
+    feature,
+    usageStatus: hasReportedUsage(event) ? 'reported' : UNKNOWN_USAGE_STATUS,
     inputTokens: calculateInputTokens(event),
-    outputTokens: toNonNegativeInteger(event.output_token_count),
-    cachedTokens: toNonNegativeInteger(event.cached_content_token_count),
-    thoughtsTokens: toNonNegativeInteger(event.thoughts_token_count),
+    outputTokens: toNonNegativeInteger(
+      readOwnNumber(event, 'output_token_count'),
+    ),
+    cachedTokens: toNonNegativeInteger(
+      readOwnNumber(event, 'cached_content_token_count'),
+    ),
+    thoughtsTokens: toNonNegativeInteger(
+      readOwnNumber(event, 'thoughts_token_count'),
+    ),
     totalTokens: calculateTotalTokens(event),
-    apiDurationMs: toNonNegativeInteger(event.duration_ms),
+    apiDurationMs: toNonNegativeInteger(readOwnNumber(event, 'duration_ms')),
   };
 }
 
@@ -261,6 +392,15 @@ function isTokenUsageRecord(value: unknown): value is TokenUsageRecord {
     return false;
   }
   const record = value as Partial<TokenUsageRecord>;
+  const feature = readOwnProperty(record, 'feature');
+  const usageStatus = readOwnProperty(record, 'usageStatus');
+  const hasPositiveTokens = [
+    record.inputTokens,
+    record.outputTokens,
+    record.cachedTokens,
+    record.thoughtsTokens,
+    record.totalTokens,
+  ].some((counter) => toNonNegativeInteger(counter) > 0);
   return (
     typeof record.id === 'string' &&
     typeof record.sessionId === 'string' &&
@@ -279,7 +419,13 @@ function isTokenUsageRecord(value: unknown): value is TokenUsageRecord {
     typeof record.cachedTokens === 'number' &&
     typeof record.thoughtsTokens === 'number' &&
     typeof record.totalTokens === 'number' &&
-    typeof record.apiDurationMs === 'number'
+    typeof record.apiDurationMs === 'number' &&
+    (feature === undefined ||
+      (typeof feature === 'string' &&
+        VALID_FEATURES.has(feature as TokenUsageFeature))) &&
+    (usageStatus === undefined ||
+      (usageStatus === 'reported' && hasPositiveTokens) ||
+      (usageStatus === 'unknown' && !hasPositiveTokens))
   );
 }
 
@@ -315,6 +461,11 @@ function summarizeRecords(
   const byAuthType = new Map<string, TokenUsageGroupSummary>();
   const byModelAndAuthType = new Map<string, TokenUsageGroupSummary>();
   const bySource = new Map<string, TokenUsageGroupSummary>();
+  const usageCoverage: TokenUsageCoverage = {
+    reported: 0,
+    unknown: 0,
+    legacy: 0,
+  };
 
   const getGroup = (
     map: Map<string, TokenUsageGroupSummary>,
@@ -334,6 +485,14 @@ function summarizeRecords(
   };
 
   for (const record of records) {
+    const usageStatus = readOwnProperty(record, 'usageStatus');
+    if (usageStatus === undefined) {
+      usageCoverage.legacy++;
+    } else if (usageStatus === 'reported') {
+      usageCoverage.reported++;
+    } else {
+      usageCoverage.unknown++;
+    }
     addRecordToTotals(totals, record);
     addRecordToTotals(
       getGroup(byModel, record.model, { model: record.model }),
@@ -375,15 +534,95 @@ function summarizeRecords(
     byAuthType: sortGroups(byAuthType.values()),
     byModelAndAuthType: sortGroups(byModelAndAuthType.values()),
     bySource: sortGroups(bySource.values()),
+    usageCoverage,
   };
 }
 
 export async function recordTokenUsageFromApiResponse(
   config: Config,
   event: ApiResponseEvent,
+  sessionId?: string,
 ): Promise<void> {
-  const record = apiResponseEventToTokenUsageRecord(config, event);
+  const record = apiResponseEventToTokenUsageRecord(config, event, sessionId);
   await jsonl.writeLine(getTokenUsageFilePath(record.localMonth), record);
+}
+
+type TokenUsageOutcomeStatus = 'error' | 'cancelled';
+type TokenUsageOutcomeEvent = ApiErrorEvent | ApiCancelEvent;
+interface TokenUsageOutcomeRecord {
+  schemaVersion: typeof OUTCOME_SCHEMA_VERSION;
+  recordType: 'usage_outcome';
+  id: string;
+  timestamp: string;
+  localDate: string;
+  localMonth: string;
+  sessionId: string;
+  model: string;
+  authType: string;
+  feature: TokenUsageFeature;
+  status: TokenUsageOutcomeStatus;
+  scope: 'telemetry_event' | 'interaction';
+  usageStatus: 'unknown';
+  tokens: null;
+}
+
+function getTokenUsageEventsFilePath(month: string): string {
+  return path.join(
+    path.dirname(getTokenUsageFilePath(month)),
+    `${USAGE_EVENTS_FILE_PREFIX}${month}${FILE_EXTENSION}`,
+  );
+}
+
+function createTokenUsageOutcomeRecord(
+  config: Config,
+  event: TokenUsageOutcomeEvent,
+  status: TokenUsageOutcomeStatus,
+  sessionId?: string,
+): TokenUsageOutcomeRecord {
+  const timestamp = getSafeTimestamp(event);
+  const date = new Date(timestamp);
+  const localParts = getLocalDateParts(
+    Number.isNaN(date.getTime()) ? new Date() : date,
+  );
+  return {
+    schemaVersion: OUTCOME_SCHEMA_VERSION,
+    recordType: 'usage_outcome',
+    id: randomUUID(),
+    timestamp,
+    localDate: localParts.date,
+    localMonth: localParts.month,
+    sessionId: sessionId === undefined ? config.getSessionId() : sessionId,
+    model: readSafeIdentity(event, 'model') ?? 'unknown',
+    authType: readSafeIdentity(event, 'auth_type') ?? UNKNOWN_AUTH_TYPE,
+    feature: getFeature(event),
+    status,
+    scope: status === 'error' ? 'telemetry_event' : 'interaction',
+    usageStatus: UNKNOWN_USAGE_STATUS,
+    tokens: null,
+  };
+}
+
+export function recordTokenUsageOutcomeBestEffort(
+  config: Config,
+  event: TokenUsageOutcomeEvent,
+  status: TokenUsageOutcomeStatus,
+  sessionId?: string,
+): void {
+  try {
+    const record = createTokenUsageOutcomeRecord(
+      config,
+      event,
+      status,
+      sessionId,
+    );
+    void jsonl
+      .writeLine(getTokenUsageEventsFilePath(record.localMonth), record)
+      .catch(() => {
+        debugLogger.warn('Failed to record token usage outcome.');
+      });
+  } catch {
+    debugLogger.warn('Failed to record token usage outcome.');
+  }
 }
 
 const lastLoggedTimeByCode = new Map<string, number>();
@@ -433,9 +672,10 @@ export function resetTokenUsageFailureLogging(): void {
 export function recordTokenUsageFromApiResponseBestEffort(
   config: Config,
   event: ApiResponseEvent,
+  sessionId?: string,
 ): void {
   try {
-    const record = apiResponseEventToTokenUsageRecord(config, event);
+    const record = apiResponseEventToTokenUsageRecord(config, event, sessionId);
     void jsonl
       .writeLine(getTokenUsageFilePath(record.localMonth), record)
       .catch(logTokenUsageWriteFailure);
