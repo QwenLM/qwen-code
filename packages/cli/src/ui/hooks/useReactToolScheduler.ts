@@ -295,13 +295,20 @@ export function useReactToolScheduler(
         try {
           await scheduler.schedule(request, signal, runtimeView);
         } catch (error) {
-          if (signal.aborted) {
-            // The busy scheduler rejects a queued request once its signal
-            // aborts, which is a cancellation rather than a scheduling
-            // failure. Completing it as `cancelled` — instead of returning
-            // early — still runs the caller's completion path, the only place
-            // that releases the batch and continuation ownership registered
-            // for these callIds.
+          // The busy scheduler rejects a queued request once its signal
+          // aborts, which is a cancellation rather than a scheduling failure.
+          // Completing it as `cancelled` — instead of returning early — still
+          // runs the caller's completion path, the only place that releases
+          // the batch and continuation ownership registered for these
+          // callIds. An aborted signal alone is not enough: any other
+          // rejection is a real scheduling failure and must keep its
+          // `errorType`, so this matches the exact Core queue rejection
+          // (see `CoreToolScheduler.schedule`).
+          if (
+            signal.aborted &&
+            error instanceof Error &&
+            error.message === 'Tool call cancelled while in queue.'
+          ) {
             const reason =
               '[Operation Cancelled] Reason: Tool call cancelled before execution.';
             const cancelledCalls: CompletedToolCall[] = requests.map(
@@ -330,7 +337,18 @@ export function useReactToolScheduler(
           }
           await completeAsSchedulingError(error);
         }
-      })();
+      })().catch((error: unknown) => {
+        // Terminal handler for the detached task: the completion callbacks
+        // above are caller-supplied and may reject. Containing that here
+        // keeps a rejected completion from surfacing as an unhandled
+        // rejection, and deliberately does not retry or complete the batch a
+        // second time.
+        debugLogger.error(
+          `Full-turn tool completion failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
     },
     [allToolCallsCompleteHandler, config, scheduler],
   );
