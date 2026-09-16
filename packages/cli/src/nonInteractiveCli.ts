@@ -1399,7 +1399,9 @@ export async function runNonInteractive(
         initialPartList = withReminder(initialPartList, recoveredAgentsNotice);
       }
 
-      let initialParts = normalizePartList(initialPartList);
+      let initialParts = normalizePartList(
+        llmClient.resolveImageReferences(initialPartList),
+      );
       let fullTurnModelOverride: string | undefined;
       let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
       const emitVisionNotice = (subtype: string, notice: string) => {
