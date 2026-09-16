@@ -526,6 +526,18 @@ export interface WorkflowAgentOpts {
    * of name never change the resume key.
    */
   disallowedTools?: string[];
+  /**
+   * The only tools this agent may use, instead of everything its agentType
+   * (or the session) would give it. It only narrows: the dispatch intersects
+   * it with the agentType's own allowlist, then subtracts the workflow floor
+   * and every deny, so nothing listed here can re-enable a denied tool. An
+   * entry that matches no tool, an empty list, and an intersection that
+   * leaves nothing all refuse the dispatch rather than run a tool-less agent.
+   * The sandbox hands the host a sorted, de-duplicated list with built-in
+   * display names mapped to tool names, so order, duplicates and the choice
+   * of name never change the resume key.
+   */
+  tools?: string[];
   // The index signature exists so TypeScript accepts forward-compat opt names
   // at compile time; the runtime allowlist still rejects unknown names.
   [key: string]: unknown;
@@ -1043,8 +1055,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     effortTiers: REASONING_EFFORT_TIERS.join(', '),
     // A built-in tool named by its display name or a legacy alias becomes its
     // tool name, so both spellings share one resume key; any other entry comes
-    // back as given for the host to judge. Primitives only.
-    canonicalDenyName: (raw: unknown): string | null =>
+    // back as given for the host to judge. Shared by `disallowedTools` and
+    // `tools`, which name tools the same way. Primitives only.
+    canonicalToolName: (raw: unknown): string | null =>
       typeof raw === 'string' ? (resolveBuiltinToolName(raw) ?? raw) : null,
     // JSON.stringify escapes only C0: strip DEL / C1 (incl. NEL) from a
     // script-controlled echo so it cannot fragment a rejection message.
@@ -1559,7 +1572,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['stepId', 'label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'disallowedTools'];
+      const KNOWN_AGENT_OPTS = ['stepId', 'label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'tools', 'disallowedTools'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1635,12 +1648,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             String(e && e.message != null ? e.message : e)
           );
         }
-        // effort and disallowedTools are validated on the REVIVED copy: that
-        // is the object the host dispatch and the resume key see, so a getter
-        // cannot show one value here and hand another to the dispatch. Both
-        // are normalized in place (an effort alias becomes its tier; a deny
-        // list has built-in display names mapped to tool names and is sorted
-        // and de-duplicated) so equivalent spellings share one resume key.
+        // effort, tools and disallowedTools are validated on the REVIVED
+        // copy: that is the object the host dispatch and the resume key see,
+        // so a getter cannot show one value here and hand another to the
+        // dispatch. All three are normalized in place (an effort alias becomes
+        // its tier; a tool list has built-in display names mapped to tool
+        // names and is sorted and de-duplicated) so equivalent spellings share
+        // one resume key.
         if (safeOpts.effort !== undefined) {
           var tier = __b.normalizeEffort(safeOpts.effort);
           if (tier === null) {
@@ -1666,7 +1680,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           }
           var uniqueDenied = [];
           for (var d = 0; d < denied.length; d++) {
-            var deniedName = __b.canonicalDenyName(denied[d]);
+            var deniedName = __b.canonicalToolName(denied[d]);
             if (uniqueDenied.indexOf(deniedName) === -1) uniqueDenied.push(deniedName);
           }
           uniqueDenied.sort();
@@ -1675,6 +1689,37 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           } else {
             safeOpts.disallowedTools = uniqueDenied;
           }
+        }
+        if (safeOpts.tools !== undefined) {
+          var allowed = safeOpts.tools;
+          if (
+            !Array.isArray(allowed) ||
+            allowed.some(function (name) {
+              return typeof name !== 'string' || name.length === 0 || name !== name.trim();
+            })
+          ) {
+            throw new Error(
+              "agent({tools}): must be an array of non-empty tool-name strings " +
+              "without surrounding whitespace, e.g. ['run_shell_command', 'read_file']."
+            );
+          }
+          // An empty allowlist is a tool-less agent, which is never what a
+          // script that bothered to pass the option meant. Taking tools away
+          // from the default set is what disallowedTools is for.
+          if (allowed.length === 0) {
+            throw new Error(
+              "agent({tools}): must name at least one tool. It narrows the agent " +
+              "to the tools you list; to take tools away from the default set, " +
+              "use disallowedTools."
+            );
+          }
+          var uniqueAllowed = [];
+          for (var a = 0; a < allowed.length; a++) {
+            var allowedName = __b.canonicalToolName(allowed[a]);
+            if (uniqueAllowed.indexOf(allowedName) === -1) uniqueAllowed.push(allowedName);
+          }
+          uniqueAllowed.sort();
+          safeOpts.tools = uniqueAllowed;
         }
         // The phase is recorded only once every option gate above has passed,
         // so a call its options rejected leaves no phase that dispatched

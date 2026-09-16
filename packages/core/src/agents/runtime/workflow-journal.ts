@@ -118,23 +118,24 @@ export const DISPATCH_AFFECTING_AGENT_OPTS = [
   'isolation',
   'agentType',
   'workingDir',
+  'tools',
   'disallowedTools',
 ] as const;
 
 /**
  * Project the dispatch-affecting opts into a stable canonical string. Only
  * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
- * `disallowedTools` change what the dispatch does; `label` / `phase` /
- * `stallMs` are cosmetic or operational and must NOT bust the cache. Object
- * keys are sorted recursively so a re-serialized schema with reordered keys
- * hashes the same.
+ * `tools` / `disallowedTools` change what the dispatch does; `label` /
+ * `phase` / `stallMs` are cosmetic or operational and must NOT bust the
+ * cache. Object keys are sorted recursively so a re-serialized schema with
+ * reordered keys hashes the same.
  *
- * `effort` and `disallowedTools` change how hard the agent thinks and what it
- * may do, so a resume that changed either has to run live. The sandbox
- * normalizes both before they get here — an effort alias to its tier, a deny
- * list to a sorted, de-duplicated array of tool names — so `'med'` and
- * `'medium'`, `Edit` and `edit`, or the same tools in another order, are one
- * key.
+ * `effort`, `tools` and `disallowedTools` change how hard the agent thinks
+ * and what it may do, so a resume that changed any of them has to run live.
+ * The sandbox normalizes them before they get here — an effort alias to its
+ * tier, a tool list to a sorted, de-duplicated array of tool names — so
+ * `'med'` and `'medium'`, `Edit` and `edit`, or the same tools in another
+ * order, are one key.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were

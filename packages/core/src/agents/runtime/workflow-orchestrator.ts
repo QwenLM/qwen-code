@@ -61,6 +61,7 @@ import type {
   AgentToolResultEvent,
 } from './agent-events.js';
 import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
+import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import {
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
@@ -779,7 +780,8 @@ async function runSingleDispatch(
   // override path or it would be silently dropped and the agent would run in
   // the parent working tree. The same holds for every option that changes
   // what a dispatch does (`effort` needs the agent's own content-generator
-  // config, `disallowedTools` the override path's deny union), so the guard is
+  // config, `tools` / `disallowedTools` the override path's allow and deny
+  // unions), so the guard is
   // driven by the one list the resume key also projects: an option added there
   // cannot silently take this path.
   if (DISPATCH_AFFECTING_AGENT_OPTS.every((key) => opts[key] === undefined)) {
@@ -922,6 +924,76 @@ function resolveDispatchDenies(raw: unknown): string[] {
 }
 
 /**
+ * `opts.tools` as a list (`[]` when omitted), normalized like the deny list.
+ * Same host-side re-check as {@link resolveDispatchDenies}: the sandbox has
+ * validated and canonicalized this already, but the host must not trust a
+ * value that crossed the boundary.
+ */
+function resolveDispatchAllows(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (name) =>
+        typeof name !== 'string' || name.length === 0 || name !== name.trim(),
+    )
+  ) {
+    throw new Error(
+      "agent({tools}): must be an array of non-empty tool-name strings without surrounding whitespace, e.g. ['run_shell_command', 'read_file'].",
+    );
+  }
+  if (raw.length === 0) {
+    throw new Error(
+      'agent({tools}): must name at least one tool. It narrows the agent to the tools you list; to take tools away from the default set, use disallowedTools.',
+    );
+  }
+  return (raw as string[]).map((name) => resolveBuiltinToolName(name) ?? name);
+}
+
+/** Tool names in an error message, quoted and in the order they were given. */
+function listToolNames(names: readonly string[]): string {
+  return sanitizeForErrorMessage(
+    names.map((name) => JSON.stringify(name)).join(', '),
+  );
+}
+
+/**
+ * The allowlist as exact tool names. A deny list is matched at run time, so an
+ * `mcp__` pattern can stay a pattern there; an allowlist is matched by exact
+ * name when the declarations are filtered (`getFunctionDeclarationsFiltered`),
+ * so a pattern left as-is would hand the agent nothing from that server while
+ * the script believes it kept the server. Expand each pattern against the
+ * registry instead, and report the entries that expand to nothing.
+ */
+async function expandAllowlistToToolNames(
+  config: Config,
+  names: readonly string[],
+): Promise<{ tools: string[]; unmatched: string[] }> {
+  const toolRegistry = config.getToolRegistry();
+  if (!toolRegistry) return { tools: [...names], unmatched: [] };
+  await toolRegistry.warmAll();
+  const registered = toolRegistry.getAllTools().map((tool) => tool.name);
+  const tools: string[] = [];
+  const unmatched: string[] = [];
+  for (const name of names) {
+    // An exact registered name — MCP or not — is kept as given.
+    if (!name.startsWith('mcp__') || registered.includes(name)) {
+      tools.push(name);
+      continue;
+    }
+    const matched = registered.filter((candidate) =>
+      matchesMcpPattern(name, candidate),
+    );
+    if (matched.length === 0) {
+      unmatched.push(name);
+      continue;
+    }
+    tools.push(...matched);
+  }
+  return { tools: Array.from(new Set(tools)), unmatched };
+}
+
+/**
  * Override path for `agent({ agentType, model, effort, isolation,
  * disallowedTools })`. Resolves the
  * requested agentType against `SubagentManager`, applies the workflow
@@ -996,6 +1068,7 @@ async function runOverridePath(
 
   const effort = resolveDispatchEffort(opts.effort);
   const requestedDenies = resolveDispatchDenies(opts.disallowedTools);
+  const requestedTools = resolveDispatchAllows(opts.tools);
 
   const subagentMgr = config.getSubagentManager();
   let baseConfig: SubagentConfig;
@@ -1075,13 +1148,89 @@ async function runOverridePath(
     schemaTools = [...baseConfig.tools, ToolNames.STRUCTURED_OUTPUT];
   }
 
+  // `agent({tools})`: the only tools this dispatch may use. It never widens.
+  // The agent type's own allowlist bounds it, every deny is subtracted, and a
+  // narrowing that leaves nothing is refused here rather than dispatched as a
+  // tool-less agent that would spend its turn discovering it can do nothing.
+  // Both matches follow `prepareTools`: exact name, or MCP pattern for an
+  // `mcp__` tool.
+  let requestedPool: string[] | undefined;
+  if (requestedTools.length > 0) {
+    const expansion = await expandAllowlistToToolNames(config, requestedTools);
+    // A built-in that exists but is not registered in this session passes, as
+    // it does for a deny: the agent could not have used it either way.
+    const unmatched = [
+      ...expansion.unmatched,
+      ...(await subagentMgr.findUnmatchedToolNames(expansion.tools)),
+    ];
+    if (unmatched.length > 0) {
+      throw new Error(
+        `agent({tools}): ${listToolNames(unmatched)} ${
+          unmatched.length === 1 ? 'matches' : 'match'
+        } no tool. Use a tool name (run_shell_command, write_file, edit), a display name (Shell, WriteFile, Edit), or an MCP pattern (mcp__<server>, mcp__<server>__*, mcp__<server>__<tool>).`,
+      );
+    }
+    const denyPatterns = [
+      ...(baseConfig.disallowedTools ?? []),
+      ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
+      ...requestedDenies,
+    ].map((name) => resolveBuiltinToolName(name) ?? name);
+    const agentTypeAllows =
+      baseConfig.tools &&
+      baseConfig.tools.length > 0 &&
+      !baseConfig.tools.includes('*')
+        ? baseConfig.tools.map((name) => resolveBuiltinToolName(name) ?? name)
+        : undefined;
+    const matchesAny = (patterns: readonly string[], name: string): boolean =>
+      patterns.some((pattern) =>
+        name.startsWith('mcp__')
+          ? matchesMcpPattern(pattern, name)
+          : pattern === name,
+      );
+    requestedPool = expansion.tools.filter(
+      (name) =>
+        !matchesAny(denyPatterns, name) &&
+        (agentTypeAllows === undefined || matchesAny(agentTypeAllows, name)),
+    );
+    if (requestedPool.length === 0) {
+      if (
+        agentTypeAllows !== undefined &&
+        !expansion.tools.some((name) => matchesAny(agentTypeAllows, name))
+      ) {
+        throw new Error(
+          `agent({tools, agentType}): none of ${listToolNames(expansion.tools)} is among the tools agent type '${sanitizeForErrorMessage(
+            opts.agentType ?? '',
+          )}' allows (${listToolNames(agentTypeAllows)}). An allowlist can only narrow that set, so this dispatch would have no tools at all.`,
+        );
+      }
+      throw new Error(
+        `agent({tools}): every requested tool (${listToolNames(
+          expansion.tools,
+        )}) is denied for this dispatch — by the workflow tool floor, by the agent type's denies, or by disallowedTools — so it would have no tools at all.`,
+      );
+    }
+    // Schema mode delivers its result through structured_output, so the
+    // allowlist keeps it whether or not the script listed it. A dispatch that
+    // also DENIES it is refused a few lines below.
+    if (
+      opts.schema !== undefined &&
+      !requestedPool.includes(ToolNames.STRUCTURED_OUTPUT)
+    ) {
+      requestedPool = [...requestedPool, ToolNames.STRUCTURED_OUTPUT];
+    }
+  }
+
   const augmented: SubagentConfig = {
     ...baseConfig,
     ...(opts.model !== undefined ? { model: opts.model } : {}),
     ...(schemaSystemPrompt !== undefined
       ? { systemPrompt: schemaSystemPrompt }
       : {}),
-    ...(schemaTools !== undefined ? { tools: schemaTools } : {}),
+    ...(requestedPool !== undefined
+      ? { tools: requestedPool }
+      : schemaTools !== undefined
+        ? { tools: schemaTools }
+        : {}),
     disallowedTools: Array.from(
       new Set([
         ...(baseConfig.disallowedTools ?? []),
@@ -1276,6 +1425,14 @@ async function runOverridePath(
         },
         ...(effort !== undefined
           ? { modelConfigOverrides: { reasoningEffort: effort } }
+          : {}),
+        // Filtering the declarations only hides the tools: a call for one the
+        // agent was never shown still executes, because the execution gate is
+        // open when no allowlist is set (`AgentCore.isToolExecutionAllowed`).
+        // A per-call narrowing has to hold at both layers, so the same pool
+        // that shaped the declarations closes the gate.
+        ...(requestedPool !== undefined
+          ? { executionAllowedTools: requestedPool }
           : {}),
         eventEmitter,
         taskName: String(ctx.get('task_prompt')),

@@ -886,6 +886,15 @@ export class SubagentManager {
       runtimeAuthOverrides?: AuthOverrides;
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
+      /**
+       * Execution-layer allowlist for this one spawn: a call for a tool
+       * outside it is rejected before scheduling or approval, not merely
+       * hidden from the declarations. Set by a caller that narrows an agent
+       * per spawn (`agent({tools})`); it wins over any allowlist the
+       * converted config carries, and leaves `tools` / `disallowedTools`
+       * normalization untouched.
+       */
+      executionAllowedTools?: string[];
       /** Business/task name used for local per-invocation usage labels. */
       taskName?: string;
       /** Stable id used to keep one invocation grouped across resume. */
@@ -982,6 +991,7 @@ export class SubagentManager {
           ],
           ['runtimeAuthOverrides', options?.runtimeAuthOverrides],
           ['toolConfigOverride', options?.toolConfigOverride],
+          ['executionAllowedTools', options?.executionAllowedTools],
           [
             'promptConfigOverrides.renderedSystemPrompt',
             options?.promptConfigOverrides?.renderedSystemPrompt,
@@ -1063,13 +1073,14 @@ export class SubagentManager {
       };
       const configuredToolConfig =
         options?.toolConfigOverride ?? runtimeConfig.toolConfig;
+      const executionAllowedTools =
+        options?.executionAllowedTools ??
+        configuredToolConfig?.executionAllowedTools;
       const toolConfig: ToolConfig = {
         tools: configuredToolConfig?.tools ?? ['*'],
-        ...(configuredToolConfig?.executionAllowedTools !== undefined
+        ...(executionAllowedTools !== undefined
           ? {
-              executionAllowedTools: [
-                ...configuredToolConfig.executionAllowedTools,
-              ],
+              executionAllowedTools: [...executionAllowedTools],
             }
           : {}),
         disallowedTools: Array.from(

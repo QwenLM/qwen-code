@@ -772,6 +772,50 @@ describe('createWorkflowSandbox security', () => {
     },
   );
 
+  // Same normalization as the deny list: what the allowlist means does not
+  // depend on order, duplicates, or which name a built-in is spelled with.
+  it('agent({tools}) hands the host a sorted, de-duplicated list', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.tools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { tools: ["write_file", "run_shell_command", "write_file"] });
+      await agent("b", { tools: ["ReadFile"] });
+      return "done";
+    `);
+    expect(seen).toEqual([['run_shell_command', 'write_file'], ['read_file']]);
+  });
+
+  it.each([['"run_shell_command"'], ['[""]'], ['[" edit"]'], ['[42]']])(
+    'agent({tools: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { tools: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{tools\}\): must be an array of non-empty tool-name strings/,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // An empty deny list denies nothing and is dropped; an empty allowlist would
+  // be a tool-less agent, which no script means to ask for.
+  it('agent({tools: []}) is rejected instead of being dropped', async () => {
+    const dispatch = vi.fn(async () => 'ignored');
+    const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+    await expect(
+      sandbox.run(`return agent("hi", { tools: [] });`),
+    ).rejects.toThrow(/must name at least one tool/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it('names effort and disallowedTools among the known options', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
@@ -779,7 +823,7 @@ describe('createWorkflowSandbox security', () => {
     });
     await expect(
       sandbox.run(`return agent("hi", { efort: "low" });`),
-    ).rejects.toThrow(/Known options are: .*effort.*disallowedTools/);
+    ).rejects.toThrow(/Known options are: .*effort.*tools.*disallowedTools/);
   });
 
   // A rejected call must leave no phase behind: the phase is recorded only
@@ -787,6 +831,8 @@ describe('createWorkflowSandbox security', () => {
   it.each([
     ['effort: "turbo"', /unknown effort tier/],
     ['disallowedTools: "edit"', /must be an array/],
+    ['tools: "edit"', /must be an array/],
+    ['tools: []', /must name at least one tool/],
   ])(
     'records no phase for a call rejected over %s',
     async (option, message) => {

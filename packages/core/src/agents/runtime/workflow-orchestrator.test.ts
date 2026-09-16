@@ -1657,6 +1657,31 @@ describe('WorkflowOrchestrator', () => {
     ).toBe(medium);
   });
 
+  // The allowlist is projected the same way, so a stage that keeps the same
+  // tools replays and one that changes them runs live.
+  it('derives one resume key for equivalent tools spellings', async () => {
+    const keyFor = async (opts: string): Promise<string> => {
+      const { journal, entries } = memoryJournal();
+      await new WorkflowOrchestrator(async () => 'ok').run({
+        script: `return await agent('scan', ${opts});`,
+        args: undefined,
+        journal,
+      });
+      const started = entries.find((e) => e.type === 'started');
+      return (started as { key: string }).key;
+    };
+
+    const base = await keyFor(`{ tools: ['read_file', 'run_shell_command'] }`);
+    expect(
+      await keyFor(
+        `{ tools: ['run_shell_command', 'read_file', 'read_file'] }`,
+      ),
+    ).toBe(base);
+    expect(await keyFor(`{ tools: ['ReadFile', 'Shell'] }`)).toBe(base);
+    expect(await keyFor(`{ tools: ['read_file'] }`)).not.toBe(base);
+    expect(await keyFor(`{}`)).not.toBe(base);
+  });
+
   it('settles a sequential agent() to null when the agent itself failed', async () => {
     const { journal, entries } = memoryJournal();
     const orchestrator = new WorkflowOrchestrator(async () => {
@@ -3498,7 +3523,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   type StubSubagentCall = {
-    config: { name?: string; model?: string; disallowedTools?: string[] };
+    config: {
+      name?: string;
+      model?: string;
+      tools?: string[];
+      disallowedTools?: string[];
+    };
     runtimeContextSame: boolean;
     /** The exact Config the dispatch handed to the runtime agent. */
     runtimeContext: Config;
@@ -3508,6 +3538,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     options?: {
       runConfigOverrides?: unknown;
       modelConfigOverrides?: unknown;
+      executionAllowedTools?: string[];
       taskName?: string;
       subagentId?: string;
     };
@@ -3517,6 +3548,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   function fakeConfigWithMgr(opts: {
     transcriptDir?: string;
+    /** What `getAllTools()` answers; an allowlist expands MCP patterns here. */
+    registeredTools?: string[];
     findSubagentByName?: (name: string) => Promise<{
       name: string;
       description: string;
@@ -3556,9 +3589,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     // The override carries the result. We don't care about the registry contents in unit
     // tests — only that the override flow doesn't crash on the missing methods — so the
     // stub registry just answers the API surface those helpers call.
+    const registeredToolNames = opts.registeredTools ?? [
+      'run_shell_command',
+      'read_file',
+      'write_file',
+      'edit',
+      'structured_output',
+    ];
     const fakeRegistry = {
       copyDiscoveredToolsFrom: () => {},
       registerTool: () => {},
+      warmAll: async () => {},
+      getAllTools: () => registeredToolNames.map((name) => ({ name })),
     };
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
@@ -3615,6 +3657,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           subagentConfig: {
             name?: string;
             model?: string;
+            tools?: string[];
             disallowedTools?: string[];
           },
           runtimeContext: Config,
@@ -3622,6 +3665,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             eventEmitter?: unknown;
             runConfigOverrides?: unknown;
             modelConfigOverrides?: unknown;
+            executionAllowedTools?: string[];
             taskName?: string;
             subagentId?: string;
           },
@@ -3637,6 +3681,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               modelConfigOverrides: options?.modelConfigOverrides,
+              executionAllowedTools: options?.executionAllowedTools,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -4381,6 +4426,210 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(new Set(disallowed).size).toBe(disallowed.length);
   });
 
+  // `agent({tools})`. The narrowing has to hold at both layers: the agent is
+  // not shown the tools (config.tools shapes the declarations) and a call for
+  // one outside the pool is refused before it runs (executionAllowedTools).
+  it('narrows a dispatch to the allowlist at both layers', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('query the warehouse', {
+      tools: ['read_file', 'run_shell_command'],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.tools).toEqual(['read_file', 'run_shell_command']);
+    expect(calls[0]!.options?.executionAllowedTools).toEqual([
+      'read_file',
+      'run_shell_command',
+    ]);
+  });
+
+  it('leaves both layers alone when no allowlist is passed', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', { model: 'other-model' });
+
+    expect(calls[0]!.config.tools).toBeUndefined();
+    expect(calls[0]!.options?.executionAllowedTools).toBeUndefined();
+  });
+
+  // The floor is the whole point of being a workflow subagent: an allowlist is
+  // a narrowing, so naming a floor tool cannot hand it back.
+  it('drops floor-denied tools from the allowlist instead of re-enabling them', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: ['read_file', 'agent', 'ask_user_question'],
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      tools: ['read_file', 'agent', 'ask_user_question'],
+    });
+
+    expect(calls[0]!.config.tools).toEqual(['read_file']);
+    expect(calls[0]!.options?.executionAllowedTools).toEqual(['read_file']);
+  });
+
+  it('subtracts a per-call deny from the allowlist', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      tools: ['read_file', 'write_file'],
+      disallowedTools: ['WriteFile'],
+    });
+
+    expect(calls[0]!.config.tools).toEqual(['read_file']);
+  });
+
+  it('intersects the allowlist with the agent type own allowlist', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Scanner',
+        description: 'read-only scan',
+        systemPrompt: 'scan prompt',
+        level: 'project',
+        tools: ['read_file', 'edit'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      agentType: 'Scanner',
+      tools: ['read_file', 'run_shell_command'],
+    });
+
+    expect(calls[0]!.config.tools).toEqual(['read_file']);
+  });
+
+  it('refuses an allowlist disjoint from the agent type allowlist', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Scanner',
+        description: 'read-only scan',
+        systemPrompt: 'scan prompt',
+        level: 'project',
+        tools: ['read_file'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('scan', {
+        agentType: 'Scanner',
+        tools: ['run_shell_command'],
+      }),
+    ).rejects.toThrow(
+      /none of "run_shell_command" is among the tools agent type 'Scanner' allows \("read_file"\)/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an allowlist every entry of which is denied', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: ['read_file', 'agent'],
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('scan', {
+        tools: ['read_file', 'agent'],
+        disallowedTools: ['read_file'],
+      }),
+    ).rejects.toThrow(/is denied for this dispatch/);
+    expect(calls).toHaveLength(0);
+  });
+
+  // An allow that names nothing takes away the tool the script meant to keep,
+  // which is the mirror image of a deny that denies nothing.
+  it('refuses an allowlist entry that matches no tool', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('scan', { tools: ['Bash'] }),
+    ).rejects.toThrow(/agent\(\{tools\}\): "Bash" matches no tool/);
+    expect(calls).toHaveLength(0);
+  });
+
+  // The declaration filter matches by exact name, so a server pattern has to
+  // become the server's tools or the agent would be handed none of them.
+  it('expands an MCP pattern in the allowlist to the server tools', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: [
+        'read_file',
+        'mcp__warehouse__query',
+        'mcp__warehouse__schema',
+        'mcp__other__ping',
+      ],
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('query', {
+      tools: ['mcp__warehouse', 'read_file'],
+    });
+
+    expect(calls[0]!.config.tools).toEqual([
+      'mcp__warehouse__query',
+      'mcp__warehouse__schema',
+      'read_file',
+    ]);
+  });
+
+  it('refuses an MCP pattern that matches no registered tool', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      registeredTools: ['read_file'],
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('query', {
+        tools: ['mcp__warehouse__*'],
+      }),
+    ).rejects.toThrow(/"mcp__warehouse__\*" matches no tool/);
+    expect(calls).toHaveLength(0);
+  });
+
+  // A schema agent answers only through structured_output; an allowlist that
+  // forgot it would leave the dispatch no way to return its result.
+  it('keeps structured_output in a schema allowlist that omits it', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    // The stub never calls structured_output, so the dispatch itself fails;
+    // what this test reads is the allowlist the agent was built with.
+    await expect(
+      createProductionDispatch(config)('extract', {
+        schema: { type: 'object' },
+        tools: ['read_file'],
+      }),
+    ).rejects.toThrow(/without calling structured_output/);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.tools).toEqual(['read_file', 'structured_output']);
+    expect(calls[0]!.options?.executionAllowedTools).toEqual([
+      'read_file',
+      'structured_output',
+    ]);
+  });
+
+  it('routes tools alone through the override path', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', { tools: ['read_file'] });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.tools).toEqual(['read_file']);
+  });
+
   it('routes disallowedTools alone through the override path', async () => {
     const { config, calls } = fakeConfigWithMgr({
       onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
@@ -4504,6 +4753,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         isolation: 'worktree',
         agentType: 'Scanner',
         workingDir: '/nonexistent/worktree',
+        tools: ['read_file'],
         disallowedTools: ['edit'],
       };
       expect(samples).toHaveProperty(key);

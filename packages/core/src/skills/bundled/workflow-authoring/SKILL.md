@@ -87,7 +87,7 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
+`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, tools?, disallowedTools? })`
 
 - `stepId` (string, ≤128 chars) — optional caller node ID; does not affect caching. Also accepted in `workflow()` options.
 - `label` (string) — display name in run views and failures.
@@ -153,6 +153,16 @@ say explicitly what each one should read and whether it may edit files.
   a legitimately slow tool is not a stall. Default 180000 (override via
   `QWEN_CODE_WORKFLOW_STALL_SECONDS`, whole seconds); `0` disables the
   watchdog. Wall time per attempt is bounded separately.
+- `tools` (string[]) — the only tools this agent may use. Name them as
+  `disallowedTools` does; `mcp__<server>` keeps that server's tools. It only
+  narrows: an `agentType`'s own allowlist bounds it and every deny below is
+  subtracted, so listing a denied tool does not bring it back. An empty list,
+  an entry that names no tool, and a list left with nothing all resolve the
+  call to null with the reason recorded, rather than dispatching an agent with
+  no tools. Under `schema` the agent keeps `structured_output` either way. The
+  narrowing holds at both layers: the tools are not declared, and a call for
+  one outside the list is refused before it runs. The resume cache key depends
+  on which tools are allowed, not on their order, duplicates, or spelling.
 - `disallowedTools` (string[]) — tools this agent may not call, on top of the
   floor below; it can only narrow the agent's tools, never re-enable one. Name a
   tool by its tool name (`run_shell_command`, `write_file`, `edit`) or its
@@ -169,7 +179,8 @@ say explicitly what each one should read and whether it may edit files.
   on whether a built-in tool is named by its tool name or its display name.
 
 Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
-EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType`. A
+EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType` or
+their `tools`. A
 subagent therefore cannot fan out further and cannot ask anyone anything: the
 script owns all fan-out, and every ambiguity has to be resolved in the prompt
 it is given. Never ask a subagent to spawn its own verifiers — dispatch them

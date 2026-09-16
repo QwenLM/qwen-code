@@ -2935,6 +2935,7 @@ bad`);
         },
         { hooks: { onStop: vi.fn() } },
         { runConfigOverrides: { max_turns: 3 } },
+        { executionAllowedTools: ['read_file'] },
       ])('rejects unsupported options %j before factory', async (options) => {
         const create = vi.fn();
         vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
@@ -3147,6 +3148,40 @@ bad`);
           tools: [ToolNames.READ_FILE, ToolNames.ASK_USER_QUESTION],
           disallowedTools: [ToolNames.EDIT, ToolNames.ASK_USER_QUESTION],
         });
+      });
+
+      // A per-spawn narrowing has to reach the execution gate: filtering the
+      // declarations only hides a tool, it does not refuse a call for it.
+      it('carries a per-spawn execution allowlist into the tool config', async () => {
+        await manager.createAgentHeadless(
+          {
+            ...agentConfig,
+            tools: [ToolNames.READ_FILE, ToolNames.SHELL],
+          },
+          mockConfig,
+          { executionAllowedTools: [ToolNames.READ_FILE] },
+        );
+
+        const { toolConfig } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(toolConfig).toEqual({
+          tools: [ToolNames.READ_FILE, ToolNames.SHELL],
+          executionAllowedTools: [ToolNames.READ_FILE],
+          disallowedTools: [ToolNames.ASK_USER_QUESTION],
+        });
+      });
+
+      it('leaves the execution gate open when no spawn allowlist is given', async () => {
+        await manager.createAgentHeadless(
+          { ...agentConfig, tools: [ToolNames.READ_FILE] },
+          mockConfig,
+        );
+
+        const { toolConfig } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(toolConfig).not.toHaveProperty('executionAllowedTools');
       });
 
       it('should create a new ContentGenerator for bare model IDs', async () => {

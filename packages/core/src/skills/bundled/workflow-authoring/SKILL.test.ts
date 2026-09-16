@@ -202,7 +202,13 @@ describe('bundled workflow-authoring skill', () => {
     ['A different effort is a different resume cache key'],
     // disallowedTools only narrows, names what it accepts, and a schema agent
     // cannot deny its answer.
-    ['stallMs?, disallowedTools? })'],
+    ['stallMs?, tools?, disallowedTools? })'],
+    // tools only narrows, refuses rather than dispatching a tool-less agent,
+    // and holds at both layers.
+    ['the only tools this agent may use'],
+    ['so listing a denied tool does not bring it back'],
+    ['an entry that names no tool, and a list left with nothing'],
+    ['one outside the list is refused before it runs'],
     ['never re-enable one'],
     ['`mcp__<server>__*`'],
     ["such as `'Bash'`, resolves the call to null"],
