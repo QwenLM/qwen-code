@@ -64,6 +64,7 @@ export interface OpenTuiCommandHost {
   setPendingItem(item: HistoryItemWithoutId | null): void;
   setDebugMessage(message: string): void;
   toggleVimEnabled(): Promise<boolean>;
+  toggleFocusMode?(): Promise<boolean | null>;
   setMemoryFileCount(count: number): void;
   reloadCommands(): void | Promise<void>;
   setSessionName(name: string | null): void;
@@ -151,6 +152,9 @@ export function createOpenTuiCommandContext(
         },
       },
       toggleVimEnabled: () => host.toggleVimEnabled(),
+      ...(host.toggleFocusMode
+        ? { toggleFocusMode: () => host.toggleFocusMode!() }
+        : {}),
       setMemoryFileCount: (count) => host.setMemoryFileCount(count),
       reloadCommands: () => host.reloadCommands(),
       setSessionName: (name) => host.setSessionName(name),

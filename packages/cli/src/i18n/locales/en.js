@@ -785,6 +785,26 @@ export default {
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
+  'Focus mode is not supported by this renderer.':
+    'Focus mode is not supported by this renderer.',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'toggle focus mode (hide reasoning and tool call noise)',
+  'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.':
+    'Focus mode enabled. Ctrl+O shows full details. Press Ctrl+O again to re-apply focus. Run /focus again to disable.',
+  'Focus mode disabled.': 'Focus mode disabled.',
+  '{{tool}} (Ctrl+O for details)': '{{tool}} (Ctrl+O for details)',
+  '{{tool}} failed (Ctrl+O for details)':
+    '{{tool}} failed (Ctrl+O for details)',
+  '{{tool}} cancelled (Ctrl+O for details)':
+    '{{tool}} cancelled (Ctrl+O for details)',
+  'Tools: {{count}}': 'Tools: {{count}}',
+  'failed: {{failed}} ({{tools}})': 'failed: {{failed}} ({{tools}})',
+  'cancelled: {{cancelled}}': 'cancelled: {{cancelled}}',
+  '{{summary}} (Ctrl+O for details)': '{{summary}} (Ctrl+O for details)',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.',
+  'Memory: {{read}} read, {{written}} written':
+    'Memory: {{read}} read, {{written}} written',
   'Show usage statistics dashboard.': 'Show usage statistics dashboard.',
   'Show model-specific usage statistics.':
     'Show model-specific usage statistics.',

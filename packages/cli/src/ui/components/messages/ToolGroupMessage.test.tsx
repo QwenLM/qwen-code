@@ -21,6 +21,7 @@ import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { setLanguageAsync } from '../../../i18n/index.js';
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
 
@@ -238,7 +239,7 @@ describe('<ToolGroupMessage />', () => {
     });
 
     it('expands a memory-only group instead of collapsing to the badge', () => {
-      // "Wrote 1 memory" would hide the very parameters the setting exists to
+      // The memory summary would hide the very parameters the setting exists to
       // surface.
       const memoryOps = [
         createToolCall({
@@ -259,7 +260,7 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       expect(frame).toContain('MockTool[m1]');
-      expect(frame).not.toContain('Wrote 1 memory');
+      expect(frame).not.toContain('Memory:');
     });
 
     it('keeps the memory badge when the setting is off', () => {
@@ -279,7 +280,7 @@ describe('<ToolGroupMessage />', () => {
           memoryWriteCount={1}
         />,
       );
-      expect(lastFrame() ?? '').toContain('Wrote 1 memory');
+      expect(lastFrame() ?? '').toContain('Memory: 0 read, 1 written');
     });
 
     it('keeps the dense panel for a pure parallel-agent group', () => {
@@ -596,7 +597,7 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Recalled 2 memories');
+      expect(frame).toContain('Memory: 2 read, 0 written');
       // Collapsible tool still summarized
       expect(frame).toContain('Read config.yaml');
       // Non-collapsible tool rendered individually
@@ -627,7 +628,7 @@ describe('<ToolGroupMessage />', () => {
       );
       const frame = lastFrame() ?? '';
       expect(frame).toContain('Read a.ts, b.ts');
-      expect(frame).toContain('Recalled 1 memory');
+      expect(frame).toContain('Memory: 1 read, 0 written');
     });
 
     it('renders tool call awaiting confirmation', () => {
@@ -758,6 +759,50 @@ describe('<ToolGroupMessage />', () => {
   });
 
   describe('Memory-only group', () => {
+    it.each(['en', 'pt'] as const)(
+      'keeps memory counts localized in compact and detailed groups (%s)',
+      async (language) => {
+        await setLanguageAsync(language);
+        try {
+          for (const [read, written] of [
+            [2, 1],
+            [1, 0],
+            [0, 1],
+          ]) {
+            const expected =
+              language === 'pt'
+                ? `Memória: ${read} leituras, ${written} gravações`
+                : `Memory: ${read} read, ${written} written`;
+            for (const variant of ['memory-only', 'mixed', 'fullDetail']) {
+              const tools = Array.from({ length: read + written }, (_, index) =>
+                createToolCall({
+                  callId: `memory-${index}`,
+                  name: 'SaveMemory',
+                  isMemoryOp: index < read ? 'read' : 'write',
+                }),
+              );
+              if (variant !== 'memory-only')
+                tools.push(createToolCall({ callId: 'shell', name: 'Shell' }));
+              const view = renderWithProviders(
+                <ToolGroupMessage
+                  {...baseProps}
+                  toolCalls={tools}
+                  memoryReadCount={read}
+                  memoryWriteCount={written}
+                  fullDetail={variant === 'fullDetail'}
+                />,
+              );
+              expect(view.lastFrame()).toContain(expected);
+              if (variant === 'fullDetail')
+                expect(view.lastFrame()).toContain('MockTool[memory-0]');
+              view.unmount();
+            }
+          }
+        } finally {
+          await setLanguageAsync('en');
+        }
+      },
+    );
     it('renders read/write counts for completed memory-only groups', () => {
       const toolCalls = [
         createToolCall({
@@ -785,11 +830,10 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Recalled 2 memories');
-      expect(frame).toContain('Wrote 1 memory');
+      expect(frame).toContain('Memory: 2 read, 1 written');
     });
 
-    it('renders singular form for single memory op', () => {
+    it('renders counts for a single memory op', () => {
       const toolCalls = [
         createToolCall({
           callId: 'm1',
@@ -806,8 +850,7 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Recalled 1 memory');
-      expect(frame).not.toContain('Wrote');
+      expect(frame).toContain('Memory: 1 read, 0 written');
     });
   });
 
@@ -815,7 +858,7 @@ describe('<ToolGroupMessage />', () => {
   // memory-only / pure-parallel-agent early returns (which run before the
   // forceExpandAll computation). Each tool must render in full.
   describe('fullDetail bypasses compact early returns', () => {
-    it('renders memory ops individually (not the "Recalled N" badge) when fullDetail', () => {
+    it('renders memory ops individually (not the memory badge) when fullDetail', () => {
       const toolCalls = [
         createToolCall({
           callId: 'm1',
@@ -841,10 +884,10 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       const frame = lastFrame() ?? '';
-      // The compact "Recalled N" badge must NOT short-circuit fullDetail:
+      // The compact memory badge must NOT short-circuit fullDetail:
       // each memory op renders as its own ToolMessage with forceShowResult.
       // (ToolMessage is mocked in this suite as `MockTool[id]…[forceShow]`.)
-      expect(frame).not.toContain('Recalled 2 memories');
+      expect(frame).not.toContain('Memory:');
       expect(frame).toContain('MockTool[m1]');
       expect(frame).toContain('MockTool[m2]');
       expect(frame).toContain('[forceShow]');

@@ -6,6 +6,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { SessionPreview } from './SessionPreview.js';
+import { LoadedSettings } from '../../config/settings.js';
+import { FocusModeProvider } from '../contexts/FocusModeContext.js';
+import { HistoryItemDisplay } from './HistoryItemDisplay.js';
+import type { ComponentProps } from 'react';
+
+vi.mock('./HistoryItemDisplay.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./HistoryItemDisplay.js')>();
+  return {
+    ...actual,
+    HistoryItemDisplay: vi.fn(
+      (props: ComponentProps<typeof actual.HistoryItemDisplay>) => (
+        <actual.HistoryItemDisplay {...props} />
+      ),
+    ),
+  };
+});
 
 beforeEach(() => {
   Object.defineProperty(process.stdout, 'columns', {
@@ -140,6 +157,42 @@ describe('SessionPreview', () => {
     expect(frame.indexOf('My session')).toBeLessThan(
       frame.indexOf('RESUMED-THINKING-LINE-1'),
     );
+  });
+
+  it('preserves preview thinking without forcing full-detail tools in focus mode', async () => {
+    const empty = { path: '', settings: {}, originalSettings: {} };
+    const settings = new LoadedSettings(
+      empty,
+      empty,
+      { ...empty, settings: { ui: { focusMode: true } } },
+      empty,
+      true,
+      new Set(),
+    );
+    const { lastFrame } = renderWithProviders(
+      <FocusModeProvider settings={settings}>
+        <SessionPreview
+          sessionService={mockService(
+            fakeResumedData([
+              { text: 'FOCUSED-PREVIEW-THOUGHT', thought: true },
+              { text: 'FOCUSED-PREVIEW-ANSWER' },
+            ]),
+          )}
+          sessionId="s1"
+          onExit={vi.fn()}
+          onResume={vi.fn()}
+        />
+      </FocusModeProvider>,
+      { settings },
+    );
+    await wait(100);
+    expect(lastFrame()).toContain('FOCUSED-PREVIEW-THOUGHT');
+    expect(lastFrame()).toContain('FOCUSED-PREVIEW-ANSWER');
+    expect(HistoryItemDisplay).toHaveBeenCalled();
+    for (const [props] of vi.mocked(HistoryItemDisplay).mock.calls) {
+      expect(props.disableFocus).toBe(true);
+      expect(props.fullDetail).not.toBe(true);
+    }
   });
 
   it('renders footer metadata (messageCount · time · branch)', async () => {

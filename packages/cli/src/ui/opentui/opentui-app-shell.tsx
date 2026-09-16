@@ -40,6 +40,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
+import { useFocusModeActions } from '../contexts/FocusModeContext.js';
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
@@ -122,7 +123,7 @@ export interface OpenTuiAppProps {
 
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
-  renderMain?: () => ReactNode;
+  renderMain?: (canNavigateDetails: boolean) => ReactNode;
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -219,6 +220,7 @@ interface ActionModal {
 type ConfirmationModal = ShellModal | ActionModal;
 
 export function OpenTuiApp(props: OpenTuiAppProps) {
+  const { toggleFocusMode, syncFocusMode } = useFocusModeActions();
   const {
     config,
     settings,
@@ -487,6 +489,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   const activeToolCall = waitingToolCalls?.[0] ?? null;
 
+  useEffect(() => {
+    syncFocusMode();
+  }, [settings.merged.ui?.focusMode, syncFocusMode]);
+
   // ink drives the gated-server approval queue from a renderer-agnostic hook at
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
@@ -526,6 +532,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         confirmations,
         onChange: () => {},
         toggleVimEnabled: () => onToggleVim?.() ?? Promise.resolve(false),
+        toggleFocusMode,
         reloadCommands: () => reloadRef.current?.() ?? undefined,
         startNewSession: (sessionId: string) => {
           if (onStartNewSession) onStartNewSession(sessionId);
@@ -542,6 +549,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       onStartNewSession,
       notify,
       onToggleVim,
+      toggleFocusMode,
       getSessionStats,
     ],
   );
@@ -922,7 +930,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     >
       <box flexDirection="column" flexGrow={1} flexShrink={0}>
         <OpenTuiBanner config={config} settings={settings} />
-        {renderMain ? renderMain() : null}
+        {renderMain
+          ? renderMain(!dialog && !activeModal && !activeToolCall)
+          : null}
         {!dialog &&
         !activeModal &&
         !activeToolCall &&

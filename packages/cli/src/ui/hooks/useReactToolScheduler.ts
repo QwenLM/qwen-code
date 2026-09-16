@@ -392,7 +392,9 @@ export function mapToDisplay(
         args: trackedCall.request.args as Record<string, unknown>,
         renderOutputAsMarkdown,
         isMemoryOp:
-          projectRoot && trackedCall.status !== 'error'
+          projectRoot &&
+          trackedCall.status !== 'error' &&
+          trackedCall.status !== 'cancelled'
             ? detectMemoryOp(
                 trackedCall.request.name,
                 trackedCall.request.args as Record<string, unknown>,
