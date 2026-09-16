@@ -186,7 +186,11 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
 
   it('falls back to the settled cap on short terminals', () => {
     expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    // At 48 the viewport reserve and the floor are the same 5 rows, so this
+    // probe also passes with the floor deleted. At 46 the inner bound is 3 and
+    // only the floor lifts it, which is what this one pins.
     expect(pendingCardMaxRows(48, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
   });
 
   it('keeps everything when the content fits', () => {

@@ -254,13 +254,19 @@ describe('OpenTuiTranscriptView', () => {
 
     it('draws the raw JSON on its own line under the header', () => {
       const { container } = render(
-        <OpenTuiTranscriptView items={[argsItem()]} showToolCallArgs />,
+        <OpenTuiTranscriptView
+          items={[argsItem({ description: 'HEADER_ROW_MARKER' })]}
+          showToolCallArgs
+        />,
       );
       const text = container.textContent ?? '';
       expect(text).toContain('{"file_path":"/x","content":"ARGS_ROW_MARKER"}');
-      // The row follows the header it belongs to, not the card body.
+      // The row follows the header it belongs to, not the card body. The header
+      // is named by its own marker: the tool name this fixture passes is mapped
+      // to a display name before it is drawn, so ordering against it would
+      // compare two absent strings.
       expect(text.indexOf('ARGS_ROW_MARKER')).toBeGreaterThan(
-        text.indexOf('write_file'),
+        text.indexOf('HEADER_ROW_MARKER'),
       );
     });
 
@@ -378,6 +384,27 @@ describe('OpenTuiTranscriptView', () => {
     const text = container.textContent ?? '';
     expect(text.split('←')).toHaveLength(2);
     expect(text.indexOf('←')).toBeGreaterThan(text.indexOf('echo two'));
+  });
+
+  it('draws no arrow on a card whose call has finished', () => {
+    // The marker needs the card to be a pending, unfinished tool row, not only
+    // the one the queue names: a call that has already run draws no arrow even
+    // while its card still reads pending. Every other case here leaves `done`
+    // at the helper's false, so this is that term's only witness.
+    const { container } = render(
+      <OpenTuiTranscriptView
+        awaitingCallId="t1"
+        items={[
+          toolItem({
+            description: 'echo done',
+            confirm: 'pending',
+            done: true,
+          }),
+        ]}
+      />,
+    );
+    expect(container.textContent).not.toContain('←');
+    expect(container.textContent).toContain('echo done');
   });
 
   it('renders the ! shell row with the ink $ prefix', () => {

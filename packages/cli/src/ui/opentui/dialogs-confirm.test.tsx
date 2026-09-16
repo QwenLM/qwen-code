@@ -516,31 +516,31 @@ describe('OpenTuiToolConfirmation', () => {
       vi.useRealTimers();
     });
 
-    it('fits headers that fill the chip row, and still clips ones that cannot fit', () => {
-      const wide = (tag: string) => tag.padEnd(30, '-');
-      const twoWideHeaders = (
-        onConfirm: (
-          outcome: ToolConfirmationOutcome,
-          payload?: ToolConfirmationPayload,
-        ) => Promise<void>,
-      ): ToolCallConfirmationDetails => ({
-        type: 'ask_user_question',
-        title: 'Two questions',
-        questions: [
-          {
-            question: 'Pick a deploy target?',
-            header: wide('deploy'),
-            options: [{ label: 'staging', description: 'the staging target' }],
-          },
-          {
-            question: 'Pick a region?',
-            header: wide('region'),
-            options: [{ label: 'eu', description: 'the eu region' }],
-          },
-        ],
-        onConfirm,
-      });
+    const wide = (tag: string) => tag.padEnd(30, '-');
+    const twoWideHeaders = (
+      onConfirm: (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>,
+    ): ToolCallConfirmationDetails => ({
+      type: 'ask_user_question',
+      title: 'Two questions',
+      questions: [
+        {
+          question: 'Pick a deploy target?',
+          header: wide('deploy'),
+          options: [{ label: 'staging', description: 'the staging target' }],
+        },
+        {
+          question: 'Pick a region?',
+          header: wide('region'),
+          options: [{ label: 'eu', description: 'the eu region' }],
+        },
+      ],
+      onConfirm,
+    });
 
+    it('fits headers that fill the chip row, and still clips ones that cannot fit', () => {
       // Eighty columns leaves this row room for both headers, and it is this arm
       // that fails when ink's transcript indent is charged to it as well.
       mocks.state.dimensions = { width: 80, height: 40 };
@@ -548,10 +548,36 @@ describe('OpenTuiToolConfirmation', () => {
       expect(room).toContain(wide('deploy'));
       expect(room).toContain(wide('region'));
 
-      // Forty columns less leaves no room, so the cap still bites.
+      // Forty columns less leaves no room, so the cap still bites — and what
+      // survives of the header is still on the row, which is what tells a
+      // clipped chip apart from a row that drew no header at all.
       mocks.state.dimensions = { width: 40, height: 40 };
       const tight = mount(twoWideHeaders(async () => {})).textContent ?? '';
       expect(tight).not.toContain(wide('deploy'));
+      expect(tight).toContain('deploy');
+    });
+
+    it('re-fits the chip row once its answered headers carry the mark', () => {
+      // Each answered header gains a " ✓" that the row's own budget pays for, so
+      // the row that fit both headers whole while they went unanswered has to
+      // clip once both are answered. Measured at the width the arm above passes
+      // at, so the only thing that moved is the answer count.
+      mocks.state.dimensions = { width: 80, height: 40 };
+      const container = mount(twoWideHeaders(async () => {}));
+      expect(container.textContent ?? '').toContain(wide('deploy'));
+
+      press({ name: '1', sequence: '1' });
+      settleAdvance();
+      press({ name: '1', sequence: '1' });
+      settleAdvance();
+
+      // Answering the second question lands on the Submit tab, whose review
+      // list prints each header in full, so the row under measurement is the
+      // text ahead of that list rather than the whole container.
+      const chipRow = (container.textContent ?? '').split('Your answers:')[0];
+      expect(chipRow).toContain('✓');
+      expect(chipRow).toContain('deploy');
+      expect(chipRow).not.toContain(wide('deploy'));
     });
 
     it('numbers each option and renders its description and the free-text row', () => {
@@ -609,6 +635,18 @@ describe('OpenTuiToolConfirmation', () => {
         ToolConfirmationOutcome.ProceedOnce,
         { answers: { '0': 'a pasted answer' } },
       );
+    });
+
+    it('drops a paste that arrives while the cursor was on an option row', () => {
+      // The composer is unmounted while this dialog owns the screen, so a
+      // bracketed paste has nowhere else to go — but a row the cursor is not on
+      // takes no key, and a paste is no different from one.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      paste('stray');
+      press({ name: '3', sequence: '3' });
+      expect(container.textContent ?? '').toContain('> ');
+      expect(container.textContent ?? '').not.toContain('stray');
     });
 
     it('keeps a pasted newline out of the row and inside the answer', () => {
@@ -1009,6 +1047,24 @@ describe('OpenTuiToolConfirmation', () => {
       );
     });
 
+    it('moves the cursor with a digit on a multi-select tab instead of ticking it', () => {
+      // On a single-select the digit commits the option it names. On a
+      // multi-select it stays ink's cursor move: an answer there is given by
+      // Space or by the free-text row, so a digit that also ticked would hand one
+      // over that no key asked for.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: '2', sequence: '2' });
+      expect(container.textContent ?? '').toContain('❯ [ ] 2. chat');
+      expect(container.textContent ?? '').not.toContain('[✓]');
+      settleAdvance();
+      // Nothing was answered, so the pause has no tab to swap to.
+      expect(container.textContent ?? '').toContain('Pick channels?');
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
     it('holds a tick the same read trails a multi-select answer with', () => {
       // A multi-select answer is rebuilt from its ticked boxes at submit, so a
       // Space behind the Enter changes an answer already given: the pause still
@@ -1053,13 +1109,22 @@ describe('OpenTuiToolConfirmation', () => {
         { name: 'x', sequence: 'x' },
       ]);
       expect(container.textContent ?? '').not.toContain('abx');
+      // The row the burst ended on belongs to the tab it reached, and '> ' is
+      // drawn only by that field, so this is that field and not an option row.
+      expect(container.textContent ?? '').not.toContain('> x');
       press({ name: 'return', sequence: '\r' });
-      expect(onConfirm).not.toHaveBeenCalled();
       press({ name: 'up' });
       press({ name: 'left' });
       press({ name: 'down' });
       press({ name: 'down' });
       expect(container.textContent ?? '').toContain('> ab');
+      // The storage half: the burst's Enter answered nothing, so the review tab
+      // still lists the question the burst landed on as open.
+      press({ name: 'up' });
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'right' });
+      expect(container.textContent ?? '').toContain('Region: (not answered)');
     });
 
     it('reviews every answer on the Submit tab and cancels from its second row', () => {

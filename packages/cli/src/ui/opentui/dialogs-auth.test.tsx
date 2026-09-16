@@ -789,6 +789,18 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(focusedField()).toEqual({ text: 'abcdXef', cell: 'e' });
   });
 
+  it('draws the model step’s custom-ID field with its own caret', async () => {
+    await runToBaseUrlStep();
+    await typeText('https://api.example.com/v1');
+    await press('return'); // baseUrl → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models, custom-ID input focused
+    await typeText('ab');
+    await press('left');
+    await typeText('X');
+    expect(focusedField()).toEqual({ text: 'aXb', cell: 'b' });
+  });
+
   it('keeps the caret at either end for ctrl+A and ctrl+E', async () => {
     await runToBaseUrlStep();
     await typeText('ab');
@@ -825,12 +837,20 @@ describe('caret editing in dialog text fields (#107)', () => {
   it('sends ctrl+E to the end of a pasted value and bare End to its own line', async () => {
     await runToBaseUrlStep();
     await pasteText('https://one.test\nhttps://two.test');
+    // The paste leaves the caret at the value's end, and ctrl+A is ink's line
+    // home, so the row drawn is the second line and the caret opens it.
     await press('a', { ctrl: true, sequence: '\x01' });
-    expect(focusedField().cell).toBe('h');
+    expect(focusedField()).toEqual({ text: 'https://two.test', cell: 'h' });
+    // Walk back over the break: the offset just past it belongs to the first
+    // line's end, so two lefts park the caret inside that line.
+    await press('left');
+    await press('left');
+    expect(focusedField()).toEqual({ text: 'https://one.test', cell: 't' });
     await press('e', { ctrl: true, sequence: '\x05' });
     await typeText('s');
-    // ink's ctrl+E binding is the end of the value, not of the caret's line.
-    // The jump lands on the second line, so that is the line the row draws.
+    // ink's ctrl+E binding is the end of the value, not of the caret's line, so
+    // from the first line it crosses the break: the row switches and the
+    // character lands on the second line rather than before the break.
     expect(focusedField()).toEqual({ text: 'https://two.tests ', cell: ' ' });
     // The bare key is ink's reducer move, which stops at the line the caret is
     // on. Park the caret inside the first line — ctrl+A after the ctrl+E jump

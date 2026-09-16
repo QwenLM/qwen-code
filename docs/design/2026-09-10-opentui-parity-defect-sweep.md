@@ -593,8 +593,10 @@ where the tab index clamps and both legs arrive at the review tab together.
 The second divergence is one this port loses. The option rows are drawn by hand
 rather than by the shared select widget, and the widget's pointer wiring did not
 cross with them: clicking an option no longer answers it and hovering no longer
-highlights it, while the outcome list a few rows below — still that widget —
-responds to both. Keys answer every question ink's dialog answers, which is the
+highlights it. The dialog draws no list that keeps it — this branch returns with
+the question flow alone — so the comparison is with the sibling confirmation
+types, whose outcome rows are still that widget and still answer a click. Keys
+answer every question ink's dialog answers, which is the
 bar this sweep set, and the pointer is deferred to its own change rather than
 argued away. A click needs a meaning on the chips, on the free-text row and on
 the submit and cancel rows, each of which answers a different question; and the
@@ -899,6 +901,15 @@ those did not pin was the timer itself — a row that went on ticking but kept
 printing the same frame passed — so the parked test now asserts that no interval
 is left running, which is the cost this decision measured on a machine.
 
+The row's phrase also obeys the accessibility setting ink reads for its own
+composer, and that gate has to reach both of the row's mounts — the composer's,
+and the waiting row under a parked confirmation — since a setting that silenced
+only one of them would keep rotating words on the other. Three tests pin it: the
+phrase dropped at each mount when the setting is explicitly off, and both kept
+when the settings say nothing, which is how ink reads an absent value. Inverting
+the comparison fails both, and dropping the prop from either mount fails the test
+that owns that mount.
+
 The row's elapsed counter needed the same treatment, and the obvious wiring is
 wrong. The shared timer zeroes what it has accumulated on a false-to-true edge of
 its active flag, so handing it `streaming && !waiting` — which is what dropping the
@@ -975,14 +986,16 @@ composer: three at a time, each collapsed to one line, an overflow row when more
 are waiting, and a hint naming the keys, shown the first three times the queue
 fills.
 
-The port is ink's component row for row, hint included. What had blocked it was
-the read rather than the render. The queue lives in a ref so that a turn can
-drain it and put it back within one tick, and a ref is invisible to a render —
-so the ref stays the synchronous source, and the five sites that move it each
-copy it into state besides: the push, the drain, the restore for texts still
-riding when a turn aborts, the pop for editing, and the transcript reset that
-backs `/clear`, resume and branch. That last one is why the rows shed with a
-cleared screen instead of outliving it.
+The port is ink's component row for row, hint included, with one addition: a
+queued row is stripped of terminal escapes before it is measured, which ink's
+component leaves to the terminal. What had blocked it was the read rather than
+the render. The queue lives in a ref so that a turn can drain it and put it back
+within one tick, and a ref is invisible to a render — so the ref stays the
+synchronous source, and the five sites that move it each copy it into state
+besides: the push, the drain, the restore for texts still riding when a turn
+aborts, the pop for editing, and the transcript reset that backs `/clear`,
+resume and branch. That last one is why the rows shed with a cleared screen
+instead of outliving it.
 
 This is the one decision here that no frame can evidence. Both renderers _steer_
 a plain-Enter submission made mid-turn: the text is drained at the next sampling
@@ -1014,21 +1027,24 @@ Keeping the rows through a confirmation would mean mounting them one level up,
 in the chrome box, at the price of setting them above the waiting row where ink
 draws them under the spinner.
 
-Coverage is unit-level across three layers: five component tests (nothing when
+Coverage is unit-level across three layers: six component tests (nothing when
 the queue is empty, one row per prompt with whitespace flattened, the three-row
 cap with its overflow row, the hint that shows on three fills and not the
-fourth, a row cut to the terminal width minus ink's indent), the hook's
-assertions on the queued texts at each of those sites, and a shell test that
-fixes the placement — the rows share the non-scrolling chrome with the composer
-instead of scrolling away with the conversation. Eleven mutations — one at each
-component behaviour, one at each mirror site and one at the mount — each fail at
-least one test, with one limitation: the mount is caught as containment and not
-as order, because the shell test asserts the rows land in the chrome beside the
-composer rather than which side of it. The five component rows fail their own and
-no other; the mirror sites do not map one to one, because a list never given its
-first entry, or never emptied, is still being asserted turns later: draining
-without mirroring fails one assertion, pushing without it fails four, popping for
-editing two.
+fourth, a row cut to the terminal width minus ink's indent, and a row stripped
+of terminal escapes before it reaches the screen), the hook's assertions on the
+queued texts at each of those sites, and a shell test that fixes the placement —
+the rows share the non-scrolling chrome with the composer instead of scrolling
+away with the conversation, and sit above it rather than below. Eleven mutations —
+one at each of the five behaviours the port copies from ink, one at each mirror
+site and one at the mount — each fail at least one test, with one limitation: the
+escape-stripping addition carries no mutation of its own. The mount's mutation is
+the rows moved under the composer, which the placement test now catches by
+ordering the two against each other in the chrome's own text. The five ported
+component rows
+fail their own and no other; the mirror sites do not map one to one, because a
+list never given its first entry, or never emptied, is still being asserted
+turns later: draining without mirroring fails one assertion, pushing without it
+fails four, popping for editing two.
 
 ## Decision 31 — a model dialog outcome is recorded as well as shown
 
@@ -1163,8 +1179,10 @@ The caret lands in the same column both ways, and what is displayed took this
 shape before the caret existed at all — ink showing a value its flow has already
 discarded is recorded as a follow-up rather than reproduced here.
 
-Coverage is the model's own suite — fifteen new tests in a file this branch adds
-whole, each compared against ink — plus the tests of the fields that use it, counted
+Coverage is the model's own suite — sixteen new tests in a file this branch adds
+whole, six of them replaying every keystroke through ink's own reducer as the
+oracle and the rest asserting the model's states directly — plus the tests of the
+fields that use it, counted
 under Decisions 33 and 37, and eleven mutations, each failing the tests that own the
 behaviour taken away: a left
 arrow that moves nothing, the context-window field's typing branch, the two
@@ -1372,10 +1390,19 @@ marker rather than a guessed one.
 
 The new case asserts the arrow sits on the call the queue names when that is not
 the first pending row, and that exactly one arrow is drawn — it fails, one test in
-a suite of seventeen, if the id is dropped and the transcript's order decides
-again. Six
-existing renders in that suite gained the id, because a marker that must come from
-the queue cannot be asserted by a render that supplies none. On a machine the
+a suite of eighteen, if the id is dropped and the transcript's order decides
+again. A second case there pins the gate's other term: a card the queue still
+names but whose call has finished draws no arrow, and deleting that term fails it,
+where the sibling term was already pinned by a settled call's render. Every render
+in that suite that asserts the marker supplies the id, because a marker that must
+come from the queue cannot be asserted by a render that supplies none. The
+wiring itself — the shell handing the queue's first id down — is pinned one level
+up, by a case that mounts the tree the entry point renders and reads the props the
+transcript receives, since every case in that suite mocks the transcript away;
+deleting the wiring fails it. Dropping the queue from the render seam's dependency
+array is the one leg no test can see, because a stale id renders identically
+within a single render: the exhaustive-deps rule names that array, and CI's lint
+lane allows no warnings. On a machine the
 ordering this needs — a re-armed call behind a waiting one — was not reproduced;
 the scenario that drove the arrow in the matrix has a single awaiting call, where
 both rules agree.
@@ -1426,15 +1453,17 @@ step is still mounted, and its text never reaches the state the plan is built fr
 writes through the setter synchronously, which is what makes a mid-read submit read the
 live text at all, so it needs the explicit stop.
 
-Coverage is seven new unit tests, four in the authentication suite and three in the
-confirmation dialog's, and seven mutations (M15–M21). Each fails exactly the test that
-owns the behaviour taken away: the endpoint and key field's guard, the guard armed on a
-refused Enter as well, the model-ID step's guard, the advanced-config step's guard, the
-settled clause of the free-text row's burst-ownership guard, the answer lock's guard on
-the answer path — which without it lets a trailing digit report `"staging"` over the
-`"xyz"` the Enter it trailed had just recorded — and the same lock's clause on the Space
-branch, which without it lets a trailing tick widen an answer already given. M2's anchor
-moved with the line it rewrote. Nothing here was reached on a machine, for the reason
+Coverage is eight new unit tests, four in the authentication suite and four in the
+confirmation dialog's, and eight mutations, one per behaviour named below. Each fails
+exactly the test that owns the behaviour taken away: the endpoint and key field's guard,
+the guard armed on a refused Enter as well, the model-ID step's guard, the
+advanced-config step's guard, the settled clause of the free-text row's burst-ownership
+guard, the single-select clause of the digit branch — which without it lets a digit
+that only moves the cursor on a multi-select tick the option it names — and
+the answer lock's guard on the answer path — which without it lets a trailing
+digit report `"staging"` over the `"xyz"` the Enter it trailed had just recorded — and
+the same lock's clause on the Space branch, which without it lets a trailing tick widen
+an answer already given. Nothing here was reached on a machine, for the reason
 recorded in Decision 33: the acceptance harness writes one character per write and never
 pastes into these dialogs.
 
@@ -1617,8 +1646,9 @@ What was verified, and how far the verification reaches:
   character per pty write on purpose, so a keystroke lands in a stdin read of its
   own, and it never pastes into a dialog input. Neither leg of the matrix can
   therefore produce the multi-key reads Decisions 33, 34 and 37 are about; those
-  rest on the two dialog suites they added tests to, and on the mutation record,
-  with no screen evidence behind any of them.
+  rest on the two dialog suites they added tests to, and on the mutations each of
+  those decisions names in its own coverage paragraph, with no screen evidence
+  behind any of them.
 - **ink's own auth-wizard suite fails locally, and this change is not shown to be
   why.** That file guards nineteen tests behind a check its own comment explains —
   simulated TUI input is unreliable on slow runners — and skips them on CI and on
@@ -1696,9 +1726,18 @@ What was verified, and how far the verification reaches:
 - Every scroll region a dialog draws is still focusable, because that is the class
   default and only the transcript's was set aside. Whether a click inside a dialog's
   list can cost the open dialog a caret key the same way Decision 38 describes was
-  not measured; the lists are hit-tested surfaces of their own there, so the exposure
-  may be benign. Worth one arm per dialog before this renderer's mouse handling is
-  called done.
+  not measured, and the code gives no reason to expect a gentler answer: the rows
+  inside those five regions are hand-rolled and subscribe to no mouse event — only
+  the shared select widget does — so a click there is unhandled, and the focus walk
+  Decision 38 describes lands on the focusable region by the same route it took in
+  the transcript. What one arm per dialog would settle is whether a focused dialog
+  region then eats the dialog's own arrow and escape keys or only scrolls beside
+  them. Worth that arm before this renderer's mouse handling is called done.
+- The question dialog's option rows are hand-drawn, so a click no longer answers
+  one and a hover no longer highlights it, while the outcome rows of the sibling
+  confirmation types — still the shared select widget — do both. Giving a click a
+  meaning on the chips, on the free-text row and on the submit and cancel rows is
+  its own change, as Decision 21 says; until then the dialog answers keys alone.
 - The `@` completion here asks only the file index. ink also completes
   sessions, MCP resources and extensions, and draws a category bar to switch
   between them. That is a feature gap rather than a parity defect and belongs
@@ -1875,18 +1914,26 @@ What was verified, and how far the verification reaches:
   one quits. A rewind overlay binds the same key but no file in the renderer
   imports it. Giving the exit handler the claim the thought-toggle handler makes
   is its own change.
-- Seven further pins were measured by review as not holding, and this pass did not
-  re-run them. Deleting the shell's mount of the waiting row leaves every unit test
-  green, because the indicator's own suite renders it directly; moving the queue
-  rows below the composer passes the test titled for that placement, which asserts
-  containment rather than order; the pending-card probe retuned from 46 rows to 48
-  now equals the reserve sum, so the case no longer reaches the floor it is
-  titled for; an args-row placement assertion compares against a string its
-  fixture never renders; the arguments-row wiring is observed only by a case that
-  mocks both of its consumers to render nothing; the paste handler's guard
-  against a row that is not the free-text one is reached only by a case that
-  presses a digit first; and two branches carry no test at all — the model
-  dialog's custom-ID caret, and the line-join branch of delete-word-left. One
-  shape runs through them: the assertion reads what was rendered, so a change
-  that renders the same thing survives. That is one pass over those suites in the
-  other direction, not seven separate fixes.
+- Six further pins were measured by review as not holding. This pass re-ran all
+  six and closed them, each against a mutation of its own. Deleting the shell's
+  mount of the waiting row now fails two of the phrase tests Decision 28 names,
+  where the indicator's own suite still renders it directly and saw nothing.
+  Moving the queue rows below the composer fails the placement test, which orders
+  the two against each other instead of only containing them together. The
+  args-row placement assertion no longer compares against a string its fixture
+  never renders, and moving that row above the header fails it. The
+  arguments-row wiring, and the queued-call id the shell hands down beside it,
+  are read off the tree the entry point renders, so deleting either fails the
+  case that mounts it. A paste arriving while the cursor is on an option row has
+  a case of its own, and dropping the guard that refuses it fails that one. The
+  two branches that carried no test at all — the model dialog's custom-ID caret
+  and the line-join branch of delete-word-left — each have one now, failing when
+  that caret is pinned to the value's start and when the join is taken out. One
+  shape ran through all six: the assertion read what was rendered, so a change
+  that rendered the same thing survived, and each closing was to assert the
+  placement, the wiring or the state instead of the picture. A seventh item the
+  same review raised was re-run and closed: the pending-card case had been
+  retuned to a height where
+  the viewport reserve and the description floor are the same five rows, so its
+  probe passed with the floor deleted. It now pins both heights, and deleting the
+  floor fails it.

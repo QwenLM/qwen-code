@@ -364,6 +364,51 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
 
+  // ink's Composer drops the phrase, not the row, when this setting is off, so
+  // the gate has to reach both mounts of the indicator: the composer's and the
+  // waiting row under a parked confirmation.
+  function phraseConfig(enableLoadingPhrases: boolean): Config {
+    return {
+      getContextFilePaths: () => [],
+      getAccessibility: () => ({ enableLoadingPhrases }),
+    } as unknown as Config;
+  }
+
+  const parkedCall = {
+    callId: 'call-1',
+    name: 'run_shell_command',
+    confirmationDetails: { type: 'info', title: 'ok?' },
+  } as never;
+
+  it('drops the composer’s loading phrase when the setting is off', async () => {
+    renderApp({ config: phraseConfig(false) });
+    await settle();
+    expect(screen.getByText('input-prompt')).toBeTruthy();
+    expect(mocks.state.loadingProps?.['showPhrase']).toBe(false);
+  });
+
+  it('drops the parked call’s loading phrase when the setting is off', async () => {
+    renderApp({
+      config: phraseConfig(false),
+      waitingToolCalls: [parkedCall],
+    });
+    await settle();
+    expect(screen.getByText('tool-confirm')).toBeTruthy();
+    expect(mocks.state.loadingProps?.['showPhrase']).toBe(false);
+  });
+
+  it('keeps both loading phrases when the setting says nothing', async () => {
+    renderApp({ waitingToolCalls: [parkedCall] });
+    await settle();
+    expect(mocks.state.loadingProps?.['showPhrase']).toBe(true);
+
+    mocks.state.loadingProps = null;
+    renderApp();
+    await settle();
+    expect(screen.getByText('input-prompt')).toBeTruthy();
+    expect(mocks.state.loadingProps?.['showPhrase']).toBe(true);
+  });
+
   it('hides the footer while the composer’s completion list is open', async () => {
     renderApp();
     await settle();
@@ -2025,8 +2070,14 @@ describe('OpenTuiApp transcript scroll region', () => {
     });
     await settle();
     const { region, chrome } = readLayout();
-    expect(chrome?.textContent).toContain('QUEUE_ROW_MARKER');
-    expect(chrome?.textContent).toContain('input-prompt');
+    const chromeText = chrome?.textContent ?? '';
+    expect(chromeText).toContain('QUEUE_ROW_MARKER');
+    expect(chromeText).toContain('input-prompt');
+    // The title says "above", so order it and not just contain it: text runs in
+    // document order, so the queue row's offset is its placement.
+    expect(chromeText.indexOf('QUEUE_ROW_MARKER')).toBeLessThan(
+      chromeText.indexOf('input-prompt'),
+    );
     expect(region?.textContent).not.toContain('QUEUE_ROW_MARKER');
   });
 });

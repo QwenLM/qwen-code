@@ -198,6 +198,23 @@ describe('line-edit', () => {
     ]);
   });
 
+  it('agrees with ink when delete-word-left meets a line break at column 0', () => {
+    // The caret sits after the break and before its own line's first
+    // character, so that line holds no word to its left: the key joins the
+    // lines instead, which is ink's own fallback. At the value's start there is
+    // no break to join either, and the key deletes nothing.
+    agreesWithInk('one\ntwo', [stepLeft, stepLeft, stepLeft, eraseWord]);
+    agreesWithInk('one\ntwo', [moveHome, eraseWord]);
+    expect(deleteWordLeftAtCaret({ text: 'one\ntwo', cursor: 4 })).toEqual({
+      text: 'onetwo',
+      cursor: 3,
+    });
+    expect(deleteWordLeftAtCaret({ text: 'one\ntwo', cursor: 0 })).toEqual({
+      text: 'one\ntwo',
+      cursor: 0,
+    });
+  });
+
   it('follows ink in jumping ctrl+E past a line break, Home and bare End only to their own', () => {
     expect(moveCaretEnd({ text: 'ab\ncd', cursor: 0 })).toEqual({
       text: 'ab\ncd',
