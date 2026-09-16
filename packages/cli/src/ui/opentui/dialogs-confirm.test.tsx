@@ -584,4 +584,108 @@ describe('OpenTuiToolConfirmation', () => {
     expect(container.textContent).toContain('OVERFLOW_LINE_00');
     expect(container.textContent).toContain('lines hidden');
   });
+
+  it('windows a long exec command to its head and expands the tail on ctrl-s', () => {
+    // The exec body used to render its command uncapped: a long command
+    // painted the question row and outcome list off the viewport. The
+    // collapsed window keeps the command's head — where `curl … | sh` sits —
+    // and ctrl-s reveals the tail.
+    mocks.state.dimensions = { width: 110, height: 80 };
+    const command = [
+      'HEAD_MARKER=$(whoami)',
+      ...Array.from(
+        { length: 98 },
+        (_, i) => `echo line-${i.toString().padStart(2, '0')}`,
+      ),
+      'echo TAIL_MARKER',
+    ].join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { ...execDetails(), command },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const collapsed = container.textContent ?? '';
+    expect(collapsed).toContain('HEAD_MARKER');
+    expect(collapsed).toContain('... last 81 lines hidden ...');
+    expect(collapsed).toContain('Press ctrl-s to show more lines');
+    expect(collapsed).not.toContain('TAIL_MARKER');
+    // The approval surface renders alongside the windowed body.
+    expect(collapsed).toContain("Allow execution of: 'ls'?");
+    expect(collapsed).toContain('No, suggest changes (esc)');
+
+    press({ name: 's', ctrl: true });
+    const expanded = container.textContent ?? '';
+    expect(expanded).toContain('TAIL_MARKER');
+    // The expanded tail window (60 rows at height 80) drops the head rows;
+    // the label is their only trace on the alt screen.
+    expect(expanded).toContain('... first 40 lines hidden ...');
+    expect(expanded).not.toContain('HEAD_MARKER');
+    expect(expanded).not.toContain('Press ctrl-s to show more lines');
+  });
+
+  it('renders a short exec command in full on a short terminal', () => {
+    mocks.state.dimensions = { width: 110, height: 24 };
+    const command = [
+      'echo FIRST_LINE',
+      'echo two',
+      'echo three',
+      'echo four',
+      'echo LAST_LINE',
+    ].join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { ...execDetails(), command },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('echo FIRST_LINE');
+    expect(text).toContain('echo LAST_LINE');
+    expect(text).not.toContain('lines hidden');
+  });
+
+  it('keeps the exec head and refuses ctrl-s when expansion would show fewer rows', () => {
+    // At height 24 the expanded tail window caps at 4 rows while the
+    // collapsed head keeps 19 — expansion would strictly shrink the view, so
+    // the hint must not be offered and the key must stay inert (R5-2).
+    mocks.state.dimensions = { width: 110, height: 24 };
+    const command = [
+      'EXEC_HEAD=$(whoami)',
+      ...Array.from(
+        { length: 29 },
+        (_, i) => `echo step-${i.toString().padStart(2, '0')}`,
+      ),
+    ].join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { ...execDetails(), command },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain('EXEC_HEAD');
+    expect(container.textContent).toContain('... last 11 lines hidden ...');
+    expect(container.textContent).not.toContain(
+      'Press ctrl-s to show more lines',
+    );
+
+    press({ name: 's', ctrl: true });
+    expect(container.textContent).toContain('EXEC_HEAD');
+    expect(container.textContent).toContain('... last 11 lines hidden ...');
+  });
 });

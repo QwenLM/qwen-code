@@ -298,6 +298,72 @@ function DiffBody({ fileDiff }: { fileDiff: string }) {
 }
 
 /**
+ * Exec confirmation body: the command in accent, windowed with TextBody's
+ * two-stage shape (duplicated rather than shared so the command keeps its
+ * accent styling). An uncapped command — a long heredoc — painted the
+ * question row and outcome list off the viewport. The collapsed window keeps
+ * the command's HEAD, where the irreversible part of an install script sits
+ * (`curl … | sh`, `rm -rf`, the heredoc body); ctrl-s expands to the tail,
+ * so the head is what the user sees first and the tail is one keystroke away.
+ */
+function ExecBody({ details }: { details: ToolExecuteConfirmationDetails }) {
+  const [expanded, setExpanded] = useState(false);
+  const { width, height } = useTerminalDimensions();
+  const rows = useMemo(
+    () => sanitizeTerminalText(details.command).split('\n'),
+    [details.command],
+  );
+  const window = useMemo(
+    () => headWindowPhysical(rows, width, MAX_BODY_ROWS),
+    [rows, width],
+  );
+  const expandedWindow = useMemo(
+    () =>
+      tailWindowPhysical(
+        rows,
+        width,
+        Math.max(height - EXPANDED_BODY_RESERVE_ROWS, 1),
+      ),
+    [rows, width, height],
+  );
+  // TextBody's honesty guard: the ctrl-s promise is "show more lines", so
+  // offer and honor it only when the expanded tail window actually reveals
+  // rows the collapsed head window hides.
+  const canExpand =
+    window.hiddenRows > 0 && expandedWindow.hiddenRows < window.hiddenRows;
+
+  useKeyboard((key) => {
+    if (key.ctrl && toOriginalKey(key).name === 's' && canExpand) {
+      setExpanded(true);
+    }
+  });
+
+  return (
+    <box flexDirection="column">
+      {(expanded ? expandedWindow.visible : window.visible).map((row, i) => (
+        <text key={`${i}`} fg={C.accent} attributes={1}>
+          {row}
+        </text>
+      ))}
+      {expanded && expandedWindow.hiddenRows > 0 ? (
+        <text fg={C.dim}>{hiddenLinesLabel(expandedWindow.hiddenRows)}</text>
+      ) : null}
+      {!expanded && window.hiddenRows > 0 ? (
+        <text fg={C.dim}>{hiddenTailLinesLabel(window.hiddenRows)}</text>
+      ) : null}
+      {!expanded && canExpand ? (
+        <text fg={C.dim}>Press ctrl-s to show more lines</text>
+      ) : null}
+      {details.warnings?.map((warning, i) => (
+        <text key={`${i}`} fg={C.yellow}>
+          {sanitizeTerminalText(`⚠ ${warning}`)}
+        </text>
+      ))}
+    </box>
+  );
+}
+
+/**
  * Plain, sanitized text body. Long bodies keep their head (ink MaxSizedBox
  * overflowDirection 'bottom' parity) with a hidden-tail indicator plus the
  * ink ShowMoreLines hint; ctrl-s expands the full text. The cap counts
@@ -402,18 +468,7 @@ function ConfirmationBody({
         </box>
       );
     case 'exec':
-      return (
-        <box flexDirection="column">
-          <text fg={C.accent} attributes={1}>
-            {sanitizeTerminalText(details.command)}
-          </text>
-          {details.warnings?.map((warning, i) => (
-            <text key={`${i}`} fg={C.yellow}>
-              {sanitizeTerminalText(`⚠ ${warning}`)}
-            </text>
-          ))}
-        </box>
-      );
+      return <ExecBody details={details} />;
     case 'mcp':
       return (
         <box flexDirection="column">
