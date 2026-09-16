@@ -428,8 +428,10 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
+  type WebShellAssistantTurnSettledEvent,
   type WebShellSessionArtifactsChange,
 } from './customization';
+import { useAssistantTurnSettlementProjection } from './assistant-turn-settlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
@@ -1387,6 +1389,12 @@ export interface WebShellProps {
   composerInputVersion?: number;
   /** Called when a session-level event occurs (rename, submit, turn complete). */
   onSessionChange?: (event: SessionChangeEvent) => void;
+  /**
+   * Called for authoritative terminals observed live, or replayed for a prompt
+   * this provider admitted. Multiple mounted providers can report the same
+   * `(sessionId, promptId)`, so hosts should deduplicate by that key.
+   */
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Prepare the immutable payload for a daemon submission. Called once for a
    * direct or queued logical submit, after local command routing and before
@@ -3073,6 +3081,7 @@ export function App({
   composerInput,
   composerInputVersion,
   onSessionChange,
+  onAssistantTurnSettled,
   prepareSubmit,
   onSubmitBefore,
   restartSseOnPrompt,
@@ -3081,6 +3090,7 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -19159,6 +19169,7 @@ export function App({
                       <SplitView
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
+                        onAssistantTurnSettled={onAssistantTurnSettled}
                         showSessionDetails={
                           (sidebarOptions.sessionActions?.items ??
                             DEFAULT_SESSION_ACTION_ITEMS).includes('details')
