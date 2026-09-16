@@ -208,6 +208,7 @@ describe('ShellTool', () => {
         getAll: vi.fn().mockReturnValue([]),
         cancel: vi.fn(),
         complete: vi.fn(),
+        observeExit: vi.fn(),
         fail: vi.fn(),
       }),
       getSessionService: vi.fn().mockReturnValue({
@@ -2014,6 +2015,7 @@ describe('ShellTool', () => {
       const makeDeferredStream = () => {
         const handlers = new Map<string, Array<() => void>>();
         return {
+          writableFinished: false,
           write: vi.fn(),
           end: vi.fn(),
           on: vi.fn(),
@@ -2022,7 +2024,8 @@ describe('ShellTool', () => {
             list.push(handler);
             handlers.set(event, list);
           }),
-          emit: (event: string) => {
+          emit(event: string) {
+            if (event === 'finish') this.writableFinished = true;
             const list = handlers.get(event) ?? [];
             handlers.set(event, []);
             for (const h of list) h();
@@ -2074,6 +2077,11 @@ describe('ShellTool', () => {
         expect(registry.complete).not.toHaveBeenCalled();
 
         deferred.emit('finish');
+        expect(registry.observeExit).toHaveBeenCalledWith(
+          shellId,
+          expect.any(Number),
+          true,
+        );
         expect(registry.complete).toHaveBeenCalledTimes(1);
         expect(registry.complete).toHaveBeenCalledWith(
           shellId,
@@ -2098,6 +2106,11 @@ describe('ShellTool', () => {
         expect(registry.complete).not.toHaveBeenCalled();
 
         deferred.emit('error');
+        expect(registry.observeExit).toHaveBeenCalledWith(
+          shellId,
+          expect.any(Number),
+          false,
+        );
         expect(registry.complete).toHaveBeenCalledTimes(1);
         expect(registry.complete).toHaveBeenCalledWith(
           shellId,
@@ -2119,6 +2132,11 @@ describe('ShellTool', () => {
           expect(registry.complete).not.toHaveBeenCalled();
 
           await vi.advanceTimersByTimeAsync(10_000);
+          expect(registry.observeExit).toHaveBeenCalledWith(
+            shellId,
+            expect.any(Number),
+            false,
+          );
           expect(registry.complete).toHaveBeenCalledTimes(1);
           expect(registry.complete).toHaveBeenCalledWith(
             shellId,

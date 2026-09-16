@@ -6762,6 +6762,24 @@ describe('AgentTool', () => {
     });
 
     it('continues a completed background agent on the same runtime', async () => {
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+      const runtimeEmitter = new AgentEventEmitter();
+      vi.mocked(mockAgent.getCore).mockReturnValue({
+        modelConfig: { model: 'subagent-model' },
+        getEventEmitter: () => runtimeEmitter,
+      } as unknown as ReturnType<AgentHeadless['getCore']>);
+      let callCount = 0;
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        runtimeEmitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'monitor',
+          round: 1,
+          callId: `call-${++callCount}`,
+          name: 'read_file',
+          args: { absolute_path: '/tmp/source' },
+          description: 'read',
+          timestamp: Date.now(),
+        });
+      });
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation({
@@ -6805,6 +6823,15 @@ describe('AgentTool', () => {
         }),
       );
       expect(mockSubagentDispose).not.toHaveBeenCalled();
+      expect(patchMetaSpy).toHaveBeenCalledWith(expect.any(String), {
+        auditToolCalls: 1,
+      });
+      expect(patchMetaSpy).toHaveBeenCalledWith(expect.any(String), {
+        auditToolCalls: 2,
+      });
+      expect(mockRegistry.complete.mock.calls[1]?.[2]).toMatchObject({
+        toolUses: 1,
+      });
     });
 
     it('clears the completed run summary in the hot continuation patch', async () => {

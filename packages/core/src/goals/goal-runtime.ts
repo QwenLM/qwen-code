@@ -129,10 +129,74 @@ export interface GoalTurnLedger {
 export interface GoalEvidenceSource {
   flush(): Promise<void>;
   readActiveTranscriptChain(): Promise<readonly GoalEvidenceRecord[]>;
+  getEvidenceArtifactRoot?(): string;
   readChildEvidence?(
     records: readonly GoalEvidenceRecord[],
     permit: GoalTurnPermit,
   ): Promise<GoalChildEvidence>;
+}
+
+function isVerificationMetadata(record: GoalEvidenceRecord): boolean {
+  if (
+    record.type !== 'system' ||
+    record.message?.parts?.length ||
+    record.toolCallResult !== undefined
+  ) {
+    return false;
+  }
+  if (
+    record.subtype === 'goal_state' ||
+    record.subtype === 'session_model' ||
+    record.subtype === 'ui_telemetry' ||
+    record.subtype === 'custom_title'
+  ) {
+    return true;
+  }
+  if (
+    record.subtype !== 'slash_command' ||
+    !record.systemPayload ||
+    typeof record.systemPayload !== 'object'
+  ) {
+    return false;
+  }
+  const payload = record.systemPayload as Record<string, unknown>;
+  return (
+    payload['sentToModel'] !== true &&
+    typeof payload['rawCommand'] === 'string' &&
+    /^[/?](?:goal(?:\s+status)?\s*|model(?:\s.*)?)$/u.test(
+      payload['rawCommand'],
+    )
+  );
+}
+
+function isWindDownHandoff(
+  record: GoalEvidenceRecord,
+  permit: GoalTurnPermit,
+): boolean {
+  const context = record.goalContext as Partial<GoalTurnPermit> | undefined;
+  if (
+    !context ||
+    context.goalId !== permit.goalId ||
+    context.revision !== permit.revision ||
+    context.turnId !== permit.turnId
+  ) {
+    return false;
+  }
+  if (record.type === 'system' && record.subtype === 'goal_turn_end')
+    return true;
+  const textOnly = record.message?.parts?.every((part) =>
+    Object.keys(part).every((key) =>
+      ['text', 'thought', 'thoughtSignature'].includes(key),
+    ),
+  );
+  return (
+    textOnly === true &&
+    record.toolCallResult === undefined &&
+    ((record.type === 'assistant' && record.subtype === undefined) ||
+      (record.type === 'user' &&
+        record.subtype === 'goal_runtime' &&
+        record.provenance === 'goal_runtime'))
+  );
 }
 
 export class GoalPersistenceUnavailableError extends Error {
@@ -1172,8 +1236,16 @@ export function createGoalRuntime(
     records: readonly GoalEvidenceRecord[],
     goal: NonNullable<GoalSnapshotV2['goal']>,
     permit: GoalTurnPermit,
+    verificationTurnId?: string,
   ) => {
-    const base = createGoalEvidenceSnapshot({ records, goal, permit });
+    const artifactRoot = options.evidenceSource?.getEvidenceArtifactRoot?.();
+    const base = createGoalEvidenceSnapshot({
+      records,
+      goal,
+      permit,
+      artifactRoot,
+      verificationTurnId,
+    });
     const scopedRecords = records.slice(
       records.findIndex((record) => record.uuid === base.scopeStart) + 1,
     );
@@ -1182,6 +1254,7 @@ export function createGoalRuntime(
       : {
           records: [],
           fingerprint: '',
+          activeWriters: [],
           coverageUnavailable: scopedRecords.some((record) =>
             record.message?.parts?.some(
               (part) =>
@@ -1201,6 +1274,8 @@ export function createGoalRuntime(
             goal,
             permit,
             auditRecords: children.records,
+            artifactRoot,
+            verificationTurnId,
           })
         : base,
       children,
@@ -1231,20 +1306,24 @@ export function createGoalRuntime(
         createHash('sha256')
           .update(
             JSON.stringify(
-              chain.filter((record) => record.subtype !== 'goal_state'),
+              chain.filter((record) => !isVerificationMetadata(record)),
             ),
           )
           .digest('hex');
       const frozenFingerprint = fingerprint(records);
+      let verificationTurnId: string | undefined;
       if (verificationRetry) {
         const tailIndex = records.findIndex(
           (record) => record.uuid === verificationRetry!.snapshotTail,
         );
         if (
+          verificationRetry.permit.goalId !== attempt.permit.goalId ||
+          verificationRetry.permit.revision !== attempt.permit.revision ||
+          verificationRetry.permit.turnId !== attempt.permit.turnId ||
           tailIndex < 0 ||
           records
             .slice(tailIndex + 1)
-            .some((record) => record.subtype !== 'goal_state')
+            .some((record) => !isVerificationMetadata(record))
         ) {
           await recordVerificationOutcome(attempt, {
             kind: 'decision',
@@ -1256,9 +1335,15 @@ export function createGoalRuntime(
           });
           return;
         }
+        verificationTurnId = attempt.permit.turnId;
       }
       const { evidenceSnapshot, children, scopedRecords } =
-        await readEvidenceSnapshot(records, attempt.goal, attempt.permit);
+        await readEvidenceSnapshot(
+          records,
+          attempt.goal,
+          attempt.permit,
+          verificationTurnId,
+        );
       const evidence = evidenceSnapshot.validate(attempt.proposal);
       const currentDeliveredOutput = evidenceSnapshot.entries
         .filter(
@@ -1286,6 +1371,7 @@ export function createGoalRuntime(
           evidenceSnapshot,
           currentDeliveredOutput,
           coverageUnavailable: children.coverageUnavailable,
+          activeWriters: children.activeWriters,
           beforeCall: () => {
             if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal)
               throw new Error(STALE_GOAL_TURN_MESSAGE);
@@ -1333,6 +1419,7 @@ export function createGoalRuntime(
         ? await evidenceSource.readChildEvidence(scopedRecords, attempt.permit)
         : children;
       if (attempt.controller.signal.aborted) return;
+      evidenceSnapshot.assertSourcesUnchanged();
       if (
         fingerprint(currentRecords) !== frozenFingerprint ||
         currentChildren.fingerprint !== children.fingerprint
@@ -1724,6 +1811,44 @@ export function createGoalRuntime(
               : heldWindDown && verificationRetry?.failureKind === 'budget'
                 ? verificationRetry
                 : undefined;
+          if (
+            pending === verificationRetry &&
+            pending &&
+            finishedWindDown &&
+            !queuedTurnKey &&
+            options.evidenceSource
+          ) {
+            let records: readonly GoalEvidenceRecord[] | undefined;
+            try {
+              await options.evidenceSource.flush();
+              records =
+                await options.evidenceSource.readActiveTranscriptChain();
+            } catch {
+              // Retain the old tail; resume must recheck the hand-off rather
+              // than losing the budget stop to an optional snapshot read.
+            }
+            assertOperational();
+            if (!isCurrentPermit(permit))
+              throw new Error(STALE_GOAL_TURN_MESSAGE);
+            const savedTail = pending.snapshotTail;
+            const tailIndex =
+              records?.findIndex((record) => record.uuid === savedTail) ?? -1;
+            if (
+              records &&
+              tailIndex >= 0 &&
+              records
+                .slice(tailIndex + 1)
+                .every(
+                  (record) =>
+                    isVerificationMetadata(record) ||
+                    isWindDownHandoff(record, permit),
+                )
+            ) {
+              // The hand-off remains in the next verification snapshot. Do
+              // not advance past a concurrent append during persistence.
+              pending = { ...pending, snapshotTail: records.at(-1)!.uuid };
+            }
+          }
           const payload: GoalStateRecordPayloadV2 = {
             v: GOAL_STATE_VERSION,
             cause: 'turn_finished',
@@ -1737,7 +1862,7 @@ export function createGoalRuntime(
           else await writeGoalState(recordUuid, payload);
           verificationRetry = pending;
           assertAvailable();
-          if (queuedTurnKey && activeProposal) {
+          if (queuedTurnKey && (activeProposal || pending)) {
             activeProposal = undefined;
             pending = undefined;
             verificationRetry = undefined;

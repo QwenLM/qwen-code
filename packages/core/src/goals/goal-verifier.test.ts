@@ -5,6 +5,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import {
+  createGoalEvidenceSnapshot,
+  type GoalEvidenceRecord,
+} from './goal-evidence.js';
+import type { GoalRecord } from './goal-protocol.js';
 import type { Config } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import {
@@ -231,8 +236,7 @@ describe('createGoalVerifier', () => {
     value.goal.objective = 'x'.repeat(256_000);
 
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
-      decision: 'inconclusive',
-      failureKind: 'capacity',
+      decision: 'reject',
     });
     expect(generateText).not.toHaveBeenCalled();
   });
@@ -326,6 +330,7 @@ function snapshotFor(
     list,
     read,
     requiredEvidence: vi.fn().mockReturnValue(required),
+    actionManifest: vi.fn().mockReturnValue([]),
     scopeStart: 'goal-created',
     snapshotTail: 'frozen-tail',
     snapshotId: 'snapshot-1',
@@ -337,6 +342,88 @@ function providerRequest(generateText: ReturnType<typeof vi.fn>, call = 0) {
   return generateText.mock.calls[call]![0] as Parameters<
     BaseLlmClient['generateText']
   >[0];
+}
+
+function inputWithHistoricalChildOutput(count = 9): GoalVerifierInput {
+  const value = input();
+  const goal: GoalRecord = {
+    ...value.goal,
+    status: 'active',
+    evidenceCursor: { recordId: 'start' },
+    turnCount: 2,
+    activeTimeMs: 0,
+    tokensUsed: 0,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const permit = {
+    goalId: goal.goalId,
+    revision: goal.revision,
+    turnId: 'turn-3',
+  };
+  const action = (
+    uuid: string,
+    turnId: string,
+    output: string,
+  ): GoalEvidenceRecord[] => [
+    {
+      uuid: `${uuid}-call`,
+      type: 'assistant',
+      provenance: 'assistant_output',
+      goalContext: { ...permit, turnId },
+      message: {
+        parts: [
+          {
+            functionCall: {
+              id: uuid,
+              name: 'shell',
+              args: {
+                command:
+                  uuid === 'tool-1'
+                    ? 'npm test --silent'
+                    : 'read dependency documentation',
+              },
+            },
+          },
+        ],
+      },
+    },
+    {
+      uuid,
+      type: 'tool_result',
+      provenance: 'tool_result',
+      goalContext: { ...permit, turnId },
+      message: {
+        parts: [
+          {
+            functionResponse: { id: uuid, name: 'shell', response: { output } },
+          },
+        ],
+      },
+    },
+  ];
+  const records: GoalEvidenceRecord[] = [
+    { uuid: 'start', type: 'system' },
+    {
+      uuid: 'earlier-turn',
+      type: 'assistant',
+      provenance: 'assistant_output',
+      goalContext: { ...permit, turnId: 'turn-2' },
+      message: { parts: [{ text: 'Earlier dependency research' }] },
+    },
+    ...action('tool-1', permit.turnId, '18 tests passed'),
+  ];
+  const auditRecords = Array.from({ length: count }, (_, index) =>
+    action(`child-${index}`, 'turn-2', 'Documentation content. '.repeat(950)),
+  ).flat();
+  value.evidenceSnapshot = createGoalEvidenceSnapshot({
+    records,
+    auditRecords,
+    goal,
+    permit,
+  });
+  value.evidence = value.evidenceSnapshot.validate(value.proposal).citedRecords;
+  return value;
 }
 
 describe('bounded evidence verification', () => {
@@ -385,16 +472,22 @@ describe('bounded evidence verification', () => {
     );
     expect(payload.evidence).toHaveLength(150);
     expect(payload.evidence[149].content).toContain('FAILED');
-    expect(snapshot.requiredEvidence).toHaveBeenCalledWith(value.proposal, {
-      includeHistoricalActions: true,
-    });
+    expect(snapshot.requiredEvidence).toHaveBeenCalledWith(value.proposal);
   });
 
-  it('reassembles all raw slices before exposing a giant original to the model', async () => {
+  it('reads the remaining slices of a cited original on demand', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"All complete"}',
     );
     const value = input();
+    generateText.mockResolvedValueOnce({
+      text: '{"decision":"needs_evidence","request":{"kind":"read","reference":"tool-1","cursor":"16000"}}',
+      usage: { totalTokenCount: 1 },
+    });
+    generateText.mockResolvedValueOnce({
+      text: '{"decision":"needs_evidence","request":{"kind":"read","reference":"tool-1","cursor":"32000"}}',
+      usage: { totalTokenCount: 1 },
+    });
     const original = `${'a'.repeat(38_000)}\nFINAL CHECK FAILED`;
     const { snapshot, read } = snapshotFor([
       { ...value.evidence[0]!, content: original },
@@ -405,7 +498,14 @@ describe('bounded evidence verification', () => {
     const payload = JSON.parse(
       providerRequest(generateText).contents[0]!.parts![0]!.text!,
     );
-    expect(payload.evidence[0].content).toBe(original);
+    expect(payload.evidence[0]).toMatchObject({
+      content: original.slice(0, 16_000),
+      complete: false,
+      nextCursor: '16000',
+    });
+    expect(
+      providerRequest(generateText, 2).contents.at(-1)?.parts?.[0]?.text,
+    ).toContain('FINAL CHECK FAILED');
   });
 
   it('retains complete source history through list and multi-slice read responses', async () => {
@@ -471,23 +571,24 @@ describe('bounded evidence verification', () => {
     ).snapshot;
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
       decision: 'inconclusive',
-      failureKind: 'evidence_unavailable',
+      failureKind: 'service',
       reason: expect.stringContaining('fully reading'),
     });
   });
 
-  it('stops when required child or original coverage is unavailable', async () => {
+  it('passes historical gaps to the verifier but rejects incomplete cited proof', async () => {
     const { config, generateText } = configFor(
-      '{"decision":"accept","reason":"Enough"}',
+      '{"decision":"accept","reason":"Fresh proof satisfies current state"}',
     );
     const value = input();
-    value.coverageUnavailable = ['Child task has no recorded action journal'];
+    value.coverageUnavailable = ['Old image cannot be inspected'];
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
-      decision: 'inconclusive',
-      failureKind: 'evidence_unavailable',
+      decision: 'accept',
     });
-    expect(generateText).not.toHaveBeenCalled();
-    value.coverageUnavailable = undefined;
+    expect(
+      providerRequest(generateText).contents[0]?.parts?.[0]?.text,
+    ).toContain('Old image cannot be inspected');
+    generateText.mockClear();
     const { snapshot, read } = snapshotFor(value.evidence);
     read.mockReturnValue({
       ...read({ reference: 'tool-1' }),
@@ -495,8 +596,292 @@ describe('bounded evidence verification', () => {
     });
     value.evidenceSnapshot = snapshot;
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
-      decision: 'inconclusive',
-      failureKind: 'evidence_unavailable',
+      decision: 'reject',
+      reason: expect.stringContaining('fresh proof'),
+    });
+    expect(generateText).not.toHaveBeenCalled();
+  });
+
+  it('verifies fresh proof after large historical outputs, media and an orphan call without hiding their actions', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"Fresh test verifies the requested current state"}',
+    );
+    const value = input();
+    const goal: GoalRecord = {
+      ...value.goal,
+      status: 'active',
+      evidenceCursor: { recordId: 'start' },
+      turnCount: 1,
+      activeTimeMs: 0,
+      tokensUsed: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const permit = {
+      goalId: goal.goalId,
+      revision: goal.revision,
+      turnId: 'turn-3',
+    };
+    const records: GoalEvidenceRecord[] = [{ uuid: 'start', type: 'system' }];
+    for (let index = 0; index < 40; index++) {
+      records.push({
+        uuid: `call-${index}`,
+        type: 'assistant',
+        provenance: 'assistant_output',
+        goalContext: permit,
+        message: {
+          parts: [
+            {
+              functionCall: {
+                id: `id-${index}`,
+                name: 'run_shell_command',
+                args: {
+                  command: index === 0 ? 'touch changed.txt' : 'inspect',
+                },
+              },
+            },
+          ],
+        },
+      });
+      records.push({
+        uuid: `result-${index}`,
+        type: 'tool_result',
+        provenance: 'tool_result',
+        goalContext: permit,
+        message: {
+          parts: [
+            {
+              functionResponse: {
+                id: `id-${index}`,
+                name: 'run_shell_command',
+                response: { output: 'x'.repeat(8_000) },
+              },
+            },
+          ],
+        },
+      });
+    }
+    records.push({
+      uuid: 'old-image',
+      type: 'user',
+      provenance: 'real_user',
+      goalContext: permit,
+      message: {
+        parts: [
+          { text: 'Unrelated earlier image' },
+          { inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' } },
+        ],
+      },
+    });
+    records.push({
+      uuid: 'orphan',
+      type: 'assistant',
+      provenance: 'assistant_output',
+      goalContext: permit,
+      message: {
+        parts: [
+          {
+            functionCall: {
+              id: 'orphan-id',
+              name: 'run_shell_command',
+              args: { command: 'inspect' },
+            },
+          },
+        ],
+      },
+    });
+    records.push({
+      uuid: 'latest-call',
+      type: 'assistant',
+      provenance: 'assistant_output',
+      goalContext: permit,
+      message: {
+        parts: [
+          {
+            functionCall: {
+              id: 'latest',
+              name: 'run_shell_command',
+              args: { command: 'npm test' },
+            },
+          },
+        ],
+      },
+    });
+    records.push({
+      uuid: 'tool-1',
+      type: 'tool_result',
+      provenance: 'tool_result',
+      goalContext: permit,
+      message: {
+        parts: [
+          {
+            functionResponse: {
+              id: 'latest',
+              name: 'run_shell_command',
+              response: { output: '18 tests passed' },
+            },
+          },
+        ],
+      },
+    });
+    value.evidenceSnapshot = createGoalEvidenceSnapshot({
+      records,
+      goal,
+      permit,
+    });
+    value.evidence = value.evidenceSnapshot.validate(
+      value.proposal,
+    ).citedRecords;
+    await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
+      decision: 'accept',
+    });
+    expect(generateText).toHaveBeenCalledOnce();
+    const request = providerRequest(generateText);
+    const payload = JSON.parse(request.contents[0]!.parts![0]!.text!);
+    expect(payload.snapshot.actions).toHaveLength(42);
+    expect(payload.snapshot.actions[0].arguments).toContain(
+      'touch changed.txt',
+    );
+    expect(payload.coverageUnavailable.join(' ')).toContain('orphan-id');
+    expect(
+      payload.evidence.find(
+        (record: { uuid: string }) => record.uuid === 'old-image',
+      ).sourceComplete,
+    ).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain('x'.repeat(8_000));
+    expect(request.systemInstruction).toContain(
+      'A write followed by a revert still violates an all-time no-write constraint',
+    );
+  });
+
+  it('does not force a fresh proof to exhaust the call budget reading unrelated old child results', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"Fresh final tests establish current state; earlier documentation reads are unrelated"}',
+    );
+    const value = inputWithHistoricalChildOutput();
+
+    await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
+      decision: 'accept',
+    });
+    expect(generateText).toHaveBeenCalledOnce();
+    const payload = JSON.parse(
+      providerRequest(generateText).contents[0]!.parts![0]!.text!,
+    );
+    const childSlices = payload.evidence.filter((record: { uuid: string }) =>
+      record.uuid.startsWith('child-'),
+    );
+    expect(childSlices).toHaveLength(9);
+    for (const slice of childSlices) {
+      expect(slice).toMatchObject({
+        sourceComplete: true,
+        complete: false,
+        mustReadCompletely: false,
+        nextCursor: expect.any(String),
+      });
+      expect(Buffer.byteLength(slice.content, 'utf8')).toBeLessThanOrEqual(
+        1_000,
+      );
+      expect(slice.totalBytes).toBeGreaterThan(20_000);
+    }
+    expect(payload.snapshot.actions).toHaveLength(10);
+    expect(
+      payload.snapshot.actions.map(
+        (entry: { recordId: string }) => entry.recordId,
+      ),
+    ).toEqual([
+      'tool-1-call',
+      ...Array.from({ length: 9 }, (_, index) => `child-${index}-call`),
+    ]);
+    expect(
+      payload.snapshot.actions.map(
+        (entry: { resultReferences: string[] }) => entry.resultReferences,
+      ),
+    ).toEqual([
+      ['tool-1'],
+      ...Array.from({ length: 9 }, (_, index) => [`child-${index}`]),
+    ]);
+  });
+
+  it('counts an optional initial slice when the verifier reads its remaining original', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"Complete original inspected"}',
+    );
+    const value = inputWithHistoricalChildOutput(1);
+    const snapshot = value.evidenceSnapshot!;
+    let slice = snapshot.read({ reference: 'child-0', maxBytes: 1_000 });
+    while (!slice.complete) {
+      generateText.mockResolvedValueOnce({
+        text: JSON.stringify({
+          decision: 'needs_evidence',
+          request: {
+            kind: 'read',
+            reference: 'child-0',
+            cursor: slice.nextCursor,
+          },
+        }),
+        usage: { totalTokenCount: 1 },
+      });
+      slice = snapshot.read({
+        reference: 'child-0',
+        cursor: slice.nextCursor,
+        maxBytes: 16_000,
+      });
+    }
+
+    await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
+      decision: 'accept',
+    });
+    expect(generateText).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['cited', 'requested'])(
+    'still refuses acceptance with only part of a %s child original',
+    async (kind) => {
+      const { config, generateText } = configFor(
+        '{"decision":"accept","reason":"Enough"}',
+      );
+      const value = inputWithHistoricalChildOutput(1);
+      if (kind === 'cited') {
+        value.proposal.evidenceRefs = ['child-0'];
+        value.evidence = value.evidenceSnapshot!.validate(
+          value.proposal,
+        ).citedRecords;
+      } else {
+        const initial = value.evidenceSnapshot!.read({
+          reference: 'child-0',
+          maxBytes: 1_000,
+        });
+        generateText.mockResolvedValueOnce({
+          text: JSON.stringify({
+            decision: 'needs_evidence',
+            request: {
+              kind: 'read',
+              reference: 'child-0',
+              cursor: initial.nextCursor,
+            },
+          }),
+          usage: { totalTokenCount: 1 },
+        });
+      }
+
+      await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
+        decision: 'inconclusive',
+        failureKind: 'service',
+        reason: expect.stringContaining('fully reading'),
+      });
+      expect(generateText).toHaveBeenCalledTimes(kind === 'cited' ? 1 : 2);
+    },
+  );
+
+  it('keeps running child execution a hard completion barrier', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"Enough"}',
+    );
+    const value = input();
+    value.activeWriters = ['shell still running'];
+    await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
+      decision: 'reject',
+      reason: expect.stringContaining('active child'),
     });
     expect(generateText).not.toHaveBeenCalled();
   });
@@ -562,8 +947,7 @@ describe('bounded evidence verification', () => {
       contentGeneratorConfig: { model: 'tiny-fast', contextWindowSize: 3_000 },
     } as Awaited<ReturnType<BaseLlmClient['resolveForModel']>>);
     await expect(createGoalVerifier(config)(input())).resolves.toMatchObject({
-      decision: 'inconclusive',
-      failureKind: 'capacity',
+      decision: 'reject',
       reason: expect.stringContaining('3000-token context'),
     });
     expect(generateText).not.toHaveBeenCalled();
@@ -583,8 +967,7 @@ describe('bounded evidence verification', () => {
     const value = input();
     value.onUsage = vi.fn();
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
-      decision: 'inconclusive',
-      failureKind: 'capacity',
+      decision: 'reject',
       usage: { totalTokenCount: 4 },
     });
     expect(value.onUsage).toHaveBeenCalledOnce();
@@ -613,7 +996,7 @@ describe('bounded evidence verification', () => {
     value.evidenceSnapshot = snapshotFor(value.evidence).snapshot;
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
       decision: 'inconclusive',
-      failureKind: 'capacity',
+      failureKind: 'service',
       reason: expect.stringContaining('repeated'),
     });
     expect(generateText).toHaveBeenCalledTimes(2);
@@ -632,25 +1015,28 @@ describe('bounded evidence verification', () => {
     const value = input();
     value.evidenceSnapshot = snapshotFor(value.evidence).snapshot;
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
-      decision: 'inconclusive',
-      failureKind: 'capacity',
+      decision: 'reject',
       usage: { totalTokenCount: 8 },
       reason: expect.stringContaining('8-call'),
     });
     expect(generateText).toHaveBeenCalledTimes(8);
   });
 
-  it('rejects an unauthorized reference instead of reading outside the snapshot', async () => {
+  it('repairs invalid verifier references without penalizing the worker', async () => {
     const { config, generateText } = configFor(
       '{"decision":"needs_evidence","request":{"kind":"read","reference":"other-goal"}}',
     );
     const value = input();
     value.evidenceSnapshot = snapshotFor(value.evidence).snapshot;
     await expect(createGoalVerifier(config)(value)).resolves.toMatchObject({
-      decision: 'reject',
-      reason: expect.stringContaining('not in this Goal snapshot'),
+      decision: 'inconclusive',
+      failureKind: 'service',
+      reason: expect.stringContaining('repeated'),
     });
-    expect(generateText).toHaveBeenCalledOnce();
+    expect(generateText).toHaveBeenCalledTimes(2);
+    expect(
+      providerRequest(generateText, 1).contents[2]?.parts?.[0]?.text,
+    ).toContain('not in this Goal snapshot');
   });
 
   it('bounds an unresponsive provider and still records usage if it arrives late', async () => {

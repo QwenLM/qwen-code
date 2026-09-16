@@ -1057,7 +1057,7 @@ function endStreamThenSettle(
   stream: fs.WriteStream,
   origin: 'promote' | 'background',
   shellId: string,
-  settle: () => void,
+  settle: (outputComplete: boolean) => void,
 ): void {
   let settled = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1065,7 +1065,7 @@ function endStreamThenSettle(
     if (settled) return;
     settled = true;
     if (flushTimer !== null) clearTimeout(flushTimer);
-    settle();
+    settle(stream.writableFinished && !stream.errored);
   };
   // A destroyed or already-finished stream emits neither 'finish' nor
   // 'error' — `.end()` on it is a silent no-op (Node only delivers
@@ -3543,6 +3543,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // form and would diverge for git-commit invocations that
       // `addCoAuthorToGitCommit()` rewrote (#3894 review).
       command: commandToExecute,
+      originalCommand: this.params.command,
       cwd,
       pid: result.pid,
       status: 'running',
@@ -3666,12 +3667,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
         failMsg: `Exited with unknown status (exitCode=${info.exitCode}, signal=${info.signal}, error=undefined)`,
       };
     };
-    const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
+    const transitionRegistry = (
+      info: ShellPostPromoteSettleInfo,
+      outputComplete: boolean,
+    ) => {
       // `task_stop` aborts the entry before the child necessarily reports
       // its signal. Preserve the user-intended `cancelled` state instead of
       // allowing the later signal settle to overwrite it as `failed`.
       if (entryAc.signal.aborted) {
         registry.cancel(shellId, info.endTime);
+        registry.observeExit(shellId, info.endTime, outputComplete);
         return;
       }
       const cls = classifySettle(info);
@@ -3680,6 +3685,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       } else {
         registry.fail(shellId, cls.failMsg as string, info.endTime);
       }
+      registry.observeExit(shellId, info.endTime, outputComplete);
     };
     promoteArtifacts.onSettleWired = (info) => {
       // Synchronous observation — the child has exited; classify now
@@ -3727,11 +3733,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (!stream) {
         // No stream (open failed or already ended) — transition right
         // away, no flush to wait on.
-        transitionRegistry(info);
+        transitionRegistry(info, false);
         return;
       }
-      endStreamThenSettle(stream, 'promote', shellId, () =>
-        transitionRegistry(info),
+      endStreamThenSettle(stream, 'promote', shellId, (outputComplete) =>
+        transitionRegistry(info, outputComplete),
       );
     };
     // Drain a settle that landed BEFORE the wire installed (fast
@@ -3880,6 +3886,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const registration: ShellTaskRegistration = {
       shellId,
       command: processedCommand,
+      originalCommand: this.params.command,
       cwd,
       status: 'running',
       startTime,
@@ -3955,35 +3962,47 @@ export class ShellToolInvocation extends BaseToolInvocation<
     void resultPromise.then(
       (result) => {
         const endTime = Date.now();
-        endStreamThenSettle(outputStream, 'background', shellId, () => {
-          if (entryAc.signal.aborted) {
-            if (registry.get(shellId)?.status === 'running') {
-              registry.cancel(shellId, endTime);
+        endStreamThenSettle(
+          outputStream,
+          'background',
+          shellId,
+          (outputComplete) => {
+            if (entryAc.signal.aborted) {
+              if (registry.get(shellId)?.status === 'running') {
+                registry.cancel(shellId, endTime);
+              }
+            } else if (
+              result.error ||
+              (result.exitCode !== null && result.exitCode !== 0) ||
+              isSignalTermination(result.signal)
+            ) {
+              // Non-zero exit / killed by signal / spawn error all count as failed.
+              // Treating them as `completed` would let `/tasks` (and any future
+              // model-facing notification) misreport a failed `npm test` or
+              // `false` command as a success.
+              const reason = result.error
+                ? result.error.message
+                : isSignalTermination(result.signal)
+                  ? `terminated by signal ${result.signal}`
+                  : `exited with code ${result.exitCode}`;
+              registry.fail(shellId, reason, endTime);
+            } else {
+              registry.complete(shellId, result.exitCode ?? 0, endTime);
             }
-          } else if (
-            result.error ||
-            (result.exitCode !== null && result.exitCode !== 0) ||
-            isSignalTermination(result.signal)
-          ) {
-            // Non-zero exit / killed by signal / spawn error all count as failed.
-            // Treating them as `completed` would let `/tasks` (and any future
-            // model-facing notification) misreport a failed `npm test` or
-            // `false` command as a success.
-            const reason = result.error
-              ? result.error.message
-              : isSignalTermination(result.signal)
-                ? `terminated by signal ${result.signal}`
-                : `exited with code ${result.exitCode}`;
-            registry.fail(shellId, reason, endTime);
-          } else {
-            registry.complete(shellId, result.exitCode ?? 0, endTime);
-          }
-        });
+            registry.observeExit(shellId, endTime, outputComplete);
+          },
+        );
       },
       (err) => {
         const endTime = Date.now();
-        endStreamThenSettle(outputStream, 'background', shellId, () =>
-          registry.fail(shellId, getErrorMessage(err), endTime),
+        endStreamThenSettle(
+          outputStream,
+          'background',
+          shellId,
+          (outputComplete) => {
+            registry.fail(shellId, getErrorMessage(err), endTime);
+            registry.observeExit(shellId, endTime, outputComplete);
+          },
         );
       },
     );

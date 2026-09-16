@@ -2382,11 +2382,14 @@ describe('ChatRecordingService', () => {
 
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.toolCallResult).not.toHaveProperty('persistedOutputFiles');
+      expect(record.persistedOutputFiles).toEqual(['/private/tool-result.txt']);
       expect(record.toolCallResult).not.toHaveProperty('boundaryArtifact');
       expect(
         JSON.parse(JSON.stringify(record)).toolCallResult.artifacts,
       ).toEqual(artifacts);
-      expect(JSON.stringify(record)).not.toContain('/private/tool-result.txt');
+      expect(JSON.stringify(record.toolCallResult)).not.toContain(
+        '/private/tool-result.txt',
+      );
       expect(boundaryObserveMock).toHaveBeenCalledTimes(2);
       for (const [observation] of boundaryObserveMock.mock.calls) {
         expect(observation.artifacts).toEqual([

@@ -219,6 +219,7 @@ describe('WorkflowRunner', () => {
     const handle = await WorkflowRunner.start({
       config,
       scriptPath: '/saved/audit.js',
+      toolUseId: 'workflow-launch',
       loadScript: async () => ({
         name: 'audit',
         scriptPath: '/saved/audit.js',
@@ -233,6 +234,10 @@ describe('WorkflowRunner', () => {
     expect(settlement.ok && settlement.outcome.result).toBe('approved');
     expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
     expect(handle.scriptPath).toBe('/saved/audit.js');
+    expect(createProductionDispatchMock.mock.calls[0]?.[5]).toEqual({
+      toolUseId: 'workflow-launch',
+      parentAgentId: null,
+    });
     expect(registry.get(handle.runId)?.workflowName).toBe('audit');
   });
 

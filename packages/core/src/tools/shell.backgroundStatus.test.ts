@@ -163,6 +163,8 @@ describe('background shell status sidecar (integration, real spawn)', () => {
     expect(settled['status']).toBe('completed');
     expect(settled['exitCode']).toBe(0);
     expect(typeof settled['endTime']).toBe('string');
+    expect(typeof settled['exitObservedAt']).toBe('number');
+    expect(settled['outputComplete']).toBe(true);
   });
 
   it('reports failed with the exit reason for a non-zero exit', async () => {
@@ -191,5 +193,30 @@ describe('background shell status sidecar (integration, real spawn)', () => {
     registry.abortAll();
     await waitFor(() => readStatus(statusPath)['status'] === 'cancelled');
     expect(typeof readStatus(statusPath)['endTime']).toBe('string');
+    await waitFor(
+      () => typeof readStatus(statusPath)['exitObservedAt'] === 'number',
+    );
+    expect(readStatus(statusPath)['status']).toBe('cancelled');
+    expect(readStatus(statusPath)['outputComplete']).toBe(true);
+    expect(isProcessRunning(registry.getAll()[0]?.pid)).toBe(false);
+  });
+
+  it('records the original invocation separately from a trimmed background command', async () => {
+    const command = `node -e "process.stdout.write('done')"`;
+    const invocation = shellTool.build({
+      command: `${command}\n`,
+      is_background: true,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    const statusPath = extractPath(String(result.llmContent), 'status file');
+    await waitFor(
+      () => typeof readStatus(statusPath)['exitObservedAt'] === 'number',
+    );
+    expect(readStatus(statusPath)).toMatchObject({
+      originalCommand: `${command}\n`,
+      command,
+      status: 'completed',
+      outputComplete: true,
+    });
   });
 });

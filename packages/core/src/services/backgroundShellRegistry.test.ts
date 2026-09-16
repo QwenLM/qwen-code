@@ -96,6 +96,28 @@ function makeEntry(
 }
 
 describe('BackgroundShellRegistry', () => {
+  it('keeps cancellation separate from observed process exit and persists the original command', () => {
+    const registry = new BackgroundShellRegistry();
+    const entry = registry.register(
+      makeEntry({ originalCommand: 'sleep 60\n' }),
+    );
+    registry.cancel(entry.shellId, 1100);
+    expect(entry.exitObservedAt).toBeUndefined();
+    expect(entry.outputComplete).toBeUndefined();
+    registry.observeExit(entry.shellId, 1200, true);
+    expect(entry.status).toBe('cancelled');
+    expect(entry.exitObservedAt).toBe(1200);
+    const persisted = JSON.parse(
+      readFileSync(statusFilePathFor(entry.outputFile), 'utf8'),
+    );
+    expect(persisted).toMatchObject({
+      status: 'cancelled',
+      originalCommand: 'sleep 60\n',
+      exitObservedAt: 1200,
+      outputComplete: true,
+    });
+  });
+
   it('gives each entry a unique default outputPath', () => {
     expect(makeEntry().outputPath).not.toBe(makeEntry().outputPath);
   });

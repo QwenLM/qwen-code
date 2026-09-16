@@ -25,6 +25,7 @@ import {
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import type { GoalTurnPermit } from './goal-protocol.js';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import {
   readGoalChildEvidence,
   type GoalEvidenceLiveTasks,
@@ -147,6 +148,86 @@ describe('Goal child action coverage', () => {
       permit,
       liveTasks,
     });
+
+  it('uses cumulative tool counts after an agent continuation without comparing the latest turn stats', async () => {
+    await agent('continued', writeActions('continued'), {
+      resumeCount: 1,
+      auditToolCalls: 2,
+      stats: { totalTokens: 1, outputTokens: 1, durationMs: 1, toolUses: 1 },
+    });
+    expect((await read()).coverageUnavailable).toEqual([]);
+    await agent('continued', writeActions('continued'), {
+      resumeCount: 1,
+      auditToolCalls: 3,
+    });
+    expect((await read()).coverageUnavailable).toContainEqual(
+      expect.stringContaining('action count does not match'),
+    );
+  });
+
+  it('reports a legacy continuation count gap instead of interpreting per-turn stats as cumulative', async () => {
+    await agent('legacy', writeActions('legacy'), { resumeCount: 1 });
+    expect((await read()).coverageUnavailable).toContainEqual(
+      expect.stringContaining('no independently recorded action count'),
+    );
+  });
+
+  it('distinguishes missing terminal logs from a launched child whose execution state is unknown', async () => {
+    expect((await read()).activeWriters).toContainEqual(
+      expect.stringContaining('no verified terminal execution state'),
+    );
+    await agent('ended');
+    await rm(getAgentJsonlPath(projectDir, sessionId, 'ended'));
+    const missingEndedLog = await read();
+    expect(missingEndedLog.activeWriters).toEqual([]);
+    expect(missingEndedLog.coverageUnavailable).toContainEqual(
+      expect.stringContaining('transcript is unavailable'),
+    );
+  });
+
+  it('does not treat an explicitly undelivered message as delegated work', async () => {
+    const records: GoalEvidenceRecord[] = [
+      {
+        ...parentLaunch('message'),
+        message: {
+          parts: [
+            {
+              functionCall: {
+                id: 'message',
+                name: 'send_message',
+                args: { task_id: 'missing', message: 'continue' },
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'message-result',
+        type: 'tool_result',
+        provenance: 'tool_result',
+        goalContext: permit,
+        toolCallResult: {
+          callId: 'message',
+          executionStatus: 'error',
+          errorType: ToolErrorType.SEND_MESSAGE_NOT_FOUND,
+        },
+        message: { parts: [response('message', 'send_message')] },
+      },
+    ];
+    expect((await read(records)).coverageUnavailable).toEqual([]);
+    expect((await read(records)).activeWriters).toEqual([]);
+    records[1].toolCallResult = {
+      callId: 'message',
+      executionStatus: 'error',
+      errorType: ToolErrorType.UNKNOWN,
+    };
+    expect((await read(records)).coverageUnavailable).toContainEqual(
+      expect.stringContaining('outside the verified Goal child lineage'),
+    );
+    expect((await read(records)).activeWriters).toContainEqual(
+      expect.stringContaining('no verified terminal execution state'),
+    );
+  });
 
   it('retains write and restore actions without promoting child text to authorization or delivery', async () => {
     await agent('child');
@@ -649,6 +730,65 @@ describe('Goal child action coverage', () => {
     expect(
       (await read(backgroundShellRecords())).coverageUnavailable[0],
     ).toContain('no verifiable current execution state');
+    expect((await read(backgroundShellRecords())).activeWriters).toContainEqual(
+      expect.stringContaining('no verified terminal execution state'),
+    );
+  });
+
+  it('matches the original shell invocation even when execution normalized its command', async () => {
+    const tasks = await shellTasks();
+    tasks.shells = [
+      { ...tasks.shells[0], command: 'build', originalCommand: 'build\n' },
+    ];
+    const records = backgroundShellRecords();
+    records[0].message!.parts![0].functionCall!.args!['command'] = 'build\n';
+    expect((await read(records, tasks)).coverageUnavailable).toEqual([]);
+    records[0].message!.parts![0].functionCall!.args!['command'] = 'different';
+    expect((await read(records, tasks)).coverageUnavailable).toContainEqual(
+      expect.stringContaining('no verifiable current execution state'),
+    );
+  });
+
+  it('allows cancelled shells only after process exit and preserves failed output capture as a gap', async () => {
+    const tasks = await shellTasks('cancelled');
+    expect(
+      (await read(backgroundShellRecords(), tasks)).activeWriters,
+    ).toHaveLength(1);
+    tasks.shells = [
+      { ...tasks.shells[0], exitObservedAt: 3, outputComplete: true },
+    ];
+    const settled = await read(backgroundShellRecords(), tasks);
+    expect(settled.activeWriters).toEqual([]);
+    expect(settled.coverageUnavailable).toEqual([]);
+    expect(JSON.stringify(settled.records)).toContain(
+      'build failed: newest result',
+    );
+    tasks.shells = [{ ...tasks.shells[0], outputComplete: false }];
+    const failedCapture = await read(backgroundShellRecords(), tasks);
+    expect(failedCapture.activeWriters).toEqual([]);
+    expect(failedCapture.records[1].sourceComplete).toBe(false);
+    expect(failedCapture.coverageUnavailable).toContainEqual(
+      expect.stringContaining('did not finish flushing'),
+    );
+  });
+
+  it('keeps large completed output as an original artifact without embedding it in the audit', async () => {
+    const tasks = await shellTasks();
+    await writeFile(
+      tasks.shells[0].outputFile,
+      'large output\n'.repeat(100_000),
+    );
+    const result = await read(backgroundShellRecords(), tasks);
+    expect(result.coverageUnavailable).toEqual([]);
+    expect(JSON.stringify(result.records).length).toBeLessThan(4_000);
+    expect(result.records[1].persistedOutputFiles).toEqual([
+      tasks.shells[0].outputFile,
+    ]);
+    expect(result.records[1].sourceComplete).not.toBe(false);
+    await appendFile(tasks.shells[0].outputFile, 'late mutation');
+    expect((await read(backgroundShellRecords(), tasks)).fingerprint).not.toBe(
+      result.fingerprint,
+    );
   });
 
   it('rejects mismatched background shell commands and unavailable output', async () => {
@@ -724,6 +864,9 @@ describe('Goal child action coverage', () => {
     expect((await read(records)).coverageUnavailable[0]).toContain(
       'no verifiable current execution state',
     );
+    expect((await read(records)).activeWriters).toContainEqual(
+      expect.stringContaining('Workflow call workflow-call'),
+    );
     const tasks: GoalEvidenceLiveTasks = {
       agents: [],
       shells: [],
@@ -738,15 +881,33 @@ describe('Goal child action coverage', () => {
       ],
     };
     const running = await read(records, tasks);
-    expect(running.coverageUnavailable).toEqual([
-      expect.stringContaining('may still modify'),
-      expect.stringContaining(
-        'do not carry a verified workflow launch lineage',
-      ),
-    ]);
+    expect(running.coverageUnavailable).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('may still modify'),
+        expect.stringContaining('dispatch count does not match'),
+      ]),
+    );
+    expect(running.activeWriters).toContainEqual(
+      expect.stringContaining('Workflow wf_1 may still modify'),
+    );
     tasks.workflows = [
       { ...tasks.workflows[0], status: 'completed', agentsDispatched: 0 },
     ];
     expect((await read(records, tasks)).coverageUnavailable).toEqual([]);
+    await agent('workflow-child', writeActions('workflow-child'), {
+      toolUseId: 'workflow-call',
+      auditToolCalls: 2,
+    });
+    tasks.workflows = [{ ...tasks.workflows[0], agentsDispatched: 1 }];
+    const completed = await read(records, tasks);
+    expect(completed.coverageUnavailable).toEqual([]);
+    expect(completed.activeWriters).toEqual([]);
+    expect(
+      completed.records.some((record) => record.agentId === 'workflow-child'),
+    ).toBe(true);
+    tasks.workflows = [{ ...tasks.workflows[0], agentsDispatched: 2 }];
+    expect((await read(records, tasks)).coverageUnavailable).toContainEqual(
+      expect.stringContaining('dispatch count does not match'),
+    );
   });
 });

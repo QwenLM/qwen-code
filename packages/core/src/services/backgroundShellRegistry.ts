@@ -165,6 +165,12 @@ export interface ShellTask extends TaskBase {
   shellId: string;
   /** The user-supplied command, after any pre-processing the tool applies. */
   command: string;
+  /** Original tool argument before shell preprocessing. */
+  originalCommand?: string;
+  /** Recorded only after the executor reports process exit. */
+  exitObservedAt?: number;
+  /** Whether all captured output was flushed successfully after process exit. */
+  outputComplete?: boolean;
   /** Working directory the process was spawned in. */
   cwd: string;
   /** OS pid once spawned; absent if registration happens before spawn. */
@@ -373,6 +379,15 @@ export class BackgroundShellRegistry {
     this.fireStatusChange(entry);
   }
 
+  observeExit(shellId: string, endTime: number, outputComplete: boolean): void {
+    const entry = this.entries.get(shellId);
+    if (!entry) return;
+    entry.exitObservedAt = endTime;
+    entry.outputComplete = outputComplete;
+    this.writeStatusFile(entry);
+    this.fireStatusChange(entry);
+  }
+
   /**
    * Mutates a running entry to its `cancelled` terminal state without
    * touching the prune or status-change side channels. Internal helper
@@ -447,6 +462,12 @@ export class BackgroundShellRegistry {
       updatedAt: new Date().toISOString(),
     };
     if (entry.pid !== undefined) payload['pid'] = entry.pid;
+    if (entry.originalCommand !== undefined)
+      payload['originalCommand'] = entry.originalCommand;
+    if (entry.exitObservedAt !== undefined)
+      payload['exitObservedAt'] = entry.exitObservedAt;
+    if (entry.outputComplete !== undefined)
+      payload['outputComplete'] = entry.outputComplete;
     if (entry.endTime !== undefined) {
       payload['endTime'] = new Date(entry.endTime).toISOString();
     }

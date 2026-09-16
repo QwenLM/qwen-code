@@ -3362,6 +3362,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Tracking TOOL_CALL ourselves keeps the subtitle in sync with the
         // rows the user actually sees.
         let liveToolCallCount = 0;
+        let auditToolCalls = 0;
         const refreshLiveStats = () => {
           const entry = registry.get(hookOpts.agentId);
           if (
@@ -3380,6 +3381,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         const onToolCall = (event: AgentToolCallEvent) => {
           liveToolCallCount += 1;
+          auditToolCalls += 1;
           refreshLiveStats();
           registry.appendActivity(hookOpts.agentId, {
             name: event.name,
@@ -3793,6 +3795,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               });
             }
           } finally {
+            if (subagentConfig.executor === undefined) {
+              patchAgentMeta(metaPath, { auditToolCalls });
+            }
             turnRunning = false;
             restoreParentPM();
             if (!keepResident || disposeRequested) {
@@ -4344,6 +4349,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             : undefined;
         patchAgentMeta(fgMetaPath, {
           status: fgTerminalStatus,
+          ...(subagentConfig.executor === undefined
+            ? { auditToolCalls: fgLiveToolCallCount }
+            : {}),
           lastUpdatedAt: new Date().toISOString(),
           ...getAgentMetaTerminalSummary(
             fgSummary

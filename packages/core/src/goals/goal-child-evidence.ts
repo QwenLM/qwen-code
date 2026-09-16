@@ -16,6 +16,7 @@ import {
 } from '../agents/agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import { openNoFollow } from '../utils/no-follow-open.js';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalTurnPermit } from './goal-protocol.js';
@@ -24,6 +25,7 @@ export interface GoalChildEvidence {
   records: GoalEvidenceRecord[];
   coverageUnavailable: string[];
   fingerprint: string;
+  activeWriters?: string[];
 }
 
 export interface GoalEvidenceLiveTasks {
@@ -36,6 +38,9 @@ export interface GoalEvidenceLiveTasks {
   shells: ReadonlyArray<{
     shellId: string;
     command: string;
+    originalCommand?: string;
+    exitObservedAt?: number;
+    outputComplete?: boolean;
     cwd: string;
     status: string;
     outputFile: string;
@@ -55,6 +60,7 @@ export interface GoalEvidenceLiveTasks {
 
 interface ChildLaunch {
   callId: string;
+  toolName: string;
   permit: GoalTurnPermit;
   parentAgentId: string | null;
   records: readonly GoalEvidenceRecord[];
@@ -67,7 +73,9 @@ const READ_ONLY_TOOLS = new Set<string>([
   ToolNames.LS,
   ToolNames.ZOOM_IMAGE,
 ]);
-const LAUNCH_TOOLS = new Set<string>([ToolNames.AGENT]);
+const LAUNCH_TOOLS = new Set<string>([ToolNames.AGENT, ToolNames.WORKFLOW]);
+const MAX_RECORDED_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_INLINE_SHELL_OUTPUT_BYTES = 64 * 1024;
 
 export async function readGoalChildEvidence(input: {
   projectDir: string;
@@ -81,6 +89,7 @@ export async function readGoalChildEvidence(input: {
     records: [],
     coverageUnavailable: [],
     fingerprint: '',
+    activeWriters: [],
   };
   const stamp = createHash('sha256');
   const unavailable = (reason: string) => {
@@ -93,10 +102,26 @@ export async function readGoalChildEvidence(input: {
   const checkMessageCoverage = () => {
     if (
       [...messagedAgents].some((agentId) => !agentId || !visited.has(agentId))
-    )
+    ) {
       unavailable(
         'send_message delegated work outside the verified Goal child lineage; action coverage is unavailable.',
       );
+      if (
+        [...messagedAgents].some(
+          (agentId) =>
+            (!agentId || !visited.has(agentId)) &&
+            !input.liveTasks?.agents.some(
+              (task) =>
+                task.agentId === agentId &&
+                ['completed', 'failed'].includes(task.status),
+            ),
+        )
+      ) {
+        (result.activeWriters ??= []).push(
+          'A message recipient has no verified terminal execution state.',
+        );
+      }
+    }
   };
   const backgroundDir =
     input.projectTempDir && /^[a-zA-Z0-9_-]+$/.test(input.sessionId)
@@ -122,6 +147,9 @@ export async function readGoalChildEvidence(input: {
     nodes = (await readAgentTrace(input.projectDir, input.sessionId)).nodes;
   } catch {
     unavailable('Child agent metadata could not be read.');
+    (result.activeWriters ??= []).push(
+      'Launched child agents have no verified terminal execution state.',
+    );
     result.fingerprint = stamp.digest('hex');
     return result;
   }
@@ -133,8 +161,30 @@ export async function readGoalChildEvidence(input: {
         node.parentAgentId === launch.parentAgentId &&
         node.lineageState === 'complete',
     );
+    if (launch.toolName === ToolNames.WORKFLOW) {
+      const workflow = input.liveTasks?.workflows.find(
+        (task) => task.toolUseId === launch.callId,
+      );
+      if (workflow && workflow.agentsDispatched !== matching.length) {
+        unavailable(
+          `Workflow ${workflow.runId} dispatch count does not match its verified child launch lineage.`,
+        );
+      }
+      if (workflow?.agentsDispatched === 0 && matching.length === 0) continue;
+    }
     if (matching.length === 0) {
       if (!didNotStart(launch)) {
+        if (
+          launch.toolName !== ToolNames.WORKFLOW ||
+          !input.liveTasks?.workflows.some(
+            (task) =>
+              task.toolUseId === launch.callId && task.status === 'completed',
+          )
+        ) {
+          (result.activeWriters ??= []).push(
+            `Child call ${launch.callId} has no verified terminal execution state.`,
+          );
+        }
         unavailable(
           `Child action coverage is unavailable for call ${launch.callId}: no verified transcript lineage.`,
         );
@@ -155,6 +205,7 @@ export async function readGoalChildEvidence(input: {
       }
       let meta: AgentMeta;
       let raw: string;
+      let verifiedTerminal = false;
       try {
         meta = JSON.parse(
           await readRecordedFile(
@@ -164,10 +215,17 @@ export async function readGoalChildEvidence(input: {
         if (!matchesNode(meta, node, input.sessionId)) {
           throw new Error('Child metadata changed');
         }
+        verifiedTerminal = ['completed', 'failed', 'cancelled'].includes(
+          meta.status ?? '',
+        );
         raw = await readRecordedFile(
           getAgentJsonlPath(input.projectDir, input.sessionId, node.agentId),
         );
       } catch {
+        if (!verifiedTerminal)
+          (result.activeWriters ??= []).push(
+            `Child agent ${node.agentId} has no verified terminal execution state.`,
+          );
         unavailable(
           `Child agent ${node.agentId} metadata or transcript is unavailable.`,
         );
@@ -204,11 +262,17 @@ export async function readGoalChildEvidence(input: {
         liveAgent.toolUseId === meta.toolUseId &&
         (liveAgent.parentAgentId ?? null) === meta.parentAgentId;
       if (active && enforcedReadOnly && !verifiedLiveReadOnly) {
+        (result.activeWriters ??= []).push(
+          `Child agent ${node.agentId} has no verified live execution state.`,
+        );
         unavailable(
           `Child agent ${node.agentId} has no verified live execution state.`,
         );
       }
       if (active && !enforcedReadOnly) {
+        (result.activeWriters ??= []).push(
+          `Child agent ${node.agentId} may still modify the Goal target.`,
+        );
         unavailable(
           `Child agent ${node.agentId} may still modify the Goal target; its execution policy does not prove read-only operation.`,
         );
@@ -272,6 +336,11 @@ export async function readGoalChildEvidence(input: {
         }
       }
       result.records.push(...mapped.records);
+      if (active && mapped.coverageUnavailable.length > 0) {
+        (result.activeWriters ??= []).push(
+          `Child agent ${node.agentId} has incomplete live action coverage.`,
+        );
+      }
       for (const reason of mapped.coverageUnavailable) unavailable(reason);
       const recordedCallCount = mapped.records.reduce(
         (count, record) =>
@@ -305,16 +374,26 @@ export async function readGoalChildEvidence(input: {
           ? [count]
           : [];
       });
-      const counts = [
-        ...(meta.stats ? [meta.stats.toolUses] : []),
-        ...parentCounts,
-      ];
+      const counts =
+        meta.auditToolCalls !== undefined
+          ? [meta.auditToolCalls]
+          : (meta.resumeCount ?? 0) === 0
+            ? [...(meta.stats ? [meta.stats.toolUses] : []), ...parentCounts]
+            : [];
       if (!active && counts.length === 0) {
         unavailable(
           `Child agent ${node.agentId} has no independently recorded action count to establish transcript completeness.`,
         );
       }
-      if (!active && counts.some((count) => count !== recordedCallCount)) {
+      if (
+        !active &&
+        counts.some(
+          (count) =>
+            !Number.isSafeInteger(count) ||
+            count < 0 ||
+            count !== recordedCallCount,
+        )
+      ) {
         unavailable(
           `Child agent ${node.agentId} transcript action count does not match its independently recorded tool uses.`,
         );
@@ -396,6 +475,7 @@ function findLaunches(
         ? [
             {
               callId: call.id,
+              toolName: call.name,
               permit: {
                 goalId: permit.goalId,
                 revision: permit.revision,
@@ -689,6 +769,11 @@ async function readBackgroundActions(
           }
         | undefined;
       if (metadata?.executionStatus === 'not_started') continue;
+      if (
+        call.name === ToolNames.SEND_MESSAGE &&
+        metadata?.errorType === ToolErrorType.SEND_MESSAGE_NOT_FOUND
+      )
+        continue;
       if (call.name === ToolNames.SEND_MESSAGE)
         messagedAgents.add(
           typeof call.args?.['task_id'] === 'string'
@@ -699,11 +784,14 @@ async function readBackgroundActions(
         const workflow = liveTasks?.workflows.find(
           (entry) => entry.toolUseId === call.id,
         );
-        if (!workflow)
+        if (!workflow) {
+          (result.activeWriters ??= []).push(
+            `Workflow call ${call.id} has no verified terminal execution state.`,
+          );
           unavailable(
             `Workflow call ${call.id} has no verifiable current execution state or child action lineage.`,
           );
-        else {
+        } else {
           stamp(
             JSON.stringify([
               workflow.runId,
@@ -714,14 +802,14 @@ async function readBackgroundActions(
               workflow.endTime,
             ]),
           );
-          if (!['completed', 'failed', 'cancelled'].includes(workflow.status))
+          if (!['completed', 'failed', 'cancelled'].includes(workflow.status)) {
+            (result.activeWriters ??= []).push(
+              `Workflow ${workflow.runId} may still modify the Goal target.`,
+            );
             unavailable(
               `Workflow ${workflow.runId} may still modify the Goal target.`,
             );
-          if (workflow.agentsDispatched > 0)
-            unavailable(
-              `Workflow ${workflow.runId} dispatched agents whose transcripts do not carry a verified workflow launch lineage.`,
-            );
+          }
           appendObservation(
             record,
             call,
@@ -753,7 +841,17 @@ async function readBackgroundActions(
         (shellId && backgroundDir
           ? await readPersistedShell(shellId, backgroundDir)
           : undefined);
-      if (!shell || shell.command !== call.args?.['command']) {
+      const originalCommand = call.args?.['command'];
+      if (
+        !shell ||
+        typeof originalCommand !== 'string' ||
+        (shell.originalCommand !== undefined
+          ? shell.originalCommand !== originalCommand
+          : shell.command !== originalCommand.trim())
+      ) {
+        (result.activeWriters ??= []).push(
+          `Background shell call ${call.id} has no verified terminal execution state.`,
+        );
         unavailable(
           `Background shell call ${call.id} has no verifiable current execution state.`,
         );
@@ -769,17 +867,43 @@ async function readBackgroundActions(
           shell.startTime,
           shell.endTime,
           shell.outputFile,
+          shell.originalCommand,
+          shell.exitObservedAt,
+          shell.outputComplete,
         ]),
       );
-      if (!['completed', 'failed'].includes(shell.status)) {
+      if (
+        !['completed', 'failed'].includes(shell.status) &&
+        !(shell.status === 'cancelled' && shell.exitObservedAt !== undefined)
+      ) {
+        (result.activeWriters ??= []).push(
+          `Background shell ${shell.shellId} process exit has not been observed.`,
+        );
         unavailable(
           `Background shell ${shell.shellId} may still modify the Goal target; process exit has not been observed.`,
         );
         continue;
       }
       let output: string;
+      let artifactBacked = false;
       try {
-        output = await readRecordedFile(shell.outputFile);
+        const file = await openNoFollow(shell.outputFile);
+        try {
+          const stat = await file.stat();
+          if (!stat.isFile()) throw new Error('Not a recorded file');
+          stamp(
+            JSON.stringify([stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]),
+          );
+          artifactBacked = stat.size > MAX_INLINE_SHELL_OUTPUT_BYTES;
+        } finally {
+          await file.close();
+        }
+        output = artifactBacked
+          ? 'Full captured output is available in the attached original artifact.'
+          : await readRecordedFile(
+              shell.outputFile,
+              MAX_INLINE_SHELL_OUTPUT_BYTES,
+            );
       } catch {
         unavailable(
           `Background shell ${shell.shellId} completed output is unavailable.`,
@@ -796,20 +920,52 @@ async function readBackgroundActions(
           exitCode: shell.exitCode,
           command: shell.command,
           cwd: shell.cwd,
-          endTime: shell.endTime,
+          endTime: shell.exitObservedAt ?? shell.endTime,
           output,
         },
         result.records,
       );
+      const observation = result.records.at(-1)!;
+      if (artifactBacked) observation.persistedOutputFiles = [shell.outputFile];
+      if (shell.outputComplete === false) {
+        observation.sourceComplete = false;
+        observation.missingReason = `Background shell ${shell.shellId} output did not finish flushing successfully.`;
+        unavailable(observation.missingReason);
+      }
     }
   }
 }
 
-async function readRecordedFile(filePath: string): Promise<string> {
+async function readRecordedFile(
+  filePath: string,
+  maxBytes = MAX_RECORDED_FILE_BYTES,
+): Promise<string> {
   const file = await openNoFollow(filePath);
   try {
-    if (!(await file.stat()).isFile()) throw new Error('Not a recorded file');
-    return await file.readFile('utf8');
+    const before = await file.stat();
+    if (!before.isFile() || before.size > maxBytes)
+      throw new Error('Recorded file exceeds the read limit');
+    const buffer = Buffer.alloc(before.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await file.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+      );
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    const after = await file.stat();
+    if (
+      length !== before.size ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs
+    )
+      throw new Error('Recorded file changed while reading');
+    return buffer.subarray(0, length).toString('utf8');
   } finally {
     await file.close();
   }
@@ -844,6 +1000,16 @@ async function readPersistedShell(
     return {
       shellId,
       command: value['command'],
+      ...(typeof value['originalCommand'] === 'string'
+        ? { originalCommand: value['originalCommand'] }
+        : {}),
+      ...(typeof value['exitObservedAt'] === 'number' &&
+      Number.isFinite(value['exitObservedAt'])
+        ? { exitObservedAt: value['exitObservedAt'] }
+        : {}),
+      ...(typeof value['outputComplete'] === 'boolean'
+        ? { outputComplete: value['outputComplete'] }
+        : {}),
       cwd: value['cwd'],
       status: value['status'],
       outputFile: path.join(directory, `shell-${shellId}.output`),

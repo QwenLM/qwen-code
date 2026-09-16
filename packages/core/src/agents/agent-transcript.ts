@@ -156,6 +156,8 @@ export interface AgentMeta {
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */
   resumeCount?: number;
+  /** Cumulative started tool calls across every continuation in this transcript. */
+  auditToolCalls?: number;
   /**
    * Nesting depth at launch time; restored on background/foreground resume
    * via {@link normalizeResumedAgentDepth} — never trust the raw value.

@@ -5515,6 +5515,16 @@ describe('Goal P0 evidence and verification recovery', () => {
     };
   }
 
+  function appendRecordedState(
+    records: RuntimeRecord[],
+    journal: { records: RuntimeRecord[] },
+  ): void {
+    const present = new Set(records.map((record) => record.uuid));
+    records.push(
+      ...journal.records.filter((record) => !present.has(record.uuid)),
+    );
+  }
+
   it('preserves the existing wind-down turn when a real budget ends before verification', async () => {
     const journal = fakeGoalJournal();
     let records: RuntimeRecord[] = [];
@@ -5607,6 +5617,208 @@ describe('Goal P0 evidence and verification recovery', () => {
     ).toHaveLength(1);
   });
 
+  it.each([
+    'handoff',
+    'blocked-handoff',
+    'tool',
+    'user',
+    'other-turn',
+    'media',
+    'concurrent-tool',
+    'reserved-user',
+    'read-failure',
+  ] as const)(
+    'retries the original budget-limited proposal only after a safe %s wind-down',
+    async (activity) => {
+      const safeHandoff =
+        activity === 'handoff' || activity === 'blocked-handoff';
+      let records: RuntimeRecord[] = [];
+      let concurrentRecord: RuntimeRecord | undefined;
+      const journal = fakeGoalJournal({
+        beforeAppend: (payload) => {
+          if (
+            activity === 'reserved-user' &&
+            payload.verificationPending &&
+            payload.snapshot.goal?.windDownTurnId
+          ) {
+            runtime.beginTurn('user-during-wind-down-append');
+          }
+          if (
+            payload.cause === 'turn_finished' &&
+            payload.snapshot.goal?.windDownTurnId &&
+            concurrentRecord
+          ) {
+            records.push(concurrentRecord);
+            concurrentRecord = undefined;
+          }
+        },
+      });
+      const evidenceSource = fakeEvidenceSource(() => records, journal);
+      const host = fakeGoalTurnHost();
+      const verifier: GoalVerifier = vi
+        .fn<GoalVerifier>()
+        .mockResolvedValueOnce({
+          decision: 'inconclusive',
+          failureKind: 'budget',
+          reason: 'Token budget exhausted',
+        })
+        .mockImplementation(async (input) => {
+          expect(
+            input.evidenceSnapshot?.entries.some(
+              (entry) => entry.uuid === 'wind-down-handoff',
+            ),
+          ).toBe(true);
+          return { decision: 'accept', reason: 'Original result still met' };
+        });
+      const runtime = createGoalRuntime({
+        journal,
+        evidenceSource,
+        verifier,
+        tokenBudgetGrant: 10,
+        ledger: { takeGoalTurnTokens: () => 10 },
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      records = (
+        activity === 'blocked-handoff'
+          ? verifierUserEvidenceRecords
+          : verifierEvidenceRecords
+      )(permit, runtime.getSnapshot().goal!.evidenceCursor.recordId!);
+      runtime.recordTerminalProposal(
+        permit,
+        activity === 'blocked-handoff'
+          ? {
+              status: 'blocked',
+              blockerKind: 'authority',
+              reason: 'Deployment requires user authority',
+              evidenceRefs: ['user-evidence'],
+            }
+          : {
+              status: 'complete',
+              reason: 'Result delivered',
+              evidenceRefs: ['assistant-evidence'],
+            },
+      );
+      await runtime.finishTurn(permit);
+      const windDown = host.started[1]!;
+      expect(host.inputs[1]?.windDown).toBe(true);
+      appendRecordedState(records, journal);
+      records.push({
+        ...records.at(-1)!,
+        uuid: 'wind-down-prompt',
+        type: 'user',
+        subtype: 'goal_runtime',
+        provenance: 'goal_runtime',
+        goalContext: windDown,
+        systemPayload: undefined,
+        message: { parts: [{ text: 'Hand off the current status' }] },
+      });
+      const handoff: RuntimeRecord = {
+        ...records.at(-1)!,
+        uuid: 'wind-down-handoff',
+        type: 'assistant',
+        subtype: undefined,
+        provenance: 'assistant_output',
+        goalContext: windDown,
+        message: {
+          parts: [
+            { text: 'Result delivered; verification needs a resumed budget.' },
+          ],
+        },
+      };
+      records.push(handoff);
+      if (activity === 'tool' || activity === 'concurrent-tool') {
+        const call: RuntimeRecord = {
+          ...handoff,
+          uuid: 'wind-down-write',
+          message: {
+            parts: [
+              {
+                functionCall: {
+                  id: 'late-write',
+                  name: 'write_file',
+                  args: { file_path: '/tmp/result', content: 'changed' },
+                },
+              },
+            ],
+          },
+        };
+        if (activity === 'concurrent-tool') concurrentRecord = call;
+        else records.push(call);
+      } else if (activity === 'user') {
+        records.push({
+          ...handoff,
+          uuid: 'wind-down-user',
+          type: 'user',
+          provenance: 'real_user',
+          message: { parts: [{ text: 'Also deliver a second file' }] },
+        });
+      } else if (activity === 'other-turn') {
+        records.push({
+          ...handoff,
+          uuid: 'other-turn-output',
+          goalContext: { ...windDown, turnId: 'other-turn' },
+        });
+      } else if (activity === 'media') {
+        records.push({
+          ...handoff,
+          uuid: 'wind-down-media',
+          message: {
+            parts: [{ inlineData: { mimeType: 'image/png', data: 'png' } }],
+          },
+        });
+      }
+      runtime.markTurnDelivered(`goal-runtime:${windDown.turnId}`);
+      if (activity === 'read-failure')
+        evidenceSource.flush.mockRejectedValueOnce(
+          new Error('Storage temporarily unavailable'),
+        );
+      await runtime.finishTurn(windDown);
+      if (activity === 'reserved-user') {
+        expect(
+          runtime.permitForTurn('user-during-wind-down-append'),
+        ).toBeDefined();
+        expect(runtime.getSnapshot().goal?.status).toBe('active');
+        const recovery = recoverGoalFromRecords(journal.records);
+        expect(recovery.kind).toBe('v2');
+        if (recovery.kind === 'v2')
+          expect(recovery.payload.verificationPending).toBeUndefined();
+        expect(verifier).toHaveBeenCalledOnce();
+        runtime.dispose();
+        return;
+      }
+      await vi.waitFor(() =>
+        expect(runtime.getSnapshot().goal?.status).toBe('usage_limited'),
+      );
+      expect(journal.appended.at(-1)?.verificationPending?.permit).toEqual(
+        permit,
+      );
+      runtime.dispose();
+
+      const retryHost = fakeGoalTurnHost();
+      const restored = createGoalRuntime({ journal, evidenceSource, verifier });
+      restored.bindHost(retryHost);
+      await restored.restore(journal.records);
+      expect(verifier).toHaveBeenCalledOnce();
+      await restored.dispatch({
+        action: 'resume',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      });
+      expect(restored.getSnapshot().goal?.status).toBe(
+        safeHandoff
+          ? activity === 'blocked-handoff'
+            ? 'blocked'
+            : 'complete'
+          : 'active',
+      );
+      expect(verifier).toHaveBeenCalledTimes(safeHandoff ? 2 : 1);
+      expect(retryHost.started).toHaveLength(safeHandoff ? 0 : 1);
+      restored.dispose();
+    },
+  );
+
   it('retains a transient failure across restart and retries only on explicit resume', async () => {
     const first: GoalVerifier = vi.fn<GoalVerifier>(async () => ({
       decision: 'inconclusive' as const,
@@ -5694,6 +5906,117 @@ describe('Goal P0 evidence and verification recovery', () => {
       f.journal.appended.filter((entry) => entry.cause === 'complete'),
     ).toHaveLength(1);
   });
+
+  it.each([
+    ['slash_command', { phase: 'result', rawCommand: '/goal' }],
+    ['slash_command', { phase: 'result', rawCommand: '/goal status' }],
+    ['slash_command', { phase: 'invocation', rawCommand: '/model larger' }],
+    ['session_model', { modelId: 'larger-model' }],
+    ['ui_telemetry', { event: 'goal_card_viewed' }],
+    ['custom_title', { title: 'Goal test' }],
+  ])(
+    'retries a saved proposal after %s metadata without restarting work',
+    async (subtype, systemPayload) => {
+      const verifier: GoalVerifier = vi
+        .fn()
+        .mockResolvedValueOnce({
+          decision: 'inconclusive',
+          failureKind: 'service',
+          reason: 'Offline',
+        })
+        .mockResolvedValue({
+          decision: 'accept',
+          reason: 'Original result met',
+        });
+      const f = await fixture(verifier);
+      f.propose();
+      await f.runtime.finishTurn(f.permit);
+      appendRecordedState(f.state.records, f.journal);
+      f.state.records.push({
+        ...f.journal.records.at(-1)!,
+        uuid: 'view-status-or-model',
+        type: 'system',
+        subtype,
+        systemPayload,
+      });
+      await f.runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: f.permit.goalId,
+        expectedRevision: f.permit.revision,
+      });
+      expect(verifier).toHaveBeenCalledTimes(2);
+      expect(f.host.started).toHaveLength(1);
+      expect(f.runtime.getSnapshot().goal?.status).toBe('complete');
+    },
+  );
+
+  it.each([
+    ['slash_command', { phase: 'result', rawCommand: '/goal' }],
+    ['session_model', { modelId: 'larger-model' }],
+  ])(
+    'does not discard a verdict when %s metadata arrives during verification',
+    async (subtype, systemPayload) => {
+      const decision = deferred<Awaited<ReturnType<GoalVerifier>>>();
+      const verifier: GoalVerifier = vi.fn(() => decision.promise);
+      const f = await fixture(verifier);
+      f.propose();
+      const finishing = f.runtime.finishTurn(f.permit);
+      await vi.waitFor(() => expect(verifier).toHaveBeenCalledOnce());
+      appendRecordedState(f.state.records, f.journal);
+      f.state.records.push({
+        ...f.journal.records.at(-1)!,
+        uuid: 'metadata-during-verification',
+        type: 'system',
+        subtype,
+        systemPayload,
+      });
+      decision.resolve({ decision: 'accept', reason: 'Original result met' });
+      await finishing;
+      expect(f.host.started).toHaveLength(1);
+      expect(f.runtime.getSnapshot().goal?.status).toBe('complete');
+    },
+  );
+
+  it.each([
+    ['slash_command', { rawCommand: '/goal', sentToModel: true }],
+    ['slash_command', { rawCommand: '/custom-write-command' }],
+    ['rewind', { rewindTo: 'earlier-turn' }],
+    ['background_task_completed', { taskId: 'writer' }],
+  ])(
+    'invalidates a saved proposal after substantive %s activity',
+    async (subtype, systemPayload) => {
+      const verifier: GoalVerifier = vi
+        .fn()
+        .mockResolvedValueOnce({
+          decision: 'inconclusive',
+          failureKind: 'service',
+          reason: 'Offline',
+        })
+        .mockResolvedValue({ decision: 'accept', reason: 'Stale result' });
+      const f = await fixture(verifier);
+      f.propose();
+      await f.runtime.finishTurn(f.permit);
+      appendRecordedState(f.state.records, f.journal);
+      f.state.records.push({
+        ...f.journal.records.at(-1)!,
+        uuid: 'substantive-activity',
+        type: 'system',
+        subtype,
+        systemPayload,
+      });
+      await f.runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: f.permit.goalId,
+        expectedRevision: f.permit.revision,
+      });
+      expect(verifier).toHaveBeenCalledOnce();
+      expect(f.host.started).toHaveLength(2);
+      expect(f.runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        lastReason: expect.stringContaining('stale'),
+      });
+    },
+  );
 
   it('distinguishes capacity from a real Goal budget stop and preserves both proposals', async () => {
     for (const failureKind of ['capacity', 'budget'] as const) {

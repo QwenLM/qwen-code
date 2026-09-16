@@ -39,6 +39,7 @@ import {
 } from './workflow-agent-failure.js';
 import { DISPATCH_AFFECTING_AGENT_OPTS } from './workflow-journal.js';
 import { resolveBuiltinToolName } from '../../tools/tool-names.js';
+import { readGoalChildEvidence } from '../../goals/goal-child-evidence.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -6015,7 +6016,14 @@ describe('createProductionDispatch — subagent transcripts', () => {
       });
     };
 
-    const dispatch = createProductionDispatch(transcriptConfig());
+    const dispatch = createProductionDispatch(
+      transcriptConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { toolUseId: 'workflow-call', parentAgentId: null },
+    );
     await dispatch('read it', { label: 'reader' });
 
     const recs = recordsIn(transcriptNames()[0]!);
@@ -6030,6 +6038,48 @@ describe('createProductionDispatch — subagent transcripts', () => {
     ]);
     expect(recs[2]!['type']).toBe('tool_result');
     expect(recs[2]!['toolCallResult']).toEqual({ callId: 'c1' });
+    const permit = { goalId: 'g', revision: 1, turnId: 't' };
+    const evidence = await readGoalChildEvidence({
+      projectDir,
+      sessionId: 'sess-1',
+      permit,
+      records: [
+        {
+          uuid: 'workflow-launch',
+          type: 'assistant',
+          provenance: 'assistant_output',
+          goalContext: permit,
+          message: {
+            parts: [
+              {
+                functionCall: {
+                  id: 'workflow-call',
+                  name: 'workflow',
+                  args: { script: 'return await agent("read it")' },
+                },
+              },
+            ],
+          },
+        },
+      ],
+      liveTasks: {
+        agents: [],
+        shells: [],
+        workflows: [
+          {
+            runId: 'wf_1',
+            toolUseId: 'workflow-call',
+            status: 'completed',
+            agentsDispatched: 1,
+            startTime: 1,
+            endTime: 2,
+          },
+        ],
+      },
+    });
+    expect(evidence.coverageUnavailable).toEqual([]);
+    expect(evidence.activeWriters).toEqual([]);
+    expect(JSON.stringify(evidence.records)).toContain('diff text');
   });
 
   // A stall-retried dispatch is ONE `agent()` call. Minting the agent id per

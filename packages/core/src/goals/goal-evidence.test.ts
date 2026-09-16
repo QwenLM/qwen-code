@@ -152,6 +152,119 @@ function revisionStart(uuid = 'cursor'): GoalEvidenceRecord {
   };
 }
 
+describe('legacy Goal checkpoint source chains', () => {
+  function checkpointRecord(current: GoalRecord): GoalEvidenceRecord {
+    return {
+      uuid: current.evidenceCheckpoint!.checkpointId,
+      type: 'system',
+      subtype: 'goal_state',
+      provenance: 'goal_control',
+      systemPayload: {
+        v: GOAL_STATE_VERSION,
+        cause: 'checkpoint',
+        snapshot: { v: GOAL_STATE_VERSION, goal: current, activity: 'idle' },
+      },
+    };
+  }
+
+  function sourceChain() {
+    const previous: GoalRecord = {
+      ...goal('cp1'),
+      evidenceCheckpoint: {
+        checkpointId: 'cp1',
+        createdAt: 3,
+        claims: [
+          {
+            id: 'cp1:1',
+            proofKind: 'delivered_output',
+            claim: 'Report delivered',
+            sourceRefs: ['original'],
+          },
+        ],
+      },
+    };
+    const current: GoalRecord = {
+      ...goal('cp2'),
+      evidenceCheckpoint: {
+        checkpointId: 'cp2',
+        createdAt: 4,
+        claims: [
+          {
+            id: 'cp2:1',
+            proofKind: 'delivered_output',
+            claim: 'Report still delivered',
+            sourceRefs: ['cp1:1'],
+          },
+        ],
+      },
+    };
+    const original = record('original', 'assistant', {
+      turnId: 'turn-3',
+      text: 'The actual delivered report.',
+    });
+    const records = () => [
+      revisionStart(),
+      original,
+      checkpointRecord(previous),
+      checkpointRecord(current),
+    ];
+    return { previous, current, records };
+  }
+
+  it('expands cp2 through historical cp1 to the original and deduplicates proof', () => {
+    const chain = sourceChain();
+    const result = validate(
+      chain.records(),
+      complete(['cp2:1', 'original']),
+      permit(),
+      chain.current,
+    );
+
+    expect(result.citedRecords).toHaveLength(1);
+    expect(result.citedRecords[0]).toMatchObject({
+      uuid: 'original',
+      content: 'The actual delivered report.',
+      proofKind: 'delivered_output',
+    });
+  });
+
+  it.each(['cycle', 'dangling'])(
+    'rejects a %s in historical source references',
+    (kind) => {
+      const chain = sourceChain();
+      chain.previous.evidenceCheckpoint!.claims[0]!.sourceRefs = [
+        kind === 'cycle' ? 'cp2:1' : 'missing-original',
+      ];
+
+      expect(() =>
+        validate(chain.records(), complete(['cp2:1']), permit(), chain.current),
+      ).toThrowError(expect.objectContaining({ code: 'missing_reference' }));
+    },
+  );
+
+  it.each(['revision', 'goal'])(
+    'does not expand a historical checkpoint from another %s',
+    (kind) => {
+      const chain = sourceChain();
+      if (kind === 'revision') chain.previous.revision -= 1;
+      else chain.previous.goalId = 'other-goal';
+
+      expect(() =>
+        validate(chain.records(), complete(['cp2:1']), permit(), chain.current),
+      ).toThrowError(expect.objectContaining({ code: 'missing_reference' }));
+    },
+  );
+
+  it('rejects a proof-kind change anywhere in a nested chain', () => {
+    const chain = sourceChain();
+    chain.previous.evidenceCheckpoint!.claims[0]!.proofKind = 'user_input';
+
+    expect(() =>
+      validate(chain.records(), complete(['cp2:1']), permit(), chain.current),
+    ).toThrowError(expect.objectContaining({ code: 'ineligible_reference' }));
+  });
+});
+
 describe('Goal evidence catalog', () => {
   it('bounds the catalog while retaining the newest evidence', () => {
     const records = [

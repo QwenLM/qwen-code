@@ -6,6 +6,7 @@
 
 import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
+import { GoalEvidenceArtifact } from './goal-evidence-artifact.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { parseGoalStateRecordPayloadV2 } from './goal-reducer.js';
 import {
@@ -71,6 +72,7 @@ export interface GoalEvidenceRecord {
   toolCallResult?: unknown;
   sourceComplete?: boolean;
   missingReason?: string;
+  persistedOutputFiles?: string[];
 }
 
 export type { GoalEvidenceProofKind } from './goal-protocol.js';
@@ -108,10 +110,12 @@ export interface ValidatedGoalEvidence {
 }
 
 export interface GoalEvidenceContext {
+  artifactRoot?: string;
   records: readonly GoalEvidenceRecord[];
   auditRecords?: readonly GoalEvidenceRecord[];
   goal: GoalRecord;
   permit: GoalTurnPermit;
+  verificationTurnId?: string;
 }
 
 export interface GoalEvidenceValidationInput extends GoalEvidenceContext {
@@ -185,6 +189,7 @@ interface EvidenceAnalysis {
   recordsByUuid: Map<string, GoalEvidenceRecord>;
   auditUuids: Set<string>;
   lineageTurnIds: string[];
+  proposalLineageTurnIds: string[];
 }
 
 interface ParsedGoalContext {
@@ -638,30 +643,72 @@ function validateEvidenceReferences(
   }
 
   const analysis = existingAnalysis ?? analyzeEvidence(input);
-  const citedRecords = references.flatMap((reference) => {
-    const claim = input.goal.evidenceCheckpoint?.claims.find(
-      (entry) => entry.id === reference,
-    );
-    const originals = claim ? claim.sourceRefs : [reference];
-    if (originals.length === 0) {
+  const claims = new Map<string, GoalEvidenceCheckpointClaim>();
+  for (const record of input.records) {
+    if (record.type !== 'system' || record.subtype !== 'goal_state') continue;
+    const state = parseGoalStateRecordPayloadV2(record.systemPayload)?.snapshot
+      .goal;
+    if (
+      state?.goalId !== input.goal.goalId ||
+      state.revision !== input.goal.revision
+    )
+      continue;
+    for (const claim of state.evidenceCheckpoint?.claims ?? [])
+      claims.set(claim.id, claim);
+  }
+  for (const claim of input.goal.evidenceCheckpoint?.claims ?? [])
+    claims.set(claim.id, claim);
+  const resolvedClaims = new Map<string, ValidatedGoalEvidenceRecord[]>();
+  let expanded = 0;
+  const resolve = (
+    reference: string,
+    visiting: Set<string>,
+  ): ValidatedGoalEvidenceRecord[] => {
+    const cached = resolvedClaims.get(reference);
+    if (cached) return cached;
+    if (++expanded > 10_000)
       throw new InvalidGoalEvidenceReferenceError(
         'missing_reference',
-        `Checkpoint claim ${reference} has no recorded original sources.`,
+        'Checkpoint source graph exceeds the inspection limit. Cite original records directly.',
+        reference,
+      );
+    const claim = claims.get(reference);
+    if (!claim) return [validateReference(reference, input, analysis)];
+    if (
+      visiting.has(reference) ||
+      visiting.size >= GOAL_EVIDENCE_REFERENCE_LIMIT ||
+      claim.sourceRefs.length === 0
+    ) {
+      throw new InvalidGoalEvidenceReferenceError(
+        'missing_reference',
+        `Checkpoint claim ${reference} has cyclic, excessive, or missing original sources.`,
         reference,
       );
     }
-    return originals.map((original) => {
-      const validated = validateReference(original, input, analysis);
-      if (claim && validated.proofKind !== claim.proofKind) {
-        throw new InvalidGoalEvidenceReferenceError(
-          'ineligible_reference',
-          `Checkpoint claim ${reference} does not match its original source proof kind.`,
-          reference,
-        );
-      }
-      return validated;
-    });
-  });
+    const path = new Set(visiting).add(reference);
+    const originals = claim.sourceRefs.flatMap((source) =>
+      resolve(source, path),
+    );
+    if (originals.some((original) => original.proofKind !== claim.proofKind)) {
+      throw new InvalidGoalEvidenceReferenceError(
+        'ineligible_reference',
+        `Checkpoint claim ${reference} does not match its original source proof kind.`,
+        reference,
+      );
+    }
+    const unique = [
+      ...new Map(originals.map((record) => [record.uuid, record])).values(),
+    ];
+    resolvedClaims.set(reference, unique);
+    return unique;
+  };
+  const citedRecords = [
+    ...new Map(
+      references
+        .flatMap((reference) => resolve(reference, new Set()))
+        .map((record) => [record.uuid, record]),
+    ).values(),
+  ];
   const externalFacts = citedRecords.filter(
     (record) => record.proofKind === 'external_fact',
   );
@@ -713,7 +760,12 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
   }
   const cursorIndex = resolveScopeStart(input, indexByUuid);
   const lineageTurnIds = collectLineageTurnIds(input, cursorIndex);
-  if (lineageTurnIds.at(-1) !== input.permit.turnId) {
+  const proposalTurnIndex = lineageTurnIds.indexOf(input.permit.turnId);
+  if (
+    proposalTurnIndex < 0 ||
+    (lineageTurnIds.at(-1) !== input.permit.turnId &&
+      input.verificationTurnId !== input.permit.turnId)
+  ) {
     throw new EvidenceSourceUnavailableError(
       'current_turn_not_tail',
       'The current Goal permit is not the tail of the active transcript lineage.',
@@ -765,6 +817,7 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     recordsByUuid,
     auditUuids,
     lineageTurnIds,
+    proposalLineageTurnIds: lineageTurnIds.slice(0, proposalTurnIndex + 1),
   };
 }
 
@@ -994,7 +1047,7 @@ function validateBlockerCoverage(
     if (
       !citedRecords.some(
         (record) =>
-          record.turnId === analysis.lineageTurnIds.at(-1) &&
+          record.turnId === analysis.proposalLineageTurnIds.at(-1) &&
           (record.proofKind === 'external_fact' ||
             (proposal.blockerKind !== 'infeasible' &&
               record.proofKind === 'user_input')),
@@ -1008,7 +1061,7 @@ function validateBlockerCoverage(
     return;
   }
 
-  const requiredTurnIds = analysis.lineageTurnIds.slice(-3);
+  const requiredTurnIds = analysis.proposalLineageTurnIds.slice(-3);
   const currentTurnId = requiredTurnIds.at(-1);
   const citedTurnIds = new Set(
     citedRecords
@@ -1399,10 +1452,36 @@ export class GoalEvidenceSnapshot {
   private readonly input: GoalEvidenceContext;
   private readonly analysis: EvidenceAnalysis;
   private readonly contents = new Map<string, ValidatedGoalEvidenceRecord>();
+  private readonly artifacts = new Map<string, GoalEvidenceArtifact | string>();
+  private readonly recoverableArtifacts = new Set<string>();
 
   constructor(input: GoalEvidenceContext) {
     this.input = structuredClone(input);
     this.analysis = analyzeEvidence(this.input);
+    for (const record of [
+      ...this.input.records,
+      ...(this.input.auditRecords ?? []),
+    ]) {
+      if (!record.persistedOutputFiles?.length) continue;
+      try {
+        if (!input.artifactRoot)
+          throw new Error('The host artifact directory is unavailable');
+        if (record.sourceComplete !== false)
+          this.recoverableArtifacts.add(record.uuid);
+        this.artifacts.set(
+          record.uuid,
+          new GoalEvidenceArtifact(
+            input.artifactRoot,
+            record.persistedOutputFiles,
+          ),
+        );
+      } catch (error) {
+        this.artifacts.set(
+          record.uuid,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     this.scopeStart = this.input.records[this.analysis.cursorIndex]!.uuid;
     this.currentStateStart =
       this.analysis.currentStateStartIndex === undefined
@@ -1466,7 +1545,7 @@ export class GoalEvidenceSnapshot {
       entries.length < limit
     ) {
       const entry = this.analysis.allEntries[index]!;
-      const original = this.fullRecord(entry.uuid);
+      const original = this.read({ reference: entry.uuid, maxBytes: 4 });
       const listed = {
         ...entry,
         sourceComplete: original.sourceComplete,
@@ -1523,22 +1602,64 @@ export class GoalEvidenceSnapshot {
         `Goal evidence read size must be between 4 and ${EVIDENCE_SLICE_BYTE_LIMIT} bytes.`,
       );
     }
-    const bytes = Buffer.from(record.content, 'utf8');
-    if (
-      start > bytes.length ||
-      (start < bytes.length && (bytes[start]! & 0xc0) === 0x80)
-    )
-      this.invalidCursor();
-    let end = Math.min(bytes.length, start + maxBytes);
-    while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
-    const complete = end === bytes.length;
+    const artifact = this.artifacts.get(record.uuid);
+    let sourceComplete = record.sourceComplete !== false;
+    let missingReason = record.missingReason;
+    if (typeof artifact === 'string') {
+      sourceComplete = false;
+      missingReason = artifact;
+    }
+    const prefix = Buffer.from(
+      record.content +
+        (artifact instanceof GoalEvidenceArtifact
+          ? '\nPersisted original output (host artifact):\n'
+          : ''),
+      'utf8',
+    );
+    const totalBytes =
+      prefix.length +
+      (artifact instanceof GoalEvidenceArtifact ? artifact.totalBytes : 0);
+    if (start > totalBytes) this.invalidCursor();
+    const length = Math.min(maxBytes + 1, totalBytes - start);
+    let bytes = prefix.subarray(start, Math.min(prefix.length, start + length));
+    if (artifact instanceof GoalEvidenceArtifact) {
+      try {
+        artifact.assertUnchanged();
+        if (bytes.length < length)
+          bytes = Buffer.concat([
+            bytes,
+            artifact.read(
+              Math.max(0, start - prefix.length),
+              length - bytes.length,
+            ),
+          ]);
+        if (
+          missingReason === TRUNCATED_ORIGINAL_REASON &&
+          this.recoverableArtifacts.has(record.uuid)
+        ) {
+          sourceComplete = true;
+          missingReason = undefined;
+        }
+      } catch (error) {
+        throw new EvidenceSourceUnavailableError(
+          'scope_unavailable',
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    if (bytes.length && (bytes[0]! & 0xc0) === 0x80) this.invalidCursor();
+    let size = Math.min(maxBytes, bytes.length);
+    while (size < bytes.length && (bytes[size]! & 0xc0) === 0x80) size--;
+    const end = start + size;
+    const complete = end === totalBytes;
     return {
       ...record,
-      content: bytes.subarray(start, end).toString('utf8'),
-      sourceComplete: record.sourceComplete !== false,
+      missingReason,
+      content: bytes.subarray(0, size).toString('utf8'),
+      sourceComplete,
       start,
       end,
-      totalBytes: bytes.length,
+      totalBytes,
       complete,
       ...(!complete
         ? {
@@ -1550,6 +1671,75 @@ export class GoalEvidenceSnapshot {
           }
         : {}),
     };
+  }
+
+  assertSourcesUnchanged(): void {
+    for (const artifact of this.artifacts.values()) {
+      if (artifact instanceof GoalEvidenceArtifact) artifact.assertUnchanged();
+    }
+  }
+
+  actionManifest() {
+    const records = [
+      ...this.input.records.slice(this.analysis.cursorIndex + 1),
+      ...(this.input.auditRecords ?? []),
+    ];
+    return records.flatMap((record) => {
+      const context = parseGoalContext(record.goalContext);
+      if (
+        coherentEvidenceProvenance(record) !== 'assistant_output' ||
+        context?.goalId !== this.input.goal.goalId ||
+        context.revision !== this.input.goal.revision
+      )
+        return [];
+      return (record.message?.parts ?? []).flatMap((part) => {
+        const call = part.functionCall;
+        if (
+          part.thought ||
+          !call ||
+          call.name === ToolNames.GET_GOAL ||
+          call.name === ToolNames.UPDATE_GOAL
+        )
+          return [];
+        const args = JSON.stringify(call.args ?? {});
+        return [
+          {
+            recordId: record.uuid,
+            timestamp: record.timestamp,
+            agentId: record.agentId,
+            turnId: context.turnId,
+            callId: call.id,
+            resultReferences: records
+              .filter((result) => {
+                const resultContext = parseGoalContext(result.goalContext);
+                const metadata = isRecord(result.toolCallResult)
+                  ? result.toolCallResult
+                  : undefined;
+                return (
+                  result.agentId === record.agentId &&
+                  coherentEvidenceProvenance(result) === 'tool_result' &&
+                  resultContext?.goalId === context.goalId &&
+                  resultContext.revision === context.revision &&
+                  resultContext.turnId === context.turnId &&
+                  (result.message?.parts ?? []).some(
+                    (part) =>
+                      !part.thought &&
+                      part.functionResponse !== undefined &&
+                      part.functionResponse.name === call.name &&
+                      typeof call.id === 'string' &&
+                      (part.functionResponse.id ?? metadata?.['callId']) ===
+                        call.id,
+                  )
+                );
+              })
+              .map((result) => result.uuid),
+            name: call.name,
+            arguments: capPreviewBytes(args, 2_000),
+            argumentsComplete: Buffer.byteLength(args, 'utf8') <= 2_000,
+          },
+        ];
+      });
+    });
   }
 
   validate(proposal: GoalTerminalProposal): ValidatedGoalEvidence {
@@ -1642,6 +1832,9 @@ export class GoalEvidenceSnapshot {
   }
 }
 
+const TRUNCATED_ORIGINAL_REASON =
+  'The recorded tool result is truncated; its omitted original is unavailable in this evidence snapshot.';
+
 function evidenceContentWithCalls(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
@@ -1718,10 +1911,10 @@ function evidenceContentWithCalls(
   const missingReason =
     record.missingReason ??
     mediaReason ??
-    (truncated
-      ? 'The recorded tool result is truncated; its omitted original is unavailable in this evidence snapshot.'
-      : missingCall
-        ? 'The recorded tool result has no unique matching Goal-owned call and arguments.'
+    (missingCall
+      ? 'The recorded tool result has no unique matching Goal-owned call and arguments.'
+      : truncated
+        ? TRUNCATED_ORIGINAL_REASON
         : undefined);
   return {
     content: `${JSON.stringify({
@@ -1801,6 +1994,7 @@ function hasTruncatedOutput(value: unknown): boolean {
     return (
       value.startsWith('Tool output was too large and has been truncated') ||
       value.startsWith('<persisted-output>') ||
+      value.startsWith('Tool output truncated.') ||
       (value.includes('... [CONTENT TRUNCATED] ...') &&
         value.endsWith('[Note: Could not save full output to file]'))
     );

@@ -39,7 +39,11 @@ describe('CodeModeOnly scheduler dispatch', () => {
     const getGoalForWorker = vi.fn().mockResolvedValue({
       goalId: permit.goalId,
       revision: permit.revision,
-      evidenceCatalog: { entries: [{ uuid: 'evidence-1' }] },
+      evidenceCatalog: {
+        entries: [{ uuid: 'evidence-1' }],
+        lineageTurnIds: [permit.turnId],
+        truncated: false,
+      },
     });
     const getSnapshotForPermit = vi.fn().mockReturnValue({
       goal: { status: 'active' },
@@ -104,7 +108,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
     expect(
       onAllToolCallsComplete.mock.calls.at(-1)?.[0]?.[0]?.response.error,
     ).toBeUndefined();
-    expect(getGoalForWorker).toHaveBeenCalledWith(permit);
+    expect(getGoalForWorker).toHaveBeenCalledWith(permit, undefined);
     expect(recordTerminalProposal).toHaveBeenCalledWith(permit, proposal);
     expect(onResult).toHaveBeenCalledWith(
       expect.objectContaining({

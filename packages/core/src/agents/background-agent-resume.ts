@@ -1149,6 +1149,9 @@ export class BackgroundAgentResumeService {
       });
       const bgEmitter = subagent.getCore().getEventEmitter();
       let liveToolCallCount = 0;
+      let auditToolCalls =
+        meta.auditToolCalls ??
+        ((meta.resumeCount ?? 0) === 0 ? meta.stats?.toolUses : undefined);
 
       const refreshLiveStats = () => {
         const target = registry.get(meta.agentId);
@@ -1157,6 +1160,7 @@ export class BackgroundAgentResumeService {
       };
       const onToolCall = (event: AgentToolCallEvent) => {
         liveToolCallCount += 1;
+        if (auditToolCalls !== undefined) auditToolCalls += 1;
         refreshLiveStats();
         registry.appendActivity(meta.agentId, {
           name: event.name,
@@ -1377,6 +1381,9 @@ export class BackgroundAgentResumeService {
             });
           }
         } finally {
+          if (auditToolCalls !== undefined) {
+            patchAgentMeta(metaPath, { auditToolCalls });
+          }
           turnRunning = false;
           activeRestoreParentPM();
           if (!keepResident || disposeRequested) {

@@ -13,8 +13,10 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { isContextLengthExceededError } from '../utils/contextLengthError.js';
 import { DEFAULT_QWEN_MODEL } from '../utils/default-qwen-model.js';
 import { runSideQuery } from '../utils/sideQuery.js';
+import { estimateTextTokens } from '../utils/request-tokenizer/textTokenizer.js';
 import type {
   GoalEvidenceSnapshot,
+  GoalEvidenceSlice,
   ValidatedGoalEvidenceRecord,
 } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
@@ -91,11 +93,11 @@ Every objective condition and factual claim in proposal.reason must be supported
 
 The runtime sends this request only after successfully executing update_goal and recording its proposal. Never require evidence that update_goal itself was called. Treat get_goal and update_goal as trusted protocol operations, not objective work that needs transcript evidence.
 
-The host includes all recorded actions throughout this revision, all real user supplements, and current delivered output. This includes actions after the earliest cited external fact and verified child actions. Inspect call arguments and results for contrary evidence. The catalog may append verified child journals after the parent journal; catalog order is not execution order across agents. Use source and call timestamp, agentId, and parentToolCallId to establish timing and verified parent-child causal order. If timestamps or causal evidence are insufficient, do not treat a child check as newer than a relevant parent mutation; request current proof or reject the claim. A write followed by a revert still violates an all-time no-write constraint; final clean state cannot prove such a constraint. An old passing test followed by a relevant mutation or failed check does not prove the current state without fresh verification or a supported applicability explanation. Missing child/action records or truncated originals cannot prove a complete action history. A related background writer still running cannot prove stable completion. The snapshot freezes records, not external state. If snapshot.currentStateStart is present, it is a legacy fresh-proof boundary: earlier originals still prove history and authorization, but cannot alone prove current state. Require fresh external facts after that boundary for current-state conditions.
+The host includes an action manifest throughout this revision, a first directory page, and bounded original slices for cited evidence, real user supplements, current delivered output, and actions after the cited facts. Historical result bodies are available on demand; they are not all embedded. The manifest contains tool names and arguments (argumentsComplete=false means the arguments need reading from the matching result). Inspect every relevant action including uncited history; a preview is only an index, never proof. coverageUnavailable describes gaps, not automatic failure of unrelated current-state proof. Reject if a required condition depends on missing evidence, and explain what fresh proof or task change is needed. Do not reject merely because an unrelated historical record is incomplete. This includes actions after the earliest cited external fact and verified child actions. Inspect call arguments and results for contrary evidence. The catalog may append verified child journals after the parent journal; catalog order is not execution order across agents. Use source and call timestamp, agentId, and parentToolCallId to establish timing and verified parent-child causal order. If timestamps or causal evidence are insufficient, do not treat a child check as newer than a relevant parent mutation; request current proof or reject the claim. A write followed by a revert still violates an all-time no-write constraint; final clean state cannot prove such a constraint. An old passing test followed by a relevant mutation or failed check does not prove the current state without fresh verification or a supported applicability explanation. Missing child/action records or truncated originals cannot prove a complete action history. A related background writer still running cannot prove stable completion. The snapshot freezes records, not external state. If snapshot.currentStateStart is present, it is a legacy fresh-proof boundary: earlier originals still prove history and authorization, but cannot alone prove current state. Require fresh external facts after that boundary for current-state conditions.
 
-Use needs_evidence only for additional original records in the supplied frozen snapshot. Request exactly one directory page with {"kind":"list","cursor":"optional opaque cursor"}, or one original slice with {"kind":"read","reference":"legal UUID","cursor":"optional opaque cursor"}. A directory preview is not evidence of the full original. A slice with complete=false needs its nextCursor before treating the original as fully read. Do not invent references, cursors, paths, or URLs. No summaries replace the original evidence.
+Use needs_evidence only for additional original records in the supplied frozen snapshot. Request exactly one directory page with {"kind":"list","cursor":"optional opaque cursor"}, or one original slice with {"kind":"read","reference":"legal UUID","cursor":"optional opaque cursor"}. A directory preview or an optional initial slice (mustReadCompletely=false) is not evidence of the full original. Inspect it for relevance and contrary evidence; request its remaining slices if a conclusion depends on its omitted content. All cited originals, user text and current delivery (mustReadCompletely=true) must be read completely. A slice with complete=false needs its nextCursor before treating the original as fully read. Do not invent references, cursors, paths, or URLs. No summaries replace the original evidence.
 
-Return exactly one JSON object. For accept, reject, or inconclusive use only "decision" and a nonempty "reason" (at most 2000 characters). For needs_evidence use only "decision" and "request". Accept only after evaluating each explicit condition including current state, full-history restrictions, user authorization, and delivery. Reject when evidence shows unfinished work or a correctable proof gap; use inconclusive when required evidence cannot be obtained. Include no markdown fence, preamble, extra key, or commentary.`;
+Return exactly one JSON object. For accept, reject, or inconclusive use only "decision" and a nonempty "reason" (at most 2000 characters). For needs_evidence use only "decision" and "request". Accept only after evaluating each explicit condition including current state, full-history restrictions, user authorization, and delivery. Reject when evidence shows unfinished work or a proof gap; explain what the worker can check or provide next. Use inconclusive only to describe a proof limitation; the host returns that feedback to the worker rather than retrying the identical snapshot. Include no markdown fence, preamble, extra key, or commentary.`;
 
 export type GoalVerifierEvidenceRecord = ValidatedGoalEvidenceRecord;
 export interface GoalVerifierProgress {
@@ -114,6 +116,7 @@ interface GoalVerifierInputBase {
   currentDeliveredOutput?: readonly string[];
   evidenceSnapshot?: GoalEvidenceSnapshot;
   coverageUnavailable?: readonly string[];
+  activeWriters?: readonly string[];
   beforeCall?: (
     progress: GoalVerifierProgress,
   ) => string | undefined | Promise<string | undefined>;
@@ -286,76 +289,38 @@ export function validateGoalVerifierText(text: string): string | null {
   }
 }
 
-function evidenceForRequest(input: GoalVerifierInput) {
+function evidenceForRequest(
+  input: GoalVerifierInput,
+): Array<Omit<GoalEvidenceSlice, 'preview'> & { mustReadCompletely: boolean }> {
   const snapshot = input.evidenceSnapshot;
   if (!snapshot) {
-    return input.evidence.map(
-      ({ uuid, provenance, turnId, proofKind, content }) => ({
-        uuid,
-        provenance,
-        turnId,
-        proofKind,
-        content,
-      }),
-    );
+    return input.evidence.map(({ preview: _preview, ...record }) => ({
+      ...record,
+      sourceComplete: record.sourceComplete !== false,
+      start: 0,
+      end: Buffer.byteLength(record.content, 'utf8'),
+      totalBytes: Buffer.byteLength(record.content, 'utf8'),
+      complete: true,
+      mustReadCompletely: true,
+    }));
   }
+  const cited = new Set(input.evidence.map((record) => record.uuid));
   const entries = new Map(snapshot.entries.map((entry) => [entry.uuid, entry]));
-  let totalBytes = 0;
-  return snapshot
-    .requiredEvidence(input.proposal, { includeHistoricalActions: true })
-    .map((reference) => {
-      const entry = entries.get(reference);
-      if (!entry)
-        throw new Error(`Required evidence ${reference} is unavailable`);
-      let cursor: string | undefined;
-      let content = '';
-      let expectedStart = 0;
-      const cursors = new Set<string>();
-      for (;;) {
-        const slice = snapshot.read({
-          reference,
-          cursor,
-          maxBytes: GOAL_VERIFIER_SLICE_BYTE_LIMIT,
-        });
-        if (!slice.sourceComplete)
-          throw new Error(
-            slice.missingReason ??
-              `Original evidence ${reference} is incomplete`,
-          );
-        if (
-          slice.start !== expectedStart ||
-          slice.end < slice.start ||
-          (!slice.complete && slice.end === slice.start)
-        ) {
-          throw new Error(
-            `Original evidence ${reference} has a missing or invalid slice`,
-          );
-        }
-        totalBytes += Buffer.byteLength(slice.content, 'utf8');
-        if (totalBytes > GOAL_VERIFIER_REQUEST_BYTE_LIMIT)
-          throw new GoalVerifierInputTooLargeError(totalBytes);
-        content += slice.content;
-        expectedStart = slice.end;
-        if (slice.complete) {
-          if (slice.end !== slice.totalBytes)
-            throw new Error(
-              `Original evidence ${reference} is not fully covered`,
-            );
-          break;
-        }
-        if (!slice.nextCursor || cursors.has(slice.nextCursor))
-          throw new Error(`Original evidence ${reference} did not advance`);
-        cursors.add(slice.nextCursor);
-        cursor = slice.nextCursor;
-      }
-      return {
-        uuid: entry.uuid,
-        provenance: entry.provenance,
-        turnId: entry.turnId,
-        proofKind: entry.proofKind,
-        content,
-      };
-    });
+  return snapshot.requiredEvidence(input.proposal).map((reference) => {
+    const entry = entries.get(reference);
+    const mustReadCompletely =
+      cited.has(reference) ||
+      entry?.proofKind === 'user_input' ||
+      (entry?.proofKind === 'delivered_output' &&
+        entry.turnId === input.currentTurnId);
+    return {
+      ...snapshot.read({
+        reference,
+        maxBytes: mustReadCompletely ? GOAL_VERIFIER_SLICE_BYTE_LIMIT : 1_000,
+      }),
+      mustReadCompletely,
+    };
+  });
 }
 
 function requestPayload(input: GoalVerifierInput) {
@@ -375,6 +340,10 @@ function requestPayload(input: GoalVerifierInput) {
         : {}),
     },
     evidence: evidenceForRequest(input),
+    coverageUnavailable: [
+      ...(input.coverageUnavailable ?? []),
+      ...(input.evidenceSnapshot?.coverageUnavailable ?? []),
+    ],
     ...(input.evidenceSnapshot
       ? {
           snapshot: {
@@ -384,6 +353,8 @@ function requestPayload(input: GoalVerifierInput) {
               ? { currentStateStart: input.evidenceSnapshot.currentStateStart }
               : {}),
             requiredCoverage: 'all_revision_actions_users_and_current_delivery',
+            actions: input.evidenceSnapshot.actionManifest(),
+            directory: input.evidenceSnapshot.list(),
           },
         }
       : {}),
@@ -476,29 +447,32 @@ export function createGoalVerifier(
       }
       await input.onUsage?.(valid ? { totalTokenCount: tokens } : {}, calls);
     };
-    const unavailable = [
-      ...(input.coverageUnavailable ?? []),
-      ...(input.evidenceSnapshot?.coverageUnavailable ?? []),
-    ];
-    if (unavailable.length)
-      return inconclusive(
-        'evidence_unavailable',
-        `Goal evidence coverage is unavailable: ${unavailable.join('; ')}`.slice(
-          0,
-          MAX_VERIFIER_REASON_LENGTH,
-        ),
+    const reject = (reason: string) =>
+      result({
+        decision: 'reject',
+        reason: reason.slice(0, MAX_VERIFIER_REASON_LENGTH),
+      });
+    if (input.activeWriters?.length)
+      return reject(
+        `Goal has active child execution; wait for it to settle before proposing completion: ${input.activeWriters.join('; ')}`,
       );
     let payload: ReturnType<typeof requestPayload>;
     try {
       payload = requestPayload(input);
     } catch (error) {
-      return inconclusive(
-        error instanceof GoalVerifierInputTooLargeError
-          ? 'capacity'
-          : 'evidence_unavailable',
-        errorMessage(error),
+      return reject(
+        `Required evidence cannot be read. Obtain fresh proof before proposing again: ${errorMessage(error)}`,
       );
     }
+    const incomplete = payload.evidence.find(
+      (record) =>
+        input.evidence.some((cited) => cited.uuid === record.uuid) &&
+        record.sourceComplete === false,
+    );
+    if (incomplete)
+      return reject(
+        `Evidence ${incomplete.uuid} is incomplete. Obtain a complete original or fresh proof: ${'missingReason' in incomplete ? (incomplete.missingReason ?? 'original unavailable') : 'original unavailable'}`,
+      );
     const contents: Content[] = [
       { role: 'user', parts: [{ text: JSON.stringify(payload) }] },
     ];
@@ -518,9 +492,22 @@ export function createGoalVerifier(
       string,
       { totalBytes: number; ranges: Array<[number, number]> }
     >();
+    const readCoverage = new Map<
+      string,
+      { totalBytes: number; ranges: Array<[number, number]> }
+    >();
+    for (const record of payload.evidence) {
+      const progress = {
+        totalBytes: record.totalBytes,
+        ranges: [[record.start, record.end] as [number, number]],
+      };
+      readCoverage.set(record.uuid, progress);
+      if (record.mustReadCompletely && !record.complete)
+        partialReads.set(record.uuid, progress);
+    }
     let repairUsed = false;
     let observedPromptTokens = 0;
-    let observedRequestBytes = 0;
+    let observedEstimatedTokens = 0;
     try {
       const selectedModel =
         config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL;
@@ -545,9 +532,8 @@ export function createGoalVerifier(
         if (abortSignal.aborted)
           return inconclusive('service', errorMessage(abortSignal.reason));
         if (calls >= maxCalls)
-          return inconclusive(
-            'capacity',
-            `Goal verifier reached its ${maxCalls}-call inspection limit; the pending proposal and evidence are retained`,
+          return reject(
+            `Goal verifier reached its ${maxCalls}-call inspection limit. Supply focused, complete proof for the remaining conditions before proposing again.`,
           );
         const budgetReason = await input.beforeCall?.({
           calls,
@@ -562,21 +548,21 @@ export function createGoalVerifier(
         });
         const bytes = Buffer.byteLength(serialized, 'utf8');
         if (bytes > GOAL_VERIFIER_REQUEST_BYTE_LIMIT)
-          return inconclusive(
-            'capacity',
-            new GoalVerifierInputTooLargeError(bytes).message,
+          return reject(
+            `${new GoalVerifierInputTooLargeError(bytes).message}. Supply focused proof or reduce the Goal scope; retrying this same proposal cannot reduce its size.`,
           );
-        // No provider tokenizer is exposed by ContentGenerator. UTF-8 bytes
-        // conservatively bound text tokens; observed usage also guards providers
-        // whose hidden framing is larger than the explicit framing allowance.
-        const promptUpperBound = Math.max(
-          bytes + 256,
-          observedPromptTokens + Math.max(0, bytes - observedRequestBytes),
+        // This is a guardrail estimate, not a claim that bytes equal tokens.
+        // Provider context errors remain authoritative and are handled below.
+        const estimatedTokens =
+          Math.ceil(estimateTextTokens(serialized) * 1.2) + 256;
+        const promptEstimate = Math.max(
+          estimatedTokens,
+          observedPromptTokens +
+            Math.max(0, estimatedTokens - observedEstimatedTokens),
         );
-        if (promptUpperBound + outputTokens > contextWindow)
-          return inconclusive(
-            'capacity',
-            `Goal verification needs up to ${promptUpperBound} input tokens plus ${outputTokens} output tokens, exceeding the selected model's ${contextWindow}-token context; no evidence was discarded`,
+        if (promptEstimate + outputTokens > contextWindow)
+          return reject(
+            `Goal verification estimates ${promptEstimate} input tokens plus ${outputTokens} output tokens, exceeding the selected model's ${contextWindow}-token context. Supply focused proof or select a verifier with a larger context.`,
           );
         calls++;
         let text: string;
@@ -613,15 +599,16 @@ export function createGoalVerifier(
           );
           observedPromptTokens =
             response.usage?.promptTokenCount ?? observedPromptTokens;
-          observedRequestBytes = bytes;
+          observedEstimatedTokens = estimatedTokens;
           text = response.text;
         } catch (error) {
           if (abortSignal.aborted) usageComplete = false;
           if (attemptSignal?.aborted) throw attemptSignal.reason;
-          return inconclusive(
-            isContextLengthExceededError(error) ? 'capacity' : 'service',
-            errorMessage(error),
-          );
+          return isContextLengthExceededError(error)
+            ? reject(
+                `Verifier context capacity exceeded. Supply focused proof or select a larger verifier context: ${errorMessage(error)}`,
+              )
+            : inconclusive('service', errorMessage(error));
         }
         if (attemptSignal?.aborted) throw attemptSignal.reason;
         if (abortSignal.aborted)
@@ -654,11 +641,13 @@ export function createGoalVerifier(
           continue;
         }
         if (response.decision === 'inconclusive')
-          return inconclusive('evidence_unavailable', response.reason);
+          return reject(
+            `Verification needs additional proof: ${response.reason}`,
+          );
         if (response.decision !== 'needs_evidence') {
           if (response.decision === 'accept' && partialReads.size > 0) {
             return inconclusive(
-              'evidence_unavailable',
+              'service',
               'The verifier accepted before fully reading a requested original record',
             );
           }
@@ -670,14 +659,14 @@ export function createGoalVerifier(
         const snapshot = input.evidenceSnapshot;
         if (!snapshot)
           return inconclusive(
-            'evidence_unavailable',
+            'service',
             'The frozen evidence reader is unavailable',
           );
         const key = JSON.stringify(response.request);
         if (requests.has(key))
           return inconclusive(
-            'capacity',
-            'Goal verifier repeated the same evidence request without advancing',
+            'service',
+            'Goal verifier repeated the same evidence request without advancing after correction or a previous read',
           );
         requests.add(key);
         let readResponse: unknown;
@@ -691,11 +680,10 @@ export function createGoalVerifier(
               maxBytes: GOAL_VERIFIER_SLICE_BYTE_LIMIT,
             });
             if (!slice.sourceComplete)
-              return inconclusive(
-                'evidence_unavailable',
-                slice.missingReason ?? 'The requested original is incomplete',
+              return reject(
+                `Requested evidence ${slice.uuid} is incomplete. Obtain fresh proof: ${slice.missingReason ?? 'original unavailable'}`,
               );
-            const progress = partialReads.get(slice.uuid) ?? {
+            const progress = readCoverage.get(slice.uuid) ?? {
               totalBytes: slice.totalBytes,
               ranges: [],
             };
@@ -711,6 +699,7 @@ export function createGoalVerifier(
               );
             }
             progress.ranges.push([slice.start, slice.end]);
+            readCoverage.set(slice.uuid, progress);
             progress.ranges.sort((left, right) => left[0] - right[0]);
             let covered = 0;
             for (const [start, end] of progress.ranges) {
@@ -723,10 +712,28 @@ export function createGoalVerifier(
             readResponse = slice;
           }
         } catch (error) {
-          return result({
-            decision: 'reject',
-            reason: `Goal verifier requested invalid evidence: ${errorMessage(error)}`,
-          });
+          if (repairUsed)
+            return inconclusive(
+              'service',
+              `Goal verifier requested invalid evidence after one correction: ${errorMessage(error)}`,
+            );
+          repairUsed = true;
+          contents.push(
+            { role: 'model', parts: [{ text }] },
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: JSON.stringify({
+                    correction: errorMessage(error),
+                    instruction:
+                      'Use only references and cursors from the supplied frozen directory. Correct the request.',
+                  }),
+                },
+              ],
+            },
+          );
+          continue;
         }
         contents.push(
           { role: 'model', parts: [{ text }] },

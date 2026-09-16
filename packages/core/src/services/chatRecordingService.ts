@@ -287,6 +287,7 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
 }
 
 export interface ChatRecord {
+  persistedOutputFiles?: string[];
   /** Daemon admission identity, distinct from CLI file-history prompt IDs. */
   daemonPromptId?: string;
   /** Unique identifier for this logical message */
@@ -1668,6 +1669,10 @@ export class ChatRecordingService {
     return session.conversation.messages;
   }
 
+  getEvidenceArtifactRoot(): string {
+    return this.config.storage.getProjectTempDir();
+  }
+
   readChildEvidence(
     records: readonly GoalEvidenceRecord[],
     permit: GoalTurnPermit,
@@ -1692,6 +1697,9 @@ export class ChatRecordingService {
         ).map(
           ({
             shellId,
+            originalCommand,
+            exitObservedAt,
+            outputComplete,
             command,
             cwd,
             status,
@@ -1701,6 +1709,9 @@ export class ChatRecordingService {
             endTime,
           }) => ({
             shellId,
+            originalCommand,
+            exitObservedAt,
+            outputComplete,
             command,
             cwd,
             status,
@@ -2512,6 +2523,9 @@ export class ChatRecordingService {
 
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),
+        ...(persistedOutputFiles?.length
+          ? { persistedOutputFiles: [...persistedOutputFiles] }
+          : {}),
         ...(options?.goalContext
           ? { goalContext: copyGoalContext(options.goalContext) }
           : {}),

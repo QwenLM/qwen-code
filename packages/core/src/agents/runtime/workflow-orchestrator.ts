@@ -54,6 +54,9 @@ import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
   buildAgentTranscriptAttach,
+  getAgentMetaPath,
+  patchAgentMeta,
+  writeAgentMeta,
 } from '../agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -542,6 +545,7 @@ export function createProductionDispatch(
     dispatchId?: string,
   ) => () => void,
   subagentBounds?: WorkflowSubagentBounds,
+  launch?: { toolUseId: string; parentAgentId: string | null },
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -578,48 +582,90 @@ export function createProductionDispatch(
           'cannot be enforced. Use an in-process agent definition instead.',
       );
     }
-    let attempt = 0;
-    return runStallResilient(
-      async (attemptSignal, emitter) => {
-        attempt += 1;
-        const cleanupApprovalBridge = bridgeApprovalEvents?.(
-          emitter,
-          dispatchId,
-        );
-        const cleanupTranscript = attachDispatchTranscript(
-          config,
+    const metaPath = launch
+      ? getAgentMetaPath(
+          config.storage.getProjectDir(),
+          config.getSessionId(),
           workflowAgentId,
-          prompt,
-          agentIdentity.name,
-          emitter,
-          attempt,
-        );
-        try {
-          return await runSingleDispatch(
-            config,
-            prompt,
-            opts,
-            attemptSignal,
+        )
+      : undefined;
+    if (metaPath && launch) {
+      writeAgentMeta(metaPath, {
+        agentId: workflowAgentId,
+        agentType: agentIdentity.name,
+        description: 'Workflow dispatch',
+        parentSessionId: config.getSessionId(),
+        parentAgentId: launch.parentAgentId,
+        toolUseId: launch.toolUseId,
+        createdAt: new Date().toISOString(),
+        status: 'running',
+      });
+    }
+    let attempt = 0;
+    let auditToolCalls = 0;
+    let completed = false;
+    try {
+      const result = await runStallResilient(
+        async (attemptSignal, emitter) => {
+          attempt += 1;
+          const cleanupApprovalBridge = bridgeApprovalEvents?.(
             emitter,
-            workflowAgentId,
-            agentIdentity,
-            onTokens,
-            subagentBounds,
+            dispatchId,
           );
-        } finally {
-          cleanupTranscript();
-          cleanupApprovalBridge?.();
-        }
-      },
-      {
-        stallMs,
-        signal,
-        // The name can carry a model-authored agentType spelling — keep
-        // the stall log / abandoned error single-line the same way the
-        // "not found" throw site sanitizes it.
-        label: sanitizeForErrorMessage(agentIdentity.name),
-      },
-    );
+          const cleanupTranscript = attachDispatchTranscript(
+            config,
+            workflowAgentId,
+            prompt,
+            agentIdentity.name,
+            emitter,
+            attempt,
+          );
+          const onToolCall = () => {
+            auditToolCalls += 1;
+          };
+          emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+          try {
+            return await runSingleDispatch(
+              config,
+              prompt,
+              opts,
+              attemptSignal,
+              emitter,
+              workflowAgentId,
+              agentIdentity,
+              onTokens,
+              subagentBounds,
+            );
+          } finally {
+            emitter.off(AgentEventType.TOOL_CALL, onToolCall);
+            cleanupTranscript();
+            cleanupApprovalBridge?.();
+          }
+        },
+        {
+          stallMs,
+          signal,
+          // The name can carry a model-authored agentType spelling — keep
+          // the stall log / abandoned error single-line the same way the
+          // "not found" throw site sanitizes it.
+          label: sanitizeForErrorMessage(agentIdentity.name),
+        },
+      );
+      completed = true;
+      return result;
+    } finally {
+      if (metaPath) {
+        patchAgentMeta(metaPath, {
+          status: completed
+            ? 'completed'
+            : signal?.aborted
+              ? 'cancelled'
+              : 'failed',
+          auditToolCalls,
+          lastUpdatedAt: new Date().toISOString(),
+        });
+      }
+    }
   };
 }
 

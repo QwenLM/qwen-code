@@ -51,6 +51,7 @@ import {
   resolveWorkflowSizeGuidelineSetting,
 } from './workflow-size.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { getCurrentAgentId } from './agent-context.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import {
   deleteInlineWorkflowScript,
@@ -393,6 +394,12 @@ export class WorkflowRunner {
                   : () => undefined
             : undefined,
           reviewLimits?.subagent,
+          options.toolUseId
+            ? {
+                toolUseId: options.toolUseId,
+                parentAgentId: getCurrentAgentId(),
+              }
+            : undefined,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       entry = registry?.register(
