@@ -70,6 +70,32 @@ function publishPrHead() {
   return git(work, 'rev-parse', 'HEAD');
 }
 
+// Criss-cross fixture: the PR side and main merge EACH OTHER, which is what
+// leaves `merge-base --all` holding two best common ancestors. The topology
+// is the mechanism — the `--no-ff` flags are decorative, since neither side
+// is an ancestor of the other and so neither merge could fast-forward.
+// Returns the anchor sha (the criss-cross merge commit) and stops there:
+// whether the head built on top of it has a UNIQUE base is each case's own
+// doing, not the fixture's. `tag` only namespaces the files and messages so
+// two calls in one repo cannot collide.
+function crissCrossAnchor(branch, tag) {
+  const base = git(work, 'rev-parse', 'main');
+  git(work, 'checkout', '-q', '-b', branch, base);
+  const prSide = commit(work, `${tag}-pr.txt`, 'pr side\n', `${tag}: pr side`);
+  git(work, 'checkout', '-q', 'main');
+  const mainSide = commit(
+    work,
+    `${tag}-main.txt`,
+    'main side\n',
+    `${tag}: main side`,
+  );
+  git(work, 'merge', '-q', '--no-edit', '--no-ff', prSide);
+  git(work, 'push', '-q', 'origin', 'main');
+  git(work, 'checkout', '-q', branch);
+  git(work, 'merge', '-q', '--no-edit', '--no-ff', mainSide);
+  return git(work, 'rev-parse', 'HEAD');
+}
+
 function markReviewed(sha, creator = 'github-actions[bot]') {
   writeFileSync(join(statusDir, sha), creator);
 }
@@ -393,21 +419,7 @@ describe('review-unchanged-diff', () => {
     // file set on each side, so two heads whose PR content genuinely
     // differs can hash to the same digest — a false skip, the one harm
     // this script exists to prevent. The check must refuse, not guess.
-    const base = git(work, 'rev-parse', 'main');
-    git(work, 'checkout', '-q', '-b', 'criss-cross', base);
-    const prSide = commit(work, 'cc-pr.txt', 'pr side\n', 'cc: pr side');
-    git(work, 'checkout', '-q', 'main');
-    const mainSide = commit(
-      work,
-      'cc-main.txt',
-      'main side\n',
-      'cc: main side',
-    );
-    git(work, 'merge', '-q', '--no-edit', '--no-ff', prSide);
-    git(work, 'push', '-q', 'origin', 'main');
-    git(work, 'checkout', '-q', 'criss-cross');
-    git(work, 'merge', '-q', '--no-edit', '--no-ff', mainSide);
-    const anchor = git(work, 'rev-parse', 'HEAD');
+    const anchor = crissCrossAnchor('criss-cross', 'cc');
     markReviewed(anchor);
     const head = commit(work, 'cc-r.txt', 'r\n', 'cc: head');
     // The criss-cross line is no descendant of the previously published
@@ -491,21 +503,7 @@ describe('review-unchanged-diff', () => {
     // prevent. Mirror the head-side fixture: the head's own base is unique
     // because it merges main, while the stamped ancestor one first-parent
     // step below it is the criss-cross commit with two.
-    const base = git(work, 'rev-parse', 'main');
-    git(work, 'checkout', '-q', '-b', 'cc-anchor', base);
-    const prSide = commit(work, 'ca-pr.txt', 'pr side\n', 'ca: pr side');
-    git(work, 'checkout', '-q', 'main');
-    const mainSide = commit(
-      work,
-      'ca-main.txt',
-      'main side\n',
-      'ca: main side',
-    );
-    git(work, 'merge', '-q', '--no-edit', '--no-ff', prSide);
-    git(work, 'push', '-q', 'origin', 'main');
-    git(work, 'checkout', '-q', 'cc-anchor');
-    git(work, 'merge', '-q', '--no-edit', '--no-ff', mainSide);
-    const anchor = git(work, 'rev-parse', 'HEAD');
+    const anchor = crissCrossAnchor('cc-anchor', 'ca');
     markReviewed(anchor);
     // A real change on top, so the head's own fingerprint is non-degenerate
     // and the walk has to step past an unstamped commit to reach the anchor.
