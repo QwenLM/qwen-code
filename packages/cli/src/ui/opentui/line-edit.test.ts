@@ -421,6 +421,18 @@ describe('line-edit', () => {
         ...mid,
         cursor: 5,
       });
+      // A value with no break in it cannot tell the two end keys apart — both
+      // land at 5 above — so routing ctrl+E to the line-end move would leave
+      // this case green. The pair below is where they part.
+      const broken: LineState = { text: 'ab\ncd', cursor: 0 };
+      expect(applyLineKey(broken, key('end'))).toEqual({
+        text: 'ab\ncd',
+        cursor: 2,
+      });
+      expect(applyLineKey(broken, key('e', { ctrl: true }))).toEqual({
+        text: 'ab\ncd',
+        cursor: 5,
+      });
     });
 
     it('erases relative to the caret, not the end of the value', () => {

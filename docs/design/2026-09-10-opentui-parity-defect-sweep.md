@@ -1128,7 +1128,12 @@ because ink's line is a _visual_ row and a value wide enough to wrap splits it,
 where this model has no wrapping to consult. Coverage is one differential step
 beside the ctrl+E one, the wizard's base-URL case pasting a two-line value and
 landing a character inside its first line, and a mutation that returns the bare
-key to the value-end jump — it fails both.
+key to the value-end jump — it fails both. The split's other direction went
+unwitnessed for a round: routing ctrl+E to the line-scoped move survived,
+because every fixture pressing that key held a value with no break in it, where
+the two keys land in the same column and the routing cannot be told from its
+neighbour. A case now presses both keys through the routing on a value that
+holds a break with the caret off its last line, and that mutation fails it.
 
 A second review-round finding was a spelling rather than a behaviour: the key
 that erases the word left of the caret. ink binds ctrl+W, and this port erases
