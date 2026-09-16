@@ -1334,7 +1334,9 @@ supersede the swap the first one scheduled; a later round put a lock in front of
 path instead, which drops an answer landing inside the pause outright (Decision 37).
 Nothing is left for the cancel to see there: a live timer always belongs to the tab the
 cursor is still on, since the only moves are the swap's own and the two arrows, and both
-arrows cancel first. This is one of the places where the port deliberately does not match
+arrows cancel first. The lock is therefore the armed timer alone — the ref that also held
+which tab the swap belonged to modelled a distinction no path could observe, and it went
+with the dead cancel. This is one of the places where the port deliberately does not match
 ink; the same 150 ms pause, the same clamping at the last tab, and the same
 tick-before-swap are kept. ink's behaviour is recorded as a defect of its own rather than
 reproduced, and the double-fire the acceptance matrix had already watched on ink's leg is
@@ -1616,11 +1618,14 @@ path's cancel could no longer observe a timer, because the lock Decision 37 adde
 second answer inside the pause before it reaches the cancel, and a live timer always
 belongs to the tab the cursor is still on — the only moves are the swap's own and the two
 arrows, which cancel first. Putting the call back fails no test, which is the measurement
-that showed it unreachable; Decision 34 is corrected to say so.
+that showed it unreachable; Decision 34 is corrected to say so. The same argument took the
+lock's second clause with it: the ref holding which tab the swap belonged to could never
+differ from the tab the cursor is on, so the lock is now the armed timer alone and the
+whole suite is green with the clause gone.
 
 Six new tests, four in the confirmation dialog's suite and two in the authentication
 one, plus the collapsed-echo assertions added to the pasted-newline test the round
-before it, and nine mutations measured this round. Each mutation fails exactly the tests
+before it, and ten mutations measured this round. Each mutation fails exactly the tests
 that own the behaviour it takes away:
 
 | mutation                                             | fails                          |
@@ -1634,6 +1639,7 @@ that own the behaviour it takes away:
 | the retry counter not bumped on service models alone | the service-model retry test   |
 | the field settled before the verdict again           | the rejected-submit test       |
 | the unreachable cancel restored                      | nothing — which is the finding |
+| the lock's tab clause restored                       | nothing — which is the finding |
 
 The machine leg is recorded with the matrix re-run below.
 

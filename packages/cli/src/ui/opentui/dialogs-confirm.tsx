@@ -688,7 +688,6 @@ function AskUserQuestionFlow(props: {
   const pickedRef = useRef<Record<number, string>>({});
   const typedCheckedRef = useRef<Record<number, boolean>>({});
   const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const answeredTabRef = useRef<number | null>(null);
   const { width } = useTerminalDimensions();
 
   // Derived from the two indices alone so the keyboard handler can read them
@@ -763,16 +762,15 @@ function AskUserQuestionFlow(props: {
   const cancelPendingAdvance = () => {
     if (advanceTimer.current) clearTimeout(advanceTimer.current);
     advanceTimer.current = null;
-    answeredTabRef.current = null;
   };
 
-  // The tab the pending swap belongs to. While that swap is armed, the row it
-  // just settled is still drawn and still owns the keys, so the rest of one
-  // stdin read would answer the same question again and quietly replace the
-  // answer already recorded. Only the answer is locked, not the cursor: a manual
-  // ←/→ cancels the swap and this guard with it.
-  const answerIsLocked = () =>
-    advanceTimer.current !== null && answeredTabRef.current === tabRef.current;
+  // While a swap is armed, the row it just settled is still drawn and still owns
+  // the keys, so the rest of one stdin read would answer the same question again
+  // and quietly replace the answer already recorded. Only the answer is locked,
+  // not the cursor: a manual ←/→ cancels the swap and this guard with it, and
+  // those two are the only moves besides the swap's own, so an armed timer always
+  // belongs to the tab the cursor is still on.
+  const answerIsLocked = () => advanceTimer.current !== null;
 
   /**
    * Whether the answer was recorded. The pause of the answer before it can
@@ -794,10 +792,8 @@ function AskUserQuestionFlow(props: {
     // dropped by the lock above instead of arming a second timer: left running,
     // both fire and the question between them is skipped without ever being
     // drawn. A manual ←/→ cancels the swap outright.
-    answeredTabRef.current = idx;
     advanceTimer.current = setTimeout(() => {
       advanceTimer.current = null;
-      answeredTabRef.current = null;
       moveToTab(Math.min(tabRef.current + 1, totalTabs - 1));
       moveToOption(0);
     }, 150);
