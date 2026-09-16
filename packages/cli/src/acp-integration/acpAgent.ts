@@ -89,6 +89,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
+  ToolErrorType,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
@@ -140,6 +141,7 @@ import {
   type ChatRecord,
   type ToolInvocationGuard,
   type WorkflowParams,
+  type WorkflowSourceRef,
   type WorkflowToolResult,
   type WorkflowRunRegistry,
   getWorkflowTaskMutationKey,
@@ -504,6 +506,39 @@ function isSessionOwnedWorkflowTool(
     'buildSessionOwnedBackground' in value &&
     typeof value.buildSessionOwnedBackground === 'function'
   );
+}
+
+/**
+ * Start a session-owned run, reporting a rejected parameter as one.
+ *
+ * `buildSessionOwnedBackground` validates the call the way the tool would for
+ * the model — a `sourceRef` that is not `{id, revision}`, an empty script —
+ * and throws a plain `Error`. Left alone that reaches the caller as an
+ * internal error, which reads as a daemon fault rather than the request
+ * problem it is.
+ */
+async function startSessionOwnedWorkflow(
+  tool: SessionOwnedWorkflowTool,
+  params: Omit<WorkflowParams, 'run_in_background'>,
+  workflowName: string | undefined,
+): Promise<WorkflowToolResult> {
+  let invocation;
+  try {
+    invocation = tool.buildSessionOwnedBackground(params, workflowName);
+  } catch (error) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const result = await invocation.execute(new AbortController().signal);
+  if (result.error?.type === ToolErrorType.INVALID_TOOL_PARAMS) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      result.error.message,
+    );
+  }
+  return result;
 }
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -8521,6 +8556,8 @@ class QwenAgent implements Agent {
         sourceRef: true,
         agentStepId: true,
         workflowStepId: true,
+        runSavedArgs: true,
+        runScript: true,
       },
       savedWorkflows,
     };
@@ -12559,22 +12596,39 @@ class QwenAgent implements Agent {
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           );
         }
+        // What the two start actions run with. A retry or rerun replays the
+        // original run's own args and `sourceRef` — that is what keeps it the
+        // same run — so anything sent alongside those actions is ignored.
+        const startInput: Omit<WorkflowParams, 'run_in_background'> = {
+          // `args` is any JSON value, `null` included, so presence decides.
+          ...(Object.hasOwn(params, 'args') ? { args: params['args'] } : {}),
+          ...(params['sourceRef'] !== undefined
+            ? { sourceRef: params['sourceRef'] as WorkflowSourceRef }
+            : {}),
+        };
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         if (!this.canUseWorkflowControls(config)) {
           return { changed: false };
         }
+        // `taskId` is a run id for the control actions, a definition name for
+        // `run-saved` and the caller's own start key for `run-script`. Each
+        // namespace claims separately, so one cannot block another; within a
+        // namespace, a second concurrent start of the same key is refused.
         const mutationClaim =
           action === 'run-saved'
             ? getWorkflowTaskMutationKey(config, taskId, 'saved')
-            : getWorkflowTaskMutationKey(config, taskId);
+            : action === 'run-script'
+              ? getWorkflowTaskMutationKey(config, taskId, 'script')
+              : getWorkflowTaskMutationKey(config, taskId);
         if (action === 'delete-history') {
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
@@ -12622,14 +12676,56 @@ class QwenAgent implements Agent {
                   'The workflow tool is unavailable; cannot run this saved workflow.',
                 );
               }
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  {
-                    scriptPath: savedWorkflow.scriptPath,
-                  },
-                  savedWorkflow.name,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, scriptPath: savedWorkflow.scriptPath },
+                savedWorkflow.name,
+              );
+              const startedTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              return startedTask
+                ? {
+                    changed: true,
+                    status: startedTask.status,
+                    taskId: startedTask.runId,
+                  }
+                : { changed: false };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        if (action === 'run-script') {
+          const script = params['script'];
+          if (typeof script !== 'string' || script.length === 0) {
+            throw RequestError.invalidParams(
+              { errorKind: 'workflow_invalid_params' },
+              '`script` is required for the "run-script" action',
+            );
+          }
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'The workflow tool is unavailable; cannot run this script.',
+                );
+              }
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, script },
+                // No definition name: a caller-supplied script is named by its
+                // own `export const meta`, which is where the run's label
+                // comes from when no saved workflow backs it.
+                undefined,
+              );
               const startedTask = result.workflowRunId
                 ? registry.get(result.workflowRunId)
                 : undefined;
@@ -12710,12 +12806,11 @@ class QwenAgent implements Agent {
                 ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  startParams,
-                  readableScriptPath ? task.workflowName : undefined,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                startParams,
+                readableScriptPath ? task.workflowName : undefined,
+              );
               if (action === 'rerun') {
                 const rerunTask = result.workflowRunId
                   ? registry.get(result.workflowRunId)

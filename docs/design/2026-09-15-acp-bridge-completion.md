@@ -485,7 +485,7 @@ This is evidence for this integration, not a relabeling of earlier artifacts.
 The ordinary-prompt fixtures retain the background/permission and latency
 coverage limits above; historical full-workspace acceptance remains open.
 
-## Current conflict follow-up: idle-child reclamation integration
+## Idle-child reclamation integration at `3a00c42948`
 
 Integration with main `9071c4eb705cf92ba517e007eb03b6178d7b8352` ports #11940
 idle-child reclamation to the extracted boundary, including candidate recency,
@@ -552,3 +552,21 @@ failure mechanism locally; it does not establish the environment or cause of
 the earlier Linux run. The three observations remain separate from the
 historical full-workspace failures. Evidence is under
 `.qwen/investigations/issue-11866-conflict2/skills-*`.
+
+## Workflow start-input integration
+
+The next main integration, `04721b5dca49e2a100de4d84257a7fa945a698a3`,
+preserves #11979 by moving its workflow-action method into the control plane
+verbatim. It forwards `args`, `sourceRef` and `script`, retains an explicit
+`args: null`, and preserves the old request shape when input is absent. Client
+ownership and the session-reset barrier remain in the same order. The two
+automatically merged ACP agent files match their three-way merge; existing
+EOF cleanup is unchanged.
+
+Before the port, the six unchanged upstream workflow tests had four passes and
+two assertion failures for lost fields. After the port, all six passed with
+the same test bytes. The built method was also inspected; this is source-test
+and build evidence, not a new real-daemon E2E run. Historical process results
+above remain tied to their original commits. Fresh integration checks and
+final audits are recorded in the PR follow-up; raw reproduction and verification
+are under `.qwen/investigations/issue-11866-conflict3/`.
