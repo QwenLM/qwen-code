@@ -69,12 +69,37 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # A bare `npm ci` has no retry: run 34700339334's build leg died at this
+      # step before any test ran, on a tree whose install reproduces clean,
+      # and every leg behind `needs: [build]` went down with it. The bounded
+      # retry is the recipe repo-hygiene.yml and qwen-autofix.yml already wrap
+      # their installs in (registry blips; ETXTBSY when an install script
+      # execs a binary npm has not finished writing). A deterministically
+      # broken tree fails all three attempts and stays red. A recovered
+      # attempt annotates a ::warning:: so the absorbed transient stays
+      # countable even though the job concludes green — the same rule the
+      # upload-artifact retry below states verbatim.
+      # web-shell-browser-regression is the one site where this loop wraps
+      # more than an install: that job has no build step of its own, so
+      # prepare's build+bundle runs inside the retry, and a deterministically
+      # broken tree there reddens only after three full builds.
       - name: 'Install dependencies'
         env:
           # The install must not build; the two steps below do it explicitly.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::npm ci failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Build project'
         run: |-
@@ -256,7 +281,18 @@ jobs:
           # so it keeps building during install.)
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::npm ci failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -371,7 +407,18 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::npm ci failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -439,7 +486,18 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::npm ci failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -502,7 +560,18 @@ jobs:
           # outputs instead.
           QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::npm ci failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       # The bundle and workspace dist/ trees come from the `build` job.
       - name: 'Download build artifact'
@@ -547,9 +616,24 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # No QWEN_SKIP_PREPARE here on purpose (the job has no build step of
+      # its own), so this loop retries prepare's build+bundle too — the
+      # widened cost and failure class are recorded at the build job's
+      # install step.
       - name: 'Install dependencies'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::npm ci failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Install Playwright Chromium'
         run: |-
