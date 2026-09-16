@@ -213,6 +213,9 @@ async function execute(message: ExecuteMessage): Promise<void> {
   let cpuDeadline = Date.now() + remainingCpuMs;
   let cpuPaused = false;
   runtime.setInterruptHandler(() => !cpuPaused && Date.now() >= cpuDeadline);
+  // The parent starts the guest wall clock on this frame, so process boot and
+  // WASM load are not charged against timeoutMs.
+  write({ type: 'started' });
   const vm = runtime.newContext();
   const pending = new Map<string, QuickJSDeferredPromise>();
   const timers = new Map<

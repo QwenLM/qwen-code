@@ -26,7 +26,9 @@ import {
   getTranscriptDir,
   planManagedAutoMemoryDreamByAgent,
 } from './dreamAgentPlanner.js';
+import { applyDreamOperations } from './dream-operations.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
@@ -53,6 +55,7 @@ describe('dreamAgentPlanner', () => {
       getApprovalMode: vi.fn(),
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
       getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
   });
@@ -121,10 +124,82 @@ describe('dreamAgentPlanner', () => {
 
     expect(prompt).toContain('`pinned/`');
     expect(prompt).toContain('Skip `pinned/` during Dream');
+    expect(prompt).toContain('description`, `category`, `usage_scenarios`');
+    expect(prompt).toContain('2-6 discriminative retrieval terms');
+    expect(prompt).toContain('at most 64 characters');
+    for (const category of AUTO_MEMORY_TREE_CATEGORIES) {
+      expect(prompt).toContain(category);
+    }
     expect(prompt).toContain(
       'Do not intentionally remove existing index entries for valid `pinned/` files',
     );
     expect(prompt).toContain('normal index limits still apply');
+  });
+
+  it('gives the Dream agent a manifest example the runtime accepts', async () => {
+    const memoryRoot = path.join(tempDir, 'dream-root');
+    const prompt = buildConsolidationTaskPrompt(
+      memoryRoot,
+      path.join(tempDir, 'transcripts'),
+      { runtimeManagedOperations: true },
+    );
+    expect(prompt).toContain('must also appear in `delete`');
+    const example = prompt.match(/`(\{"version":1[^`]*\})`/)?.[1];
+    expect(example).toBeDefined();
+    const manifest = JSON.parse(example!) as {
+      delete: string[];
+      operations: Array<
+        | { type: 'dedupe'; sources: string[]; target: string }
+        | { type: 'split'; source: string; targets: string[] }
+      >;
+    };
+    const writeDoc = async (relativePath: string, name: string) => {
+      const filePath = path.join(memoryRoot, relativePath);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      const content = [
+        '---',
+        `name: ${name}`,
+        'description: Dream operations fixture',
+        'type: project',
+        'category: project_introduction',
+        'keywords:',
+        '  - dream operations',
+        '  - manifest example',
+        'usage_scenarios:',
+        '  - verifying dream manifests',
+        '---',
+        'Body.',
+      ].join('\n');
+      await fs.writeFile(filePath, content, 'utf-8');
+      return content;
+    };
+    await fs.mkdir(memoryRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(memoryRoot, '.dream-operations.json'),
+      JSON.stringify(manifest),
+      'utf-8',
+    );
+    const beforeSnapshot = new Map<string, { content: string }>();
+    for (const relativePath of manifest.delete) {
+      beforeSnapshot.set(relativePath, {
+        content: await writeDoc(relativePath, `deleted ${relativePath}`),
+      });
+    }
+    for (const operation of manifest.operations) {
+      const targets =
+        operation.type === 'dedupe' ? [operation.target] : operation.targets;
+      for (const relativePath of targets) {
+        await writeDoc(relativePath, `target ${relativePath}`);
+      }
+    }
+
+    await expect(
+      applyDreamOperations(memoryRoot, beforeSnapshot),
+    ).resolves.toEqual({
+      deletedPaths: manifest.delete,
+      dedupedEntries: 1,
+      splitEntries: 1,
+    });
   });
 
   it('returns the forked agent result', async () => {
@@ -143,6 +218,10 @@ describe('dreamAgentPlanner', () => {
     expect(result).toBe(mockResult);
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        taskPrompt: expect.stringContaining('.dream-operations.json'),
+        systemPrompt: expect.stringContaining(
+          'discriminative retrieval terms or short phrases',
+        ),
         maxTurns: 8,
         maxTimeMinutes: 5,
         tools: [
@@ -155,6 +234,28 @@ describe('dreamAgentPlanner', () => {
         ],
       }),
     );
+  });
+
+  it('does not inherit the session auto-memory routing contract', async () => {
+    // The session contract routes body access through search_memory /
+    // manage_memory — tools this agent does not have — and forbids the
+    // direct file tools it does have.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+      systemPrompt: string;
+    };
+    expect(params.config.getAutoMemoryPrompt()).toBe('');
+    // The frontmatter format reference travels with the agent's own prompt
+    // instead (it used to arrive via the inherited legacy section).
+    expect(params.systemPrompt).toContain('Memory file format reference:');
+    expect(params.systemPrompt).toContain('usage_scenarios:');
   });
 
   it('threads the configured memory agent timeout into the forked agent', async () => {

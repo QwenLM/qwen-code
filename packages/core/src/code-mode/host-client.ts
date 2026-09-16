@@ -28,9 +28,15 @@ import {
   type ParentMessage,
 } from './protocol.js';
 
-// Startup grace must cover host spawn + QuickJS WASM init, which takes
-// several seconds on slow or heavily loaded machines.
-const CODE_MODE_HOST_STARTUP_GRACE_MS = 30_000;
+// Boot (process spawn, tsx transform, WASM load) gets its own bound: on
+// oversubscribed runners it dwarfs the guest execution budget.
+const CODE_MODE_HOST_BOOT_TIMEOUT_MS = 30_000;
+// Slack over timeoutMs once the host signals execution start; covers frame
+// I/O and real-time waits the guest CPU budget does not charge. The sandbox
+// legalises guest setTimeout delays far beyond any wall slack without
+// charging them to the CPU budget, so sizing this below the waits a script
+// may legitimately accumulate would SIGKILL budget-compliant work.
+const CODE_MODE_HOST_WALL_GRACE_MS = 30_000;
 
 export interface CodeModeExecutionResult {
   output: string;
@@ -151,9 +157,10 @@ export async function executeCodeMode(
   let terminating = false;
   let protocolError: Error | undefined;
   let wallTimer: ReturnType<typeof setTimeout> | undefined;
-  let wallRemainingMs = timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS;
+  let wallRemainingMs = CODE_MODE_HOST_BOOT_TIMEOUT_MS;
   let wallDeadline = Date.now() + wallRemainingMs;
   let wallPaused = false;
+  let hostStarted = false;
 
   const send = (message: ParentMessage): void => {
     if (!child.stdin.destroyed && !child.stdin.writableEnded) {
@@ -170,10 +177,15 @@ export async function executeCodeMode(
     terminate(child);
   };
   const onWallTimeout = () => {
+    // Name the budget that actually applied: before the host signals
+    // execution start the boot bound is in force, afterwards the guest
+    // budget plus the frame-I/O grace.
     protocolError = new Error(
-      `JavaScript execution timed out after ${
-        timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS
-      }ms (guest budget ${timeoutMs}ms; the code-mode host may not have finished starting).`,
+      hostStarted
+        ? `JavaScript execution timed out after ${
+            timeoutMs + CODE_MODE_HOST_WALL_GRACE_MS
+          }ms (guest budget ${timeoutMs}ms).`
+        : `JavaScript execution timed out after ${CODE_MODE_HOST_BOOT_TIMEOUT_MS}ms (guest budget ${timeoutMs}ms; the code-mode host may not have finished starting).`,
     );
     cancelNested(protocolError);
     terminate(child);
@@ -223,6 +235,15 @@ export async function executeCodeMode(
           });
           cancelNested(protocolError);
           child.stdin.end();
+          continue;
+        }
+        if (message.type === 'started') {
+          hostStarted = true;
+          if (!completed && !protocolError) {
+            if (wallTimer) clearTimeout(wallTimer);
+            wallRemainingMs = timeoutMs + CODE_MODE_HOST_WALL_GRACE_MS;
+            startWallTimer();
+          }
           continue;
         }
         if (terminating) continue;

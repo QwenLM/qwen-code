@@ -490,5 +490,11 @@ export function createMemoryScopedAgentConfig(
 
   return deriveConfig(config, {
     getPermissionManager: () => scopedPm as unknown as PermissionManager,
+    // Memory maintenance agents carry their own memory instructions in their
+    // system/task prompts. The session's auto-memory section routes body
+    // access through search_memory/manage_memory — tools these agents do not
+    // have — and forbids the direct file tools they do have, so it must never
+    // reach their assembled system prompt.
+    getAutoMemoryPrompt: () => '',
   });
 }

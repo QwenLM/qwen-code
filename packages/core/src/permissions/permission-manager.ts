@@ -690,6 +690,8 @@ export class PermissionManager {
     'web_search',
     'todo_write',
     'save_memory',
+    'manage_memory',
+    'search_memory',
     'lsp',
     'cron_create',
     'cron_list',

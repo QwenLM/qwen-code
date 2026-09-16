@@ -28,6 +28,11 @@ import {
   createMemoryScopedAgentConfig,
   isAllowedMemoryPath,
 } from './memory-scoped-agent-config.js';
+import {
+  scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
+} from './scan.js';
+import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_REMEMBER');
 
@@ -87,7 +92,13 @@ async function buildCleanMemorySystemPrompt(
       /* teamSection */ undefined,
       // The remember agent needs the full protocol (type definitions, scope
       // routing, exclusion rules) to write correct memories — do not remove.
-      { forceFullProtocol: true },
+      {
+        forceFullProtocol: true,
+        keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
+          await scanUserAutoMemoryTopicDocuments().catch(() => []),
+          { scopes: ['user'] },
+        ),
+      },
     );
   }
 
@@ -106,7 +117,13 @@ async function buildCleanMemorySystemPrompt(
       indexContent: await readUserAutoMemoryIndex().catch(() => null),
     };
   }
-  const projectIndex = await readAutoMemoryIndex(projectRoot);
+  const [projectIndex, projectDocs, userDocs] = await Promise.all([
+    readAutoMemoryIndex(projectRoot),
+    scanAutoMemoryTopicDocuments(projectRoot),
+    scope === 'project'
+      ? Promise.resolve([])
+      : scanUserAutoMemoryTopicDocuments().catch(() => []),
+  ]);
 
   return buildManagedAutoMemoryPrompt(
     getAutoMemoryRoot(projectRoot),
@@ -115,7 +132,13 @@ async function buildCleanMemorySystemPrompt(
     /* teamSection */ undefined,
     // The remember agent needs the full protocol (type definitions, scope routing,
     // exclusion rules) to write correct memories — do not remove.
-    { forceFullProtocol: true },
+    {
+      forceFullProtocol: true,
+      keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
+        [...userDocs, ...projectDocs],
+        { scopes: scope === 'project' ? ['project'] : ['user', 'project'] },
+      ),
+    },
   );
 }
 
@@ -382,6 +405,11 @@ export async function runManagedRememberByAgent(params: {
     );
   }
 
+  if (touchedScopes.includes('user')) {
+    await params.config
+      .getMemoryManager()
+      .recordUserMutation(params.projectRoot, params.config);
+  }
   await rebuildWrittenScopes();
 
   return {
