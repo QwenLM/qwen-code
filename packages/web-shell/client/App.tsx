@@ -5455,6 +5455,7 @@ export function App({
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
       sourcePreview = false,
+      silentUnavailable = false,
     ) => {
       if (
         onWorkspaceFileOpen &&
@@ -5500,7 +5501,11 @@ export function App({
         };
         setArtifactPanelTabs((tabs) =>
           tabs.some((item) => item.id === tab.id)
-            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            ? tabs.map((item) =>
+                item.id === tab.id && item.kind === 'file'
+                  ? { ...tab, previewVersion: (item.previewVersion ?? 0) + 1 }
+                  : item,
+              )
             : [tab, ...tabs],
         );
         setActiveArtifactPanelTabId(tab.id);
@@ -5550,7 +5555,8 @@ export function App({
           })
           .catch((error: unknown) => {
             if (!owner.isCurrent()) return;
-            pushToast('error', formatError(error, 'Failed to preview file'));
+            if (!silentUnavailable)
+              pushToast('error', formatError(error, 'Failed to preview file'));
           });
         return;
       }
@@ -6664,6 +6670,8 @@ export function App({
           },
           request.workspaceCwd,
           request.sourceSessionId,
+          false,
+          request.silentUnavailable,
         );
         return;
       }
@@ -10919,26 +10927,71 @@ export function App({
     lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId, connection.workspaceCwd]);
 
+  // A recap is one local annotation shared by both triggers: the latest request
+  // owns it, so a newer recap replaces the previous one instead of accumulating
+  // in the transcript. Each request writes under the generation it was issued
+  // with, so a slow answer cannot replace a newer recap.
+  const recapRequestRef = useRef(0);
+
+  const showRecapMessage = useCallback(
+    (
+      requestId: number,
+      content: string,
+      anchor?: {
+        messageId: string;
+        anchorAfterId?: string;
+        anchorIndex: number;
+      },
+    ) => {
+      // A superseded request must not write, but it must still drop the row it
+      // owns: an answer that never lands would otherwise strand the manual
+      // path's "Generating recap" placeholder in the transcript.
+      const ownMessageId = anchor?.messageId;
+      if (requestId !== recapRequestRef.current) {
+        if (ownMessageId) {
+          setRecapMessage((previous) =>
+            previous?.message.id === ownMessageId ? null : previous,
+          );
+        }
+        return;
+      }
+      const currentMessages = messagesRef.current;
+      setRecapMessage({
+        anchorAfterId: anchor
+          ? anchor.anchorAfterId
+          : currentMessages.at(-1)?.id,
+        anchorIndex: anchor ? anchor.anchorIndex : currentMessages.length,
+        message: {
+          id: ownMessageId ?? `local-recap-${nextRecapMessageIdRef.current++}`,
+          role: 'system',
+          content,
+          variant: 'info',
+          source: 'recap',
+        },
+      });
+    },
+    [],
+  );
+
   const runVisibleRecap = useCallback(() => {
     if (sessionWriteBlocked) return;
     if (!requireActiveSessionForLocalCommand()) return;
+    recapRequestRef.current += 1;
+    const requestId = recapRequestRef.current;
     const messageId = `local-recap-${nextRecapMessageIdRef.current++}`;
     const currentMessages = messagesRef.current;
-    const anchorIndex = currentMessages.length;
-    const anchorAfterId = currentMessages.at(-1)?.id;
+    const anchor = {
+      messageId,
+      anchorIndex: currentMessages.length,
+      anchorAfterId: currentMessages.at(-1)?.id,
+    };
     const sessionId = connection.sessionId;
     const workspaceCwd = connection.workspaceCwd;
-    setRecapMessage({
-      anchorAfterId,
-      anchorIndex,
-      message: {
-        id: messageId,
-        role: 'system',
-        content: `※ ${t('recap.label')}: ${t('recap.loading')}`,
-        variant: 'info',
-        source: 'recap',
-      },
-    });
+    showRecapMessage(
+      requestId,
+      `※ ${t('recap.label')}: ${t('recap.loading')}`,
+      anchor,
+    );
     sessionActions.recapSession().then(
       (result) => {
         if (
@@ -10946,19 +10999,13 @@ export function App({
           connectionRef.current.workspaceCwd !== workspaceCwd
         )
           return;
-        setRecapMessage({
-          anchorAfterId,
-          anchorIndex,
-          message: {
-            id: messageId,
-            role: 'system',
-            content: result.recap
-              ? `※ ${t('recap.label')}: ${result.recap}`
-              : t('recap.empty'),
-            variant: 'info',
-            source: 'recap',
-          },
-        });
+        showRecapMessage(
+          requestId,
+          result.recap
+            ? `※ ${t('recap.label')}: ${result.recap}`
+            : t('recap.empty'),
+          anchor,
+        );
       },
       (error: unknown) => {
         if (
@@ -10966,7 +11013,8 @@ export function App({
           connectionRef.current.workspaceCwd !== workspaceCwd
         )
           return;
-        setRecapMessage(null);
+        // A stale failure must not clear a newer recap.
+        if (requestId === recapRequestRef.current) setRecapMessage(null);
         if (!isAbortError(error) && !isAlreadyDispatched(error)) {
           console.warn('[web-shell] unhandled recap failure', error);
         }
@@ -10978,6 +11026,7 @@ export function App({
     requireActiveSessionForLocalCommand,
     sessionWriteBlocked,
     sessionActions,
+    showRecapMessage,
     t,
   ]);
 
@@ -11851,6 +11900,10 @@ export function App({
       return;
     }
     autoRecapVersionRef.current += 1;
+    // Clearing the screen wipes the transcript, so it also drops every recap:
+    // the one on screen and any request still in flight.
+    recapRequestRef.current += 1;
+    setRecapMessage(null);
     lastRecapBlockCountRef.current = 0;
     store.reset();
   }, [store, t]);
@@ -12488,6 +12541,8 @@ export function App({
       // Local-only commands also append user blocks. Treat any new visible user
       // activity as invalidating the recap rather than risk placing it too late.
       const userBlockId = getLatestUserBlockId(store.getSnapshot().blocks);
+      recapRequestRef.current += 1;
+      const recapRequestId = recapRequestRef.current;
       sessionActions.recapSession().then(
         (result) => {
           const currentUserBlockId = getLatestUserBlockId(
@@ -12517,13 +12572,10 @@ export function App({
             return;
           }
           if (result.recap) {
-            store.dispatch([
-              {
-                type: 'status',
-                text: `※ ${t('recap.label')}: ${result.recap}`,
-                source: 'recap',
-              },
-            ]);
+            showRecapMessage(
+              recapRequestId,
+              `※ ${t('recap.label')}: ${result.recap}`,
+            );
           }
         },
         (error: unknown) => {
@@ -12539,6 +12591,7 @@ export function App({
     sessionActions,
     sessionOwnerGuard,
     sessionWriteBlocked,
+    showRecapMessage,
     store,
     t,
   ]);
