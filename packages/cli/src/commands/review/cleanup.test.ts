@@ -949,6 +949,36 @@ describe('runCleanup', () => {
       '/repo/.qwen/tmp/review-pr-123-base.lock',
       { recursive: true, force: true },
     );
+    // ...AND the host-side one, once the tree it guards is gone (the default
+    // `existsSync` answer above): the lease-release reclaim skips locks, so
+    // without this sweep a killed builder's lock outlived its tree and wedged
+    // the next review of this PR for the whole staleness window — every ask
+    // took EEXIST from `mkdirSync` and reported "another probe is building —
+    // the fast path will then reuse it" over a tree this command had already
+    // removed, a recovery that cannot happen.
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/review-leases/base-tree/pr-123/review-pr-123-base.lock',
+      { recursive: true, force: true },
+    );
+  });
+
+  it('keeps the host-side base-tree build lock while its tree still stands', () => {
+    // The release is keyed on the tree being GONE: a base tree that would not
+    // delete may still have a killed builder's container writing into it, and
+    // removing its lock lets the next review build over that tree at once,
+    // where a lock that ages out at least holds the next build off for the
+    // staleness window.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation(
+      (path: string) => path === '/repo/.qwen/tmp/review-pr-123-base',
+    );
+
+    runCleanup('pr-123');
+
+    const hostSide = mocks.rmSync.mock.calls
+      .map(([path]) => String(path))
+      .filter((path) => path.startsWith('/repo/.qwen/review-leases/base-tree'));
+    expect(hostSide).toEqual([]);
   });
 
   it('never sweeps lease files, even for a target whose name collides with the lease prefix (#9205)', () => {

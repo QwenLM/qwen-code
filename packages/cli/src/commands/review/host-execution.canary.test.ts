@@ -58,7 +58,44 @@ import { loadCombined } from './load-rules.js';
 import { runRevertHunk } from './revert-hunk.js';
 import type { BuildTestReport } from './build-test.js';
 import { baseWorktreePath } from './lib/paths.js';
-import { runEpochMs } from './lib/prompt-record.js';
+import {
+  baseTreeTrustPath,
+  establishTrust,
+  recordBuiltTree,
+  runIdentity,
+} from './lib/base-tree-trust.js';
+import {
+  createReviewWorktreeLease,
+  recordReviewWorktreeLeaseMergeBase,
+} from '../../services/review-worktree-lease.js';
+
+/**
+ * The lease fetch-pr holds for the whole review — the run identity the mount
+ * cannot touch, and the only source of one: `runIdentity` refuses rather
+ * than falling back to anything inside the mount, so `base-tree` reports
+ * itself unavailable without this and the canary would pass for the wrong
+ * reason.
+ */
+const acquireLease = (
+  repo: string,
+  worktree: string,
+  mergeBaseSha?: string,
+): void => {
+  createReviewWorktreeLease({
+    sessionId: 'canary-session',
+    promptId: 'canary-prompt',
+    target: 'pr-1',
+    repositoryRoot: repo,
+    worktreePath: worktree,
+    branch: 'qwen-review/pr-1',
+  });
+  // The capture records the merge base it resolved, host-side, which
+  // `base-tree` now refuses to proceed without — its absence handed the
+  // mount-writable plan back its sole authority over the sha the run builds.
+  if (mergeBaseSha) {
+    recordReviewWorktreeLeaseMergeBase(repo, 'pr-1', mergeBaseSha);
+  }
+};
 
 // On Windows `mountRootFor` refuses every absolute path (a drive letter is a
 // colon), so containment cannot exist there and the question this file asks has
@@ -274,31 +311,35 @@ describe('a planted repository reaches no host-side execution', () => {
     'the base-tree reuse fast path does not certify a planted tree (base-tree)',
     () => {
       // The entrance a census found rather than the review: the reuse branch
-      // RETURNS before the gate that guards the rebuild, on two facts that both
-      // live inside the mount — a marker file in the base tree, and
-      // `rev-parse HEAD` resolved through that tree's own `.git`. Reused, the
-      // A/B's BASE side is the reviewed code's own tree, and every "the base
-      // behaves differently" verdict belongs to its author.
+      // RETURNS before the gate that guards the rebuild, on a fact that lives
+      // inside the mount — `rev-parse HEAD` resolved through that tree's own
+      // `.git`. Reused, the A/B's BASE side is the reviewed code's own tree,
+      // and every "the base behaves differently" verdict belongs to its
+      // author. The fence's certification is the host-side trust record; the
+      // in-tree marker is a note it no longer reads, so the fixture writes
+      // the record through the real helpers.
       const repo = repository();
       const canaryDir = tmp('qwen-canary-out-');
       const canary = join(canaryDir, 'PWNED');
       const worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
       g(repo, 'worktree', 'add', '-q', '--detach', worktree, 'HEAD');
       const baseSha = g(worktree, 'rev-parse', 'HEAD');
-      // The base tree the pipeline would build, standing and marked. Through
-      // the real path helper, so the fixture cannot drift from the location
-      // the command actually reuses.
+      acquireLease(repo, worktree, baseSha);
+      // The base tree the pipeline would build, standing and RECORDED.
+      // Through the real helpers, so the fixture cannot drift from the state
+      // the command actually trusts.
       const tree = baseWorktreePath(worktree);
       g(repo, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
       const plan = join(repo, 'plan.json');
       writeFileSync(plan, `${JSON.stringify({ mergeBaseSha: baseSha })}\n`);
-      // Stamped with THIS run's epoch, so the reuse branch reaches the pointer
-      // gate this test is about instead of being turned away by the epoch fence
-      // that keeps an earlier run's tree from being reused at all.
-      writeFileSync(
-        join(tree, '.qwen-review-base-ok'),
-        `${baseSha}\n${runEpochMs(plan)}\n`,
-      );
+      const trustPath = baseTreeTrustPath(worktree, plan);
+      const identityMs = runIdentity(worktree).identity;
+      establishTrust(trustPath, identityMs, baseSha);
+      recordBuiltTree(trustPath, identityMs, tree, {
+        baseSha,
+        state: 'ok',
+        untracked: {},
+      });
       const common = plantRepository(
         join(repo, '.qwen', 'tmp', '.evil-common'),
         join(repo, '.git'),
@@ -329,6 +370,59 @@ describe('a planted repository reaches no host-side execution', () => {
       });
 
       expect(JSON.stringify(report)).not.toContain('reusing it');
+      expect(existsSync(canary)).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'the base-tree record step does not measure through a pointer rewritten during the build (base-tree)',
+    () => {
+      // The build holds the fresh base tree read-write for minutes. A
+      // gitfile rewritten in that window turns the fence's own
+      // evidence-gathering — the residue listing that feeds the host-side
+      // record — into reads through the plant, on the host. The record step
+      // re-asks the pointer question first, and declines rather than
+      // certifying what it cannot safely measure.
+      const repo = repository();
+      const canaryDir = tmp('qwen-canary-out-');
+      const canary = join(canaryDir, 'PWNED');
+      const worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
+      g(repo, 'worktree', 'add', '-q', '--detach', worktree, 'HEAD');
+      const baseSha = g(worktree, 'rev-parse', 'HEAD');
+      acquireLease(repo, worktree, baseSha);
+      const plan = join(repo, 'plan.json');
+      writeFileSync(plan, `${JSON.stringify({ mergeBaseSha: baseSha })}\n`);
+
+      const report = runBaseTree({
+        plan,
+        worktree,
+        timeout: 60_000,
+        install: false,
+        build: (w) => {
+          // The reviewed code's move, mid-build: rewrite the new tree's
+          // pointer at a planted repository carrying a clean filter.
+          const common = plantRepository(
+            join(repo, '.qwen', 'tmp', '.evil-common'),
+            join(repo, '.git'),
+            canary,
+          );
+          plantAdminEntry(
+            join(repo, '.qwen', 'tmp', '.evil-git'),
+            join(repo, '.git', 'worktrees', basename(w)),
+            w,
+            common,
+          );
+          return {
+            ok: true,
+            toolchain: 'npm',
+            build: [{ command: 'npm run build', exitCode: 0 }],
+            note: 'built',
+          } as unknown as BuildTestReport;
+        },
+      });
+
+      expect(report.available).toBe(false);
+      expect(JSON.stringify(report)).toContain('rewritten during the build');
       expect(existsSync(canary)).toBe(false);
     },
   );
