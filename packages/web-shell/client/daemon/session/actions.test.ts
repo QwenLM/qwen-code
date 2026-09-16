@@ -1718,7 +1718,7 @@ describe('createDaemonSessionActions', () => {
         vi.useFakeTimers();
         const deferred = createDeferred<DaemonSessionClient>();
         try {
-          const { client } = createTimedCreateClient({
+          const { client, fetch } = createTimedCreateClient({
             sessionDelayMs: 120_000,
           });
           const requestStarted = Date.now();
@@ -1730,11 +1730,32 @@ describe('createDaemonSessionActions', () => {
             }));
           await vi.runAllTimersAsync();
           const requestResult = await request;
+          expect(fetch).toHaveBeenCalledTimes(1);
           expect(requestResult).toMatchObject({
             error: { name: 'TimeoutError' },
           });
           if (!('elapsedMs' in requestResult))
             throw new Error('Expected SDK timeout');
+          const singleRequestBudgetMs = requestResult.elapsedMs;
+
+          const { client: preflightClient } = createTimedCreateClient({
+            capabilitiesDelayMs: 120_000,
+          });
+          const preflightStarted = Date.now();
+          const preflight = preflightClient
+            .capabilities()
+            .catch((error: unknown) => ({
+              error,
+              elapsedMs: Date.now() - preflightStarted,
+            }));
+          await vi.runAllTimersAsync();
+          const preflightResult = await preflight;
+          expect(preflightResult).toMatchObject({
+            error: { name: 'TimeoutError' },
+          });
+          if (!('elapsedMs' in preflightResult))
+            throw new Error('Expected capability preflight timeout');
+          expect(preflightResult.elapsedMs).toBe(singleRequestBudgetMs);
 
           const { actions, existing } = createWorkspaceCreateHarness(
             path,
@@ -1761,7 +1782,7 @@ describe('createDaemonSessionActions', () => {
           if (!('elapsedMs' in createResult))
             throw new Error('Expected create timeout');
           expect(createResult.elapsedMs).toBeGreaterThanOrEqual(
-            2 * requestResult.elapsedMs + 15_000,
+            preflightResult.elapsedMs + singleRequestBudgetMs + 15_000,
           );
           expect(vi.getTimerCount()).toBe(0);
         } finally {
