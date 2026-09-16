@@ -339,15 +339,28 @@ export class PermissionManager {
     // already does): bash hands a body to the reading command as data and
     // never tokenizes it, so it must not drive the splitter's comment, quote
     // or substitution state.
+    //
+    // A collapsed split is still evaluated per segment: dropping a
+    // comment-only segment, or stripping a heredoc body, can leave exactly one
+    // segment whose text is not the raw command. Matching the raw text instead
+    // anchors the rule pattern on the discarded prefix, so `# cleanup\nrm -rf
+    // x` misses `Bash(rm *)` and a configured deny degrades to ask.
     let bashDecision: PermissionDecision;
     if (command !== undefined) {
       const subCommands = splitCompoundCommand(stripHeredocBodies(command));
       if (subCommands.length > 1) {
         bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
       } else {
-        bashDecision = this.evaluateSingle(ctx);
+        const only = subCommands[0] ?? command;
+        bashDecision = this.evaluateSingle(
+          only === command ? ctx : { ...ctx, command: only },
+        );
         // For shell commands, resolve 'default' to actual permission via AST
-        // analysis so the caller always sees a concrete verdict.
+        // analysis so the caller always sees a concrete verdict. The AST
+        // read-only classifier keeps seeing the RAW command: the projection
+        // above drops text bash still reads (a heredoc body), and classifying
+        // the projection is what turns `cat <<EOF\n# hi ; rm -rf /\nEOF` from
+        // allow into ask.
         if (
           bashDecision === 'default' &&
           SHELL_TOOL_NAMES.has(toolName) &&
@@ -959,10 +972,12 @@ export class PermissionManager {
     // ── Compound-command pass ────────────────────────────────────────────
     // Mirrors evaluate(): each segment is evaluated independently, so a deny
     // rule matching any segment is the deciding rule. Recurse per segment so
-    // nested compounds and per-segment virtual ops are covered.
+    // nested compounds and per-segment virtual ops are covered. A split that
+    // collapsed to one projected segment is recursed into too, or the raw text
+    // below would anchor the pattern on the discarded prefix (#11821).
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(stripHeredocBodies(command));
-      if (subCommands.length > 1) {
+      if (subCommands.length > 1 || subCommands[0] !== command) {
         for (const subCmd of subCommands) {
           const rule = this.findMatchingDenyRule({ ...ctx, command: subCmd });
           if (rule) {
@@ -1118,7 +1133,7 @@ export class PermissionManager {
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(stripHeredocBodies(command));
-      if (subCommands.length > 1) {
+      if (subCommands.length > 1 || subCommands[0] !== command) {
         return subCommands.some((subCmd) =>
           this.hasRelevantRules({ ...ctx, command: subCmd }),
         );
@@ -1216,7 +1231,7 @@ export class PermissionManager {
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(stripHeredocBodies(command));
-      if (subCommands.length > 1) {
+      if (subCommands.length > 1 || subCommands[0] !== command) {
         return subCommands.some((subCmd) =>
           this.hasMatchingAskRule({ ...ctx, command: subCmd }),
         );

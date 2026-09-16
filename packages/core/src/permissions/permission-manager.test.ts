@@ -3048,6 +3048,77 @@ describe('PermissionManager', () => {
         await pm.evaluate({ toolName: 'run_shell_command', command }),
       ).toBe('deny');
     });
+
+    // Dropping a comment-only segment is right, but when the command holds
+    // exactly ONE real command the split collapses to one segment, and every
+    // Bash-rule consumer gated per-segment evaluation on
+    // `subCommands.length > 1`. The `else` branch then matched the RAW text,
+    // which still starts with the comment line, so the anchored `Bash(rm *)`
+    // pattern could not match: a configured deny degraded to ask, which
+    // `--approval-mode yolo` auto-approves, while bash runs the rm
+    // (`bash --noprofile --norc -xc` traces `+ rm -rf poc.flag` on 5.3 and 3.2).
+    // Pinned at evaluate level: the segments are the mechanism, the verdict is
+    // what fails open.
+    it.each([
+      ['a full-line comment', '# cleanup temp files\nrm -rf poc.flag'],
+      ['a shebang line', '#!/bin/sh\nrm -rf poc.flag'],
+    ])(
+      '%s above the only real command: deny still fires',
+      async (_where, command) => {
+        pm = new PermissionManager(
+          makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      },
+    );
+
+    // An unquoted `<<` inside `$(( … ))` is bash's left-shift operator, but the
+    // heredoc scan tracked quote and escape state only, so it registered the
+    // right operand as a delimiter. No later line satisfies it, so the strip
+    // deleted every remaining line and the `rm` never reached a rule. bash
+    // traces `+ echo 8` and then `+ rm -rf poc.flag`. Quoted spellings
+    // (`"$((1 << 3))"`) were already safe and stay that way.
+    it.each([
+      ['a shift in an echo', 'echo $((1 << 3))\nrm -rf poc.flag'],
+      ['a shift in an assignment', 'x=$((1<<20))\nrm -rf poc.flag'],
+      [
+        'a shift inside a test',
+        'if [ $((1<<2)) -gt 2 ]; then echo y; fi\nrm -rf poc.flag',
+      ],
+    ])('arithmetic << in %s: deny still fires', async (_where, command) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('deny');
+    });
+
+    // The benefit this PR exists for must survive both fixes above: bash runs
+    // only the `echo`, so the commented-out tail must not drag the hard deny
+    // onto text bash never executes.
+    it('a same-line comment still hides its tail from the deny rule', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo a # c && rm -rf poc.flag',
+        }),
+      ).toBe('allow');
+    });
   });
 
   describe('file path evaluation', () => {

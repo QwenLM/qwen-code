@@ -2200,6 +2200,15 @@ export function stripHeredocBodies(command: string): string {
     pendingDelimiters.push(...getHeredocDelimiters(line));
   }
 
+  // A delimiter that is never satisfied means the `<<` that registered it was
+  // not a heredoc operator at all — an arithmetic left shift, a `<<` inside a
+  // construct this scan does not model. Deleting every following line on that
+  // guess is fail-open (the dropped lines never reach their own rule check), so
+  // fall back to the unstripped text and let the splitter see the whole command.
+  if (pendingDelimiters.length > 0) {
+    return command;
+  }
+
   return kept.join('\n');
 }
 
@@ -2208,6 +2217,11 @@ function getHeredocDelimiters(line: string): string[] {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
+  // Nesting depth of `$(( … ))` arithmetic. bash reads `<<` there as the
+  // left-shift operator, not as a heredoc, so `echo $((1 << 3))` opens no
+  // heredoc; registering `3` as a delimiter left it unsatisfied and dropped
+  // every following line from the splitter's input (#11821, regression B).
+  let arithDepth = 0;
 
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
@@ -2226,6 +2240,22 @@ function getHeredocDelimiters(line: string): string[] {
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      continue;
+    }
+    // `$(( … ))` opens arithmetic, whose closers are consumed as the `))` pair
+    // below. Everything inside is skipped, so neither a `<<` shift nor a `#`
+    // base prefix can be mistaken for a heredoc operator or a comment there.
+    if (!inSingle && !inDouble && ch === '(' && line[i + 1] === '(') {
+      arithDepth++;
+      i++;
+      continue;
+    }
+    if (arithDepth > 0 && ch === ')' && line[i + 1] === ')') {
+      arithDepth--;
+      i++;
+      continue;
+    }
+    if (arithDepth > 0) {
       continue;
     }
     // A word-initial `#` starts a comment (the escape check above already
