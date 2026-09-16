@@ -224,6 +224,7 @@ export {
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionWorkflowTaskStatus,
+  type DaemonWorkflowActionInput,
   type DaemonWorkflowApprovalStatusEntry,
   type DaemonWorkflowSizeWarning,
   type DaemonWorkflowDispatchStatus,
