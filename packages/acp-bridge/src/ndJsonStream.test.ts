@@ -989,7 +989,7 @@ describe('ndJsonStream', () => {
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
     const onTransportError = vi.fn();
     const onMessageReceived = vi.fn();
-    const validateInboundMessage = vi.fn(() => true);
+    const validateInboundMessage = vi.fn((_message: AnyMessage) => true);
     const stream = ndJsonStream(
       new WritableStream<Uint8Array>(),
       byteStream([
