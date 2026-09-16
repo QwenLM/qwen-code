@@ -6,7 +6,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { cleanup } from 'ink-testing-library';
-import { HookEventName } from '@qwen-code/qwen-code-core';
+import {
+  HookEventName,
+  HookType,
+  HooksConfigSource,
+  type HookRegistryEntry,
+  type HookDefinition,
+} from '@qwen-code/qwen-code-core';
 import { HooksManagementDialog } from './HooksManagementDialog.js';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
@@ -38,7 +44,10 @@ function disabledHooksConfig(): ReturnType<typeof useConfig> {
   return {
     getExtensions: vi.fn(() => []),
     getDisableAllHooks: vi.fn(() => true),
+    isSafeMode: () => false,
+    getBareMode: () => false,
     getHookSystem: vi.fn(() => ({
+      getAllHooks: () => [],
       getSessionHooksManager: vi.fn(() => ({
         getAllSessionHooks: vi.fn(() => []),
       })),
@@ -83,8 +92,11 @@ vi.mock('../../contexts/ConfigContext.js', async (importOriginal) => {
     ...actual,
     useConfig: vi.fn(() => ({
       getExtensions: vi.fn(() => []),
+      isSafeMode: () => false,
+      getBareMode: () => false,
       getDisableAllHooks: vi.fn(() => false),
       getHookSystem: vi.fn(() => ({
+        getAllHooks: () => [],
         getSessionHooksManager: vi.fn(() => ({
           getAllSessionHooks: vi.fn(() => []),
         })),
@@ -154,7 +166,31 @@ function createKey(name: string, sequence = ''): Key {
   };
 }
 
-function mockSettingsHooks(userHooks: Record<string, unknown>): void {
+function mockRegistryHooks(entries: HookRegistryEntry[]): void {
+  const config = mockedUseConfig()!;
+  vi.mocked(config.getHookSystem).mockReturnValue({
+    getAllHooks: () => entries,
+    getSessionHooksManager: () => ({ getAllSessionHooks: () => [] }),
+  } as unknown as ReturnType<typeof config.getHookSystem>);
+  mockedUseConfig.mockReturnValue(config);
+}
+
+function mockSettingsHooks(userHooks: Record<string, HookDefinition[]>): void {
+  mockRegistryHooks(
+    Object.entries(userHooks).flatMap(([eventName, definitions]) =>
+      definitions.flatMap((definition) =>
+        definition.hooks.map((config) => ({
+          config,
+          eventName: eventName as HookEventName,
+          matcher: definition.matcher,
+          sequential: definition.sequential,
+          enabled: true,
+          source: HooksConfigSource.User,
+        })),
+      ),
+    ),
+  );
+
   mockedUseSettings.mockReturnValue({
     forScope: vi.fn((scope: SettingScope) => ({
       settings:
@@ -174,6 +210,15 @@ describe('HooksManagementDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedUseConfig.mockReset();
+    mockedUseConfig.mockReturnValue({
+      getExtensions: () => [],
+      getDisableAllHooks: () => false,
+      isSafeMode: () => false,
+      getBareMode: () => false,
+      getSessionId: () => 'test-session-id',
+      getHookSystem: vi.fn(),
+    } as unknown as ReturnType<typeof useConfig>);
     mockSettingsHooks({});
     keypressHandler = null;
 
@@ -195,12 +240,12 @@ describe('HooksManagementDialog', () => {
     expect(lastFrame()).toContain('Loading hooks');
   });
 
-  it('uses live session settings without reading settings files again', async () => {
+  it('reads registry hooks without reading settings files or scopes', async () => {
     mockSettingsHooks({
       PreToolUse: [
         {
           matcher: 'Read',
-          hooks: [{ type: 'command', command: 'echo session-settings' }],
+          hooks: [{ type: HookType.Command, command: 'echo session-settings' }],
         },
       ],
     });
@@ -212,7 +257,142 @@ describe('HooksManagementDialog', () => {
       expect(lastFrame()).toContain('1 hook configured');
     });
     expect(mockedLoadSettings).not.toHaveBeenCalled();
-    expect(mockedUseSettings).toHaveBeenCalled();
+    expect(mockedUseSettings).not.toHaveBeenCalled();
+    expect(mockedUseSettings().forScope).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    'shows the actual registry enabled state %s in list and detail',
+    async (enabled) => {
+      mockRegistryHooks([
+        {
+          eventName: HookEventName.PreToolUse,
+          matcher: 'Read',
+          source: HooksConfigSource.User,
+          enabled,
+          config: {
+            type: HookType.Command,
+            command: 'echo state',
+            timeout: 1500,
+            statusMessage: 'Checking files',
+            async: true,
+          },
+          sequential: true,
+        },
+      ]);
+      const { lastFrame } = renderWithProviders(
+        <HooksManagementDialog onClose={mockOnClose} />,
+      );
+      await vi.waitFor(() =>
+        expect(lastFrame()).toContain('1 hook configured'),
+      );
+      pressKey('return');
+      await vi.waitFor(() => expect(lastFrame()).toContain('[User] Read'));
+      pressKey('return');
+      await vi.waitFor(() => expect(lastFrame()).toContain('echo state'));
+      if (enabled) expect(lastFrame()).not.toContain('disabled');
+      else expect(lastFrame()).toContain('disabled');
+      pressKey('return');
+      await vi.waitFor(() => expect(lastFrame()).toContain('Hook details'));
+      expect(lastFrame()).toMatch(
+        new RegExp(`Status:\\s+${enabled ? 'enabled' : 'disabled'}`),
+      );
+      expect(lastFrame()).toContain('1500 ms');
+      expect(lastFrame()).toContain('Checking files');
+      expect(lastFrame()).toContain('runs in background, sequential');
+    },
+  );
+
+  it('preserves extension annotation in the registry detail', async () => {
+    mockRegistryHooks([
+      {
+        eventName: HookEventName.PreToolUse,
+        matcher: 'Read',
+        source: HooksConfigSource.Extensions,
+        enabled: true,
+        config: {
+          type: HookType.Command,
+          name: 'ext-hook',
+          command: 'echo extension',
+        },
+      },
+    ]);
+    const config = mockedUseConfig()!;
+    config.getExtensions = () =>
+      [
+        {
+          name: 'my-extension',
+          path: '/extensions/my-extension',
+          isActive: true,
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [
+                  {
+                    type: HookType.Command,
+                    name: 'ext-hook',
+                    command: 'echo extension',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ] as ReturnType<typeof config.getExtensions>;
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('1 hook configured'));
+    pressKey('return');
+    await vi.waitFor(() => expect(lastFrame()).toContain('Read'));
+    pressKey('return');
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('Extensions (my-extension)'),
+    );
+    pressKey('return');
+    await vi.waitFor(() => expect(lastFrame()).toContain('Hook details'));
+    expect(lastFrame()).toMatch(/Extension:\s+my-extension/);
+    expect(lastFrame()).toContain('/extensions/my-extension');
+  });
+
+  it('includes session hooks in matcher rows', async () => {
+    const config = mockedUseConfig()!;
+    vi.mocked(config.getHookSystem).mockReturnValue({
+      getAllHooks: () => [],
+      getSessionHooksManager: () => ({
+        getAllSessionHooks: () => [
+          {
+            eventName: HookEventName.PreToolUse,
+            matcher: 'Read',
+            config: { type: HookType.Command, command: 'echo temporary' },
+            hookId: 'session-hook',
+            skillRoot: '/skills/test',
+          },
+        ],
+      }),
+    } as unknown as ReturnType<typeof config.getHookSystem>);
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('1 hook configured'));
+    pressKey('return');
+    await vi.waitFor(() => expect(lastFrame()).toContain('Read'));
+    pressKey('return');
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('Session (temporary)'),
+    );
+    expect(lastFrame()).toContain('echo temporary');
+  });
+
+  it('renders an absent config as an empty list', async () => {
+    mockedUseConfig.mockReturnValue(
+      undefined as unknown as ReturnType<typeof useConfig>,
+    );
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+    await vi.waitFor(() => expect(lastFrame()).not.toContain('Loading hooks'));
+    expect(lastFrame()).not.toContain('Failed to load');
   });
 
   it('should allow Escape to close during loading state', () => {
@@ -278,11 +458,11 @@ describe('HooksManagementDialog', () => {
       PreToolUse: [
         {
           matcher: 'Read',
-          hooks: [{ type: 'command', command: 'echo read' }],
+          hooks: [{ type: HookType.Command, command: 'echo read' }],
         },
         {
           matcher: 'Bash',
-          hooks: [{ type: 'command', command: 'echo bash' }],
+          hooks: [{ type: HookType.Command, command: 'echo bash' }],
         },
       ],
     });
@@ -322,13 +502,13 @@ describe('HooksManagementDialog', () => {
       PreToolUse: [
         {
           matcher: 'Read',
-          hooks: [{ type: 'command', command: 'echo read' }],
+          hooks: [{ type: HookType.Command, command: 'echo read' }],
         },
         {
           matcher: 'Bash',
           hooks: [
-            { type: 'command', command: 'echo first' },
-            { type: 'command', command: 'echo second' },
+            { type: HookType.Command, command: 'echo first' },
+            { type: HookType.Command, command: 'echo second' },
           ],
         },
       ],
@@ -371,10 +551,10 @@ describe('HooksManagementDialog', () => {
     mockSettingsHooks({
       Stop: [
         {
-          hooks: [{ type: 'command', command: 'echo stop one' }],
+          hooks: [{ type: HookType.Command, command: 'echo stop one' }],
         },
         {
-          hooks: [{ type: 'command', command: 'echo stop two' }],
+          hooks: [{ type: HookType.Command, command: 'echo stop two' }],
         },
       ],
     });

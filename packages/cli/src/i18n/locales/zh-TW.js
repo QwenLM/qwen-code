@@ -632,6 +632,7 @@ export default {
   'Settings:': '設置：',
   active: '已啟用',
   disabled: '已禁用',
+  '(disabled)': '(已禁用)',
   enabled: '已啟用',
   'View Details': '查看詳情',
   'Update failed:': '更新失敗：',
@@ -1321,6 +1322,7 @@ export default {
   'missing name': '缺少名稱',
   'missing description': '缺少描述',
   '(unnamed)': '(未命名)',
+  unnamed: '未命名',
   'Warning: This tool cannot be called by the LLM':
     '警告：此工具無法被 LLM 調用',
   Reason: '原因',

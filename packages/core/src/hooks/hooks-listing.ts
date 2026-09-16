@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Config } from '../config/config.js';
 import type { HookConfig, HookEventName } from './types.js';
 import { HookType, HooksConfigSource } from './types.js';
@@ -11,7 +12,7 @@ import { HookType, HooksConfigSource } from './types.js';
 /**
  * Where a listed hook lives. `registry` rows come from settings files and
  * extensions, plus the hooks a subagent attaches while it runs; `session`
- * rows are hooks registered for the current session by skills, `/goal` or
+ * rows are hooks registered for the current session by skills or
  * the SDK. `source` alone cannot tell the two apart, because a subagent's
  * hooks sit in the registry with the source `session`.
  */
@@ -45,6 +46,8 @@ export interface HooksListingRow {
   hookId?: string;
   /** Session rows registered by a skill: the skill's root directory. */
   skillRoot?: string;
+  extensionName?: string;
+  extensionPath?: string;
   /**
    * The hook configuration itself, for in-process consumers that need a
    * field this row does not flatten. It can carry `env` and HTTP `headers`,
@@ -71,15 +74,12 @@ export type HooksListingConfig = Pick<
   | 'isSafeMode'
   | 'getBareMode'
   | 'getSessionId'
+  | 'getExtensions'
 >;
 
 const PROMPT_DISPLAY_LIMIT = 50;
 
-/**
- * One-line identity for a hook. A port of `describeHook` in
- * packages/cli/src/ui/components/hooks/HandlerListBody.tsx: keep the two in
- * step until the ink dialog reads this listing too.
- */
+/** One-line identity shared by hook listing consumers. */
 export function describeHookConfig(config: HookConfig): string {
   switch (config.type) {
     case HookType.Command:
@@ -164,6 +164,25 @@ function toRow(config: HookConfig, placement: RowPlacement): HooksListingRow {
   };
 }
 
+function hookIdentity(config: HookConfig): string {
+  if (config.name) return config.name;
+  switch (config.type) {
+    case HookType.Command:
+      return config.command || 'unknown-command';
+    case HookType.Http:
+      return config.url || 'unknown-url';
+    case HookType.Function:
+      return config.id || 'unknown-function';
+    case HookType.Prompt:
+      return config.prompt || 'prompt-hook';
+    default: {
+      const exhaustive: never = config;
+      void exhaustive;
+      return 'unknown-hook';
+    }
+  }
+}
+
 /**
  * Lists every hook the session can run: the registry's entries with their
  * real enabled state, followed by the hooks registered for the current
@@ -183,16 +202,37 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
   }
 
   for (const entry of hookSystem.getAllHooks()) {
-    listing.rows.push(
-      toRow(entry.config, {
-        eventName: entry.eventName,
-        matcher: entry.matcher,
-        sequential: entry.sequential,
-        source: entry.source,
-        origin: 'registry',
-        enabled: entry.enabled,
-      }),
-    );
+    const row = toRow(entry.config, {
+      eventName: entry.eventName,
+      matcher: entry.matcher,
+      sequential: entry.sequential,
+      source: entry.source,
+      origin: 'registry',
+      enabled: entry.enabled,
+    });
+    if (entry.source === HooksConfigSource.Extensions) {
+      const identity = hookIdentity(entry.config);
+      const extensions = config
+        .getExtensions()
+        .filter(
+          (extension) =>
+            extension.isActive &&
+            extension.hooks?.[entry.eventName]?.some((definition) =>
+              definition.hooks.some((hook) => hookIdentity(hook) === identity),
+            ),
+        );
+      const extension = extensions[0];
+      if (extension) {
+        row.extensionName = extension.displayName ?? extension.name;
+        row.extensionPath = extension.path;
+      }
+      if (extensions.length > 1) {
+        createDebugLogger('HOOKS_LISTING').debug(
+          'Multiple extensions match a registered hook; using the first extension.',
+        );
+      }
+    }
+    listing.rows.push(row);
   }
 
   const sessionId = config.getSessionId();

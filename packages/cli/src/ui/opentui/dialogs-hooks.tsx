@@ -10,10 +10,12 @@
  * OpenTUI /hooks: a read-only browser over the hooks this session can run,
  * moving from events to matchers to hooks to one hook's details, like the
  * ink HooksManagementDialog. The rows come from core `buildHooksListing`, so
- * they carry the registry's real enabled state and include the hooks skills,
- * `/goal` and the SDK registered for this session.
+ * they carry the registry's real enabled state and include the hooks skills
+ * and the SDK registered for this session.
  */
 
+import { formatHookTimeout } from '../components/hooks/hook-timeout-label.js';
+export { formatHookTimeout } from '../components/hooks/hook-timeout-label.js';
 import { useMemo, useState } from 'react';
 import { useKeyboard } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
@@ -26,7 +28,6 @@ import {
   type HooksListing,
   type HooksListingRow,
 } from '@qwen-code/qwen-code-core/hooks/hooks-listing.js';
-import { isLegacyMillisecondHookTimeout } from '@qwen-code/qwen-code-core/hooks/hook-timeout.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
@@ -145,23 +146,6 @@ export function hooksBannerText(listing: HooksListing): string | undefined {
     return t('All hooks are disabled by the disableAllHooks setting.');
   }
   return undefined;
-}
-
-/**
- * Timeout with its unit: function hooks count milliseconds, command hooks
- * still read 1000 or more as legacy milliseconds, everything else seconds.
- */
-export function formatHookTimeout(row: HooksListingRow): string {
-  const timeout = row.timeout;
-  if (typeof timeout !== 'number') return String(timeout);
-  if (row.hookType === HookType.Function) return `${timeout} ms`;
-  if (
-    row.hookType === HookType.Command &&
-    isLegacyMillisecondHookTimeout(timeout)
-  ) {
-    return `${timeout} ms`;
-  }
-  return `${timeout} s`;
 }
 
 function literalLabel(hookType: HookType): string {

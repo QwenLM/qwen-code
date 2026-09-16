@@ -431,6 +431,7 @@ export default {
   'Settings:': 'Configuració:',
   active: 'activa',
   disabled: 'desactivada',
+  '(disabled)': '(desactivada)',
   enabled: 'activada',
   'View Details': 'Visualitza els detalls',
   'Update failed:': "Error en l'actualització:",
@@ -1113,6 +1114,7 @@ export default {
   'missing name': 'nom absent',
   'missing description': 'descripció absent',
   '(unnamed)': '(sense nom)',
+  unnamed: 'sense nom',
   'Warning: This tool cannot be called by the LLM':
     'Advertència: el model no pot cridar aquesta eina',
   Reason: 'Motiu',

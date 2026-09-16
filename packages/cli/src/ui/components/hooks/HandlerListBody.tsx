@@ -7,6 +7,7 @@
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { describeHookConfig } from '@qwen-code/qwen-code-core/hooks/hooks-listing.js';
 import { HookType } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { HookConfigDisplayInfo } from './types.js';
 import { getConfigSourceDisplay } from './sourceLabels.js';
@@ -33,7 +34,7 @@ export function HandlerListBody({
       {configs.map((config, index) => {
         const isSelected = index === selectedIndex;
         const sourceDisplay = getConfigSourceDisplay(config);
-        const hookDisplay = describeHook(config);
+        const hookDisplay = describeHookConfig(config.config);
         const typeDisplay = formatTypeDisplay(config);
 
         return (
@@ -58,6 +59,11 @@ export function HandlerListBody({
             <Box width={sourceWidth}>
               <Text color={theme.text.secondary} wrap="wrap">
                 {sourceDisplay}
+                {!config.enabled && (
+                  <Text
+                    color={theme.status.warning}
+                  >{`  ${t('disabled')}`}</Text>
+                )}
               </Text>
             </Box>
           </Box>
@@ -70,33 +76,6 @@ export function HandlerListBody({
       </Box>
     </>
   );
-}
-
-function describeHook(info: HookConfigDisplayInfo): string {
-  const { config } = info;
-  switch (config.type) {
-    case HookType.Command:
-      return config.command || '';
-    case HookType.Http:
-      return config.name || config.url || '';
-    case HookType.Function:
-      return config.name || config.id || 'function-hook';
-    case HookType.Prompt: {
-      const promptText = config.prompt || '';
-      const maxLength = 50;
-      return (
-        config.name ||
-        (promptText.length > maxLength
-          ? promptText.slice(0, maxLength) + '...'
-          : promptText)
-      );
-    }
-    default: {
-      const _exhaustive: never = config;
-      void _exhaustive;
-      return '';
-    }
-  }
 }
 
 function formatTypeDisplay(info: HookConfigDisplayInfo): string {

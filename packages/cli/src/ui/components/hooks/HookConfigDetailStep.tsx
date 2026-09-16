@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatHookTimeout } from './hook-timeout-label.js';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
@@ -65,6 +66,31 @@ export function HookConfigDetailStep({
   const labelWidth = 12;
   const showMatcher = supportsMatchers(hookEvent.event);
 
+  const detailFields: Array<[string, string]> = [];
+  const definition = hookConfig.config;
+  if (definition.timeout !== undefined)
+    detailFields.push([
+      t('Timeout:'),
+      formatHookTimeout({
+        timeout: definition.timeout,
+        hookType: definition.type,
+      }),
+    ]);
+  if (definition.statusMessage)
+    detailFields.push([t('Status message:'), definition.statusMessage]);
+  if (definition.type === 'http' && definition.if)
+    detailFields.push([t('Condition:'), definition.if]);
+  const options = [
+    definition.type === 'command' && definition.async
+      ? t('runs in background')
+      : undefined,
+    definition.type === 'http' && definition.once ? t('runs once') : undefined,
+    hookConfig.sequential ? t('sequential') : undefined,
+  ].filter((option): option is string => option !== undefined);
+  if (options.length) detailFields.push([t('Options:'), options.join(', ')]);
+  if (hookConfig.skillRoot)
+    detailFields.push([t('Skill:'), hookConfig.skillRoot]);
+
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
@@ -106,6 +132,15 @@ export function HookConfigDetailStep({
         )}
       </Box>
 
+      <Box>
+        <Box width={labelWidth}>
+          <Text color={theme.text.secondary}>{t('Status:')}</Text>
+        </Box>
+        <Text color={theme.text.primary}>
+          {hookConfig.enabled ? t('enabled') : t('disabled')}
+        </Text>
+      </Box>
+
       {isFromExtension && hookConfig.sourceDisplay && (
         <Box>
           <Box width={labelWidth}>
@@ -134,6 +169,15 @@ export function HookConfigDetailStep({
           </Text>
         </Box>
       )}
+
+      {detailFields.map(([label, value]) => (
+        <Box key={label}>
+          <Box width={16}>
+            <Text color={theme.text.secondary}>{label}</Text>
+          </Box>
+          <Text color={theme.text.primary}>{value}</Text>
+        </Box>
+      ))}
 
       {hookConfig.config.type === 'command' && (
         <>

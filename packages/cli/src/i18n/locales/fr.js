@@ -438,6 +438,7 @@ export default {
   'Settings:': 'Paramètres :',
   active: 'actif',
   disabled: 'désactivé',
+  '(disabled)': '(désactivé)',
   enabled: 'activé',
   'View Details': 'Voir les détails',
   'Update failed:': 'Échec de la mise à jour :',
@@ -1120,6 +1121,7 @@ export default {
   'missing name': 'nom manquant',
   'missing description': 'description manquante',
   '(unnamed)': '(sans nom)',
+  unnamed: 'sans nom',
   'Warning: This tool cannot be called by the LLM':
     'Avertissement : Cet outil ne peut pas être appelé par le LLM',
   Reason: 'Raison',

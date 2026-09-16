@@ -37,7 +37,7 @@ export function getConfigSourceDisplay(config: {
   sourceDisplay: string;
 }): string {
   const sourceDisplayMap = getTranslatedSourceDisplayMap();
-  if (config.source === HooksConfigSource.Extensions) {
+  if (config.source === HooksConfigSource.Extensions && config.sourceDisplay) {
     return `${sourceDisplayMap[HooksConfigSource.Extensions]} (${config.sourceDisplay})`;
   }
   return sourceDisplayMap[config.source] || config.source;

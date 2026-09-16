@@ -1355,6 +1355,7 @@ export default {
   'Re-authenticate': '重新认证',
   'Clear Authentication': '清空认证',
   disabled: '已禁用',
+  '(disabled)': '(已禁用)',
   enabled: '已启用',
   'Server:': '服务器：',
   'Error:': '错误：',
@@ -1428,6 +1429,7 @@ export default {
   'missing name': '缺少名称',
   'missing description': '缺少描述',
   '(unnamed)': '(未命名)',
+  unnamed: '未命名',
   'Warning: This tool cannot be called by the LLM':
     '警告：此工具无法被 LLM 调用',
   Reason: '原因',

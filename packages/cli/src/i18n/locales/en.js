@@ -692,6 +692,7 @@ export default {
   'Settings:': 'Settings:',
   active: 'active',
   disabled: 'disabled',
+  '(disabled)': '(disabled)',
   enabled: 'enabled',
   'View Details': 'View Details',
   'Update failed:': 'Update failed:',
@@ -1488,6 +1489,7 @@ export default {
   'missing name': 'missing name',
   'missing description': 'missing description',
   '(unnamed)': '(unnamed)',
+  unnamed: 'unnamed',
   'Warning: This tool cannot be called by the LLM':
     'Warning: This tool cannot be called by the LLM',
   Reason: 'Reason',

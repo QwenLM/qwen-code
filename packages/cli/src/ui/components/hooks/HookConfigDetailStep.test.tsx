@@ -70,6 +70,34 @@ describe('HookConfigDetailStep', () => {
     vi.clearAllMocks();
   });
 
+  it('shows HTTP execution options and the registering skill', () => {
+    const hookConfig: HookConfigDisplayInfo = {
+      ...createMockHookConfig(HooksConfigSource.Session),
+      config: {
+        type: HookType.Http,
+        url: 'https://example.test/hook',
+        timeout: 1000,
+        if: 'Bash(git *)',
+        once: true,
+        statusMessage: 'Audit request',
+      },
+      skillRoot: '/skills/audit',
+      enabled: false,
+    };
+    const { lastFrame } = render(
+      <HookConfigDetailStep
+        hookEvent={createMockHookEvent()}
+        hookConfig={hookConfig}
+      />,
+    );
+    expect(lastFrame()).toMatch(/Status:\s+disabled/);
+    expect(lastFrame()).toMatch(/Timeout:\s+1000 s/);
+    expect(lastFrame()).toMatch(/Status message:\s+Audit request/);
+    expect(lastFrame()).toMatch(/Condition:\s+Bash\(git \*\)/);
+    expect(lastFrame()).toMatch(/Options:\s+runs once/);
+    expect(lastFrame()).toMatch(/Skill:\s+\/skills\/audit/);
+  });
+
   it('should render hook details title', () => {
     const hookEvent = createMockHookEvent();
     const hookConfig = createMockHookConfig();

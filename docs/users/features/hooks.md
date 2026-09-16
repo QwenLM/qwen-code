@@ -32,6 +32,8 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
 
+`/hooks list` displays the same listing in non-interactive mode, marking disabled hooks with `(disabled)`.
+
 When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top. It does not change anything: to add, edit or remove a hook, edit `settings.json`.
 
 ## Hook Types

@@ -108,6 +108,7 @@ describe('hooksCommand', () => {
       } = {},
     ) {
       const hookSystem = {
+        getAllHooks: vi.fn().mockReturnValue([]),
         reload: vi.fn().mockResolvedValue(undefined),
         getRegistry: vi.fn().mockReturnValue({
           getAllHooks: vi.fn().mockReturnValue([]),
@@ -125,6 +126,8 @@ describe('hooksCommand', () => {
         isSafeMode: vi.fn().mockReturnValue(opts.safeMode ?? false),
         getWorkingDir: vi.fn().mockReturnValue('/work/dir'),
         getSessionId: vi.fn().mockReturnValue('session-1'),
+        getDisableAllHooks: () => false,
+        getExtensions: () => [],
       };
       const context = createMockCommandContext({
         executionMode: opts.executionMode ?? 'interactive',
@@ -256,11 +259,14 @@ describe('hooksCommand', () => {
         eventName: string;
         matcher?: string;
         source: string;
+        enabled?: boolean;
         config: {
           type: string;
           command?: string;
           url?: string;
           name?: string;
+          id?: string;
+          prompt?: string;
         };
       }>;
       sessionHooks?: Array<{
@@ -270,10 +276,16 @@ describe('hooksCommand', () => {
       }>;
     }) {
       const sessionConfig = {
+        getDisableAllHooks: () => false,
+        isSafeMode: () => false,
+        getBareMode: () => false,
+        getExtensions: () => [],
         getHookSystem: vi.fn().mockReturnValue({
-          getRegistry: vi.fn().mockReturnValue({
-            getAllHooks: vi.fn().mockReturnValue(opts.configHooks),
-          }),
+          getAllHooks: vi
+            .fn()
+            .mockReturnValue(
+              opts.configHooks.map((hook) => ({ enabled: true, ...hook })),
+            ),
           getSessionHooksManager: vi.fn().mockReturnValue({
             getAllSessionHooks: vi
               .fn()
@@ -287,6 +299,48 @@ describe('hooksCommand', () => {
         services: { config: sessionConfig },
       });
     }
+
+    it.each([
+      [{ type: 'command', name: 'my-hook', command: 'echo hidden' }, 'my-hook'],
+      [{ type: 'function', id: 'function-id' }, 'function-id'],
+      [{ type: 'prompt', prompt: '' }, 'unnamed'],
+    ])(
+      'uses the shared display identity with name and empty fallbacks: %j',
+      async (config, name) => {
+        const result = await hooksCommand.action!(
+          makeContext({
+            configHooks: [{ eventName: 'PreToolUse', source: 'user', config }],
+          }),
+          '',
+        );
+        expect((result as { content: string }).content).toContain(
+          `- **${name}** [User]`,
+        );
+      },
+    );
+
+    it('marks a disabled registry row', async () => {
+      const result = await hooksCommand.action!(
+        makeContext({
+          configHooks: [
+            {
+              eventName: 'Stop',
+              source: 'user',
+              enabled: false,
+              config: {
+                type: 'command',
+                name: 'disabled-hook',
+                command: 'true',
+              },
+            },
+          ],
+        }),
+        '',
+      );
+      expect((result as { content: string }).content).toContain(
+        '- **disabled-hook** [User] (disabled)',
+      );
+    });
 
     it('groups hooks under matcher headings', async () => {
       const ctx = makeContext({

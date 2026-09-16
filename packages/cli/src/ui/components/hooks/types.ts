@@ -34,6 +34,7 @@ export interface HookConfigDisplayInfo {
   source: HooksConfigSource;
   sourceDisplay: string;
   sourcePath?: string;
+  skillRoot?: string;
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;

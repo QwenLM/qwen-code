@@ -1137,6 +1137,7 @@ export default {
   'Re-authenticate': 'Erneut authentifizieren',
   'Clear Authentication': 'Authentifizierung löschen',
   disabled: 'deaktiviert',
+  '(disabled)': '(deaktiviert)',
   enabled: 'aktiviert',
   'Server:': 'Server:',
   Reconnect: 'Neu verbinden',
@@ -1191,6 +1192,7 @@ export default {
   'missing name': 'Name fehlt',
   'missing description': 'Beschreibung fehlt',
   '(unnamed)': '(unbenannt)',
+  unnamed: 'unbenannt',
   'Warning: This tool cannot be called by the LLM':
     'Warnung: Dieses Werkzeug kann nicht vom LLM aufgerufen werden',
   Reason: 'Grund',

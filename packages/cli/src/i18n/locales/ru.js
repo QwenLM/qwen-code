@@ -1127,6 +1127,7 @@ export default {
   'Re-authenticate': 'Повторная аутентификация',
   'Clear Authentication': 'Очистить аутентификацию',
   disabled: 'отключен',
+  '(disabled)': '(отключен)',
   enabled: 'включен',
   'Server:': 'Сервер:',
   Reconnect: 'Переподключить',
@@ -1144,6 +1145,7 @@ export default {
   'missing name': 'отсутствует имя',
   'missing description': 'отсутствует описание',
   '(unnamed)': '(без имени)',
+  unnamed: 'без имени',
   'Warning: This tool cannot be called by the LLM':
     'Предупреждение: Этот инструмент не может быть вызван LLM',
   Reason: 'Причина',

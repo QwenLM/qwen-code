@@ -11,16 +11,8 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
-import { useSettings } from '../../contexts/SettingsContext.js';
-import { SettingScope } from '../../../config/settings.js';
-import {
-  HooksConfigSource,
-  type HookDefinition,
-  type HookConfig,
-  type SessionHookEntry,
-  createDebugLogger,
-  HOOKS_CONFIG_FIELDS,
-} from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { buildHooksListing } from '@qwen-code/qwen-code-core/hooks/hooks-listing.js';
 import type {
   HooksManagementDialogProps,
   HookEventDisplayInfo,
@@ -42,91 +34,10 @@ import { t } from '../../../i18n/index.js';
 
 const debugLogger = createDebugLogger('HOOKS_DIALOG');
 
-function isValidHookConfig(config: unknown): config is HookConfig {
-  if (typeof config !== 'object' || config === null || !('type' in config)) {
-    return false;
-  }
-  const obj = config as Record<string, unknown>;
-  if (obj['type'] === 'command') {
-    return 'command' in obj && typeof obj['command'] === 'string';
-  }
-  if (obj['type'] === 'http') {
-    return 'url' in obj && typeof obj['url'] === 'string';
-  }
-  if (obj['type'] === 'function') {
-    return 'callback' in obj && typeof obj['callback'] === 'function';
-  }
-  if (obj['type'] === 'prompt') {
-    return 'prompt' in obj && typeof obj['prompt'] === 'string';
-  }
-  return false;
-}
-
-function isValidHookDefinition(def: unknown): def is HookDefinition {
-  if (typeof def !== 'object' || def === null) {
-    return false;
-  }
-  const obj = def as Record<string, unknown>;
-  if (!('hooks' in obj) || !Array.isArray(obj['hooks'])) {
-    return false;
-  }
-  for (const hook of obj['hooks']) {
-    if (!isValidHookConfig(hook)) {
-      return false;
-    }
-  }
-  if ('matcher' in obj && typeof obj['matcher'] !== 'string') {
-    return false;
-  }
-  if ('sequential' in obj && typeof obj['sequential'] !== 'boolean') {
-    return false;
-  }
-  return true;
-}
-
-function isValidHooksRecord(hooks: unknown): hooks is Record<string, unknown> {
-  if (typeof hooks !== 'object' || hooks === null) {
-    return false;
-  }
-  const record = hooks as Record<string, unknown>;
-  for (const [key, value] of Object.entries(record)) {
-    if (HOOKS_CONFIG_FIELDS.includes(key)) {
-      continue;
-    }
-    if (!Array.isArray(value)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function getValidHookDefinitions(
-  hooksRecord: Record<string, unknown>,
-  eventName: string,
-): HookDefinition[] {
-  const value = hooksRecord[eventName];
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const result: HookDefinition[] = [];
-  for (const def of value) {
-    if (isValidHookDefinition(def)) {
-      result.push(def);
-    } else {
-      debugLogger.warn(
-        `Skipping invalid hook definition for ${eventName}:`,
-        def,
-      );
-    }
-  }
-  return result;
-}
-
 export function HooksManagementDialog({
   onClose,
 }: HooksManagementDialogProps): React.JSX.Element {
   const config = useConfig();
-  const settings = useSettings();
   const { columns: width } = useTerminalSize();
   const boxWidth = width - 4;
 
@@ -292,131 +203,33 @@ export function HooksManagementDialog({
   const fetchHooksData = useCallback((): HookEventDisplayInfo[] => {
     if (!config) return [];
 
-    const userSettings = settings.forScope(SettingScope.User).settings;
-    const workspaceSettings = settings.forScope(
-      SettingScope.Workspace,
-    ).settings;
-
+    const listing = buildHooksListing(config);
     const sourceDisplayMap = getTranslatedSourceDisplayMap();
-
-    const result: HookEventDisplayInfo[] = [];
-
-    for (const eventName of DISPLAY_HOOK_EVENTS) {
+    return DISPLAY_HOOK_EVENTS.map((eventName) => {
       const hookInfo = createEmptyHookEventInfo(eventName);
       const groupByMatcher = supportsMatchers(eventName);
-
-      const userSettingsRecord = userSettings as Record<string, unknown>;
-      const userHooksRaw = userSettingsRecord?.['hooks'];
-      if (isValidHooksRecord(userHooksRaw)) {
-        const userDefs = getValidHookDefinitions(userHooksRaw, eventName);
-        for (const def of userDefs) {
-          for (const hookConfig of def.hooks) {
-            addConfigToMatcherGroup(
-              hookInfo,
-              def.matcher,
-              def.sequential,
-              {
-                config: hookConfig,
-                source: HooksConfigSource.User,
-                sourceDisplay: sourceDisplayMap[HooksConfigSource.User],
-                enabled: true,
-              },
-              groupByMatcher,
-            );
-          }
-        }
-      }
-
-      const workspaceSettingsRecord = workspaceSettings as Record<
-        string,
-        unknown
-      >;
-      const workspaceHooksRaw = workspaceSettingsRecord?.['hooks'];
-      if (isValidHooksRecord(workspaceHooksRaw)) {
-        const workspaceDefs = getValidHookDefinitions(
-          workspaceHooksRaw,
-          eventName,
+      for (const row of listing.rows) {
+        if (row.eventName !== eventName) continue;
+        addConfigToMatcherGroup(
+          hookInfo,
+          row.matcher,
+          row.sequential,
+          {
+            config: row.config,
+            source: row.source,
+            sourceDisplay:
+              row.extensionName ??
+              (row.source === 'extensions' ? '' : sourceDisplayMap[row.source]),
+            sourcePath: row.extensionPath,
+            enabled: row.enabled,
+            skillRoot: row.skillRoot,
+          },
+          groupByMatcher,
         );
-        for (const def of workspaceDefs) {
-          for (const hookConfig of def.hooks) {
-            addConfigToMatcherGroup(
-              hookInfo,
-              def.matcher,
-              def.sequential,
-              {
-                config: hookConfig,
-                source: HooksConfigSource.Project,
-                sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
-                enabled: true,
-              },
-              groupByMatcher,
-            );
-          }
-        }
       }
-
-      const extensions = config.getExtensions() || [];
-      for (const extension of extensions) {
-        if (extension.isActive && extension.hooks?.[eventName]) {
-          const extensionHooks = extension.hooks[eventName];
-          if (Array.isArray(extensionHooks)) {
-            for (const def of extensionHooks) {
-              if (isValidHookDefinition(def)) {
-                for (const hookConfig of def.hooks) {
-                  addConfigToMatcherGroup(
-                    hookInfo,
-                    def.matcher,
-                    def.sequential,
-                    {
-                      config: hookConfig,
-                      source: HooksConfigSource.Extensions,
-                      sourceDisplay: extension.displayName ?? extension.name,
-                      sourcePath: extension.path,
-                      enabled: true,
-                    },
-                    groupByMatcher,
-                  );
-                }
-              }
-            }
-          }
-        }
-      }
-
-      const hookSystem = config.getHookSystem();
-      if (hookSystem) {
-        const sessionId = config.getSessionId();
-        if (sessionId) {
-          const sessionHooksManager = hookSystem.getSessionHooksManager();
-          const allSessionHooks =
-            sessionHooksManager.getAllSessionHooks(sessionId);
-
-          const eventSessionHooks = allSessionHooks.filter(
-            (hook: SessionHookEntry) => hook.eventName === eventName,
-          );
-
-          for (const sessionHook of eventSessionHooks) {
-            addConfigToMatcherGroup(
-              hookInfo,
-              sessionHook.matcher,
-              sessionHook.sequential,
-              {
-                config: sessionHook.config as HookConfig,
-                source: HooksConfigSource.Session,
-                sourceDisplay: t('Session (temporary)'),
-                enabled: true,
-              },
-              groupByMatcher,
-            );
-          }
-        }
-      }
-
-      result.push(hookInfo);
-    }
-
-    return result;
-  }, [config, settings]);
+      return hookInfo;
+    });
+  }, [config]);
 
   useEffect(() => {
     let cancelled = false;

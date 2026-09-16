@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { buildHooksListing } from '@qwen-code/qwen-code-core/hooks/hooks-listing.js';
 import type {
   SlashCommand,
   SlashCommandActionReturn,
@@ -12,12 +13,7 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import type {
-  Config,
-  HookRegistryEntry,
-  SessionHookEntry,
-  HookEventName,
-} from '@qwen-code/qwen-code-core';
+import type { Config, HookEventName } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { supportsMatchers } from '../components/hooks/constants.js';
 import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
@@ -31,8 +27,8 @@ const debugLogger = createDebugLogger('HOOKS_COMMAND');
  * Re-reads the settings files and reloads the hook registry, so hooks added,
  * changed or removed since startup run without a restart. The hook fields are
  * resolved exactly as at startup (bare and safe mode load none; project hooks
- * only in a trusted folder). Session hooks registered by skills, the SDK or
- * `/goal` live outside the registry and are unaffected.
+ * only in a trusted folder). Session hooks registered by skills or the SDK
+ * live outside the registry and are unaffected.
  */
 async function reloadHooksFromSettings(
   config: Config,
@@ -118,16 +114,8 @@ const listCommand: SlashCommand = {
       };
     }
 
-    const registry = hookSystem.getRegistry();
-    const configHooks = registry.getAllHooks();
-
-    const sessionId = config.getSessionId();
-    const sessionHooksManager = hookSystem.getSessionHooksManager();
-    const sessionHooks = sessionId
-      ? sessionHooksManager.getAllSessionHooks(sessionId)
-      : [];
-
-    const totalHooks = configHooks.length + sessionHooks.length;
+    const listing = buildHooksListing(config);
+    const totalHooks = listing.rows.length;
 
     if (totalHooks === 0) {
       return {
@@ -142,6 +130,7 @@ const listCommand: SlashCommand = {
     interface FlattenedHook {
       name: string;
       source: string;
+      enabled: boolean;
     }
 
     const hooksByEvent = new Map<string, Map<string, FlattenedHook[]>>();
@@ -167,42 +156,13 @@ const listCommand: SlashCommand = {
       bucket.push(hook);
     };
 
-    const extractName = (config: {
-      type: string;
-      command?: string;
-      url?: string;
-      name?: string;
-    }): string =>
-      config.name ||
-      (config.type === 'command' ? config.command : undefined) ||
-      (config.type === 'http' ? config.url : undefined) ||
-      'unnamed';
-
-    for (const hook of configHooks) {
-      const configHook = hook as HookRegistryEntry;
-      const config = configHook.config as {
-        type: string;
-        command?: string;
-        url?: string;
-        name?: string;
-      };
-      addHook(configHook.eventName, normalizeMatcher(configHook.matcher), {
-        name: extractName(config),
-        source: formatHookSource(configHook.source),
-      });
-    }
-
-    for (const hook of sessionHooks) {
-      const sessionHook = hook as SessionHookEntry;
-      const config = sessionHook.config as {
-        type: string;
-        command?: string;
-        url?: string;
-        name?: string;
-      };
-      addHook(sessionHook.eventName, normalizeMatcher(sessionHook.matcher), {
-        name: extractName(config),
-        source: formatHookSource('session'),
+    for (const row of listing.rows) {
+      addHook(row.eventName, normalizeMatcher(row.matcher), {
+        name: row.name || row.displayText || t('unnamed'),
+        source: row.extensionName
+          ? `${formatHookSource(row.source)} (${row.extensionName})`
+          : formatHookSource(row.source),
+        enabled: row.enabled,
       });
     }
 
@@ -215,14 +175,14 @@ const listCommand: SlashCommand = {
         for (const [matcher, hookList] of matcherMap) {
           output += `#### ${t('Matcher:')} ${matcher}\n`;
           for (const hook of hookList) {
-            output += `- **${hook.name}** [${hook.source}]\n`;
+            output += `- **${hook.name}** [${hook.source}]${hook.enabled ? '' : ` ${t('(disabled)')}`}\n`;
           }
           output += '\n';
         }
       } else {
         for (const hookList of matcherMap.values()) {
           for (const hook of hookList) {
-            output += `- **${hook.name}** [${hook.source}]\n`;
+            output += `- **${hook.name}** [${hook.source}]${hook.enabled ? '' : ` ${t('(disabled)')}`}\n`;
           }
         }
         output += '\n';

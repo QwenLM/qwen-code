@@ -93,6 +93,12 @@ describe('sourceLabels', () => {
       );
     });
 
+    it('omits the extension annotation when no identity matches', () => {
+      expect(
+        getConfigSourceDisplay(makeConfig(HooksConfigSource.Extensions)),
+      ).toBe('Extensions');
+    });
+
     it('appends the extension name for Extensions-source configs', () => {
       expect(
         getConfigSourceDisplay(

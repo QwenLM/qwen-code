@@ -21,6 +21,7 @@ vi.mock('../../hooks/useTerminalSize.js', () => ({
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: { primary: 'white', secondary: 'gray', accent: 'cyan' },
+    status: { warning: 'yellow' },
   },
 }));
 
@@ -88,7 +89,7 @@ describe('HandlerListBody', () => {
     vi.clearAllMocks();
   });
 
-  describe('describeHook (rendered as the row label)', () => {
+  describe('shared identity (rendered as the row label)', () => {
     it('renders the command path for command hooks', () => {
       const { lastFrame } = render(
         <HandlerListBody
@@ -212,6 +213,22 @@ describe('HandlerListBody', () => {
       expect(out).toContain('classifier');
       expect(out).not.toContain('should not appear');
     });
+  });
+
+  it('marks only disabled rows', () => {
+    const enabled = commandConfig('enabled-command');
+    const disabled = { ...commandConfig('disabled-command'), enabled: false };
+    const { lastFrame } = render(
+      <HandlerListBody configs={[enabled, disabled]} selectedIndex={0} />,
+    );
+    const lines = lastFrame()!.split('\n');
+    expect(
+      lines.find((line) => line.includes('enabled-command')),
+    ).not.toContain('disabled');
+    expect(lines.find((line) => line.includes('disabled-command'))).toContain(
+      'disabled',
+    );
+    expect(lastFrame()).toMatch(/disabled-command[^\n]*User[^\n]*disabled/);
   });
 
   describe('source column', () => {

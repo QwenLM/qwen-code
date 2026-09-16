@@ -52,11 +52,71 @@ function makeConfig(options: {
     getDisableAllHooks: vi.fn().mockReturnValue(options.disableAll ?? false),
     isSafeMode: vi.fn().mockReturnValue(options.safeMode ?? false),
     getBareMode: vi.fn().mockReturnValue(options.bareMode ?? false),
+    getExtensions: vi.fn().mockReturnValue([]),
     getSessionId: vi.fn().mockReturnValue(options.sessionId ?? SESSION_ID),
   };
 }
 
 describe('buildHooksListing', () => {
+  it('annotates only matching active extension registry hooks without adding rows', () => {
+    const config = makeConfig({
+      entries: () => [
+        entry(
+          { type: HookType.Command, name: 'registered', command: 'echo real' },
+          { source: HooksConfigSource.Extensions },
+        ),
+        entry(
+          { type: HookType.Command, command: 'echo unmatched' },
+          { source: HooksConfigSource.Extensions },
+        ),
+      ],
+    });
+    config.getExtensions = () =>
+      [
+        {
+          name: 'extension-a',
+          displayName: 'Extension A',
+          path: '/extensions/a',
+          isActive: true,
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [
+                  {
+                    type: HookType.Command,
+                    name: 'registered',
+                    command: 'echo annotation-only',
+                  },
+                  { type: HookType.Command, command: 'echo extra' },
+                ],
+              },
+            ],
+          },
+        },
+        {
+          name: 'inactive',
+          path: '/inactive',
+          isActive: false,
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [{ type: HookType.Command, command: 'echo unmatched' }],
+              },
+            ],
+          },
+        },
+      ] as ReturnType<HooksListingConfig['getExtensions']>;
+    const { rows } = buildHooksListing(config);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      extensionName: 'Extension A',
+      extensionPath: '/extensions/a',
+      displayText: 'echo real',
+    });
+    expect(rows[1]).not.toHaveProperty('extensionName');
+    expect(rows[1]).not.toHaveProperty('extensionPath');
+  });
+
   it('flattens each hook type into its identity and literal text', () => {
     const longPrompt = 'x'.repeat(60);
     const listing = buildHooksListing(

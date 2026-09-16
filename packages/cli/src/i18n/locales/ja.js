@@ -882,6 +882,7 @@ export default {
   'Re-authenticate': '再認証',
   'Clear Authentication': '認証をクリア',
   disabled: '無効',
+  '(disabled)': '(無効)',
   enabled: '有効',
   'Server:': 'サーバー:',
   Reconnect: '再接続',
@@ -937,6 +938,7 @@ export default {
   'missing name': '名前なし',
   'missing description': '説明なし',
   '(unnamed)': '(名前なし)',
+  unnamed: '名前なし',
   'Warning: This tool cannot be called by the LLM':
     '警告: このツールはLLMによって呼び出すことができません',
   Reason: '理由',
