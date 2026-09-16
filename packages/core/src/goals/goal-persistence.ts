@@ -48,8 +48,6 @@ export function recoverGoalFromRecords(
 export function selectGoalRecoveryFromRecords(
   records: readonly GoalRecoveryRecord[],
 ): GoalRecoverySelection {
-  let unsupported: GoalRecovery | undefined;
-  let unsupportedSourceUuid: string | undefined;
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
     if (record?.subtype !== 'goal_state') continue;
@@ -60,18 +58,15 @@ export function selectGoalRecoveryFromRecords(
     if (payload) {
       return { recovery: { kind: 'v2', payload }, sourceUuid: record.uuid };
     }
-    if (!unsupported) {
-      unsupported = {
+    return {
+      recovery: {
         kind: 'unsupported',
         reason: `Goal lifecycle record ${record.uuid} is malformed or uses an unsupported version`,
-      };
-      unsupportedSourceUuid = record.uuid;
-    }
+      },
+      sourceUuid: record.uuid,
+    };
   }
-
-  return unsupported
-    ? { recovery: unsupported, sourceUuid: unsupportedSourceUuid }
-    : recoverLegacyGoal(records);
+  return recoverLegacyGoal(records);
 }
 
 function recoverLegacyGoal(

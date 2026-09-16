@@ -18,6 +18,7 @@ import {
   isGoalTokenBudgetSpent,
   isGoalTurnBudgetSpent,
   validateGoalPauseReason,
+  validateGoalProposalReason,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -223,25 +224,9 @@ export function reduceGoalControl(
   if (request.action !== 'resume') {
     return assertNever(request, snapshotOf(current));
   }
-  // A Goal stopped by an evidence bound resumes from a fresh evidence window
-  // rather than refusing to resume at all. The bound was reached because the
-  // catalog could no longer hold everything since the cursor; carrying that
-  // same cursor and checkpoint back into an active Goal would reach it again
-  // on the next turn. Repointing the cursor to the resume boundary and
-  // dropping the checkpoint is the same reset `/goal edit` already performs,
-  // without discarding the objective or minting a new revision.
-  //
-  // The cost is explicit and belongs to the user who asked to resume:
-  // evidence recorded before this point is no longer citable, so a terminal
-  // proposal must prove itself from what the resumed run produces.
   if (current.status === 'usage_limited' && isEvidenceLimited(current)) {
     return transitionGoal(current, transition.now, {
       status: 'active',
-      evidenceCursor: copyCursor(transition.cursor),
-      evidenceCheckpoint: undefined,
-      // The streak counts checkpoints against one window; this resume starts
-      // a different one, so carrying it over would spend the new window's
-      // allowance on the old window's failures.
       checkpointStalls: undefined,
       lastCheckpointFailure: undefined,
       noProgressTurns: undefined,
@@ -385,17 +370,31 @@ export function parseGoalStateRecordPayloadV2(
       'cause',
       'snapshot',
       'checkpointPending',
+      'verificationPending',
       'blockedAudit',
     ]) ||
     value['v'] !== GOAL_STATE_VERSION ||
     !isGoalStateCause(value['cause']) ||
     !isCheckpointPending(value['checkpointPending']) ||
+    !isVerificationPending(value['verificationPending']) ||
     !isBlockedAudit(value['blockedAudit'])
   ) {
     return undefined;
   }
   const parsedSnapshot = parseGoalSnapshotV2(value['snapshot']);
   if (parsedSnapshot?.activity !== 'idle') return undefined;
+  const verificationPending = value['verificationPending'];
+  if (
+    verificationPending &&
+    (!parsedSnapshot.goal ||
+      !['active', 'paused', 'usage_limited'].includes(
+        parsedSnapshot.goal.status,
+      ) ||
+      verificationPending.permit.goalId !== parsedSnapshot.goal.goalId ||
+      verificationPending.permit.revision !== parsedSnapshot.goal.revision ||
+      value['checkpointPending'] !== undefined)
+  )
+    return undefined;
   const checkpointPending = value['checkpointPending'];
   if (
     checkpointPending &&
@@ -413,6 +412,9 @@ export function parseGoalStateRecordPayloadV2(
     v: GOAL_STATE_VERSION,
     cause: value['cause'],
     snapshot: parsedSnapshot,
+    ...(verificationPending
+      ? { verificationPending: structuredClone(verificationPending) }
+      : {}),
     ...(checkpointPending
       ? { checkpointPending: structuredClone(checkpointPending) }
       : {}),
@@ -702,6 +704,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'turnCount',
       'activeTimeMs',
       'tokensUsed',
+      'verificationUsageIncomplete',
       'tokenBudget',
       'turnBudget',
       'activeTimeBudgetMs',
@@ -725,6 +728,8 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isTranscriptCursor(value['evidenceCursor']) ||
     !isNonNegativeInteger(value['turnCount']) ||
     !isNonNegativeNumber(value['activeTimeMs']) ||
+    (value['verificationUsageIncomplete'] !== undefined &&
+      value['verificationUsageIncomplete'] !== true) ||
     (value['tokensUsed'] !== undefined &&
       !isNonNegativeNumber(value['tokensUsed'])) ||
     (value['tokenBudget'] !== undefined &&
@@ -771,6 +776,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     activeTimeMs: value['activeTimeMs'],
     // Goals persisted before `tokensUsed` existed carry no spend to restore.
     tokensUsed: value['tokensUsed'] ?? 0,
+    ...(value['verificationUsageIncomplete'] === true
+      ? { verificationUsageIncomplete: true as const }
+      : {}),
     // And no budget: a Goal from before budgets existed stays unbounded.
     ...(value['tokenBudget'] === undefined
       ? {}
@@ -906,6 +914,57 @@ function isGoalEvidenceCheckpoint(
     if (checkpointBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) return false;
   }
   return true;
+}
+
+function isVerificationPending(
+  value: unknown,
+): value is GoalStateRecordPayloadV2['verificationPending'] {
+  if (value === undefined) return true;
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      'permit',
+      'proposal',
+      'snapshotTail',
+      'failureKind',
+    ]) ||
+    !isGoalTurnPermit(value['permit']) ||
+    typeof value['snapshotTail'] !== 'string' ||
+    !value['snapshotTail'] ||
+    (value['failureKind'] !== undefined &&
+      (typeof value['failureKind'] !== 'string' ||
+        !['service', 'capacity', 'budget', 'evidence_unavailable'].includes(
+          value['failureKind'],
+        )))
+  )
+    return false;
+  const proposal = value['proposal'];
+  return (
+    isRecord(proposal) &&
+    hasOnlyKeys(proposal, [
+      'status',
+      'reason',
+      'evidenceRefs',
+      'blockerKind',
+    ]) &&
+    (proposal['status'] === 'complete' || proposal['status'] === 'blocked') &&
+    typeof proposal['reason'] === 'string' &&
+    !validateGoalProposalReason(proposal['reason']) &&
+    Array.isArray(proposal['evidenceRefs']) &&
+    proposal['evidenceRefs'].length > 0 &&
+    proposal['evidenceRefs'].length <= 100 &&
+    proposal['evidenceRefs'].every(
+      (ref) => typeof ref === 'string' && ref.length > 0,
+    ) &&
+    new Set(proposal['evidenceRefs']).size ===
+      proposal['evidenceRefs'].length &&
+    (proposal['blockerKind'] === undefined ||
+      (proposal['status'] === 'blocked' &&
+        typeof proposal['blockerKind'] === 'string' &&
+        ['authority', 'external', 'infeasible', 'repeated'].includes(
+          proposal['blockerKind'],
+        )))
+  );
 }
 
 function isCheckpointPending(

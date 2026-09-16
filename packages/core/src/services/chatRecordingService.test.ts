@@ -47,6 +47,7 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { readGoalChildEvidence } from '../goals/goal-child-evidence.js';
 
 function branchTestRecord(
   uuid: string,
@@ -85,6 +86,9 @@ vi.mock('node:crypto', () => ({
   })),
 }));
 vi.mock('../utils/jsonl-utils.js');
+vi.mock('../goals/goal-child-evidence.js', () => ({
+  readGoalChildEvidence: vi.fn(),
+}));
 
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
@@ -190,6 +194,33 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('reads child Goal evidence from the owning session storage', async () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal',
+      revision: 2,
+      turnId: 'turn',
+    };
+    const records = [branchTestRecord('launch', null, 'assistant', [])];
+    const evidence = {
+      records: [],
+      coverageUnavailable: [],
+      fingerprint: 'frozen',
+    };
+    vi.mocked(readGoalChildEvidence).mockResolvedValueOnce(evidence);
+
+    await expect(
+      chatRecordingService.readChildEvidence(records, permit),
+    ).resolves.toBe(evidence);
+    expect(readGoalChildEvidence).toHaveBeenLastCalledWith({
+      projectDir: '/test/project/root/.gemini/projects/test-project',
+      projectTempDir: '/test/project/root/.gemini/tmp/hash',
+      sessionId: 'test-session-id',
+      records,
+      permit,
+      liveTasks: { agents: [], shells: [], workflows: [] },
+    });
   });
 
   describe('background execution recording ownership', () => {

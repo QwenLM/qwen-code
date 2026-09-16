@@ -62,6 +62,11 @@ import type {
   GoalTurnPermit,
   TranscriptCursor,
 } from '../goals/goal-protocol.js';
+import type { GoalEvidenceRecord } from '../goals/goal-evidence.js';
+import {
+  readGoalChildEvidence,
+  type GoalChildEvidence,
+} from '../goals/goal-child-evidence.js';
 import {
   collectPendingBranchToolCalls,
   resolveCompletedTurnBranchCandidateFromRecords,
@@ -1661,6 +1666,69 @@ export class ChatRecordingService {
       );
     }
     return session.conversation.messages;
+  }
+
+  readChildEvidence(
+    records: readonly GoalEvidenceRecord[],
+    permit: GoalTurnPermit,
+  ): Promise<GoalChildEvidence> {
+    return readGoalChildEvidence({
+      projectDir: this.config.storage.getProjectDir(),
+      projectTempDir: this.config.storage.getProjectTempDir(),
+      sessionId: this.getSessionId(),
+      records,
+      permit,
+      liveTasks: {
+        agents: (this.config.getBackgroundTaskRegistry?.()?.getAll() ?? []).map(
+          ({ agentId, toolUseId, parentAgentId, status }) => ({
+            agentId,
+            toolUseId,
+            parentAgentId,
+            status,
+          }),
+        ),
+        shells: (
+          this.config.getBackgroundShellRegistry?.()?.getAll() ?? []
+        ).map(
+          ({
+            shellId,
+            command,
+            cwd,
+            status,
+            outputFile,
+            exitCode,
+            startTime,
+            endTime,
+          }) => ({
+            shellId,
+            command,
+            cwd,
+            status,
+            outputFile,
+            exitCode,
+            startTime,
+            endTime,
+          }),
+        ),
+        workflows: (this.config.getWorkflowRunRegistry?.()?.list() ?? []).map(
+          ({
+            runId,
+            toolUseId,
+            status,
+            agentsDispatched,
+            startTime,
+            endTime,
+          }) => ({
+            runId,
+            toolUseId,
+            status,
+            agentsDispatched,
+            startTime,
+            endTime,
+          }),
+        ),
+      },
+    });
   }
 
   async runWithWriteBarrier<T>(operation: () => Promise<T>): Promise<T> {

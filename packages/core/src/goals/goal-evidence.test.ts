@@ -6,6 +6,7 @@
 
 import type { Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
+import { GOAL_STATE_VERSION } from './goal-protocol.js';
 import type {
   GoalRecord,
   GoalTerminalProposal,
@@ -133,6 +134,24 @@ function validate(
   });
 }
 
+function revisionStart(uuid = 'cursor'): GoalEvidenceRecord {
+  return {
+    uuid,
+    type: 'system',
+    subtype: 'goal_state',
+    provenance: 'goal_control',
+    systemPayload: {
+      v: GOAL_STATE_VERSION,
+      cause: 'edit',
+      snapshot: {
+        v: GOAL_STATE_VERSION,
+        activity: 'idle',
+        goal: goal(uuid),
+      },
+    },
+  };
+}
+
 describe('Goal evidence catalog', () => {
   it('bounds the catalog while retaining the newest evidence', () => {
     const records = [
@@ -162,16 +181,16 @@ describe('Goal evidence catalog', () => {
         ...input,
         proposal: complete(['evidence-100']),
       }),
-    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
+    ).not.toThrow();
     expect(() =>
       validateGoalEvidenceReferences({
         ...input,
         proposal: complete(['evidence-0']),
       }),
-    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
+    ).not.toThrow();
   });
 
-  it('scopes the truncated catalog gate to full-window coverage proposals', () => {
+  it('keeps blocker proof requirements independent of catalog pagination', () => {
     const records = [
       record('cursor', 'system', {
         provenance: 'goal_control',
@@ -187,18 +206,19 @@ describe('Goal evidence catalog', () => {
     ];
     const input = { records, goal: goal(), permit: permit() };
 
-    // Immediate blockers depend on the full post-cursor window, which
-    // truncation silently weakens, so they stay fail-closed.
+    // A large directory must not turn assistant assertions into external facts.
     expect(() =>
       validateGoalEvidenceReferences({
         ...input,
         proposal: blocked('external', ['evidence-100']),
       }),
-    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'immediate_blocker_external_evidence_required',
+      }),
+    );
 
-    // A repeated blocker only has to cover the newest three turns, and the
-    // bounded catalog still holds that coverage here, so it reaches the
-    // coverage check instead of dying at the truncation gate.
+    // Repeated blockers still need three distinct turns.
     expect(() =>
       validateGoalEvidenceReferences({
         ...input,
@@ -269,130 +289,78 @@ describe('Goal evidence catalog', () => {
     });
   });
 
-  it('fails closed when truncation evicts a repeated blocker turn', () => {
-    const checkpointGoal: GoalRecord = {
-      ...goal('checkpoint-1'),
-      evidenceCheckpoint: {
-        checkpointId: 'checkpoint-1',
-        createdAt: 42,
-        claims: Array.from({ length: 32 }, (_, index) => ({
-          id: `checkpoint-1:${index + 1}`,
-          proofKind: 'external_fact' as const,
-          claim: `claim ${index + 1}`,
-          sourceRefs: [`source-${index + 1}`],
-        })),
-      },
-    };
+  it('keeps repeated blocker evidence valid outside the displayed page', () => {
     const records = [
-      record('checkpoint-1', 'system', {
-        provenance: 'goal_control',
-        subtype: 'goal_state',
+      revisionStart(),
+      record('old', 'tool_result', {
+        turnId: 'turn-1',
+        toolResponse: { output: 'failed' },
       }),
-      ...Array.from({ length: 5 }, (_, index) =>
-        record(`old-${index}`, 'tool_result', {
-          provenance: 'tool_result',
-          turnId: 'turn-1',
-          toolResponse: { output: `old failure ${index}` },
-        }),
-      ),
-      ...Array.from({ length: 67 }, (_, index) =>
-        record(`mid-${index}`, 'tool_result', {
-          provenance: 'tool_result',
+      ...Array.from({ length: 101 }, (_, index) =>
+        record(`middle-${index}`, 'tool_result', {
           turnId: 'turn-2',
-          toolResponse: { output: `mid failure ${index}` },
+          toolResponse: { output: 'still failed' },
         }),
       ),
-      record('new-0', 'tool_result', {
-        provenance: 'tool_result',
+      record('new', 'tool_result', {
         turnId: 'turn-3',
-        toolResponse: { output: 'new failure' },
+        toolResponse: { output: 'failed again' },
       }),
     ];
-    const input = { records, goal: checkpointGoal, permit: permit() };
-
-    expect(buildGoalEvidenceCatalog(input).truncated).toBe(true);
-    // The evicted turn makes the required coverage unsatisfiable, and the
-    // gate runs before reference validation, so even a citation of the
-    // evicted record reports catalog exhaustion rather than an unknown
-    // reference.
-    expect(() =>
-      validateGoalEvidenceReferences({
-        ...input,
-        proposal: blocked('repeated', ['old-0', 'mid-0', 'new-0']),
-      }),
-    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
-    expect(() =>
-      validateGoalEvidenceReferences({
-        ...input,
-        proposal: blocked('repeated', ['mid-0', 'new-0']),
-      }),
-    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
-  });
-
-  it('keeps a repeated blocker validatable while its turns stay catalogued', () => {
-    const checkpointGoal: GoalRecord = {
-      ...goal('checkpoint-1'),
+    const currentGoal = {
+      ...goal('middle-60'),
       evidenceCheckpoint: {
-        checkpointId: 'checkpoint-1',
-        createdAt: 42,
-        claims: Array.from({ length: 32 }, (_, index) => ({
-          id: `checkpoint-1:${index + 1}`,
-          proofKind: 'external_fact' as const,
-          claim: `claim ${index + 1}`,
-          sourceRefs: [`source-${index + 1}`],
-        })),
+        checkpointId: 'checkpoint',
+        createdAt: 1,
+        claims: [],
       },
     };
-    const records = [
-      record('checkpoint-1', 'system', {
-        provenance: 'goal_control',
-        subtype: 'goal_state',
-      }),
-      ...Array.from({ length: 5 }, (_, index) =>
-        record(`old-${index}`, 'tool_result', {
-          provenance: 'tool_result',
-          turnId: 'turn-1',
-          toolResponse: { output: `old failure ${index}` },
-        }),
-      ),
-      ...Array.from({ length: 66 }, (_, index) =>
-        record(`mid-${index}`, 'tool_result', {
-          provenance: 'tool_result',
-          turnId: 'turn-2',
-          toolResponse: { output: `mid failure ${index}` },
-        }),
-      ),
-      record('new-0', 'tool_result', {
-        provenance: 'tool_result',
-        turnId: 'turn-3',
-        toolResponse: { output: 'new failure' },
-      }),
-    ];
-    const input = { records, goal: checkpointGoal, permit: permit() };
-
-    // The entry cap still evicts older records of the oldest turn, but the
-    // turn itself stays catalogued, so the coverage check remains reachable.
-    expect(buildGoalEvidenceCatalog(input).truncated).toBe(true);
     expect(
-      validateGoalEvidenceReferences({
-        ...input,
-        proposal: blocked('repeated', ['old-4', 'mid-0', 'new-0']),
-      }).citedRecords,
+      buildGoalEvidenceCatalog({ records, goal: currentGoal, permit: permit() })
+        .truncated,
+    ).toBe(true);
+    expect(
+      validate(
+        records,
+        blocked('repeated', ['old', 'middle-0', 'new']),
+        permit(),
+        currentGoal,
+      ).citedRecords,
     ).toHaveLength(3);
-    // Once the relaxed truncation gate lets the proposal through, citing a
-    // record the entry cap evicted surfaces as an ordinary retryable
-    // reference failure rather than catalog exhaustion.
     expect(() =>
-      validateGoalEvidenceReferences({
-        ...input,
-        proposal: blocked('repeated', ['old-0', 'mid-0', 'new-0']),
-      }),
+      validate(
+        records,
+        blocked('repeated', ['middle-0', 'new']),
+        permit(),
+        currentGoal,
+      ),
     ).toThrowError(
-      expect.objectContaining({ code: 'reference_not_catalogued' }),
+      expect.objectContaining({ code: 'repeated_blocker_turn_coverage' }),
     );
   });
 
-  it('does not expand records older than the bounded catalog window', () => {
+  it('rejects checkpoint history with no reliable revision start', () => {
+    const currentGoal = {
+      ...goal(),
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint',
+        createdAt: 1,
+        claims: [],
+      },
+    };
+    expect(() =>
+      buildGoalEvidenceCatalog({
+        records: [
+          record('cursor', 'system'),
+          record('new', 'assistant', { turnId: 'turn-3', text: 'done' }),
+        ],
+        goal: currentGoal,
+        permit: permit(),
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'scope_unavailable' }));
+  });
+
+  it('copies the recorded payload once while freezing a multi-page catalog', () => {
     let oldPayloadReads = 0;
     const oldPayload: Record<string, unknown> = {};
     Object.defineProperty(oldPayload, 'payload', {
@@ -425,7 +393,7 @@ describe('Goal evidence catalog', () => {
         permit: permit(),
       }),
     ).toMatchObject({ truncated: true });
-    expect(oldPayloadReads).toBe(0);
+    expect(oldPayloadReads).toBe(1);
   });
 
   it('bounds the serialized catalog by UTF-8 bytes', () => {
@@ -617,7 +585,7 @@ describe('Goal evidence catalog', () => {
     expect(capped?.content).not.toContain('\ufffd');
   });
 
-  it('does not expand raw evidence below the checkpoint threshold', () => {
+  it('does not make another snapshot copy for a skipped legacy checkpoint', () => {
     let fullPayloadReads = 0;
     const level2: Record<string, unknown> = {};
     Object.defineProperty(level2, 'payload', {
@@ -638,17 +606,17 @@ describe('Goal evidence catalog', () => {
     const input = { records, goal: goal(), permit: permit() };
 
     expect(buildGoalEvidenceCatalog(input).truncated).toBe(false);
-    expect(fullPayloadReads).toBe(0);
+    expect(fullPayloadReads).toBe(1);
 
     expect(buildGoalEvidenceCheckpointWindow(input)).toMatchObject({
       shouldCheckpoint: false,
       truncated: false,
       evidence: [],
     });
-    expect(fullPayloadReads).toBe(0);
+    expect(fullPayloadReads).toBe(1);
   });
 
-  it('bounds reference count, rejects duplicates, and bounds cited bytes', () => {
+  it('bounds reference count and duplicates but keeps oversized raw records readable', () => {
     const records = [
       record('cursor', 'system'),
       ...Array.from({ length: 13 }, (_, index) =>
@@ -684,9 +652,9 @@ describe('Goal evidence catalog', () => {
     ).toThrowError(
       expect.objectContaining({ code: 'duplicate_evidence_reference' }),
     );
-    expect(() => validate(records, complete(['evidence-0']))).toThrowError(
-      expect.objectContaining({ code: 'evidence_payload_too_large' }),
-    );
+    expect(
+      validate(records, complete(['evidence-0'])).citedRecords[0]?.content,
+    ).toHaveLength(256_001);
   });
 
   it('admits delivered output larger than the catalog preview budget', () => {
@@ -738,7 +706,7 @@ describe('Goal evidence catalog', () => {
         turnId: 'turn-1',
         text: 'old input',
       }),
-      record('cursor', 'system'),
+      revisionStart(),
       record('tool', 'tool_result', {
         provenance: 'tool_result',
         turnId: 'turn-2',
@@ -1028,17 +996,23 @@ describe('Goal evidence lineage and blockers', () => {
           code: 'immediate_blocker_external_evidence_required',
         }),
       );
-      expect(
-        validate(records, blocked(blockerKind, ['user', 'assistant']))
-          .citedRecords[0],
-      ).toMatchObject({ proofKind: 'user_input' });
       expect(() =>
-        validate(records, blocked(blockerKind, ['user'])),
+        validate(records, blocked(blockerKind, ['user', 'assistant'])),
       ).toThrowError(
         expect.objectContaining({
           code: 'immediate_blocker_newer_evidence_required',
         }),
       );
+      records.push(
+        record('current-user', 'user', {
+          turnId: 'turn-3',
+          text: 'Access remains unavailable',
+        }),
+      );
+      expect(
+        validate(records, blocked(blockerKind, ['current-user']))
+          .citedRecords[0],
+      ).toMatchObject({ proofKind: 'user_input' });
     },
   );
 
@@ -1084,19 +1058,14 @@ describe('Goal evidence lineage and blockers', () => {
       validate(records, blocked('infeasible', ['probe', 'assistant']))
         .citedRecords[0],
     ).toMatchObject({ uuid: 'probe', proofKind: 'external_fact' });
-    // Like the other immediate blockers, it cannot leave newer evidence
-    // uncited: a later record could contradict the impossibility.
+    // The host supplies newer records automatically for contradiction review.
     expect(() =>
       validate(records, blocked('infeasible', ['probe'])),
-    ).toThrowError(
-      expect.objectContaining({
-        code: 'immediate_blocker_newer_evidence_required',
-      }),
-    );
+    ).not.toThrow();
   });
 
   it.each(['authority', 'external'] as const)(
-    'gates an immediate %s blocker on checkpoint claims like raw evidence',
+    'expands an immediate %s blocker claim to its original recorded proof',
     (blockerKind) => {
       const checkpointGoal: GoalRecord = {
         ...goal('checkpoint-1'),
@@ -1120,6 +1089,15 @@ describe('Goal evidence lineage and blockers', () => {
         },
       };
       const records = [
+        revisionStart(),
+        record('user-old', 'user', {
+          turnId: 'turn-3',
+          text: 'The user withheld deploy authority.',
+        }),
+        record('assistant-old', 'assistant', {
+          turnId: 'turn-3',
+          text: 'The change was delivered.',
+        }),
         record('checkpoint-1', 'system', {
           provenance: 'goal_control',
           subtype: 'goal_state',
@@ -1143,7 +1121,7 @@ describe('Goal evidence lineage and blockers', () => {
           checkpointGoal,
         ).citedRecords[0],
       ).toMatchObject({
-        uuid: 'checkpoint-1:1',
+        uuid: 'user-old',
         proofKind: 'user_input',
         content: 'The user withheld deploy authority.',
       });
@@ -1166,11 +1144,7 @@ describe('Goal evidence lineage and blockers', () => {
           permit(),
           checkpointGoal,
         ),
-      ).toThrowError(
-        expect.objectContaining({
-          code: 'immediate_blocker_newer_evidence_required',
-        }),
-      );
+      ).not.toThrow();
     },
   );
 

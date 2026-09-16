@@ -5,9 +5,11 @@
  */
 
 import type { Part } from '@google/genai';
+import { createHash } from 'node:crypto';
+import { ToolNames } from '../tools/tool-names.js';
+import { parseGoalStateRecordPayloadV2 } from './goal-reducer.js';
 import {
-  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
-  isRepeatedBlockerProposal,
+  goalLimitKindForReason,
   type GoalEvidenceCheckpointClaim,
   type GoalEvidenceProofKind,
   type GoalRecord,
@@ -41,7 +43,7 @@ const CHECKPOINT_BYTE_THRESHOLD = 19_200;
 const CHECKPOINT_CONTENT_BYTE_LIMIT = 2_000;
 const CHECKPOINT_CONTENT_TRUNCATION_MARKER = '\n\u2026[truncated]';
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
-const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
+const EVIDENCE_SLICE_BYTE_LIMIT = 24_000;
 
 export type GoalEvidenceProvenance =
   | 'real_user'
@@ -57,28 +59,44 @@ type GoalRecordProvenance =
 
 export interface GoalEvidenceRecord {
   uuid: string;
+  timestamp?: string;
+  agentId?: string;
+  parentToolCallId?: string;
   type: 'user' | 'assistant' | 'tool_result' | 'system';
   subtype?: string;
   provenance?: GoalRecordProvenance;
   goalContext?: unknown;
   message?: { parts?: Part[] };
   systemPayload?: unknown;
+  toolCallResult?: unknown;
+  sourceComplete?: boolean;
+  missingReason?: string;
 }
 
 export type { GoalEvidenceProofKind } from './goal-protocol.js';
 
 export interface GoalEvidenceCatalogEntry {
   uuid: string;
+  timestamp?: string;
+  agentId?: string;
+  parentToolCallId?: string;
   provenance: GoalEvidenceProvenance;
   turnId: string;
   preview: string;
   proofKind: GoalEvidenceProofKind;
+  sourceComplete?: boolean;
+  missingReason?: string;
 }
 
 export interface GoalEvidenceCatalog {
   entries: GoalEvidenceCatalogEntry[];
   lineageTurnIds: string[];
   truncated: boolean;
+  hasMore?: boolean;
+  nextCursor?: string;
+  scopeStart?: string;
+  snapshotTail?: string;
+  snapshotId?: string;
 }
 
 export interface ValidatedGoalEvidenceRecord extends GoalEvidenceCatalogEntry {
@@ -91,6 +109,7 @@ export interface ValidatedGoalEvidence {
 
 export interface GoalEvidenceContext {
   records: readonly GoalEvidenceRecord[];
+  auditRecords?: readonly GoalEvidenceRecord[];
   goal: GoalRecord;
   permit: GoalTurnPermit;
 }
@@ -113,7 +132,9 @@ export type EvidenceSourceUnavailableCode =
   | 'permit_goal_mismatch'
   | 'malformed_turn_context'
   | 'turn_reentry'
-  | 'current_turn_not_tail';
+  | 'current_turn_not_tail'
+  | 'scope_unavailable'
+  | 'invalid_read_cursor';
 
 export class EvidenceSourceUnavailableError extends Error {
   constructor(
@@ -157,12 +178,13 @@ export class InvalidGoalEvidenceReferenceError extends Error {
 
 interface EvidenceAnalysis {
   cursorIndex: number;
-  catalog: GoalEvidenceCatalogEntry[];
+  currentStateStartIndex?: number;
+  allEntries: GoalEvidenceCatalogEntry[];
   eligibleByUuid: Map<string, GoalEvidenceCatalogEntry>;
   indexByUuid: Map<string, number>;
+  recordsByUuid: Map<string, GoalEvidenceRecord>;
+  auditUuids: Set<string>;
   lineageTurnIds: string[];
-  catalogTruncated: boolean;
-  catalogBytes: number;
 }
 
 interface ParsedGoalContext {
@@ -237,7 +259,11 @@ export class GoalEvidenceRecordIndexAccumulator {
         previewValues.push(part.text.slice(0, CATALOG_PREVIEW_LIMIT));
         if (part.text.trim()) this.hasRawEligibleContent = true;
       }
-      if (this.provenance === 'tool_result' && part.functionResponse) {
+      if (
+        part.thought !== true &&
+        this.provenance === 'tool_result' &&
+        part.functionResponse
+      ) {
         previewValues.push(renderToolResponsePreview(part.functionResponse));
         if (part.functionResponse.response !== undefined) {
           this.hasRawEligibleContent = true;
@@ -554,11 +580,12 @@ export function getGoalEvidenceRecordIndexHint(
 export function buildGoalEvidenceCatalog(
   input: GoalEvidenceContext,
 ): GoalEvidenceCatalog {
-  const analysis = analyzeEvidence(input);
+  const snapshot = createGoalEvidenceSnapshot(input);
+  const page = snapshot.list({ direction: 'backward' });
   return {
-    entries: analysis.catalog.map((entry) => ({ ...entry })),
-    lineageTurnIds: analysis.lineageTurnIds.slice(-CATALOG_LINEAGE_LIMIT),
-    truncated: analysis.catalogTruncated,
+    ...page,
+    lineageTurnIds: snapshot.lineageTurnIds.slice(-CATALOG_LINEAGE_LIMIT),
+    truncated: page.hasMore,
   };
 }
 
@@ -583,6 +610,13 @@ export function buildGoalEvidenceCheckpointWindow(
 export function validateGoalEvidenceReferences(
   input: GoalEvidenceValidationInput,
 ): ValidatedGoalEvidence {
+  return validateEvidenceReferences(input);
+}
+
+function validateEvidenceReferences(
+  input: GoalEvidenceValidationInput,
+  existingAnalysis?: EvidenceAnalysis,
+): ValidatedGoalEvidence {
   const references = input.proposal.evidenceRefs;
   if (references.length === 0) {
     throw new InvalidGoalEvidenceReferenceError(
@@ -603,40 +637,54 @@ export function validateGoalEvidenceReferences(
     );
   }
 
-  const analysis = analyzeEvidence(input);
-  // Truncation drops the oldest post-cursor evidence, so fail closed unless
-  // the bounded catalog can still satisfy the proposal's required coverage.
-  // A repeated blocker only needs the newest three turns, and only when each
-  // of them still holds evidence the coverage check can actually cite.
+  const analysis = existingAnalysis ?? analyzeEvidence(input);
+  const citedRecords = references.flatMap((reference) => {
+    const claim = input.goal.evidenceCheckpoint?.claims.find(
+      (entry) => entry.id === reference,
+    );
+    const originals = claim ? claim.sourceRefs : [reference];
+    if (originals.length === 0) {
+      throw new InvalidGoalEvidenceReferenceError(
+        'missing_reference',
+        `Checkpoint claim ${reference} has no recorded original sources.`,
+        reference,
+      );
+    }
+    return originals.map((original) => {
+      const validated = validateReference(original, input, analysis);
+      if (claim && validated.proofKind !== claim.proofKind) {
+        throw new InvalidGoalEvidenceReferenceError(
+          'ineligible_reference',
+          `Checkpoint claim ${reference} does not match its original source proof kind.`,
+          reference,
+        );
+      }
+      return validated;
+    });
+  });
+  const externalFacts = citedRecords.filter(
+    (record) => record.proofKind === 'external_fact',
+  );
   if (
-    analysis.catalogTruncated &&
-    !(
-      isRepeatedBlockerProposal(input.proposal) &&
-      repeatedBlockerCoverageCatalogued(analysis)
+    input.proposal.status === 'complete' &&
+    analysis.currentStateStartIndex !== undefined &&
+    externalFacts.length > 0 &&
+    externalFacts.every(
+      (record) =>
+        evidenceOrder(record, input, analysis) <=
+        analysis.currentStateStartIndex!,
     )
   ) {
     throw new InvalidGoalEvidenceReferenceError(
-      'catalog_truncated',
-      GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+      'pre_cursor_reference',
+      'The cited external facts precede the legacy evidence reset. Cite fresh current-state proof; earlier history remains available for action auditing.',
     );
   }
-  const citedRecords = references.map((reference) =>
-    validateReference(reference, input, analysis),
-  );
-  const evidenceBytes = citedRecords.reduce(
-    (total, record) => total + Buffer.byteLength(record.content, 'utf8'),
-    0,
-  );
-  if (evidenceBytes > VERIFIER_EVIDENCE_BYTE_LIMIT) {
-    throw new InvalidGoalEvidenceReferenceError(
-      'evidence_payload_too_large',
-      `Cited Goal evidence exceeds the ${VERIFIER_EVIDENCE_BYTE_LIMIT}-byte verifier limit.`,
-    );
-  }
-
   validateBlockerCoverage(input.proposal, citedRecords, analysis);
   return {
-    citedRecords: citedRecords.map((entry) => ({ ...entry })),
+    citedRecords: [
+      ...new Map(citedRecords.map((entry) => [entry.uuid, entry])).values(),
+    ],
   };
 }
 
@@ -652,14 +700,6 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     );
   }
 
-  const cursorId = input.goal.evidenceCursor.recordId;
-  if (cursorId === null) {
-    throw new EvidenceSourceUnavailableError(
-      'cursor_unset',
-      'The Goal evidence cursor is not available.',
-    );
-  }
-
   const indexByUuid = new Map<string, number>();
   for (let index = 0; index < input.records.length; index += 1) {
     const uuid = input.records[index]!.uuid;
@@ -671,15 +711,7 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     }
     indexByUuid.set(uuid, index);
   }
-
-  const cursorIndex = indexByUuid.get(cursorId);
-  if (cursorIndex === undefined) {
-    throw new EvidenceSourceUnavailableError(
-      'cursor_not_found',
-      `The Goal evidence cursor ${cursorId} is not in the active transcript chain.`,
-    );
-  }
-
+  const cursorIndex = resolveScopeStart(input, indexByUuid);
   const lineageTurnIds = collectLineageTurnIds(input, cursorIndex);
   if (lineageTurnIds.at(-1) !== input.permit.turnId) {
     throw new EvidenceSourceUnavailableError(
@@ -688,53 +720,113 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     );
   }
 
-  const checkpointEntries = checkpointCatalogEntries(input.goal);
-  const selectedEvidence: GoalEvidenceCatalogEntry[] = [];
-  let catalogBytes = checkpointEntries.reduce(
-    (total, entry) => total + Buffer.byteLength(JSON.stringify(entry), 'utf8'),
-    0,
+  const recordsByUuid = new Map(
+    input.records.map((record) => [record.uuid, record]),
   );
-  let catalogTruncated =
-    checkpointEntries.length >= CATALOG_ENTRY_LIMIT ||
-    catalogBytes > CATALOG_BYTE_LIMIT;
-  const rawEntryLimit = Math.max(
-    0,
-    CATALOG_ENTRY_LIMIT - checkpointEntries.length,
-  );
-  for (let index = input.records.length - 1; index > cursorIndex; index -= 1) {
-    const record = input.records[index]!;
-    if (selectedEvidence.length >= rawEntryLimit) {
-      // The entry cap keeps the newest evidence; only call the catalog
-      // truncated when eligible evidence is actually left behind.
-      if (hasCatalogEligibleEvidence(record, input)) {
-        catalogTruncated = true;
-        break;
-      }
-      continue;
+  const auditUuids = new Set<string>();
+  for (const [index, record] of (input.auditRecords ?? []).entries()) {
+    const context = parseGoalContext(record.goalContext);
+    if (
+      !context ||
+      context.goalId !== input.goal.goalId ||
+      context.revision !== input.goal.revision ||
+      !lineageTurnIds.includes(context.turnId)
+    ) {
+      throw new EvidenceSourceUnavailableError(
+        'malformed_turn_context',
+        `Derived evidence ${record.uuid} is outside the authorized Goal lineage.`,
+      );
     }
-    const evidence = catalogEvidence(record, input);
-    if (!evidence) continue;
-    const entryBytes = Buffer.byteLength(JSON.stringify(evidence), 'utf8');
-    if (catalogBytes + entryBytes > CATALOG_BYTE_LIMIT) {
-      catalogTruncated = true;
-      break;
+    if (recordsByUuid.has(record.uuid)) {
+      throw new EvidenceSourceUnavailableError(
+        'duplicate_record_uuid',
+        `Derived evidence duplicates record UUID ${record.uuid}.`,
+      );
     }
-    selectedEvidence.push(evidence);
-    catalogBytes += entryBytes;
+    auditUuids.add(record.uuid);
+    recordsByUuid.set(record.uuid, record);
+    indexByUuid.set(record.uuid, input.records.length + index);
   }
-
-  selectedEvidence.reverse();
-  const catalog = [...checkpointEntries, ...selectedEvidence];
-  const eligibleByUuid = new Map(catalog.map((entry) => [entry.uuid, entry]));
+  const allEntries = input.records.slice(cursorIndex + 1).flatMap((record) => {
+    const entry = catalogEvidence(record, input);
+    return entry ? [entry] : [];
+  });
+  for (const record of input.auditRecords ?? []) {
+    if (coherentEvidenceProvenance(record) !== 'tool_result') continue;
+    const entry = catalogEvidence(record, input);
+    if (entry) allEntries.push(entry);
+  }
   return {
     cursorIndex,
-    catalog,
-    eligibleByUuid,
+    currentStateStartIndex: legacyCurrentStateStart(input, cursorIndex),
+    allEntries,
+    eligibleByUuid: new Map(allEntries.map((entry) => [entry.uuid, entry])),
     indexByUuid,
+    recordsByUuid,
+    auditUuids,
     lineageTurnIds,
-    catalogTruncated,
-    catalogBytes,
   };
+}
+
+function resolveScopeStart(
+  input: GoalEvidenceContext,
+  indices: ReadonlyMap<string, number>,
+): number {
+  let hasMovedCursor = Boolean(input.goal.evidenceCheckpoint);
+  for (let index = 0; index < input.records.length; index++) {
+    const record = input.records[index]!;
+    if (record.type !== 'system' || record.subtype !== 'goal_state') continue;
+    const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+    const state = payload?.snapshot.goal;
+    if (
+      !payload ||
+      !state ||
+      state.goalId !== input.goal.goalId ||
+      state.revision !== input.goal.revision
+    )
+      continue;
+    const cause = payload.cause;
+    if (
+      cause === 'create' ||
+      cause === 'replace' ||
+      cause === 'edit' ||
+      cause === 'migrated'
+    ) {
+      return index;
+    }
+    if (cause === 'checkpoint' || cause === 'resume') hasMovedCursor = true;
+  }
+  if (hasMovedCursor) {
+    throw new EvidenceSourceUnavailableError(
+      'scope_unavailable',
+      'The current Goal revision start is missing; a checkpoint or resume cursor cannot establish evidence scope.',
+    );
+  }
+  const cursorId = input.goal.evidenceCursor.recordId;
+  if (cursorId === null) {
+    throw new EvidenceSourceUnavailableError(
+      'cursor_unset',
+      'The Goal evidence scope start is not available.',
+    );
+  }
+  const index = indices.get(cursorId);
+  if (index === undefined) {
+    throw new EvidenceSourceUnavailableError(
+      'cursor_not_found',
+      `The Goal evidence scope start ${cursorId} is not in the active transcript chain.`,
+    );
+  }
+  if (
+    input.records
+      .slice(0, index + 1)
+      .some((record) => claimsGoalRevision(record.goalContext, input.goal))
+  ) {
+    throw new EvidenceSourceUnavailableError(
+      'scope_unavailable',
+      'The Goal cursor would omit earlier actions without a recorded revision start.',
+    );
+  }
+  return index;
 }
 
 function collectLineageTurnIds(
@@ -779,24 +871,9 @@ function collectLineageTurnIds(
 
 function validateReference(
   reference: string,
-  input: GoalEvidenceValidationInput,
+  input: GoalEvidenceContext,
   analysis: EvidenceAnalysis,
 ): ValidatedGoalEvidenceRecord {
-  const checkpointClaim = input.goal.evidenceCheckpoint?.claims.find(
-    (claim) => claim.id === reference,
-  );
-  if (checkpointClaim) {
-    const catalogEntry = analysis.eligibleByUuid.get(reference);
-    if (!catalogEntry) {
-      throw new InvalidGoalEvidenceReferenceError(
-        'reference_not_catalogued',
-        `Evidence reference ${reference} is outside the bounded Goal evidence catalog.`,
-        reference,
-      );
-    }
-    return { ...catalogEntry, content: checkpointClaim.claim };
-  }
-
   const recordIndex = analysis.indexByUuid.get(reference);
   if (recordIndex === undefined) {
     throw new InvalidGoalEvidenceReferenceError(
@@ -808,12 +885,12 @@ function validateReference(
   if (recordIndex <= analysis.cursorIndex) {
     throw new InvalidGoalEvidenceReferenceError(
       'pre_cursor_reference',
-      `Evidence reference ${reference} is not after the Goal evidence cursor.`,
+      `Evidence reference ${reference} precedes the current Goal revision scope.`,
       reference,
     );
   }
 
-  const record = input.records[recordIndex]!;
+  const record = analysis.recordsByUuid.get(reference)!;
   if (!coherentEvidenceProvenance(record)) {
     throw new InvalidGoalEvidenceReferenceError(
       'ineligible_reference',
@@ -855,11 +932,18 @@ function validateReference(
   if (!catalogEntry) {
     throw new InvalidGoalEvidenceReferenceError(
       'reference_not_catalogued',
-      `Evidence reference ${reference} is outside the bounded Goal evidence catalog.`,
+      `Evidence reference ${reference} has no eligible recorded content in the authorized Goal scope.`,
       reference,
     );
   }
-  const content = evidenceContent(record, catalogEntry.provenance);
+  const rendered = evidenceContentWithCalls(
+    record,
+    catalogEntry.provenance,
+    analysis.auditUuids.has(reference)
+      ? (input.auditRecords ?? [])
+      : input.records,
+  );
+  const { content } = rendered;
   if (!content) {
     throw new InvalidGoalEvidenceReferenceError(
       'ineligible_reference',
@@ -867,21 +951,7 @@ function validateReference(
       reference,
     );
   }
-  return { ...catalogEntry, content };
-}
-
-function repeatedBlockerCoverageCatalogued(
-  analysis: EvidenceAnalysis,
-): boolean {
-  const requiredTurnIds = analysis.lineageTurnIds.slice(-3);
-  const currentTurnId = requiredTurnIds.at(-1);
-  return requiredTurnIds.every((turnId) =>
-    analysis.catalog.some(
-      (entry) =>
-        entry.turnId === turnId &&
-        (turnId === currentTurnId || entry.provenance !== 'assistant_output'),
-    ),
-  );
+  return { ...catalogEntry, ...rendered };
 }
 
 function validateBlockerCoverage(
@@ -921,24 +991,18 @@ function validateBlockerCoverage(
         'An immediate blocker requires cited user input or external tool evidence.',
       );
     }
-    const citedIds = new Set(citedRecords.map(({ uuid }) => uuid));
-    const oldestBlockerIndex = Math.min(
-      ...citedRecords
-        .filter(
-          ({ proofKind }) =>
-            proofKind === 'user_input' || proofKind === 'external_fact',
-        )
-        .map(({ uuid }) =>
-          analysis.catalog.findIndex((entry) => entry.uuid === uuid),
-        ),
-    );
-    const uncitedNewerEvidence = analysis.catalog
-      .slice(oldestBlockerIndex + 1)
-      .filter(({ uuid }) => !citedIds.has(uuid));
-    if (uncitedNewerEvidence.length > 0) {
+    if (
+      !citedRecords.some(
+        (record) =>
+          record.turnId === analysis.lineageTurnIds.at(-1) &&
+          (record.proofKind === 'external_fact' ||
+            (proposal.blockerKind !== 'infeasible' &&
+              record.proofKind === 'user_input')),
+      )
+    ) {
       throw new InvalidGoalEvidenceReferenceError(
         'immediate_blocker_newer_evidence_required',
-        'An immediate blocker must cite every newer bounded evidence record so contradictory evidence cannot be omitted.',
+        'An immediate blocker requires current-turn user input or external tool evidence.',
       );
     }
     return;
@@ -983,39 +1047,6 @@ function checkpointCatalogEntries(
   }));
 }
 
-function hasCatalogEligibleEvidence(
-  record: GoalEvidenceRecord,
-  input: GoalEvidenceContext,
-): boolean {
-  const provenance = coherentEvidenceProvenance(record);
-  if (!provenance) return false;
-  const context = parseGoalContext(record.goalContext);
-  if (
-    !context ||
-    context.goalId !== input.goal.goalId ||
-    context.revision !== input.goal.revision
-  ) {
-    return false;
-  }
-  for (const part of record.message?.parts ?? []) {
-    if (
-      part.thought !== true &&
-      typeof part.text === 'string' &&
-      part.text.trim()
-    ) {
-      return true;
-    }
-    if (
-      provenance === 'tool_result' &&
-      part.functionResponse &&
-      part.functionResponse.response !== undefined
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function catalogEvidence(
   record: GoalEvidenceRecord,
   input: GoalEvidenceContext,
@@ -1035,6 +1066,11 @@ function catalogEvidence(
   if (!preview) return undefined;
   return {
     uuid: record.uuid,
+    ...(record.timestamp ? { timestamp: record.timestamp } : {}),
+    ...(record.agentId ? { agentId: record.agentId } : {}),
+    ...(record.parentToolCallId
+      ? { parentToolCallId: record.parentToolCallId }
+      : {}),
     provenance,
     turnId: context.turnId,
     preview,
@@ -1138,7 +1174,11 @@ function evidenceContent(
     if (part.thought !== true && typeof part.text === 'string') {
       content.push(part.text);
     }
-    if (provenance === 'tool_result' && part.functionResponse) {
+    if (
+      part.thought !== true &&
+      provenance === 'tool_result' &&
+      part.functionResponse
+    ) {
       const rendered = renderToolResponse(part.functionResponse);
       if (rendered) content.push(rendered);
     }
@@ -1173,7 +1213,11 @@ function evidencePreview(
     if (part.thought !== true && typeof part.text === 'string') {
       append(part.text);
     }
-    if (provenance === 'tool_result' && part.functionResponse) {
+    if (
+      part.thought !== true &&
+      provenance === 'tool_result' &&
+      part.functionResponse
+    ) {
       append(renderToolResponsePreview(part.functionResponse));
     }
     if (preview.length >= CATALOG_PREVIEW_LIMIT) break;
@@ -1295,4 +1339,554 @@ function hasOnlyKeys(
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+export interface GoalEvidencePage {
+  entries: GoalEvidenceCatalogEntry[];
+  hasMore: boolean;
+  nextCursor?: string;
+  scopeStart: string;
+  snapshotTail: string;
+  snapshotId: string;
+}
+
+export interface GoalEvidenceSlice extends ValidatedGoalEvidenceRecord {
+  start: number;
+  end: number;
+  totalBytes: number;
+  complete: boolean;
+  sourceComplete: boolean;
+  nextCursor?: string;
+}
+
+export interface GoalEvidenceListRequest {
+  cursor?: string;
+  limit?: number;
+  direction?: 'forward' | 'backward';
+}
+
+export interface GoalEvidenceReadRequest {
+  reference: string;
+  cursor?: string;
+  maxBytes?: number;
+}
+
+interface EvidenceReadCursor {
+  snapshotId: string;
+  kind: 'list' | 'read';
+  offset: number;
+  reference?: string;
+  direction?: 'forward' | 'backward';
+}
+
+export function createGoalEvidenceSnapshot(
+  input: GoalEvidenceContext,
+  options: { auditRecords?: readonly GoalEvidenceRecord[] } = {},
+): GoalEvidenceSnapshot {
+  return new GoalEvidenceSnapshot({
+    ...input,
+    ...(options.auditRecords ? { auditRecords: options.auditRecords } : {}),
+  });
+}
+
+export class GoalEvidenceSnapshot {
+  readonly scopeStart: string;
+  readonly currentStateStart?: string;
+  readonly snapshotTail: string;
+  readonly snapshotId: string;
+  readonly lineageTurnIds: readonly string[];
+  readonly coverageUnavailable: readonly string[];
+  private readonly input: GoalEvidenceContext;
+  private readonly analysis: EvidenceAnalysis;
+  private readonly contents = new Map<string, ValidatedGoalEvidenceRecord>();
+
+  constructor(input: GoalEvidenceContext) {
+    this.input = structuredClone(input);
+    this.analysis = analyzeEvidence(this.input);
+    this.scopeStart = this.input.records[this.analysis.cursorIndex]!.uuid;
+    this.currentStateStart =
+      this.analysis.currentStateStartIndex === undefined
+        ? undefined
+        : this.input.records[this.analysis.currentStateStartIndex]!.uuid;
+    this.snapshotTail = this.input.records.at(-1)!.uuid;
+    this.snapshotId = createHash('sha256')
+      .update(
+        JSON.stringify([
+          input.goal.goalId,
+          input.goal.revision,
+          this.scopeStart,
+          this.snapshotTail,
+          this.input.auditRecords ?? [],
+        ]),
+      )
+      .digest('hex');
+    this.lineageTurnIds = Object.freeze([...this.analysis.lineageTurnIds]);
+    this.coverageUnavailable = Object.freeze([
+      ...orphanedCalls(
+        this.input.records.slice(this.analysis.cursorIndex + 1),
+        this.input.goal,
+      ),
+      ...orphanedCalls(this.input.auditRecords ?? [], this.input.goal),
+      ...unreadableMedia(
+        [
+          ...this.input.records.slice(this.analysis.cursorIndex + 1),
+          ...(this.input.auditRecords ?? []),
+        ],
+        this.input.goal,
+      ),
+    ]);
+  }
+
+  get entries(): readonly GoalEvidenceCatalogEntry[] {
+    return this.analysis.allEntries.map((entry) => ({ ...entry }));
+  }
+
+  list(request: GoalEvidenceListRequest = {}): GoalEvidencePage {
+    const cursor = request.cursor
+      ? this.decodeCursor(request.cursor, 'list')
+      : undefined;
+    const direction = cursor?.direction ?? request.direction ?? 'forward';
+    if (cursor && request.direction && cursor.direction !== request.direction) {
+      this.invalidCursor();
+    }
+    const limit = request.limit ?? CATALOG_ENTRY_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > CATALOG_ENTRY_LIMIT) {
+      throw new RangeError(
+        `Goal evidence page limit must be between 1 and ${CATALOG_ENTRY_LIMIT}.`,
+      );
+    }
+    let index =
+      cursor?.offset ??
+      (direction === 'forward' ? 0 : this.analysis.allEntries.length - 1);
+    const entries: GoalEvidenceCatalogEntry[] = [];
+    let bytes = 0;
+    while (
+      index >= 0 &&
+      index < this.analysis.allEntries.length &&
+      entries.length < limit
+    ) {
+      const entry = this.analysis.allEntries[index]!;
+      const original = this.fullRecord(entry.uuid);
+      const listed = {
+        ...entry,
+        sourceComplete: original.sourceComplete,
+        ...(original.missingReason
+          ? { missingReason: original.missingReason }
+          : {}),
+      };
+      const size = Buffer.byteLength(JSON.stringify(listed), 'utf8') + 1;
+      if (bytes + size + 2 > CATALOG_BYTE_LIMIT) break;
+      entries.push(listed);
+      bytes += size;
+      index += direction === 'forward' ? 1 : -1;
+    }
+    if (direction === 'backward') entries.reverse();
+    const hasMore = index >= 0 && index < this.analysis.allEntries.length;
+    if (hasMore && entries.length === 0) {
+      throw new EvidenceSourceUnavailableError(
+        'scope_unavailable',
+        'A Goal evidence directory entry exceeds the page capacity.',
+      );
+    }
+    return {
+      entries,
+      hasMore,
+      ...(hasMore
+        ? {
+            nextCursor: this.encodeCursor({
+              kind: 'list',
+              offset: index,
+              direction,
+            }),
+          }
+        : {}),
+      scopeStart: this.scopeStart,
+      snapshotTail: this.snapshotTail,
+      snapshotId: this.snapshotId,
+    };
+  }
+
+  read(request: GoalEvidenceReadRequest): GoalEvidenceSlice {
+    const record = this.fullRecord(request.reference);
+    const cursor = request.cursor
+      ? this.decodeCursor(request.cursor, 'read')
+      : undefined;
+    if (cursor && cursor.reference !== request.reference) this.invalidCursor();
+    const start = cursor?.offset ?? 0;
+    const maxBytes = request.maxBytes ?? EVIDENCE_SLICE_BYTE_LIMIT;
+    if (
+      !Number.isInteger(maxBytes) ||
+      maxBytes < 4 ||
+      maxBytes > EVIDENCE_SLICE_BYTE_LIMIT
+    ) {
+      throw new RangeError(
+        `Goal evidence read size must be between 4 and ${EVIDENCE_SLICE_BYTE_LIMIT} bytes.`,
+      );
+    }
+    const bytes = Buffer.from(record.content, 'utf8');
+    if (
+      start > bytes.length ||
+      (start < bytes.length && (bytes[start]! & 0xc0) === 0x80)
+    )
+      this.invalidCursor();
+    let end = Math.min(bytes.length, start + maxBytes);
+    while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+    const complete = end === bytes.length;
+    return {
+      ...record,
+      content: bytes.subarray(start, end).toString('utf8'),
+      sourceComplete: record.sourceComplete !== false,
+      start,
+      end,
+      totalBytes: bytes.length,
+      complete,
+      ...(!complete
+        ? {
+            nextCursor: this.encodeCursor({
+              kind: 'read',
+              offset: end,
+              reference: request.reference,
+            }),
+          }
+        : {}),
+    };
+  }
+
+  validate(proposal: GoalTerminalProposal): ValidatedGoalEvidence {
+    return validateEvidenceReferences(
+      { ...this.input, proposal },
+      this.analysis,
+    );
+  }
+
+  requiredEvidence(
+    proposal: GoalTerminalProposal,
+    options: { includeHistoricalActions?: boolean } = {},
+  ): string[] {
+    const cited = this.validate(proposal).citedRecords;
+    const externalIndices = cited
+      .filter((record) => record.proofKind === 'external_fact')
+      .map((record) => evidenceOrder(record, this.input, this.analysis));
+    const turnStart = this.input.records.findIndex(
+      (record, index) =>
+        index > this.analysis.cursorIndex &&
+        parseGoalContext(record.goalContext)?.turnId ===
+          this.input.permit.turnId,
+    );
+    const tailStart = externalIndices.length
+      ? Math.min(...externalIndices)
+      : turnStart;
+    const citedIds = new Set(cited.map((record) => record.uuid));
+    return this.analysis.allEntries
+      .filter(
+        (entry) =>
+          citedIds.has(entry.uuid) ||
+          this.analysis.auditUuids.has(entry.uuid) ||
+          entry.proofKind === 'user_input' ||
+          (entry.proofKind === 'delivered_output' &&
+            entry.turnId === this.input.permit.turnId) ||
+          (options.includeHistoricalActions &&
+            entry.proofKind === 'external_fact') ||
+          this.analysis.indexByUuid.get(entry.uuid)! >= tailStart,
+      )
+      .map((entry) => entry.uuid);
+  }
+
+  private fullRecord(reference: string): ValidatedGoalEvidenceRecord {
+    const cached = this.contents.get(reference);
+    if (cached) return cached;
+    const record = validateReference(reference, this.input, this.analysis);
+    this.contents.set(reference, record);
+    return record;
+  }
+
+  private encodeCursor(cursor: Omit<EvidenceReadCursor, 'snapshotId'>): string {
+    return Buffer.from(
+      JSON.stringify({ ...cursor, snapshotId: this.snapshotId }),
+    ).toString('base64url');
+  }
+
+  private decodeCursor(
+    value: string,
+    kind: EvidenceReadCursor['kind'],
+  ): EvidenceReadCursor {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    } catch {
+      this.invalidCursor();
+    }
+    if (
+      !isRecord(parsed) ||
+      parsed['snapshotId'] !== this.snapshotId ||
+      parsed['kind'] !== kind ||
+      typeof parsed['offset'] !== 'number' ||
+      !Number.isInteger(parsed['offset']) ||
+      parsed['offset'] < 0 ||
+      (kind === 'list' &&
+        parsed['direction'] !== 'forward' &&
+        parsed['direction'] !== 'backward') ||
+      (kind === 'list' &&
+        parsed['offset'] >= this.analysis.allEntries.length) ||
+      (kind === 'read' && typeof parsed['reference'] !== 'string')
+    )
+      this.invalidCursor();
+    return parsed as unknown as EvidenceReadCursor;
+  }
+
+  private invalidCursor(): never {
+    throw new EvidenceSourceUnavailableError(
+      'invalid_read_cursor',
+      'The evidence cursor is invalid or belongs to a different frozen Goal snapshot.',
+    );
+  }
+}
+
+function evidenceContentWithCalls(
+  record: GoalEvidenceRecord,
+  provenance: GoalEvidenceProvenance,
+  records: readonly GoalEvidenceRecord[],
+): { content: string; sourceComplete: boolean; missingReason?: string } {
+  const content = evidenceContent(record, provenance);
+  const mediaReason = containsEvidenceMedia(record)
+    ? 'The record contains media that the text evidence reader cannot fully inspect.'
+    : undefined;
+  if (provenance !== 'tool_result') {
+    return {
+      content,
+      sourceComplete:
+        record.sourceComplete !== false && mediaReason === undefined,
+      ...(record.missingReason || mediaReason
+        ? { missingReason: record.missingReason ?? mediaReason }
+        : {}),
+    };
+  }
+  const metadata = isRecord(record.toolCallResult)
+    ? record.toolCallResult
+    : undefined;
+  const responses = (record.message?.parts ?? []).flatMap((part) =>
+    part.thought !== true && part.functionResponse
+      ? [part.functionResponse]
+      : [],
+  );
+  const resultIndex = records.findIndex((entry) => entry.uuid === record.uuid);
+  const context = parseGoalContext(record.goalContext);
+  const calls: unknown[] = [];
+  let missingCall = responses.length === 0;
+  for (const response of responses) {
+    const id = response.id ?? metadata?.['callId'];
+    const matches = records
+      .slice(0, resultIndex)
+      .filter((entry) => {
+        const callContext = parseGoalContext(entry.goalContext);
+        return (
+          entry.type === 'assistant' &&
+          coherentEvidenceProvenance(entry) === 'assistant_output' &&
+          callContext?.goalId === context?.goalId &&
+          callContext?.revision === context?.revision &&
+          callContext?.turnId === context?.turnId
+        );
+      })
+      .flatMap((entry) =>
+        (entry.message?.parts ?? []).flatMap((part) =>
+          part.thought !== true &&
+          part.functionCall &&
+          typeof id === 'string' &&
+          part.functionCall.id === id &&
+          (!response.name || part.functionCall.name === response.name)
+            ? [
+                {
+                  ...part.functionCall,
+                  recordId: entry.uuid,
+                  timestamp: entry.timestamp ?? null,
+                  agentId: entry.agentId ?? null,
+                  parentToolCallId: entry.parentToolCallId ?? null,
+                },
+              ]
+            : [],
+        ),
+      );
+    if (matches.length !== 1) missingCall = true;
+    calls.push(...matches);
+  }
+  const truncated =
+    record.sourceComplete === false ||
+    responses.some((response) => hasTruncatedOutput(response.response)) ||
+    (record.message?.parts ?? []).some(
+      (part) => part.thought !== true && hasTruncatedOutput(part.text),
+    );
+  const missingReason =
+    record.missingReason ??
+    mediaReason ??
+    (truncated
+      ? 'The recorded tool result is truncated; its omitted original is unavailable in this evidence snapshot.'
+      : missingCall
+        ? 'The recorded tool result has no unique matching Goal-owned call and arguments.'
+        : undefined);
+  return {
+    content: `${JSON.stringify({
+      source: {
+        recordId: record.uuid,
+        timestamp: record.timestamp ?? null,
+        agentId: record.agentId ?? null,
+        parentToolCallId: record.parentToolCallId ?? null,
+        temporalOrder:
+          'Directory order is not execution order across transcripts; use timestamps and verified parent call/completion lineage. Missing or ambiguous ordering cannot establish freshness.',
+      },
+      toolCalls: calls,
+      ...(metadata?.['executionStatus']
+        ? { executionStatus: metadata['executionStatus'] }
+        : {}),
+    })}\n${content}`,
+    sourceComplete: !truncated && !missingCall && mediaReason === undefined,
+    ...(missingReason ? { missingReason } : {}),
+  };
+}
+
+function orphanedCalls(
+  records: readonly GoalEvidenceRecord[],
+  goal: GoalRecord,
+): string[] {
+  const missing: string[] = [];
+  for (const [index, record] of records.entries()) {
+    const context = parseGoalContext(record.goalContext);
+    if (
+      coherentEvidenceProvenance(record) !== 'assistant_output' ||
+      context?.goalId !== goal.goalId ||
+      context.revision !== goal.revision
+    )
+      continue;
+    for (const part of record.message?.parts ?? []) {
+      const call = part.functionCall;
+      if (
+        part.thought === true ||
+        !call ||
+        call.name === ToolNames.GET_GOAL ||
+        call.name === ToolNames.UPDATE_GOAL
+      )
+        continue;
+      const matching = records.slice(index + 1).filter((result) => {
+        const resultContext = parseGoalContext(result.goalContext);
+        const metadata = isRecord(result.toolCallResult)
+          ? result.toolCallResult
+          : undefined;
+        return (
+          coherentEvidenceProvenance(result) === 'tool_result' &&
+          resultContext?.goalId === context.goalId &&
+          resultContext.revision === context.revision &&
+          resultContext.turnId === context.turnId &&
+          (result.message?.parts ?? []).some(
+            (response) =>
+              response.thought !== true &&
+              response.functionResponse !== undefined &&
+              typeof call.id === 'string' &&
+              (response.functionResponse.id ?? metadata?.['callId']) ===
+                call.id &&
+              response.functionResponse?.name === call.name &&
+              response.functionResponse.response !== undefined,
+          )
+        );
+      });
+      if (matching.length !== 1)
+        missing.push(
+          `Tool call ${call.id ?? record.uuid} (${call.name ?? 'unknown'}) has no unique recorded completion; its action coverage is unavailable.`,
+        );
+    }
+  }
+  return missing;
+}
+
+function hasTruncatedOutput(value: unknown): boolean {
+  if (typeof value === 'string')
+    return (
+      value.startsWith('Tool output was too large and has been truncated') ||
+      value.startsWith('<persisted-output>') ||
+      (value.includes('... [CONTENT TRUNCATED] ...') &&
+        value.endsWith('[Note: Could not save full output to file]'))
+    );
+  if (Array.isArray(value)) return value.some(hasTruncatedOutput);
+  return isRecord(value) && Object.values(value).some(hasTruncatedOutput);
+}
+
+function legacyCurrentStateStart(
+  input: GoalEvidenceContext,
+  scopeStart: number,
+): number | undefined {
+  let previous: GoalRecord | undefined;
+  let boundary: number | undefined;
+  for (let index = scopeStart; index < input.records.length; index++) {
+    const record = input.records[index]!;
+    if (record.type !== 'system' || record.subtype !== 'goal_state') continue;
+    const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+    const state = payload?.snapshot.goal;
+    if (
+      !payload ||
+      !state ||
+      state.goalId !== input.goal.goalId ||
+      state.revision !== input.goal.revision
+    )
+      continue;
+    const limit =
+      previous?.limitKind ?? goalLimitKindForReason(previous?.lastReason ?? '');
+    if (
+      payload.cause === 'resume' &&
+      previous?.status === 'usage_limited' &&
+      (limit === 'evidence_catalog' || limit === 'checkpoint_request') &&
+      state.evidenceCursor.recordId !== previous.evidenceCursor.recordId
+    )
+      boundary = index;
+    previous = state;
+  }
+  return boundary;
+}
+
+function evidenceOrder(
+  record: ValidatedGoalEvidenceRecord,
+  input: GoalEvidenceContext,
+  analysis: EvidenceAnalysis,
+): number {
+  return analysis.auditUuids.has(record.uuid)
+    ? input.records.findIndex(
+        (entry, index) =>
+          index > analysis.cursorIndex &&
+          parseGoalContext(entry.goalContext)?.turnId === record.turnId,
+      )
+    : analysis.indexByUuid.get(record.uuid)!;
+}
+
+function unreadableMedia(
+  records: readonly GoalEvidenceRecord[],
+  goal: GoalRecord,
+): string[] {
+  return records.flatMap((record) => {
+    const context = parseGoalContext(record.goalContext);
+    if (
+      !coherentEvidenceProvenance(record) ||
+      context?.goalId !== goal.goalId ||
+      context.revision !== goal.revision
+    )
+      return [];
+    return containsEvidenceMedia(record)
+      ? [
+          `Evidence ${record.uuid} contains media that the text evidence reader cannot fully inspect.`,
+        ]
+      : [];
+  });
+}
+
+function containsEvidenceMedia(record: GoalEvidenceRecord): boolean {
+  return (record.message?.parts ?? []).some((part) => {
+    if (part.thought === true) return false;
+    if (part.inlineData || part.fileData) return true;
+    const response = part.functionResponse;
+    return (
+      isRecord(response) &&
+      Array.isArray(response['parts']) &&
+      response['parts'].some(
+        (item) =>
+          isRecord(item) &&
+          (item['inlineData'] !== undefined || item['fileData'] !== undefined),
+      )
+    );
+  });
 }

@@ -65,7 +65,6 @@ import {
 import { collectSessionTurnState } from './session-turn-state.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
-import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -2140,7 +2139,7 @@ describe('SessionTranscriptReader', () => {
     ).rejects.toBeInstanceOf(TypeError);
   });
 
-  it('normalizes Goal candidates without changing recovery precedence', async () => {
+  it('preserves the newest malformed Goal record as a recovery barrier', async () => {
     const validGoal: GoalStateRecordPayloadV2 = {
       v: 2,
       cause: 'create',
@@ -2205,11 +2204,13 @@ describe('SessionTranscriptReader', () => {
       workspaceDir,
     ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
 
-    expect(recoverGoalFromRecords(projection!.runtime.goalRecords)).toEqual({
-      kind: 'v2',
-      payload: validGoal,
+    expect(
+      recoverGoalFromRecords(projection!.runtime.goalRecords),
+    ).toMatchObject({
+      kind: 'unsupported',
+      reason: expect.stringContaining('malformed-goal'),
     });
-    expect(projection?.runtime.goalRecoverySourceUuid).toBe('valid-goal');
+    expect(projection?.runtime.goalRecoverySourceUuid).toBe('malformed-goal');
     expect(projection?.runtime.goalRecords).toEqual([
       expect.objectContaining({
         uuid: 'legacy',
@@ -2462,21 +2463,12 @@ describe('SessionTranscriptReader', () => {
         replay: { kind: 'none' },
       }),
     ]);
-    const expected = buildGoalEvidenceCheckpointWindow({
-      records: loaded!.conversation.messages,
-      goal: goalPayload.snapshot.goal!,
-      permit,
-    });
-
-    expect(projection?.runtime.goalCheckpointWindow).toEqual(expected);
-    expect(projection?.runtime.goalCheckpointWindow).toMatchObject({
-      shouldCheckpoint: true,
-      truncated: false,
-    });
-    expect(projection?.runtime.goalCheckpointWindow?.evidence).toHaveLength(80);
-    expect(projection?.runtime.goalCheckpointWindow?.evidence[0]?.content).toBe(
-      'evidence 0\nfragment tail',
-    );
+    expect(
+      loaded!.conversation.messages.some(
+        (record) => record.uuid === evidence[0]!.uuid,
+      ),
+    ).toBe(true);
+    expect(projection?.runtime.goalCheckpointWindow).toBeUndefined();
     expect(buildCount).toBe(1);
   });
 

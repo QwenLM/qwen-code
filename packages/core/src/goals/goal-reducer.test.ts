@@ -454,7 +454,7 @@ describe('goal reducer', () => {
   });
 
   it.each(['evidence_catalog', 'checkpoint_request'] as const)(
-    'resumes a Goal limited by %s from a fresh evidence window',
+    'resumes a Goal limited by %s without moving its evidence scope',
     (limitKind) => {
       const resumed = reduceGoalControl(
         goalRecord({
@@ -494,9 +494,11 @@ describe('goal reducer', () => {
         status: 'active',
         revision: 4,
         objective: 'ship',
-        evidenceCursor: { recordId: 'r-200' },
+        evidenceCursor: { recordId: 'r-100' },
       });
-      expect(resumed?.evidenceCheckpoint).toBeUndefined();
+      expect(resumed?.evidenceCheckpoint?.claims[0]?.sourceRefs).toEqual([
+        'r-99',
+      ]);
       expect(resumed?.limitKind).toBeUndefined();
       expect(resumed?.lastReason).toBeUndefined();
     },
@@ -564,7 +566,7 @@ describe('goal reducer', () => {
     GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
     GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   ])(
-    'resets the window for a pre-limitKind Goal known only by its sentinel prose',
+    'preserves the window for a pre-limitKind Goal known only by its sentinel prose',
     (lastReason) => {
       const resumed = reduceGoalControl(
         goalRecord({ status: 'usage_limited', revision: 4, lastReason }),
@@ -582,7 +584,7 @@ describe('goal reducer', () => {
 
       expect(resumed).toMatchObject({
         status: 'active',
-        evidenceCursor: { recordId: 'r-200' },
+        evidenceCursor: { recordId: 'r-100' },
       });
       expect(resumed?.lastReason).toBeUndefined();
     },
@@ -1521,7 +1523,7 @@ describe('token budget transitions', () => {
     expect(edited).not.toHaveProperty('tokenBudget');
   });
 
-  it('resumes an evidence-limited Goal through the fresh window, re-arming a spent budget on the way', () => {
+  it('resumes an evidence-limited Goal without clearing evidence, re-arming a spent budget on the way', () => {
     const resumed = reduceGoalControl(
       goalRecord({
         status: 'usage_limited',
@@ -1539,7 +1541,7 @@ describe('token budget transitions', () => {
       status: 'active',
       tokensUsed: 1_200,
       tokenBudget: 2_200,
-      evidenceCursor: { recordId: 'r-200' },
+      evidenceCursor: { recordId: 'r-100' },
     });
     expect(resumed?.lastReason).toBeUndefined();
     expect(resumed?.limitKind).toBeUndefined();
@@ -2013,7 +2015,7 @@ describe('turn and active-time budgets', () => {
     );
     expect(resumed).toMatchObject({
       status: 'active',
-      evidenceCursor: { recordId: 'r-200' },
+      evidenceCursor: { recordId: 'r-100' },
       turnBudget: 40,
     });
   });
@@ -2108,4 +2110,71 @@ describe('reduceGoalSpend', () => {
     const goal = goalRecord();
     expect(reduceGoalSpend(goal, tokens, 99)).toBe(goal);
   });
+});
+
+describe('durable verification proposal validation', () => {
+  const pending = {
+    permit: { goalId: 'g-1', revision: 1, turnId: 'turn-1' },
+    proposal: { status: 'complete', reason: 'Proven', evidenceRefs: ['raw-1'] },
+    snapshotTail: 'tail-1',
+    failureKind: 'service',
+  };
+  const payload = () => ({
+    v: 2,
+    cause: 'pause',
+    snapshot: snapshot(
+      goalRecord({ status: 'paused', verificationUsageIncomplete: true }),
+    ),
+    verificationPending: structuredClone(pending),
+  });
+  it('roundtrips retained evidence and unknown usage without resetting the original scope', () => {
+    const value = payload();
+    expect(parseGoalStateRecordPayloadV2(value)).toEqual(value);
+  });
+  it.each([
+    { failureKind: ['service'] },
+    { failureKind: 'invented' },
+    { snapshotTail: '' },
+    { permit: { goalId: 'other', revision: 1, turnId: 'turn-1' } },
+    { proposal: { ...pending.proposal, evidenceRefs: ['raw-1', 'raw-1'] } },
+    { proposal: { ...pending.proposal, evidenceRefs: [] } },
+    {
+      proposal: {
+        ...pending.proposal,
+        status: 'blocked',
+        blockerKind: ['external'],
+      },
+    },
+  ])('rejects malformed or foreign verification state %#', (fields) => {
+    const value = payload();
+    expect(
+      parseGoalStateRecordPayloadV2({
+        ...value,
+        verificationPending: { ...pending, ...fields },
+      }),
+    ).toBeUndefined();
+  });
+  it('rejects a retained proposal attached to a completed Goal', () => {
+    const value = payload();
+    value.snapshot.goal!.status = 'complete';
+    expect(parseGoalStateRecordPayloadV2(value)).toBeUndefined();
+  });
+  it.each([false, 'true', 1, null])(
+    'rejects a forged unknown-usage marker %s',
+    (marker) => {
+      const value = payload();
+      expect(
+        parseGoalStateRecordPayloadV2({
+          ...value,
+          snapshot: {
+            ...value.snapshot,
+            goal: {
+              ...value.snapshot.goal,
+              verificationUsageIncomplete: marker,
+            },
+          },
+        }),
+      ).toBeUndefined();
+    },
+  );
 });

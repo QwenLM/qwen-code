@@ -387,6 +387,7 @@ export interface GoalRecord {
    * Zero on Goals recovered from a transcript written before the field existed.
    */
   tokensUsed: number;
+  verificationUsageIncomplete?: true;
   /**
    * The ceiling `tokensUsed` may reach before autonomous continuation stops
    * and the Goal waits for the user. Armed at creation from the runtime's
@@ -744,6 +745,12 @@ export interface GoalStateRecordPayloadV2 {
   v: typeof GOAL_STATE_VERSION;
   cause: GoalStateCause;
   snapshot: GoalSnapshotV2;
+  verificationPending?: {
+    permit: GoalTurnPermit;
+    proposal: GoalTerminalProposal;
+    snapshotTail: string;
+    failureKind?: 'service' | 'capacity' | 'budget' | 'evidence_unavailable';
+  };
   checkpointPending?: {
     permit: GoalTurnPermit;
     recordUuid: string;

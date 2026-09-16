@@ -139,6 +139,77 @@ test('runs the canonical Goal and active-turn queue interaction chain @smoke', a
   await capture(page, testInfo, '03-goal-cleared.png');
 });
 
+for (const failure of ['service', 'capacity'] as const) {
+  test(`shows retained verification evidence and resumes after ${failure} pause`, async ({
+    page,
+  }, testInfo) => {
+    const lastReason =
+      failure === 'capacity'
+        ? 'Goal verification capacity is insufficient. Evidence and the proposal are retained. Adjust the verifier model/context capacity before resuming.'
+        : 'Goal verification could not finish: provider unavailable. Evidence and the proposal are retained. Resume the Goal to retry verification.';
+    const scenario = createWebShellDaemonScenario({
+      goalSnapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-retained-verification',
+          revision: 3,
+          objective: 'Deliver the reviewed result',
+          status: 'paused',
+          evidenceCursor: { recordId: 'original-goal-scope' },
+          turnCount: 4,
+          activeTimeMs: 5000,
+          tokensUsed: 1234,
+          createdAt: 1234,
+          updatedAt: 2345,
+          lastReason,
+        },
+      },
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+    await gotoSession(page, scenario, daemon);
+    await daemon.sendEvent({
+      id: 10,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            goalState: scenario.goalSnapshot,
+            goalStatus: {
+              kind: 'paused',
+              condition: 'Deliver the reviewed result',
+              iterations: 4,
+              durationMs: 5000,
+              lastReason,
+            },
+          },
+        },
+      },
+    });
+    const strip = page.getByTestId('goal-status-strip');
+    await expect(strip).toContainText('Paused');
+    await expect(
+      page.getByText(`Last check: ${lastReason}`, { exact: true }),
+    ).toBeVisible();
+    await expect(
+      strip.getByRole('button', { name: 'Resume goal' }),
+    ).toBeEnabled();
+    await capture(page, testInfo, `verification-${failure}-paused.png`);
+    await strip.getByRole('button', { name: 'Resume goal' }).click();
+    await expect.poll(() => goalControlRequests(daemon).length).toBe(1);
+    expect(goalControlRequests(daemon)[0]?.body).toEqual({
+      action: 'resume',
+      expectedGoalId: 'goal-retained-verification',
+      expectedRevision: 3,
+    });
+    expect(daemon.promptRequests()).toHaveLength(0);
+    await expect(strip).toContainText('In progress');
+  });
+}
+
 async function installScenario(
   page: Page,
   scenario: WebShellDaemonScenario,

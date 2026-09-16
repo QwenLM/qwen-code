@@ -66,6 +66,7 @@ export interface GoalRecord {
    * without it.
    */
   tokensUsed?: number;
+  verificationUsageIncomplete?: true;
   /**
    * The ceiling `tokensUsed` may reach before the Goal stops and waits for
    * the user. Absent means the Goal is unbounded, which is also what an older

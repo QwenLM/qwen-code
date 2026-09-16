@@ -103,6 +103,7 @@ describe('GetGoalTool', () => {
     const tool = new GetGoalTool(makeConfig({}));
 
     expect(ToolNames.GET_GOAL).toBe('get_goal');
+    expect(tool.maxOutputChars).toBe(Number.POSITIVE_INFINITY);
     expect(ToolDisplayNames.GET_GOAL).toBe('Goal');
     expect(tool.name).toBe(ToolNames.GET_GOAL);
     expect(tool.displayName).toBe(ToolDisplayNames.GET_GOAL);
@@ -557,7 +558,7 @@ describe('GetGoalTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(invocation.getDescription()).toBe('Read the current goal');
-    expect(getGoalForWorker).toHaveBeenCalledWith(permit);
+    expect(getGoalForWorker).toHaveBeenCalledWith(permit, {});
     expect(getSnapshotForPermit).toHaveBeenCalledWith(permit);
     expect(JSON.parse(String(result.llmContent))).toEqual({
       active: true,
@@ -581,16 +582,20 @@ describe('GetGoalTool', () => {
     expect(result.returnDisplay).toBe('Active goal · revision 3');
   });
 
-  it('exposes the view parameter and nothing else', () => {
+  it('exposes only bounded evidence read parameters', () => {
     const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
     expect(tool.schema.parametersJsonSchema).toEqual({
       type: 'object',
       properties: {
         view: {
           type: 'string',
-          enum: ['summary', 'full'],
-          description: expect.stringContaining('summary (default)'),
+          enum: ['summary', 'full', 'evidence'],
+          description: expect.stringContaining('summary:'),
         },
+        snapshotId: expect.objectContaining({ type: 'string' }),
+        cursor: expect.objectContaining({ type: 'string' }),
+        reference: expect.objectContaining({ type: 'string' }),
+        maxBytes: expect.objectContaining({ type: 'integer', maximum: 24000 }),
       },
       additionalProperties: false,
     });
@@ -789,27 +794,25 @@ describe('UpdateGoalTool', () => {
       };
     };
 
-    expect(tool.description).toContain('call get_goal in the current turn');
-    expect(tool.description).toContain('evidenceCatalog.entries[].uuid');
+    expect(tool.description).toContain('any page in this Goal revision');
+    expect(tool.description).toContain('legal raw UUIDs');
     expect(tool.description).toContain(
-      'never goalId, turnId, or lineageTurnIds',
+      'never cite goalId, turnId, or lineageTurnIds',
     );
     expect(tool.description).toContain(
       'Do not tell the user the Goal is complete',
     );
     expect(tool.description).toContain(
-      'call get_goal, wait for its result, and call update_goal in a later model step',
+      'automatically receives all current-turn delivery',
     );
     expect(tool.description).not.toContain('in that same response');
     expect(tool.description).toContain(
       'Do not add progress or completion commentary',
     );
     expect(tool.description).toContain(
-      'end the turn without additional user-facing text',
+      'deliver any explicitly required final content before this call',
     );
-    expect(tool.description).toContain(
-      'readyForVerification or checkpointRequired',
-    );
+    expect(tool.description).not.toContain('checkpointRequired');
     expect(tool.description).not.toContain(
       'say the proposal is awaiting independent verification',
     );
@@ -899,18 +902,17 @@ describe('UpdateGoalTool', () => {
       readyForVerification: false,
       goalLifecycleChanged: false,
       invalidEvidenceRefs: [permit.turnId],
-      error:
-        'evidenceRefs must use values from the latest get_goal evidenceCatalog.entries[].uuid; call get_goal and retry. Do not use goalId, turnId, or lineageTurnIds.',
+      error: 'Cite raw evidence UUIDs, not goalId, turnId, or lineageTurnIds.',
     });
     expect(result.returnDisplay).toBe(
-      'Goal proposal was not recorded because its evidence is not current. Read the current Goal and retry.',
+      'Goal proposal was not recorded because its evidence references identify a Goal or turn instead of evidence.',
     );
     expect(result.returnDisplay).not.toContain('turnId');
     expect(result.returnDisplay).not.toContain('uuid');
     expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
 
-  it("cites this turn's delivered output for a completion that omitted it", async () => {
+  it('leaves auto-delivery collection to the frozen runtime snapshot', async () => {
     const recordTerminalProposal = vi.fn(() => ({
       recorded: true,
       readyForVerification: true,
@@ -980,13 +982,12 @@ describe('UpdateGoalTool', () => {
       permit,
       expect.objectContaining({
         status: 'complete',
-        evidenceRefs: ['tool-result-1', 'letter-x'],
+        evidenceRefs: ['tool-result-1'],
       }),
     );
     expect(JSON.parse(String(result.llmContent))).toMatchObject({
       proposalRecorded: true,
       readyForVerification: true,
-      autoCitedCurrentDeliveredOutput: ['letter-x'],
     });
   });
 
@@ -1054,12 +1055,12 @@ describe('UpdateGoalTool', () => {
 
     expect(recordTerminalProposal).toHaveBeenCalledWith(
       permit,
-      expect.objectContaining({ evidenceRefs: ['letter-x', 'letter-y'] }),
+      expect.objectContaining({ evidenceRefs: ['letter-x'] }),
     );
     expect(recordTerminalProposal).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(result.llmContent))).toMatchObject({
-      autoCitedCurrentDeliveredOutput: ['letter-y'],
-    });
+    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
+      'autoCitedCurrentDeliveredOutput',
+    );
   });
 
   it('leaves a blocked proposal to cite whatever it chose', async () => {
@@ -1120,7 +1121,7 @@ describe('UpdateGoalTool', () => {
     );
   });
 
-  it('checkpoints a truncated catalog before recording completion', async () => {
+  it('records completion independently of evidence page capacity', async () => {
     const recordTerminalProposal = vi.fn(() => ({
       recorded: true,
       readyForVerification: true,
@@ -1174,18 +1175,15 @@ describe('UpdateGoalTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(JSON.parse(String(result.llmContent))).toMatchObject({
-      proposalRecorded: false,
-      readyForVerification: false,
+      proposalRecorded: true,
+      readyForVerification: true,
       goalLifecycleChanged: false,
-      checkpointRequired: true,
-      // A retry that runs another tool first can push a cited entry out of
-      // the catalog, so the hint says to retry before anything else.
-      nextAction: expect.stringMatching(
-        /checkpoint the evidence catalog[\s\S]*before running any other tool/,
-      ),
     });
+    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
+      'checkpointRequired',
+    );
     expect(result.terminateTurn).toBe(true);
-    expect(recordTerminalProposal).not.toHaveBeenCalled();
+    expect(recordTerminalProposal).toHaveBeenCalledOnce();
   });
 
   it('keeps truncated repeated blockers eligible for coverage validation', async () => {
@@ -1254,7 +1252,7 @@ describe('UpdateGoalTool', () => {
       readyForVerification: true,
       goalLifecycleChanged: false,
       nextAction:
-        'End this turn without user-facing text. Do not claim the Goal is complete or blocked. The Goal status card will report the independent verification result.',
+        'End this turn. Do not claim the Goal is complete or blocked before independent verification. The Goal status card will report the result.',
     });
     expect(result.returnDisplay).toContain(
       'queued for independent verification',
@@ -1313,7 +1311,7 @@ describe('UpdateGoalTool', () => {
       readyForVerification: true,
       goalLifecycleChanged: false,
       nextAction:
-        'End this turn without user-facing text. Do not claim the Goal is complete or blocked. The Goal status card will report the independent verification result.',
+        'End this turn. Do not claim the Goal is complete or blocked before independent verification. The Goal status card will report the result.',
     });
     expect(second.returnDisplay).toContain('already recorded');
     expect(second.returnDisplay).not.toContain('Goal is complete');

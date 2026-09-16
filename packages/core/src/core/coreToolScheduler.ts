@@ -262,6 +262,7 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.EXEC,
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
+  ToolNames.GET_GOAL,
   ToolNames.ENTER_PLAN_MODE,
 ]);
 

@@ -2910,6 +2910,44 @@ describe('CoreToolScheduler', () => {
     expect(output.length).toBeLessThan(200_000);
   });
 
+  it('preserves bounded get_goal JSON pages above the generic output threshold', async () => {
+    const payload = {
+      evidence: {
+        content: '\\'.repeat(20_000),
+        complete: false,
+        nextCursor: 'next-original-slice',
+      },
+    };
+    const tool = new MockTool({
+      name: ToolNames.GET_GOAL,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: JSON.stringify(payload),
+        returnDisplay: 'Goal original',
+      }),
+    });
+    Object.defineProperty(tool, 'maxOutputChars', {
+      get: () => Number.POSITIVE_INFINITY,
+    });
+    const toolsByName = new Map<string, MockTool>([[ToolNames.GET_GOAL, tool]]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'goal-page',
+          name: ToolNames.GET_GOAL,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'goal-page',
+        },
+      ],
+      new AbortController().signal,
+    );
+    expect(JSON.parse(outputOfFirstCall(onAllToolCallsComplete))).toEqual(
+      payload,
+    );
+  });
+
   it('leaves small model-facing output untouched', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'small output',

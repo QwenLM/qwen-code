@@ -48,7 +48,7 @@ describe('resumeHistoryUtils', () => {
     } as unknown as AnyDeclarativeTool;
   });
 
-  it('restores lifecycle cards without per-turn Goal bookkeeping', () => {
+  it('restores lifecycle cards without compatibility guards or per-turn Goal bookkeeping', () => {
     const goal: NonNullable<GoalSnapshotV2['goal']> = {
       goalId: 'goal-1',
       revision: 1,
@@ -84,7 +84,18 @@ describe('resumeHistoryUtils', () => {
     const conversation = {
       messages: [
         goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-compatibility-stop', 'turn_finished', {
+          ...goal,
+          status: 'paused',
+          lastReason:
+            'Goal verification requires the current Qwen Code version. Resume with that version to retry.',
+        }),
         goalRecord('goal-turn', 'turn_finished', { ...goal, turnCount: 1 }),
+        goalRecord(
+          'goal-compatibility-complete',
+          'turn_finished',
+          completeGoal,
+        ),
         goalRecord('goal-complete', 'complete', completeGoal),
         goalRecord('goal-clear', 'clear', null),
       ],

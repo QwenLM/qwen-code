@@ -90,7 +90,7 @@ describe('recoverGoalFromRecords', () => {
       },
     },
   ])(
-    'uses the newest valid lifecycle record when a newer record is $label',
+    'fails closed when the newest lifecycle record is $label',
     ({ overrides }) => {
       expect(
         recoverGoalFromRecords([
@@ -103,7 +103,10 @@ describe('recoverGoalFromRecords', () => {
             ...overrides,
           }),
         ]),
-      ).toEqual({ kind: 'v2', payload: ACTIVE_PAYLOAD });
+      ).toMatchObject({
+        kind: 'unsupported',
+        reason: expect.stringContaining('state-2'),
+      });
     },
   );
 

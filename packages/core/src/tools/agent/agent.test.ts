@@ -6899,6 +6899,59 @@ describe('AgentTool', () => {
       patchMetaSpy.mockRestore();
     });
 
+    it.each([true, false])(
+      'persists started tool count for native agents (background=%s)',
+      async (background) => {
+        const runtimeEmitter = new AgentEventEmitter();
+        vi.mocked(mockAgent.getCore).mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+          getEventEmitter: () => runtimeEmitter,
+        } as ReturnType<AgentHeadless['getCore']>);
+        vi.mocked(mockAgent.getExecutionSummary).mockReturnValue({
+          totalTokens: 20,
+          outputTokens: 5,
+          totalDurationMs: 10,
+          totalToolCalls: 0,
+        } as ReturnType<AgentHeadless['getExecutionSummary']>);
+        vi.mocked(mockAgent.execute).mockImplementation(async () => {
+          runtimeEmitter.emit(AgentEventType.TOOL_CALL, {
+            subagentId: 'sub-1',
+            round: 1,
+            callId: 'pending-write',
+            name: 'write_file',
+            args: { file_path: '/tmp/source' },
+            description: 'Write source',
+            timestamp: Date.now(),
+          } satisfies AgentToolCallEvent);
+        });
+        const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Inspect',
+          prompt: 'Inspect source',
+          subagent_type: 'monitor',
+          run_in_background: background,
+        });
+        await invocation.execute();
+        await vi.waitFor(() => {
+          expect(patchMetaSpy).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({
+              status: 'completed',
+              stats: {
+                totalTokens: 20,
+                outputTokens: 5,
+                durationMs: 10,
+                toolUses: 1,
+              },
+            }),
+          );
+        });
+        patchMetaSpy.mockRestore();
+      },
+    );
+
     it('does not retain an agent whose frontmatter hooks are globally registered', async () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
         ...bgSubagent,

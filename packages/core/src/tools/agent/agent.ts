@@ -166,9 +166,10 @@ function persistBackgroundCancellation(
     status: persistedStatus,
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
-    ...(sessionWorkflow
-      ? getAgentMetaTerminalSummary(stats, recentActivities)
-      : {}),
+    ...getAgentMetaTerminalSummary(
+      stats,
+      sessionWorkflow ? recentActivities : undefined,
+    ),
   });
 }
 
@@ -3667,12 +3668,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   status: 'completed',
                   lastUpdatedAt: new Date().toISOString(),
                   lastError: undefined,
-                  ...(sessionWorkflowAgent
-                    ? getAgentMetaTerminalSummary(
-                        completionStats,
-                        registry.get(hookOpts.agentId)?.recentActivities,
-                      )
-                    : {}),
+                  ...getAgentMetaTerminalSummary(
+                    completionStats,
+                    sessionWorkflowAgent
+                      ? registry.get(hookOpts.agentId)?.recentActivities
+                      : undefined,
+                  ),
                 });
                 registry.complete(
                   hookOpts.agentId,
@@ -3712,12 +3713,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   status: 'failed',
                   lastUpdatedAt: new Date().toISOString(),
                   lastError: failureText,
-                  ...(sessionWorkflowAgent
-                    ? getAgentMetaTerminalSummary(
-                        completionStats,
-                        registry.get(hookOpts.agentId)?.recentActivities,
-                      )
-                    : {}),
+                  ...getAgentMetaTerminalSummary(
+                    completionStats,
+                    sessionWorkflowAgent
+                      ? registry.get(hookOpts.agentId)?.recentActivities
+                      : undefined,
+                  ),
                 });
               }
               break;
@@ -3783,12 +3784,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: errorMsg,
-                ...(sessionWorkflowAgent
-                  ? getAgentMetaTerminalSummary(
-                      completionStats,
-                      registry.get(hookOpts.agentId)?.recentActivities,
-                    )
-                  : {}),
+                ...getAgentMetaTerminalSummary(
+                  completionStats,
+                  sessionWorkflowAgent
+                    ? registry.get(hookOpts.agentId)?.recentActivities
+                    : undefined,
+                ),
               });
             }
           } finally {
@@ -4337,9 +4338,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             : fgTerminateMode === AgentTerminateMode.CANCELLED
               ? 'cancelled'
               : 'failed';
+        const fgSummary =
+          subagentConfig.executor === undefined
+            ? subagent.getExecutionSummary()
+            : undefined;
         patchAgentMeta(fgMetaPath, {
           status: fgTerminalStatus,
           lastUpdatedAt: new Date().toISOString(),
+          ...getAgentMetaTerminalSummary(
+            fgSummary
+              ? {
+                  totalTokens: fgSummary.totalTokens,
+                  outputTokens: fgSummary.outputTokens,
+                  toolUses: fgLiveToolCallCount,
+                  durationMs: fgSummary.totalDurationMs,
+                }
+              : undefined,
+          ),
         });
         // Foreground entries leave the registry as soon as the tool-call
         // returns — the parent's tool-result is the durable record. Doing
