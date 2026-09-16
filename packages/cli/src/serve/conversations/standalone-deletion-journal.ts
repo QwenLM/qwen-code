@@ -5,15 +5,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, type BigIntStats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { hasVerifiableInode } from '@qwen-code/qwen-code-core/utils/file-identity.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import {
   getConversationDirectoryName,
-  hasVerifiableInode,
   isSameConversationPath,
-  normalizedInode,
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
 
@@ -86,10 +85,28 @@ export class StandaloneDeletionJournalError extends Error {
   }
 }
 
+// Directory identities ride bigint stats: the 64-bit NTFS file index is
+// exact as a bigint, while a number-backed Stats rounds it at the JS
+// boundary — which is what let a complete private replacement of the
+// journal tree compare equal on volumes whose ids exceed 2^53 (#11848).
+// The gate is core's canonical `hasVerifiableInode`, already typed
+// `(ino: number | bigint)`: zero is the only unverifiable inode
+// (FAT/exFAT/SMB). The strict number predicate in
+// conversation-directory-identity.ts keeps its `(ino: number)` signature
+// for its number-backed consumers and is not widened for this comparator.
 interface DirectoryIdentity {
-  device: number;
-  inode: number;
+  device: bigint;
+  inode: bigint;
   inodeVerifiable: boolean;
+}
+
+function directoryIdentityOf(stat: BigIntStats): DirectoryIdentity {
+  const inodeVerifiable = hasVerifiableInode(stat.ino);
+  return {
+    device: stat.dev,
+    inode: inodeVerifiable ? stat.ino : 0n,
+    inodeVerifiable,
+  };
 }
 
 interface DurableDirectory {
@@ -673,9 +690,9 @@ export class StandaloneDeletionJournal {
     directory: string,
     requirePrivate = true,
   ): Promise<DirectoryIdentity> {
-    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    let stat: BigIntStats;
     try {
-      stat = await fs.lstat(directory);
+      stat = await fs.lstat(directory, { bigint: true });
     } catch (error) {
       if (isMissing(error) && this.directoryIdentities.has(directory)) {
         throw new StandaloneDeletionJournalError('compromised');
@@ -686,17 +703,13 @@ export class StandaloneDeletionJournal {
       !stat.isDirectory() ||
       stat.isSymbolicLink() ||
       (process.platform !== 'win32' &&
-        ((requirePrivate && (stat.mode & 0o777) !== 0o700) ||
+        ((requirePrivate && (stat.mode & 0o777n) !== 0o700n) ||
           (typeof process.getuid === 'function' &&
-            stat.uid !== process.getuid())))
+            stat.uid !== BigInt(process.getuid()))))
     ) {
       throw new StandaloneDeletionJournalError('compromised');
     }
-    const identity = {
-      device: stat.dev,
-      inode: normalizedInode(stat.ino),
-      inodeVerifiable: hasVerifiableInode(stat.ino),
-    };
+    const identity = directoryIdentityOf(stat);
     if (
       directory === this.stableBaseDir ||
       directory === this.stateDirectory ||
@@ -777,12 +790,8 @@ export class StandaloneDeletionJournal {
         fsConstants.O_RDONLY |
           (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
       );
-      const opened = await handle.stat();
-      const openedIdentity = {
-        device: opened.dev,
-        inode: normalizedInode(opened.ino),
-        inodeVerifiable: hasVerifiableInode(opened.ino),
-      };
+      const opened = await handle.stat({ bigint: true });
+      const openedIdentity = directoryIdentityOf(opened);
       if (
         !opened.isDirectory() ||
         !sameDirectoryIdentity(openedIdentity, expected)
@@ -803,12 +812,8 @@ export class StandaloneDeletionJournal {
   private async syncDurableDirectory(
     directory: DurableDirectory,
   ): Promise<void> {
-    const opened = await directory.handle.stat();
-    const openedIdentity = {
-      device: opened.dev,
-      inode: normalizedInode(opened.ino),
-      inodeVerifiable: hasVerifiableInode(opened.ino),
-    };
+    const opened = await directory.handle.stat({ bigint: true });
+    const openedIdentity = directoryIdentityOf(opened);
     if (
       !opened.isDirectory() ||
       !sameDirectoryIdentity(openedIdentity, directory.identity)

@@ -18,15 +18,19 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isSameFile } from './same-file.js';
+import { inodesVerifiable } from './test-utils.js';
 
 // Lets a test pose as a volume that exposes no inode numbers: statSync
 // reports ino 0 while enabled, everything else delegates to the real thing.
 const inoZeroVolume = vi.hoisted(() => ({ enabled: false }));
-// Lets a test pose as a Windows NTFS volume whose 64-bit file indices are
-// rounded at the JS boundary: while set, every stat reports that (unsafe)
-// inode value, so distinct files can surface with an equal `ino`.
-const roundedInodeVolume = vi.hoisted(() => ({
-  inode: undefined as number | undefined,
+// Lets a test pose as a Windows NTFS volume whose 64-bit file indices
+// exceed the safe-integer range: a registered path stats with that EXACT id
+// under `{ bigint: true }` and with its rounded double under a number
+// stat — the two shapes one volume shows a bigint caller and a number
+// caller. Keyed by the post-alias path, so a case-variant spelling inherits
+// the id of the file it names.
+const exactInodeVolume = vi.hoisted(() => ({
+  byPath: new Map<string, bigint>(),
 }));
 // Lets a test pose as a case-insensitive volume (FAT/exFAT/SMB): every
 // registered case-variant spelling stats and canonicalises as the file it
@@ -41,11 +45,22 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   const resolveAlias = (filePath: string): string =>
     caseInsensitiveVolume.aliases.get(filePath) ?? filePath;
-  const statSync = ((filePath: string) => {
-    const stats = actual.statSync(resolveAlias(String(filePath)));
+  const wantsBigint = (opts: unknown): boolean =>
+    typeof opts === 'object' &&
+    opts !== null &&
+    (opts as { bigint?: boolean }).bigint === true;
+  const statSync = ((filePath: string, options?: unknown) => {
+    const resolved = resolveAlias(String(filePath));
+    const forced = exactInodeVolume.byPath.get(resolved);
+    if (wantsBigint(options)) {
+      const stats = actual.statSync(resolved, { bigint: true });
+      if (inoZeroVolume.enabled) stats.ino = 0n;
+      else if (forced !== undefined) stats.ino = forced;
+      return stats;
+    }
+    const stats = actual.statSync(resolved);
     if (inoZeroVolume.enabled) stats.ino = 0;
-    else if (roundedInodeVolume.inode !== undefined)
-      stats.ino = roundedInodeVolume.inode;
+    else if (forced !== undefined) stats.ino = Number(forced);
     return stats;
   }) as typeof actual.statSync;
   const realpathSync = Object.assign(
@@ -87,19 +102,13 @@ describe('isSameFile', () => {
     writeFileSync(original, '{}');
     const linked = join(dir, 'linked.json');
     linkSync(original, linked);
-    // Hard-link identity rides dev/ino, so the gate below covers two cases
-    // that must not be read as one:
-    //   ino === 0 (FAT/exFAT/SMB) — degrading to canonical spellings is BY
-    //     DESIGN, and 'decides by canonical spelling when inodes are
-    //     unverifiable' below is the test that pins it.
-    //   ino above the safe-integer range (NTFS 64-bit file index) — the
-    //     degradation is a DEFECT, not a design: the id is knowable exactly,
-    //     and is only lost because `tryStat` asks for a number-backed `Stats`.
-    //     The alias guards that consume this answer fail open there.
-    // The second is tracked in #11848; converting `tryStat` to `{ bigint: true }`
-    // narrows this gate to the ino-0 case alone.
-    const inode = statSync(original).ino;
-    if (!Number.isSafeInteger(inode) || inode <= 0) {
+    // Hard-link identity rides dev/ino, so this test is meaningful only
+    // where the volume exposes inode numbers at all; the ino-0 fallback is
+    // pinned by 'decides by canonical spelling when inodes are
+    // unverifiable' below. A 64-bit NTFS file index above 2^53 is NOT a skip
+    // case: bigint stats carry it exactly (#11848), and 'equates hard-linked
+    // names through an exact inode above the safe-integer range' pins that.
+    if (!inodesVerifiable(statSync, original)) {
       ctx.skip();
       return;
     }
@@ -155,40 +164,70 @@ describe('isSameFile', () => {
     }
   });
 
-  it('refuses inode identity above the safe-integer range', () => {
-    // Windows surfaces 64-bit NTFS file indices rounded at the JS boundary:
-    // distinct indices (say 2^60+1 and 2^60+2) can both surface as 2^60.
-    // Comparing those rounded doubles as identity would equate distinct
-    // files, so an unsafe `ino` must degrade to canonical-spelling
-    // comparison — never a dev/ino match.
-    const left = join(dir, 'unsafe-left.json');
-    const right = join(dir, 'unsafe-right.json');
+  it('equates hard-linked names through an exact inode above the safe-integer range', () => {
+    // NTFS file ids are 64-bit: a number-backed Stats rounds them at the JS
+    // boundary, which used to withhold verifiability and degrade the
+    // comparison to canonical spellings — a fallback that can never see
+    // through a hard link, whose two names realpath to themselves. The alias
+    // guards consuming this predicate failed open there (#11848). Bigint
+    // stats carry the id exactly, so two names for one inode are one file
+    // again. This goes red against the number-stat implementation: the mock
+    // reports the rounded double there, the strict number predicate refuses
+    // it, and the fallback answers false.
+    const original = join(dir, 'original.json');
+    const linked = join(dir, 'linked.json');
+    writeFileSync(original, '{}');
+    linkSync(original, linked);
+    // Above 2^53, so the number shape of this id is not a safe integer; pin
+    // that or the fixture could silently stop exercising the defect.
+    const exact = 2n ** 60n + 12345n;
+    expect(Number.isSafeInteger(Number(exact))).toBe(false);
+    exactInodeVolume.byPath.set(original, exact);
+    exactInodeVolume.byPath.set(linked, exact);
+    try {
+      expect(isSameFile(original, linked)).toBe(true);
+      expect(isSameFile(linked, original)).toBe(true);
+    } finally {
+      exactInodeVolume.byPath.clear();
+    }
+  });
+
+  it('keeps distinct files distinct through exact inodes one rounding bucket apart', () => {
+    // 2^60+1 and 2^60+2 collapse to the same double but are distinct NTFS
+    // file ids; exact bigint comparison must keep the two files apart.
+    const left = join(dir, 'bucket-left.json');
+    const right = join(dir, 'bucket-right.json');
     writeFileSync(left, '{}');
     writeFileSync(right, '{}');
-    roundedInodeVolume.inode = 2 ** 60;
+    const leftIno = 2n ** 60n + 1n;
+    const rightIno = 2n ** 60n + 2n;
+    // Fixture guard: the case rests on the two ids sharing one double while
+    // staying distinct as bigints.
+    expect(Number(leftIno)).toBe(Number(rightIno));
+    exactInodeVolume.byPath.set(left, leftIno);
+    exactInodeVolume.byPath.set(right, rightIno);
     try {
       expect(isSameFile(left, right)).toBe(false);
       expect(isSameFile(right, left)).toBe(false);
     } finally {
-      roundedInodeVolume.inode = undefined;
+      exactInodeVolume.byPath.clear();
     }
   });
 
-  it('still finds one file through an unsafe inode via canonical spelling', () => {
-    // The degradation must not over-refuse: two spellings of ONE file stay
-    // one file when the comparison falls back to the case-folding
-    // canonicaliser (hard-link identity is lost there by design, exactly as
-    // on ino-0 volumes — the affordable direction).
-    const real = join(dir, 'Unsafe.md');
+  it('equates case-variant spellings through their shared exact inode', () => {
+    // The exact-id regime must not over-refuse either: two spellings of ONE
+    // file stat the same file, so dev/ino identity equates them without the
+    // canonical-spelling fallback ever being consulted.
+    const real = join(dir, 'Exact.md');
     writeFileSync(real, '{}');
-    const variant = join(dir, 'unsafe.md');
+    const variant = join(dir, 'exact.md');
     caseInsensitiveVolume.aliases.set(variant, real);
-    roundedInodeVolume.inode = 2 ** 60;
+    exactInodeVolume.byPath.set(real, 2n ** 60n);
     try {
       expect(isSameFile(real, variant)).toBe(true);
       expect(isSameFile(variant, real)).toBe(true);
     } finally {
-      roundedInodeVolume.inode = undefined;
+      exactInodeVolume.byPath.clear();
       caseInsensitiveVolume.aliases.clear();
     }
   });
