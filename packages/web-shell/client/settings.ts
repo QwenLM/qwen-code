@@ -80,6 +80,13 @@ export interface WebShellSettingsOptions {
   excludeItems?: readonly WebShellSettingItemId[];
 }
 
+export function isItemExcluded(
+  id: WebShellSettingItemId,
+  options?: WebShellSettingsOptions,
+): boolean {
+  return options?.excludeItems?.includes(id) ?? false;
+}
+
 export function isSettingExcluded(
   key: string,
   options?: WebShellSettingsOptions,

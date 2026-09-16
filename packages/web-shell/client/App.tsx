@@ -240,7 +240,11 @@ import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { McpAppHostContext } from './mcpAppHostContext';
-import { isSettingExcluded, type WebShellSettingsOptions } from './settings';
+import {
+  isItemExcluded,
+  isSettingExcluded,
+  type WebShellSettingsOptions,
+} from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -15228,7 +15232,6 @@ export function App({
             return true;
           }
           if (cmd === 'model') {
-            settingsDialogKeyRef.current = undefined;
             const modelArg = text.slice(match[0].length).trim();
             if (
               !workspaceContextActive &&
@@ -15238,6 +15241,7 @@ export function App({
               return true;
             }
             if (modelArg === '--fast') {
+              settingsDialogKeyRef.current = undefined;
               setModelDialogMode('fast');
               return true;
             }
@@ -15255,6 +15259,7 @@ export function App({
             }
             if (modelArg === '--voice') {
               if (echoOrDeferLocalCommand(text, images)) return true;
+              settingsDialogKeyRef.current = undefined;
               void openVoiceModelPicker('workspace', 'command');
               return true;
             }
@@ -15266,6 +15271,7 @@ export function App({
               return true;
             }
             if (modelArg === '--vision') {
+              settingsDialogKeyRef.current = undefined;
               setModelDialogMode('vision');
               return true;
             }
@@ -15307,6 +15313,7 @@ export function App({
                 pushToast('info', t('model.unavailable'));
                 return true;
               }
+              settingsDialogKeyRef.current = undefined;
               setModelDialogMode('main');
             }
             return true;
@@ -17039,17 +17046,37 @@ export function App({
     if (!key) return;
     const excluded =
       key === 'builtin:model-management'
-        ? settingsPresentation?.excludeItems?.includes(key)
+        ? isItemExcluded(key, settingsPresentation)
         : isSettingExcluded(key, settingsPresentation);
     if (excluded) {
       if (pendingVoicePickerSourceRef.current === 'settings') {
         voicePickerRequestRef.current++;
         pendingVoicePickerSourceRef.current = undefined;
       }
-      setModelDialogMode(null);
-      setShowFallbacksDialog(false);
-      setShowApprovalModeDialog(false);
-      if (key === 'builtin:model-management') handleCloseAuthDialog();
+      // Close only the dialog the held key owns: a stale key left over from a
+      // settings launch must not close a surface a command or the status bar
+      // opened afterwards.
+      if (key === 'modelFallbacks') {
+        setShowFallbacksDialog(false);
+      } else if (key === 'builtin:model-management') {
+        handleCloseAuthDialog();
+      } else {
+        const ownedMode =
+          key === 'fastModel'
+            ? 'fast'
+            : key === 'visionModel'
+              ? 'vision'
+              : key === 'advisorModel'
+                ? 'advisor'
+                : key === 'imageModel'
+                  ? 'image'
+                  : key === 'voiceModel'
+                    ? 'voice'
+                    : null;
+        if (ownedMode) {
+          setModelDialogMode((cur) => (cur === ownedMode ? null : cur));
+        }
+      }
       settingsDialogKeyRef.current = undefined;
     } else if (
       !modelDialogMode &&
@@ -18742,8 +18769,15 @@ export function App({
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
                           onAddModel: () => {
-                            if (settingsPresentation?.excludeItems?.includes('builtin:model-management')) return;
-                            settingsDialogKeyRef.current = 'builtin:model-management';
+                            if (
+                              isItemExcluded(
+                                'builtin:model-management',
+                                settingsPresentation,
+                              )
+                            )
+                              return;
+                            settingsDialogKeyRef.current =
+                              'builtin:model-management';
                             setShowAuthDialog(true);
                           },
                         }}

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isItemExcluded,
   isSettingExcluded,
   WEB_SHELL_SETTING_ITEM_IDS,
   type WebShellSettingItemId,
@@ -26,6 +27,19 @@ describe('settings presentation aliases', () => {
       }),
     ).toBe(false);
   });
+  it('matches published builtin ids by direct membership', () => {
+    expect(
+      isItemExcluded('builtin:model-management', {
+        excludeItems: ['builtin:model-management'],
+      }),
+    ).toBe(true);
+    expect(
+      isItemExcluded('builtin:chat-width', {
+        excludeItems: ['builtin:model-management'],
+      }),
+    ).toBe(false);
+    expect(isItemExcluded('builtin:local-control')).toBe(false);
+  });
   it('ignores unknown runtime IDs and inherited property names', () => {
     for (const id of ['unknown', 'toString', '__proto__']) {
       expect(
@@ -36,6 +50,18 @@ describe('settings presentation aliases', () => {
     }
     expect(isSettingExcluded('fastModel')).toBe(false);
     expect(isSettingExcluded('fastModel', { excludeItems: [] })).toBe(false);
+  });
+  it('ignores ids inherited from a polluted Object.prototype', () => {
+    (Object.prototype as Record<string, unknown>).someHostProp = 'fastModel';
+    try {
+      expect(
+        isSettingExcluded('fastModel', {
+          excludeItems: ['someHostProp' as WebShellSettingItemId],
+        }),
+      ).toBe(false);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).someHostProp;
+    }
   });
   it('publishes unique IDs including each native frontend block', () => {
     expect(new Set(WEB_SHELL_SETTING_ITEM_IDS).size).toBe(

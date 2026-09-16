@@ -50,13 +50,7 @@ import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '../ui/empty';
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty';
 import {
   Field,
   FieldContent,
@@ -79,6 +73,7 @@ import { Switch } from '../ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 import {
+  isItemExcluded,
   isSettingExcluded,
   type WebShellSettingsOptions,
 } from '../../settings';
@@ -548,7 +543,7 @@ export function SettingsMessage({
                 : item.type === 'local-control'
                   ? 'builtin:local-control'
                   : 'builtin:model-management';
-          return !presentation?.excludeItems?.includes(id);
+          return !isItemExcluded(id, presentation);
         }),
       }))
       .filter((group) => group.items.length > 0);
@@ -844,7 +839,6 @@ export function SettingsMessage({
                     <Settings2Icon />
                   </EmptyMedia>
                   <EmptyTitle>{t('settings.empty')}</EmptyTitle>
-                  <EmptyDescription>{t('settings.empty')}</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             )}

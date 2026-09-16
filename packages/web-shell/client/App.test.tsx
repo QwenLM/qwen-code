@@ -34484,6 +34484,216 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it('keeps a status-bar model picker open when a stale settings key is excluded', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/work/primary',
+      features: [
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const voiceStatus = voiceWorkspaceStatus('/work/secondary');
+    const voiceResult = deferred<typeof voiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    // Start the settings Voice picker with the status fetch in flight, so
+    // 'voiceModel' stays in the settings-dialog key ref.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-voice-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    // The status-bar model chip opens a 'main' picker without touching the
+    // settings-dialog key.
+    act(() => {
+      testState.latestStatusBarOnSelectModel?.();
+    });
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    rerender({ settings: { excludeItems: ['setting:voice-model'] } });
+    await flush();
+    // The exclusion owns only the voice picker; the status-bar picker stays.
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      voiceResult.resolve(voiceStatus);
+      await Promise.resolve();
+    });
+  });
+
+  it('keeps the exclusion armed across a /model sub-path that opens no dialog', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-modelFallbacks-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="fallbacks-confirm"]'),
+    ).not.toBeNull();
+    // A /model sub-path that only writes a setting opens no dialog, so it
+    // must not clear the key that arms exclusion for the open dialog.
+    testState.prompt = '/model --vision qwen-vl-max';
+    await clickSubmit(container);
+    await flush();
+    rerender({ settings: { excludeItems: ['setting:model-fallbacks'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="fallbacks-confirm"]'),
+    ).toBeNull();
+  });
+
+  it('does not close a command-launched fast picker when its setting is excluded', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    // The command takes over the picker surface and clears the settings key.
+    testState.prompt = '/model --fast';
+    await clickSubmit(container);
+    await flush();
+    rerender({ settings: { excludeItems: ['setting:fast-model'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not close a command auth dialog when its settings key was cleared at launch', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      testState.latestModelManagement?.onAddModel?.();
+    });
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    testState.prompt = '/auth';
+    await clickSubmit(container);
+    await flush();
+    rerender({ settings: { excludeItems: ['builtin:model-management'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+  });
+
+  it('closes a settings fallbacks dialog when model-fallbacks is excluded', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-modelFallbacks-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="fallbacks-confirm"]'),
+    ).not.toBeNull();
+    rerender({ settings: { excludeItems: ['setting:model-fallbacks'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="fallbacks-confirm"]'),
+    ).toBeNull();
+  });
+
+  it('never opens a settings Voice picker whose item is excluded mid-flight', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/work/primary',
+      features: [
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const voiceStatus = voiceWorkspaceStatus('/work/secondary');
+    const voiceResult = deferred<typeof voiceStatus>();
+    qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-voice-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
+    rerender({ settings: { excludeItems: ['setting:voice-model'] } });
+    await flush();
+    await act(async () => {
+      voiceResult.resolve(voiceStatus);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+  });
+
   it('closes the panel, sends /model --fast, and reloads settings on fast-model pick', async () => {
     const { container } = renderApp();
     await flush();

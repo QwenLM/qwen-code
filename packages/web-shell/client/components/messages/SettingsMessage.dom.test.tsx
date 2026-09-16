@@ -696,6 +696,14 @@ describe('SettingsMessage user-scope editing', () => {
     });
     expect(container.querySelectorAll('nav button')).toHaveLength(0);
     expect(container.querySelector('[data-slot="empty"]')).toBeTruthy();
+    const emptyTitle = container.querySelector('[data-slot="empty-title"]');
+    const emptyDescription = container.querySelector(
+      '[data-slot="empty-description"]',
+    );
+    expect(emptyTitle?.textContent).toBeTruthy();
+    expect(emptyDescription?.textContent ?? null).not.toBe(
+      emptyTitle?.textContent,
+    );
   });
 
   it('preserves default content and counts for an empty exclusion list', () => {
