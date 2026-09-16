@@ -59,11 +59,17 @@ describe('web shell boot', () => {
     window.history.replaceState(null, '', '/');
   });
 
-  it('keeps an unconsumed URL token when the daemon target is invalid', async () => {
-    window.history.replaceState(null, '', '/?daemon=invalid#token=example');
+  it('keeps only the fragment token when the daemon target is invalid', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=invalid&token=query-token#token=fragment-token',
+    );
     document.body.innerHTML = '<div id="root"></div>';
     await import('./main');
     await vi.waitFor(() => expect(testState.containers).toHaveLength(1));
+    expect(new URL(window.location.href).searchParams.has('token')).toBe(false);
+    expect(window.location.hash).toBe('#token=fragment-token');
     expect(testState.removeToken).not.toHaveBeenCalled();
     expect(testState.resolveToken).toBeUndefined();
   });

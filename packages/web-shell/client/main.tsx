@@ -374,7 +374,17 @@ async function main() {
     (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
       ? await waitForDaemonTokenMessage()
       : undefined);
-  if (!INVALID_DAEMON_TARGET) removeDaemonTokenFromUrl();
+  if (INVALID_DAEMON_TARGET) {
+    // Keep a fragment token for recovery, but never leave a server-visible
+    // query token in the address bar or history.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('token')) {
+      url.searchParams.delete('token');
+      window.history.replaceState(null, '', url);
+    }
+  } else {
+    removeDaemonTokenFromUrl();
+  }
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token

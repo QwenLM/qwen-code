@@ -909,6 +909,8 @@ const EN: Messages = {
     'The daemon did not accept the connection; the stored credential was left unchanged.',
   'daemon.connection.authFailed':
     'The daemon rejected that token; the stored credential was left unchanged.',
+  'daemon.connection.reloadUnavailable':
+    'Browser storage is unavailable, so the new token could not be applied to this connection.',
   'daemon.connection.status.idle': 'Idle',
   'daemon.connection.status.connecting': 'Connecting',
   'daemon.connection.status.connected': 'Connected',
@@ -4722,6 +4724,8 @@ const ZH: Messages = {
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
     'Daemon 拒绝了该 token，已保存的凭据未被修改。',
+  'daemon.connection.reloadUnavailable':
+    '浏览器存储不可用，因此新 token 无法应用到当前连接。',
   'daemon.connection.status.idle': '空闲',
   'daemon.connection.status.connecting': '连接中',
   'daemon.connection.status.connected': '已连接',

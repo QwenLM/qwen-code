@@ -624,7 +624,7 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
 function DaemonStatusDialogInner({
   onChangeTarget,
 }: {
-  onChangeTarget: (daemonOrigin: string, token?: string) => void;
+  onChangeTarget: (daemonOrigin: string, token?: string) => boolean | void;
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -793,8 +793,12 @@ function DaemonStatusDialogInner({
                   );
                   return;
                 }
-                setConnectionError('');
-                onChangeTarget(daemonOrigin, token);
+                const changed = onChangeTarget(daemonOrigin, token);
+                setConnectionError(
+                  changed === false
+                    ? t('daemon.connection.reloadUnavailable')
+                    : '',
+                );
               })
               .catch(() => {
                 if (!owned()) return;
@@ -1325,7 +1329,7 @@ function DaemonStatusDialogInner({
 export function DaemonStatusDialog({
   onChangeTarget = navigateToDaemon,
 }: {
-  onChangeTarget?: (daemonOrigin: string, token?: string) => void;
+  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
 } = {}) {
   const { t } = useI18n();
   return (

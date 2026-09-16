@@ -318,10 +318,10 @@ export function isKnownDaemonTarget(origin: string): boolean {
   }
 }
 
-export function navigateToDaemon(raw: string, token?: string): void {
+export function navigateToDaemon(raw: string, token?: string): boolean {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
   const nextUrl = buildDaemonConnectionUrl(raw, window.location.href);
-  if (!daemonOrigin || !nextUrl) return;
+  if (!daemonOrigin || !nextUrl) return false;
   // Read before the assign: getDaemonBaseUrl() follows the live URL.
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
@@ -345,9 +345,9 @@ export function navigateToDaemon(raw: string, token?: string): void {
     // from it — so reloading is exactly the plain refresh this case means.
     // Unless the credential cannot outlive it: with storage disabled the
     // reloaded page would boot with no token at all, so stay on this one.
-    if (token !== undefined && !hasReloadSurvivableDaemonToken()) return;
+    if (token !== undefined && !hasReloadSurvivableDaemonToken()) return false;
     window.location.reload();
-    return;
+    return true;
   }
   // The per-tab split set (App.tsx's refresh restore) is session-scoped state
   // for the daemon being left, and a switch back to the page origin leaves one
@@ -355,4 +355,5 @@ export function navigateToDaemon(raw: string, token?: string): void {
   // survive and boot the next daemon into a split of sessions it has never had.
   clearSplitSessions();
   window.location.assign(nextUrl);
+  return true;
 }

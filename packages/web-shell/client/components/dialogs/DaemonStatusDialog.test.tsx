@@ -531,6 +531,40 @@ describe('DaemonStatusDialog', () => {
     }
   });
 
+  it('reports when a validated token cannot be applied to the current target', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=http%3A%2F%2Flocalhost%3A4170',
+    );
+    const originalStorage = window.sessionStorage;
+    Object.defineProperty(window, 'sessionStorage', {
+      get() {
+        throw new Error('storage disabled');
+      },
+      configurable: true,
+    });
+    try {
+      mount('en');
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'new token could not be applied',
+      );
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', {
+        value: originalStorage,
+        writable: true,
+        configurable: true,
+      });
+      persistDaemonToken('', 'http://localhost:4170');
+      window.history.replaceState(null, '', '/');
+      vi.unstubAllGlobals();
+    }
+  });
+
   // A same-target probe that answers green calls onChangeTarget, which persists
   // the credential and reloads the page. Both cases below abandon the submit
   // before that answer arrives, so nothing may be written or reloaded: the
