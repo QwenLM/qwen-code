@@ -101,13 +101,25 @@ function mappedIpv4(hostname: string): string | undefined {
   return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 }
 
+/**
+ * Classify a bare IP address (not a URL) against the private ranges.
+ *
+ * Hostname *text* only — a public-looking name whose A record points at a
+ * private address is not caught here. Callers that hand fetched bytes to a
+ * third party must resolve and pin the connection instead; see
+ * `resolveNetworkTarget` in extension/network-policy.ts.
+ */
+function isPrivateAddress(address: string): boolean {
+  // The URL API brackets IPv6 hostnames ([::1]); strip them so the IPv6
+  // ranges above can actually match.
+  const bare = address.replace(/^\[|\]$/g, '');
+  const target = mappedIpv4(bare) ?? bare;
+  return PRIVATE_IP_RANGES.some((range) => range.test(target));
+}
+
 export function isPrivateIp(url: string): boolean {
   try {
-    // The URL API brackets IPv6 hostnames ([::1]); strip them so the IPv6
-    // ranges above can actually match.
-    const hostname = new URL(url).hostname.replace(/^\[|\]$/g, '');
-    const target = mappedIpv4(hostname) ?? hostname;
-    return PRIVATE_IP_RANGES.some((range) => range.test(target));
+    return isPrivateAddress(new URL(url).hostname);
   } catch (_e) {
     return false;
   }
