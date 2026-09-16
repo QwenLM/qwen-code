@@ -619,6 +619,11 @@ function formatChatRecord(
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** The charset ChannelBase's own slash classifier requires of a leading
+ * `/token`. Slash-prefixed prose — a path, a `//` or block comment — fails it
+ * and stays prose. */
+const SLASH_COMMAND_TOKEN_RE = /^[a-zA-Z0-9_:-]+$/;
+
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
@@ -3676,6 +3681,31 @@ export class DingtalkChannel extends ChannelBase {
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
+      // A user-scope 1:1 DM gets no [sender] tag from ChannelBase — that prefix
+      // needs isGroup or sessionScope 'single' — so neither the model nor the
+      // transcript (which renders exactly the prompt) would record who sent
+      // this. metadata is appended AFTER command parsing, so locally dispatched
+      // DM commands and `!` shell never see it; an agent-exposed command does,
+      // and its parser sweeps everything past the command path into `args`, so
+      // a DM opening on a bare command token gets no identity line. trimStart
+      // because the audio and chat-record branches hand back untrimmed text. It
+      // stays one line because that append folds CR/LF to spaces. The nick is
+      // attacker-controlled and the ID is platform-opaque, so both go through
+      // the shared name sanitizer. The ID is spelled out only next to a nick,
+      // otherwise the same value reads twice.
+      const dmSenderId =
+        senderNick && senderId
+          ? ` (sender ID: ${sanitizeSenderName(senderId)})`
+          : '';
+      const dmCommandToken =
+        content.text.trimStart().match(/^\/(\S+)/)?.[1] ?? '';
+      const dmSenderMetadata =
+        !isGroup &&
+        this.config.sessionScope !== 'single' &&
+        !SLASH_COMMAND_TOKEN_RE.test(dmCommandToken)
+          ? `Direct message from ${sanitizeSenderName(senderNick || senderId)}${dmSenderId}`
+          : undefined;
+
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -3687,6 +3717,7 @@ export class DingtalkChannel extends ChannelBase {
         text: content.text,
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
+        ...(dmSenderMetadata ? { metadata: dmSenderMetadata } : {}),
         isGroup,
         isMentioned,
         isReplyToBot: quoted.isReplyToBot,

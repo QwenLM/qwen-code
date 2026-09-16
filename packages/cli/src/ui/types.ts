@@ -398,6 +398,9 @@ export interface ToolDefinition {
   name: string;
   displayName: string;
   description?: string;
+  /** Omni media-policy tool that only runs via fixed policies: it is hidden
+   * from the model's declarations, so /tools annotates it for the human. */
+  fixedOnly?: boolean;
   /**
    * Registered, but its schema is not in the eager model request — the tool
    * is reached on demand via `tool_search`. Set for `shouldDefer` tools and
