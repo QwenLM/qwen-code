@@ -163,8 +163,8 @@ function isVerificationMetadata(record: GoalEvidenceRecord): boolean {
   return (
     payload['sentToModel'] !== true &&
     typeof payload['rawCommand'] === 'string' &&
-    /^[/?](?:goal(?:\s+status)?\s*|model(?:\s.*)?)$/u.test(
-      payload['rawCommand'],
+    /^[/?](?:goal(?:\s+(?:status|resume))?\s*|model(?:\s.*)?)$/u.test(
+      payload['rawCommand'].toLowerCase(),
     )
   );
 }

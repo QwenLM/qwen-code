@@ -5910,6 +5910,10 @@ describe('Goal P0 evidence and verification recovery', () => {
   it.each([
     ['slash_command', { phase: 'result', rawCommand: '/goal' }],
     ['slash_command', { phase: 'result', rawCommand: '/goal status' }],
+    ['slash_command', { phase: 'invocation', rawCommand: '/goal resume' }],
+    ['slash_command', { phase: 'result', rawCommand: '/goal resume' }],
+    ['slash_command', { phase: 'invocation', rawCommand: '/goal RESUME' }],
+    ['slash_command', { phase: 'result', rawCommand: '/goal RESUME' }],
     ['slash_command', { phase: 'invocation', rawCommand: '/model larger' }],
     ['session_model', { modelId: 'larger-model' }],
     ['ui_telemetry', { event: 'goal_card_viewed' }],
@@ -5952,6 +5956,10 @@ describe('Goal P0 evidence and verification recovery', () => {
 
   it.each([
     ['slash_command', { phase: 'result', rawCommand: '/goal' }],
+    ['slash_command', { phase: 'invocation', rawCommand: '/goal resume' }],
+    ['slash_command', { phase: 'result', rawCommand: '/goal resume' }],
+    ['slash_command', { phase: 'invocation', rawCommand: '/goal RESUME' }],
+    ['slash_command', { phase: 'result', rawCommand: '/goal RESUME' }],
     ['session_model', { modelId: 'larger-model' }],
   ])(
     'does not discard a verdict when %s metadata arrives during verification',
@@ -5979,6 +5987,16 @@ describe('Goal P0 evidence and verification recovery', () => {
 
   it.each([
     ['slash_command', { rawCommand: '/goal', sentToModel: true }],
+    ['slash_command', { rawCommand: '/goal resume', sentToModel: true }],
+    ['slash_command', { rawCommand: '/goal resume extra' }],
+    ['slash_command', { rawCommand: '/goal pause' }],
+    ['slash_command', { rawCommand: '/goal edit replacement' }],
+    ['slash_command', { rawCommand: '/goal clear' }],
+    ['slash_command', { rawCommand: '/goal RESUME', sentToModel: true }],
+    ['slash_command', { rawCommand: '/goal RESUME extra' }],
+    ['slash_command', { rawCommand: '/goal PAUSE' }],
+    ['slash_command', { rawCommand: '/goal EDIT replacement' }],
+    ['slash_command', { rawCommand: '/goal CLEAR' }],
     ['slash_command', { rawCommand: '/custom-write-command' }],
     ['rewind', { rewindTo: 'earlier-turn' }],
     ['background_task_completed', { taskId: 'writer' }],
