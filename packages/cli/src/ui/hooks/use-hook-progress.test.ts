@@ -222,14 +222,21 @@ describe('hookProgressToRow', () => {
   ] satisfies Array<Partial<HookProgress>>)('suppresses %j', (msg) => {
     expect(hookProgressToRow(progress(msg))).toBeNull();
   });
-  it.each(['command', 'http'] as const)(
-    'does not expose a credential-bearing %s name in text or metadata',
-    (hookType) => {
+  it.each([
+    ['command', 'error'],
+    ['http', 'error'],
+    ['command', 'timeout'],
+    ['http', 'timeout'],
+    ['command', 'blocked'],
+    ['http', 'blocked'],
+  ] as const)(
+    'does not expose a credential-bearing %s name for %s in text or metadata',
+    (hookType, outcome) => {
       const row = hookProgressToRow(
         progress({
           hookType,
           hookName: 'https://user:FAKE_SECRET@example.com?token=FAKE_SECRET',
-          outcome: 'error',
+          outcome,
           exitCode: 1,
           error: 'failed',
         }),

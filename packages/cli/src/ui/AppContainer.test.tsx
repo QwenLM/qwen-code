@@ -1350,7 +1350,7 @@ describe('AppContainer State Management', () => {
       await flushConfigInitialization();
       const bus = mockConfig.getMessageBus()!;
       const event = {
-        type: MessageBusType.HOOK_PROGRESS,
+        type: MessageBusType.HOOK_PROGRESS as const,
         eventName: 'PreToolUse',
         hookName: 'private-command',
         hookType: 'command' as const,

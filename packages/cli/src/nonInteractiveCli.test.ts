@@ -1128,6 +1128,7 @@ describe('runNonInteractive', () => {
     [OutputFormat.JSON, ['timeout'], 0, 'same'],
     [OutputFormat.STREAM_JSON, ['timeout', 'error'], 0, 'same'],
     [OutputFormat.TEXT, ['success'], 0, 'same'],
+    [OutputFormat.TEXT, ['blocked'], 0, 'same'],
     [OutputFormat.TEXT, ['timeout', 'timeout'], 2, 'hook'],
     [OutputFormat.TEXT, ['timeout', 'timeout'], 2, 'event'],
   ] as const)(
