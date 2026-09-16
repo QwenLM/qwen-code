@@ -2491,6 +2491,9 @@ const EN: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
+  'goal.turnsOfBudget': (v) =>
+    `${v?.count ?? 0} / ${v?.budget ?? 0} ${v?.budget === 1 ? 'turn' : 'turns'}`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
   'goal.tokens': (v) => `${v?.used ?? 0} tokens`,
   'goal.tokensOfBudget': (v) => `${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': 'Goals',
@@ -6196,6 +6199,8 @@ const ZH: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
+  'goal.turnsOfBudget': (v) => `${v?.count ?? 0} / ${v?.budget ?? 0} 轮`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
   'goal.tokens': (v) => `已用 ${v?.used ?? 0} tokens`,
   'goal.tokensOfBudget': (v) =>
     `已用 ${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
