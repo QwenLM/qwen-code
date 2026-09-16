@@ -43,6 +43,7 @@ describe('materializeGoalEvidenceCheckpoint', () => {
   it('assigns Core-owned claim IDs after validating their sources', () => {
     expect(
       materialize({
+        usage: { totalTokenCount: 50 },
         claims: [
           {
             proofKind: 'delivered_output',

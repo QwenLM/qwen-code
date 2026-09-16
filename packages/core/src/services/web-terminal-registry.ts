@@ -7,7 +7,7 @@
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
-import { getPty, getPtyLoadError } from '../utils/getPty.js';
+import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
 import {
@@ -216,9 +216,9 @@ export class WebTerminalRegistry {
       return { error: 'Web terminal limit reached', retryable: true };
     }
     this.creating.set(terminalId, options.workspaceCwd);
-    let ptyImpl;
+    let ptyLoad: PtyLoadResult;
     try {
-      ptyImpl = await getPty();
+      ptyLoad = await loadPty();
     } catch (error) {
       this.finishCreating(terminalId);
       return {
@@ -233,16 +233,17 @@ export class WebTerminalRegistry {
       this.finishCreating(terminalId);
       return { error: 'Web terminal registry disposed' };
     }
-    if (!ptyImpl) {
+    if (!ptyLoad.impl) {
       this.finishCreating(terminalId);
-      // getPty() reports an absent backend and an unloadable one (a prebuild
-      // that fails to dlopen) the same way, so name the cause it recorded
-      // instead of claiming no module was found.
-      const loadError = getPtyLoadError();
+      // loadPty() reports an absent backend and an unloadable one (a prebuild
+      // that fails to dlopen) the same way, so name the cause that same call
+      // recorded instead of claiming no module was found.
+      const loadError = ptyLoad.loadError;
       return {
         error: `PTY not available: no loadable PTY backend (@lydell/node-pty or node-pty) for ${os.platform()}/${os.arch()}${loadError ? `: ${loadError}` : ''}`,
       };
     }
+    const ptyImpl = ptyLoad.impl;
 
     const env = { ...(options.env ?? process.env) };
     const { file, args } = resolveWebTerminalShell(process.platform, env);

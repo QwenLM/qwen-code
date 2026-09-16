@@ -43,6 +43,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type OmniPolicyToolsSettings,
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
@@ -59,6 +60,8 @@ import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
+import { getSettingsSchema } from './settingsSchema.js';
+import { resolveHookSettingsForConfig } from './hook-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -92,6 +95,7 @@ import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
+import { sandboxCommand } from '../commands/sandbox.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -872,7 +876,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register update command
-    .command(updateCommand);
+    .command(updateCommand)
+    // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
+    .command(sandboxCommand);
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -905,7 +911,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
-      result._[0] === 'update')
+      result._[0] === 'update' ||
+      result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
@@ -1336,6 +1343,70 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+/**
+ * Reject unknown keys directly under `omni`.
+ *
+ * The generic settings loader only scans TOP-LEVEL keys, and only writes a
+ * debug line — so a nested typo is caught by nothing: `omni.memoryy` or
+ * `omni.processingg` leaves `settings.omni?.memory` / `?.processing`
+ * undefined, every downstream normalizer sees "not configured" and returns
+ * defaults, and the session silently runs with the operator's entire
+ * configuration discarded (probe: `omni.memoryy.recall.mode = sideQuery`
+ * still registered the active-mode recall tool). The omni namespace's
+ * declared stance is that a misconfiguration must fail loud, so this
+ * mirrors the nested checks its own normalizers already perform.
+ *
+ * The allowed set is derived from the settings schema rather than
+ * hardcoded, so it cannot drift as the namespace grows.
+ */
+function assertKnownOmniSettingKeys(settings: Settings): void {
+  const omni = settings.omni;
+  if (omni === undefined || omni === null || typeof omni !== 'object') return;
+  const schemaOmni = getSettingsSchema()['omni'] as
+    | { properties?: Record<string, unknown> }
+    | undefined;
+  // No schema properties resolved (unexpected): stay silent rather than
+  // rejecting every valid key.
+  if (Object.keys(schemaOmni?.properties ?? {}).length === 0) return;
+
+  // Walk nested object settings too: the deletion-controlling knobs live
+  // at `omni.storage.*`, and a typo there would silently leave the GC on
+  // defaults. Free-form map nodes (fixedPolicies, policyTools — schema
+  // nodes without `properties`) stop the walk: their keys are
+  // user-defined.
+  const walk = (
+    value: unknown,
+    schemaNode: { properties?: Record<string, unknown> } | undefined,
+    label: string,
+  ): void => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return;
+    }
+    const props = schemaNode?.properties;
+    if (!props || Object.keys(props).length === 0) return;
+    const allowed = new Set(Object.keys(props));
+    const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Invalid settings: unknown key(s) under "${label}": ` +
+          `${unknown.map((k) => `"${k}"`).join(', ')}. ` +
+          `Allowed: ${[...allowed].sort().join(', ')}. ` +
+          `An unrecognized ${label} entry would be silently ignored, ` +
+          `leaving the session running with defaults instead of your ` +
+          `configuration.`,
+      );
+    }
+    for (const [key, child] of Object.entries(value)) {
+      walk(
+        child,
+        props[key] as { properties?: Record<string, unknown> } | undefined,
+        `${label}.${key}`,
+      );
+    }
+  };
+  walk(omni, schemaOmni, 'omni');
+}
+
 export function buildEnabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
@@ -1568,6 +1639,7 @@ export async function loadCliConfig(
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
+  assertKnownOmniSettingKeys(settings);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -2399,6 +2471,36 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
+    omniEnabled: settings.omni?.enabled ?? false,
+    omniMaxUploadFileBytes:
+      settings.omni?.processing?.transportGuard?.maxUploadFileBytes,
+    omniMaxEstimatedTokens:
+      settings.omni?.processing?.transportGuard?.maxEstimatedTokens,
+    omniMaxDurationSeconds:
+      settings.omni?.processing?.transportGuard?.maxDurationSeconds,
+    omniUrlDownloadMaxFileBytes:
+      settings.omni?.ingestion?.localization?.url?.maxFileBytes,
+    omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
+    omniUploadBaseUrl: settings.omni?.delivery?.upload?.baseUrl,
+    omniUploadApiKeyEnv: settings.omni?.delivery?.upload?.apiKeyEnv,
+    omniUploadModel: settings.omni?.delivery?.upload?.model,
+    omniPolicyTools: settings.omni?.processing?.policyTools as
+      | OmniPolicyToolsSettings
+      | undefined,
+    omniFixedPolicies: settings.omni?.processing?.fixedPolicies as
+      | Record<string, unknown>
+      | undefined,
+    omniTransportGuardPolicies: settings.omni?.processing?.transportGuard
+      ?.policies as Record<string, unknown> | undefined,
+    omniProcessingLimits: settings.omni?.processing?.limits as
+      | Record<string, unknown>
+      | undefined,
+    omniQuarantineRetentionDays:
+      settings.omni?.storage?.quarantine?.retentionDays,
+    omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
+    omniStorageRetentionDays: settings.omni?.storage?.retentionDays,
+    omniStorageMaxTotalBytes: settings.omni?.storage?.maxTotalBytes,
+    omniMemory: settings.omni?.memory as Record<string, unknown> | undefined,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
@@ -2434,6 +2536,7 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
@@ -2496,12 +2599,11 @@ export async function loadCliConfig(
       settings.modelFallbacks,
     ),
     // Use separated hooks if provided, otherwise fall back to merged hooks
-    userHooks:
-      bareMode || safeMode
-        ? undefined
-        : (hooksConfig?.userHooks ?? settings.hooks),
-    projectHooks: bareMode || safeMode ? undefined : hooksConfig?.projectHooks,
-    hooks: bareMode || safeMode ? undefined : settings.hooks,
+    ...resolveHookSettingsForConfig(
+      settings.hooks,
+      hooksConfig,
+      bareMode || safeMode,
+    ),
     disableAllHooks:
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
