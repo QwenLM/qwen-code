@@ -871,6 +871,31 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('should reject --batch together with --prompt-interactive', async () => {
+    process.argv = ['node', 'script.js', '--batch', '-i', 'hello'];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--batch is only available in non-interactive runs',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('should accept --batch with a one-shot prompt', async () => {
+    process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+    const argv = await parseArguments();
+    expect(argv.batch).toBe(true);
+  });
+
   it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
     // True interactive invocation with no prompt anywhere → fail fast.
     process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];

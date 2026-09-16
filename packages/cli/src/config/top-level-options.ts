@@ -334,6 +334,12 @@ export const DEFAULT_COMMAND_OPTIONS = {
       'Include partial assistant messages when using stream-json output.',
     default: false,
   },
+  batch: {
+    type: 'boolean' as const,
+    description:
+      'Send the main model turns through the DashScope Batch API (non-interactive only; half price, up to 24h per turn). Experimental.',
+    default: false,
+  },
   'json-fd': {
     type: 'number' as const,
     description:

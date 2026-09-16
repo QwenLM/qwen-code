@@ -5052,6 +5052,9 @@ export class LlmChat {
         ...(transportContinuationPrefix !== undefined && {
           continuationInFlight: true,
         }),
+        ...(this.config.getBatchMode?.() && {
+          executionMode: 'batch' as const,
+        }),
       };
       return generator.generateContentStream(request, prompt_id);
     };

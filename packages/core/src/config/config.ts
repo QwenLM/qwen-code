@@ -945,6 +945,7 @@ export interface ConfigParameters {
   provisionalWorkspace?: boolean;
   debugMode: boolean;
   includePartialMessages?: boolean;
+  batchMode?: boolean;
   question?: string;
   systemPrompt?: string;
   appendSystemPrompt?: string;
@@ -2597,6 +2598,7 @@ export class Config {
   private readonly inputFormat: InputFormat;
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
+  private readonly batchMode: boolean;
   private readonly question: string | undefined;
   private readonly systemPrompt: string | undefined;
   private readonly appendSystemPrompt: string | undefined;
@@ -2999,6 +3001,7 @@ export class Config {
     );
     this.outputFormat = normalizedOutputFormat ?? OutputFormat.TEXT;
     this.includePartialMessages = params.includePartialMessages ?? false;
+    this.batchMode = params.batchMode ?? false;
     this.question = params.question;
     this.systemPrompt = params.systemPrompt;
     this.appendSystemPrompt = params.appendSystemPrompt;
@@ -8307,6 +8310,11 @@ export class Config {
 
   getIncludePartialMessages(): boolean {
     return this.includePartialMessages;
+  }
+
+  /** Headless `--batch`: main turns go through the provider's Batch API. */
+  getBatchMode(): boolean {
+    return this.batchMode;
   }
 
   getAccessibility(): AccessibilitySettings {

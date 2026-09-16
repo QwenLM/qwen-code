@@ -90,6 +90,7 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -208,6 +209,7 @@ export interface CliArgs {
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
+  batch?: boolean;
   /**
    * If chat recording is disabled, the chat history would not be recorded,
    * so --continue and --resume would not take effect.
@@ -704,6 +706,7 @@ export async function parseArguments(): Promise<CliArgs> {
           'include-partial-messages',
           DEFAULT_COMMAND_OPTIONS['include-partial-messages'],
         )
+        .option('batch', DEFAULT_COMMAND_OPTIONS['batch'])
         .option('json-fd', DEFAULT_COMMAND_OPTIONS['json-fd'])
         .option('json-file', DEFAULT_COMMAND_OPTIONS['json-file'])
         .option('json-schema', DEFAULT_COMMAND_OPTIONS['json-schema'])
@@ -774,6 +777,13 @@ export async function parseArguments(): Promise<CliArgs> {
             argv['outputFormat'] !== OutputFormat.STREAM_JSON
           ) {
             return '--include-partial-messages requires --output-format stream-json';
+          }
+          if (
+            argv['batch'] &&
+            (argv['promptInteractive'] ||
+              (!argv['prompt'] && !argv['query'] && process.stdin.isTTY))
+          ) {
+            return '--batch is only available in non-interactive runs: pass a prompt (-p or positional) or pipe stdin';
           }
           if (
             argv['inputFormat'] === 'stream-json' &&
@@ -872,6 +882,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    .command(batchCommand)
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
@@ -2412,6 +2423,7 @@ export async function loadCliConfig(
     inputFormat,
     outputFormat,
     includePartialMessages,
+    batchMode: Boolean(argv.batch),
     modelProvidersConfig,
     providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
