@@ -1,4 +1,6 @@
 import './styles/globals.css';
+import { getSourceEntries } from './components/sources/sourceEntries';
+import { openSourceEntry } from './components/panels/SourcesSection';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
@@ -297,6 +299,7 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from './i18n';
+import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
@@ -396,6 +399,9 @@ import {
   type WebShellComposerApi,
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
+  type WebShellSource,
+  type WebShellSourceIconResolver,
+  type WebShellSourceReference,
   type ToolHeaderExtraRenderer,
   type UserMessageContentRenderer,
   type UserMessageContentParser,
@@ -1337,6 +1343,8 @@ export interface WebShellProps {
   onComposerTagClick?: ComposerTagClickHandler;
   /** Custom renderer displayed after the final assistant message of each turn. */
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  sourceReferences?: readonly WebShellSourceReference[];
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -3022,6 +3030,8 @@ export function App({
   renderComposerTagTooltip,
   onComposerTagClick,
   renderAssistantTurnFooter,
+  getAssistantSourcesIcon,
+  sourceReferences,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
@@ -3289,6 +3299,8 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      getAssistantSourcesIcon,
+      sourceReferences,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -3319,6 +3331,8 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      getAssistantSourcesIcon,
+      sourceReferences,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -3444,13 +3458,15 @@ export function App({
         : undefined
       : connection.workspaceCwd;
   const {
-    hasActivePrompt: sessionHasActivePrompt,
+    hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
   } = useDaemonSessionActivityBridge(
     workspace.client,
     activePromptWorkspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePrompt =
+    daemonHasActivePrompt || !!connection.backgroundTurn;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const trustedPrimaryWorkspaceCwd = useMemo(
@@ -4406,29 +4422,22 @@ export function App({
   const sessionAttachmentsRequestIdRef = useRef(0);
   const attachmentRetryCountRef = useRef(new Map<string, number>());
   const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
-  // Uploaded sources come from the daemon attachment store. Refresh on
-  // transcript updates while the panel is open, throttled during streaming.
+  // The source panel and turn footers share the attachment inventory.
+  // Refresh on transcript updates, throttled during streaming.
   const transcriptRevision = blockChangeSummary?.revision ?? 0;
   const sessionAttachmentsRequestEligibleRef = useRef(false);
   sessionAttachmentsRequestEligibleRef.current =
-    environmentPanelReachable &&
-    environmentSourcesEnabled &&
-    environmentPanelOpen &&
     connection.status === 'connected' &&
     Boolean(connection.sessionId && logicalSessionKey) &&
     connection.capabilities?.features.includes(
       SESSION_ATTACHMENT_LIST_FEATURE,
     ) === true;
   useEffect(() => {
-    const attachmentsSectionEnabled =
-      environmentPanelReachable && environmentSourcesEnabled;
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
       ) === true;
     if (
-      !attachmentsSectionEnabled ||
-      !environmentPanelOpen ||
       connection.status !== 'connected' ||
       !connection.sessionId ||
       !logicalSessionKey
@@ -4541,13 +4550,10 @@ export function App({
     connection.status,
     attachmentRefreshNonce,
     environmentPanelOpen,
-    environmentPanelReachable,
-    environmentPanelItems,
     logicalSessionKey,
     transcriptRevision,
     sessionActions,
     sessionAttachmentsOwner,
-    environmentSourcesEnabled,
     t,
   ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
@@ -5822,6 +5828,29 @@ export function App({
             }
           }
         }
+        if (!restored && tab.targetKind === 'subagent' && tab.taskId) {
+          const snapshot = await workspace.client.sessionTasks(
+            tab.sourceSessionId,
+          );
+          const task =
+            snapshot.sessionId === tab.sourceSessionId
+              ? snapshot.tasks.find(
+                  (item) => item.kind === 'agent' && item.id === tab.taskId,
+                )
+              : undefined;
+          if (task?.kind === 'agent') {
+            const rootTool = agentTaskAsToolCall(task);
+            restored = {
+              id: tab.id,
+              kind: 'subagent',
+              title: tab.title,
+              sessionId: tab.sourceSessionId,
+              rootToolCallId: rootTool.callId,
+              rootTool,
+              workspaceCwd: tab.workspaceCwd,
+            };
+          }
+        }
         if (!restored) {
           throw new Error(t('rightPanel.savedContentUnavailable'));
         }
@@ -6525,6 +6554,44 @@ export function App({
         onRightPanelOpen(request);
         return;
       }
+      if (request.kind === 'background_task') {
+        if (!request.sourceSessionId) return;
+        const turn = request.backgroundTurn;
+        const tab: ArtifactPanelTab =
+          turn.kind === 'workflow'
+            ? {
+                id: `workflow:${request.sourceSessionId}`,
+                kind: 'workflow',
+                title: request.title,
+                sessionId: request.sourceSessionId,
+              }
+            : {
+                id: request.id,
+                kind: 'pending',
+                title: request.title,
+                targetKind: turn.kind === 'agent' ? 'subagent' : turn.kind,
+                sourceSessionId: request.sourceSessionId,
+                rootToolCallId: turn.toolUseId,
+                taskId: turn.taskId,
+                workspaceCwd: request.workspaceCwd,
+              };
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+        if (tab.kind === 'pending') {
+          const existing = artifactPanelTabsRef.current.find(
+            (item) => item.id === tab.id,
+          );
+          if (!existing || existing.kind === 'pending')
+            void hydratePendingArtifactPanelTab(tab);
+        }
+        return;
+      }
       if (request.kind === 'review') {
         openReviewPanel(
           request.changes,
@@ -6673,6 +6740,7 @@ export function App({
     },
     [
       getDefaultReviewPanelWidth,
+      hydratePendingArtifactPanelTab,
       onFileReviewOpen,
       onRightPanelOpen,
       openReviewPanel,
@@ -7503,6 +7571,7 @@ export function App({
   }
   previousStreamingStateRef.current = streamingState;
   const activeTurnStartedAt = useMemo(() => {
+    if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (streamingState === 'idle') return undefined;
     for (let i = displayMessages.length - 1; i >= 0; i--) {
       const message = displayMessages[i];
@@ -7511,7 +7580,7 @@ export function App({
       }
     }
     return localStreamingStartedAtRef.current;
-  }, [displayMessages, streamingState]);
+  }, [displayMessages, streamingState, connection.backgroundTurn]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
@@ -9863,11 +9932,13 @@ export function App({
       if (isAlreadyDispatched(error)) {
         return;
       }
-      const message = formatError(error, fallback);
+      const message = isAcpChildCapacityError(error)
+        ? t('daemon.capacity.exhausted')
+        : formatError(error, fallback);
       console.error('[web-shell]', message, error);
       pushToast('error', message);
     },
-    [pushToast],
+    [pushToast, t],
   );
   const sendPrompt = useCallback(
     async (
@@ -10805,13 +10876,18 @@ export function App({
         );
       }
       if (shouldToastNotice(notice)) {
-        pushToast(toastToneFromNotice(notice), notice.message);
+        pushToast(
+          toastToneFromNotice(notice),
+          notice.code === 'acp_child_capacity_exhausted'
+            ? t('daemon.capacity.exhausted')
+            : notice.message,
+        );
       } else if (notice.category !== 'lifecycle') {
         console.warn('[web-shell] daemon notice', notice);
       }
       dismissNotice(notice.id);
     }
-  }, [dismissNotice, notices, pushToast]);
+  }, [dismissNotice, notices, pushToast, t]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -14535,8 +14611,13 @@ export function App({
     [pushToast, t],
   );
 
+  const goalSessionCreationInFlightRef = useRef(false);
   const handleGoalSlashCommand = useCallback(
-    (text: string, hasAttachments: boolean) => {
+    (
+      text: string,
+      hasAttachments: boolean,
+      commitComposerAccepted?: () => void,
+    ) => {
       if (hasAttachments) {
         pushToast('error', t('goals.error.attachmentsUnsupported'));
         return false;
@@ -14564,11 +14645,16 @@ export function App({
       // composer has no disabled state, so it has to refuse here. Two controls
       // read the same snapshot and stamp the same `expectedGoalId`/
       // `expectedRevision`, and the daemon rejects the loser with a 409.
-      if (goalControlOwnerRef.current) {
+      if (
+        goalControlOwnerRef.current ||
+        goalSessionCreationInFlightRef.current
+      ) {
         pushToast('error', t('goals.error.controlBusy'));
         return false;
       }
 
+      const needsSession = !connectionRef.current.sessionId;
+      goalSessionCreationInFlightRef.current = needsSession;
       void (async () => {
         const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
@@ -14597,6 +14683,10 @@ export function App({
         if (!connectionRef.current.sessionId && !allocatedSessionId) {
           throw new Error(t('localCommand.noSession'));
         }
+        if (needsSession) {
+          if (commitComposerAccepted) commitComposerAccepted();
+          else editorRef.current?.clear();
+        }
         store.appendLocalUserMessage(text);
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
@@ -14611,10 +14701,14 @@ export function App({
         } else {
           await controlCurrentGoal(action, objective);
         }
-      })().catch((error: unknown) => {
-        reportError(error, `Failed to ${operation.kind} /goal`);
-      });
-      return true;
+      })()
+        .catch((error: unknown) => {
+          reportError(error, `Failed to ${operation.kind} /goal`);
+        })
+        .finally(() => {
+          goalSessionCreationInFlightRef.current = false;
+        });
+      return !needsSession;
     },
     [
       controlCurrentGoal,
@@ -14956,6 +15050,7 @@ export function App({
               (images?.length ?? 0) > 0 ||
                 (files?.length ?? 0) > 0 ||
                 (metadata?.inputAnnotations?.length ?? 0) > 0,
+              commitComposerAccepted,
             );
           }
           if (cmd === 'theme') {
@@ -17646,6 +17741,52 @@ export function App({
     onToggleFullscreen: toggleArtifactPanelFullscreen,
   };
   const environmentPanelOwner = sessionOwnerGuard.capture();
+  const panelAttachments = logicalSessionKey
+    ? sessionAttachmentsBySessionRef.current.get(logicalSessionKey)
+    : undefined;
+  const sourceEntries = useMemo(
+    () =>
+      getSourceEntries(
+        sourcesState.supported ? sourcesState.sources : [],
+        panelAttachments ?? [],
+      ),
+    [sourcesState.supported, sourcesState.sources, panelAttachments],
+  );
+  const openTurnSource = useCallback(
+    (entry: WebShellSource) => {
+      const owner = sourcesState.owner;
+      if (!owner.isCurrent()) return;
+      openSourceEntry(entry, {
+        onOpen: openSourcePanel,
+        onReadImage: readSessionImage,
+        onImagePreview: (src, alt, source) => {
+          if (owner.isCurrent()) openImagePanel(src, alt, source);
+        },
+        onAttachmentPreview: (file) => {
+          if (owner.isCurrent())
+            openAttachmentPanel(file, undefined, undefined, true);
+        },
+        onAttachmentPreviewError: (error) => {
+          if (owner.isCurrent())
+            pushToast(
+              'error',
+              t('rightPanel.attachmentLoadFailed', {
+                error: formatError(error, t('environment.unavailable')),
+              }),
+            );
+        },
+      });
+    },
+    [
+      sourcesState.owner,
+      openSourcePanel,
+      readSessionImage,
+      openImagePanel,
+      openAttachmentPanel,
+      pushToast,
+      t,
+    ],
+  );
 
   // BrandProvider sits above I18nProvider so portals and every pane see it. The
   // prettier-ignore keeps adding it from re-indenting the whole subtree, the
@@ -17959,7 +18100,10 @@ export function App({
               onAdd={handleAddWorkspace}
               onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={
-                nativeDirectoryPickerSupported
+                nativeDirectoryPickerSupported &&
+                (!workspace.baseUrl ||
+                  new URL(workspace.baseUrl, window.location.origin).origin ===
+                    window.location.origin)
                   ? async () => {
                       const result =
                         await workspaceActions.pickWorkspaceDirectory();
@@ -19274,6 +19418,9 @@ export function App({
                                     ? fileChangesByTurn
                                     : undefined
                                 }
+                                sourceEntries={sourceEntries}
+                                sourceSessionId={connection.sessionId}
+                                onSourceOpen={openTurnSource}
                                 turnArtifacts={
                                   visibleTurnOutputKinds.has('artifact')
                                     ? artifactsByTurn
@@ -19309,6 +19456,18 @@ export function App({
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
+                                onOpenBackground={(turn) => {
+                                  if (!connection.sessionId) return;
+                                  handleTurnOutputOpen({
+                                    id: `background:${connection.sessionId}:${turn.taskId}`,
+                                    kind: 'background_task',
+                                    title: turn.label ?? turn.kind,
+                                    turnId: turn.turnId,
+                                    backgroundTurn: turn,
+                                    sourceSessionId: connection.sessionId,
+                                    workspaceCwd: connection.workspaceCwd,
+                                  });
+                                }}
                               >
                                 {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
@@ -19628,6 +19787,10 @@ export function App({
                                 activeTurnStartedAt
                               }
                               hasActivePrompt={sessionHasActivePrompt}
+                              backgroundLabel={
+                                connection.backgroundTurn?.label ??
+                                connection.backgroundTurn?.kind
+                              }
                             />
                           )
                         ) : newSessionSuggestion ? (

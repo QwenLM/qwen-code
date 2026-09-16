@@ -44,17 +44,23 @@ function salvagedPageText(parts: string[]): string {
   if (parts.length === 0) return '';
   const text = parts.join('\n\n');
   const truncated = text.length > MAX_EXTRACTED_FALLBACK_CHARS;
+  // A cut that lands after a high surrogate backs off one unit, so the label
+  // states the length actually delivered rather than the bound.
+  const delivered = truncated
+    ? sliceAtCharBoundary(text, MAX_EXTRACTED_FALLBACK_CHARS)
+    : text;
   const label =
     "[Raw page content salvaged from the search agent's page reads — its narrated answer did not arrive" +
-    (truncated
-      ? `. Truncated to ${MAX_EXTRACTED_FALLBACK_CHARS} characters.]`
-      : '.]');
-  return `${label}\n${truncated ? sliceAtCharBoundary(text, MAX_EXTRACTED_FALLBACK_CHARS) : text}`;
+    (truncated ? `. Truncated to ${delivered.length} characters.]` : '.]');
+  return `${label}\n${delivered}`;
 }
 
-/** "120s", "90s", "0.2s": the budget as configured, never rounded to zero. */
+/**
+ * "120s", "90s", "0.2s", "0.04s": the budget as configured, to the
+ * millisecond, so a sub-second budget is never rounded to zero.
+ */
 function formatBudget(ms: number): string {
-  return `${Number((ms / 1000).toFixed(1))}s`;
+  return `${Number((ms / 1000).toFixed(3))}s`;
 }
 
 /**

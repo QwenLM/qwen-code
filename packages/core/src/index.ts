@@ -95,6 +95,7 @@ export * from './core/prompts.js';
 export * from './core/output-styles.js';
 export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
+export { buildSessionHistoryFromConversation } from './services/session-api-history.js';
 export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
@@ -218,7 +219,9 @@ export type {
   WebSearchSettings,
 } from './tools/web-search.js';
 export {
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
   MAX_WEB_SEARCH_TIMEOUT_MS,
 } from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
@@ -481,6 +484,7 @@ export * from './services/backgroundShellRegistry.js';
 export * from './agents/background-notification-queue.js';
 export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
+export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export {
   listSavedWorkflows,
@@ -489,15 +493,26 @@ export {
   validateWorkflowName,
   getSavedWorkflowDirs,
   WORKFLOW_NAME_PATTERN,
+  EXTENSION_WORKFLOW_NAME_PATTERN,
+  qualifyExtensionWorkflowName,
+  parseExtensionWorkflowName,
   type SavedWorkflowEntry,
+  type SavedWorkflowScope,
   type SavedWorkflowSource,
   type ResolvedSavedWorkflow,
   type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
 export {
+  loadExtensionWorkflows,
+  MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
+  type ExtensionWorkflowDefinition,
+} from './agents/runtime/workflow-extension.js';
+export {
   extractAndStripMeta,
   type WorkflowMeta,
 } from './agents/runtime/workflow-sandbox.js';
+export * from './agents/runtime/workflow-size.js';
+export * from './agents/runtime/workflow-script-shape.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
@@ -607,6 +622,7 @@ export {
   logSpeculation,
   logWorkflowKeyword,
   logWorkflowRun,
+  logWorkflowSizeWarning,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -624,6 +640,7 @@ export {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
 
 // ============================================================================
@@ -706,6 +723,7 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
+export * from './utils/background-turn-context.js';
 export * from './tools/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
@@ -795,6 +813,12 @@ export {
   hookEventSupportsMatcher,
 } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export { buildHooksListing } from './hooks/hooks-listing.js';
+export type {
+  HooksListing,
+  HooksListingOrigin,
+  HooksListingRow,
+} from './hooks/hooks-listing.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   STOP_HOOK_BLOCK_CAP_ENV,

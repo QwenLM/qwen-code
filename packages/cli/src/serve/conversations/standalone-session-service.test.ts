@@ -6,6 +6,7 @@
 
 import {
   SessionNotFoundError,
+  AcpChildCapacityExceededError,
   StandaloneSessionSpawnError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
@@ -3639,6 +3640,69 @@ describe('StandaloneSessionService', () => {
     releaseSpawn();
     await expect(first).resolves.toMatchObject({ session: { sessionId } });
     expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('retains capacity only after a pre-dispatch absence check', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        false,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({
+      code: 'standalone_creation_rolled_back',
+      retryable: true,
+      capacity: {
+        code: 'acp_child_capacity_exhausted',
+        maxConcurrentChildren: 1,
+        committedAcpChildren: 1,
+      },
+    });
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+    expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps quarantine precedence when capacity rollback cannot verify absence', async () => {
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        false,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
+    expect(harness.reservation.release).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a post-dispatch capacity cause as safe rollback', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        true,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
   });
 
   it('cleanly rolls back a failure before newSession dispatch', async () => {

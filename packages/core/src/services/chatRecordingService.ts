@@ -7,6 +7,11 @@
 import type { SessionSourcesSnapshot } from './session-sources.js';
 
 import { type Config } from '../config/config.js';
+import {
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
+} from '../utils/background-turn-context.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -301,6 +306,7 @@ export interface ChatRecord {
     | 'at_command'
     | 'attribution_snapshot'
     | 'notification'
+    | 'background_task_completed'
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
@@ -320,12 +326,14 @@ export interface ChatRecord {
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
+    | 'goal_turn_end'
     | 'realtime_message'
     | 'turn_result';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
   goalContext?: GoalTurnPermit;
+  backgroundTurn?: BackgroundNotificationTurn;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -385,6 +393,7 @@ export interface ChatRecord {
     | SessionSourcesSnapshot
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
+    | GoalTurnEndRecordPayload
     | TurnResultRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -429,6 +438,7 @@ export interface NotificationRecordPayload {
     status: string;
     kind: 'agent' | 'monitor' | 'shell' | 'workflow';
     toolUseId?: string;
+    sourceTurnId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
     commandLabel?: string;
@@ -510,6 +520,11 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  completedToolCallIds?: string[];
+}
+
+export interface GoalTurnEndRecordPayload {
+  toolCallId: string;
 }
 
 export interface SlashCommandRecordPayload {
@@ -1272,7 +1287,15 @@ export class ChatRecordingService {
     type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
     const cwd = this.config.getProjectRoot();
+    const background = backgroundTurnContext.getStore();
+    const backgroundTurn =
+      background?.active &&
+      background.sessionId === this.getSessionId() &&
+      !getCurrentAgentId()
+        ? background.turn
+        : undefined;
     return {
+      ...(backgroundTurn ? { backgroundTurn } : {}),
       uuid: randomUUID(),
       parentUuid: this.lastRecordUuid,
       sessionId: this.getSessionId(),
@@ -1937,6 +1960,18 @@ export class ChatRecordingService {
     }
   }
 
+  async recordGoalTurnEnd(
+    toolCallId: string,
+    goalContext: GoalTurnPermit,
+  ): Promise<void> {
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'goal_turn_end',
+      goalContext: copyGoalContext(goalContext),
+      systemPayload: { toolCallId },
+    });
+  }
+
   /**
    * Records a user message drained while tool results are being submitted.
    *
@@ -1984,6 +2019,20 @@ export class ChatRecordingService {
       undefined,
       goalContext,
     );
+  }
+
+  recordBackgroundTaskCompleted(payload: NotificationRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        subtype: 'background_task_completed',
+        systemPayload: payload,
+      };
+      delete record.backgroundTurn;
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving background task completion:', error);
+    }
   }
 
   /**

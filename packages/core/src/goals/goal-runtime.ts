@@ -48,6 +48,7 @@ import {
   isGoalTokenBudgetSpent,
   isGoalTurnBudgetSpent,
   isRepeatedBlockerProposal,
+  type GoalBroadcastMeta,
   type GoalCheckpointFailureShape,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
@@ -247,8 +248,16 @@ export interface GoalRuntime {
    * cause the broadcast carried.
    */
   getRecoveryCause?(): GoalStateCause | undefined;
+  /**
+   * `meta.replayed` is set on the one broadcast `restore()` makes to
+   * republish recovered state; every other broadcast passes no `meta`.
+   */
   subscribe(
-    listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
+    listener: (
+      snapshot: GoalSnapshotV2,
+      cause?: GoalStateCause,
+      meta?: GoalBroadcastMeta,
+    ) => void,
   ): () => void;
   restore(records: readonly GoalRecoveryRecord[]): Promise<void>;
   prepareRestore(
@@ -319,7 +328,11 @@ export function createGoalRuntime(
     activity: 'idle',
   };
   const listeners = new Set<
-    (value: GoalSnapshotV2, cause?: GoalStateCause) => void
+    (
+      value: GoalSnapshotV2,
+      cause?: GoalStateCause,
+      meta?: GoalBroadcastMeta,
+    ) => void
   >();
   let dispatchTail = Promise.resolve();
   let host: GoalTurnHost | undefined;
@@ -661,10 +674,10 @@ export function createGoalRuntime(
 
   const getSnapshot = (): GoalSnapshotV2 => structuredClone(snapshot);
 
-  const broadcast = (cause?: GoalStateCause) => {
+  const broadcast = (cause?: GoalStateCause, meta?: GoalBroadcastMeta) => {
     for (const listener of listeners) {
       try {
-        listener(getSnapshot(), cause);
+        listener(getSnapshot(), cause, meta);
       } catch {
         // Subscribers cannot roll back a committed runtime transition.
       }
@@ -1556,7 +1569,11 @@ export function createGoalRuntime(
       return recoveryCause;
     },
     subscribe(
-      listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
+      listener: (
+        value: GoalSnapshotV2,
+        cause?: GoalStateCause,
+        meta?: GoalBroadcastMeta,
+      ) => void,
     ): () => void {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -1691,7 +1708,11 @@ export function createGoalRuntime(
       restoreActivation = restorePreparation.then(async (attempt) => {
         assertAvailable();
         restoreActivationPending = false;
-        if (preparedRestoreHasSnapshot) broadcast(preparedRestoreCause);
+        // The cause is the recovered record's: the transition it names was
+        // published by the session that made it, so mark this one a replay.
+        if (preparedRestoreHasSnapshot) {
+          broadcast(preparedRestoreCause, { replayed: true });
+        }
         if (!attempt) {
           await enqueue(async () => {
             assertAvailable();

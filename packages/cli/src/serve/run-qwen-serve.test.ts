@@ -69,8 +69,11 @@ import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import * as pemCertificateBlocks from './pem-certificate-blocks.js';
 import * as webShellResolver from './web-shell-resolver.js';
 import * as webShellStatic from './web-shell-static.js';
@@ -1040,6 +1043,199 @@ describe('workspace skill settings persistence', () => {
     else process.env['QWEN_HOME'] = previousQwenHome;
     settingsRuntime.resetHomeEnvBootstrapForTesting();
     vi.restoreAllMocks();
+  });
+
+  const skillStatus = (
+    name: string,
+    level: ServeWorkspaceSkillStatus['level'],
+    extensionName?: string,
+  ): ServeWorkspaceSkillStatus => ({
+    kind: 'skill',
+    status: 'ok',
+    name,
+    description: name,
+    level,
+    modelInvocable: true,
+    ...(extensionName ? { extensionName } : {}),
+  });
+
+  const writeSkillSettings = (
+    workspaceDisabled: string[],
+    userDisabled: string[] = [],
+  ) => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-identity-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-identity-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: workspaceDisabled } }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ skills: { disabled: userDisabled } }),
+    );
+  };
+
+  const captureSkillPersistence = async (
+    skills: ServeWorkspaceSkillStatus[],
+  ) => {
+    const originalCreateServeApp = serverModule.createServeApp;
+    let deps: Parameters<typeof serverModule.createServeApp>[2];
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      deps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    const bridge = {
+      ...makeRuntimeBridge(),
+      queryWorkspaceStatus: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills,
+      }),
+    } as unknown as HttpAcpBridge;
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge },
+    );
+    await handle.runtimeReady;
+    expect(deps?.persistDisabledSkills).toBeDefined();
+    expect(deps?.persistDisabledSkillsBatch).toBeDefined();
+    return deps!;
+  };
+
+  it('uses catalog identity for a non-extension skill whose name contains a colon', async () => {
+    writeSkillSettings(['rust:chat', 'chat']);
+    const { persistDisabledSkills } = await captureSkillPersistence([
+      skillStatus('rust:chat', 'project'),
+    ]);
+
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:chat', true),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['chat'],
+      settingsChanges: [
+        { key: 'skills.disabled', value: ['chat'] },
+        { key: 'skills.enabled', value: ['rust:chat'] },
+      ],
+    });
+  });
+
+  it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
+    writeSkillSettings([], ['pdf', 'legacy']);
+    const { persistDisabledSkills } = await captureSkillPersistence([
+      skillStatus('rust:pdf', 'extension', 'rust'),
+    ]);
+
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:pdf', true),
+    ).resolves.toMatchObject({
+      changed: false,
+      block: { entry: 'pdf', scope: 'User' },
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'rust:legacy', true),
+    ).resolves.toMatchObject({
+      changed: false,
+      block: { entry: 'legacy', scope: 'User' },
+    });
+  });
+
+  it('makes a batch enable order-independent without bypassing a user block', async () => {
+    writeSkillSettings(['pdf'], ['locked']);
+    const { persistDisabledSkillsBatch } = await captureSkillPersistence([
+      skillStatus('pdf', 'user'),
+      skillStatus('rust:pdf', 'extension', 'rust'),
+      skillStatus('rust:locked', 'extension', 'rust'),
+    ]);
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+
+    const first = await persistDisabledSkillsBatch!(
+      workspace,
+      ['pdf', 'rust:pdf'],
+      true,
+    );
+    expect(first.outcomes).toEqual([
+      { skillName: 'pdf', changed: true },
+      { skillName: 'rust:pdf', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['pdf'] } }),
+    );
+    setValues.mockClear();
+
+    const reversed = await persistDisabledSkillsBatch!(
+      workspace,
+      ['rust:pdf', 'pdf'],
+      true,
+    );
+    expect(reversed.outcomes).toEqual([
+      { skillName: 'rust:pdf', changed: true },
+      { skillName: 'pdf', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: [] } }),
+    );
+    setValues.mockClear();
+
+    const blocked = await persistDisabledSkillsBatch!(
+      workspace,
+      ['rust:locked'],
+      true,
+    );
+    expect(blocked.outcomes).toEqual([
+      { skillName: 'rust:locked', changed: false },
+    ]);
+    expect(setValues).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a batch until a multi-step alias chain converges', async () => {
+    writeSkillSettings(['y:z', 'z']);
+    const { persistDisabledSkillsBatch } = await captureSkillPersistence([
+      skillStatus('x:y:z', 'extension', 'x'),
+      skillStatus('y:z', 'extension', 'y'),
+      skillStatus('z', 'project'),
+    ]);
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+
+    const result = await persistDisabledSkillsBatch!(
+      workspace,
+      ['x:y:z', 'y:z', 'z'],
+      true,
+    );
+
+    expect(result.outcomes).toEqual([
+      { skillName: 'x:y:z', changed: true },
+      { skillName: 'y:z', changed: true },
+      { skillName: 'z', changed: true },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
   });
 
   it('canonicalizes, deduplicates, preserves orphans, and serializes updates across settings scopes', async () => {
@@ -4712,6 +4908,14 @@ describe('runQwenServe telemetry validation', () => {
 
   it('adds, advertises, and hot-removes a dynamic workspace runtime', async () => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    const reclaim = vi.fn();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      expect(app.locals['reclaimIdleAcp']).toBeTypeOf('function');
+      app.locals['reclaimIdleAcp'] = reclaim;
+      return app;
+    });
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hot-remove-')),
     );
@@ -4770,6 +4974,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
+        childHeapMode: 'admit',
         workspace: primary,
         token: 'hot-remove-token',
         sessionRestoreTimeoutMs: 90_000,
@@ -4801,6 +5006,19 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(added.status).toBe(201);
       expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      const signal = new AbortController().signal;
+      for (const [index, cwd] of [primary, secondary].entries()) {
+        const callback = mockCreateSpawnChannelFactoryOptions[index][
+          'reclaimIdleChild'
+        ] as (signal?: AbortSignal) => ReturnType<IdleAcpReclaimer>;
+        expect(callback).toBeTypeOf('function');
+        await callback(signal);
+        expect(reclaim).toHaveBeenNthCalledWith(
+          index + 1,
+          hashDaemonWorkspace(canonicalizeWorkspace(cwd)),
+          signal,
+        );
+      }
       for (const options of mockCreateSpawnChannelFactoryOptions) {
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,
@@ -5095,6 +5313,14 @@ describe('runQwenServe telemetry validation', () => {
 
   it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    const reclaim = vi.fn();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      expect(app.locals['reclaimIdleAcp']).toBeTypeOf('function');
+      app.locals['reclaimIdleAcp'] = reclaim;
+      return app;
+    });
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
@@ -5155,6 +5381,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
+        childHeapMode: 'admit',
         workspace: [primary, secondary],
         maxSessions: 1,
         eventRingSize: 1234,
@@ -5174,6 +5401,19 @@ describe('runQwenServe telemetry validation', () => {
       await handle.runtimeReady;
       expect(createBridge).toHaveBeenCalledTimes(2);
       expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      const signal = new AbortController().signal;
+      for (const [index, cwd] of [primary, secondary].entries()) {
+        const callback = mockCreateSpawnChannelFactoryOptions[index][
+          'reclaimIdleChild'
+        ] as (signal?: AbortSignal) => ReturnType<IdleAcpReclaimer>;
+        expect(callback).toBeTypeOf('function');
+        await callback(signal);
+        expect(reclaim).toHaveBeenNthCalledWith(
+          index + 1,
+          hashDaemonWorkspace(canonicalizeWorkspace(cwd)),
+          signal,
+        );
+      }
       for (const options of mockCreateSpawnChannelFactoryOptions) {
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,
@@ -5595,6 +5835,7 @@ describe('runQwenServe memory budget', () => {
             enforced: boolean;
             childHeap: {
               mode: string;
+              admissionEnforced: boolean;
               maxConcurrentChildren: number;
               perChildCeilingMb: number | null;
               refusals: number;
@@ -5661,12 +5902,14 @@ describe('runQwenServe memory budget', () => {
       // all — so a matcher asserting `any(Number)` would fail on exactly the
       // host where the code is doing the right thing.
       expect(Object.keys(memory?.childHeap ?? {}).sort()).toEqual([
+        'admissionEnforced',
         'maxConcurrentChildren',
         'mode',
         'perChildCeilingMb',
         'refusals',
       ]);
       expect(memory?.childHeap?.mode).toBe('observe');
+      expect(memory?.childHeap?.admissionEnforced).toBe(false);
       expect(memory?.childHeap?.refusals).toBe(0);
       // Whichever branch this host took, the two figures agree with each
       // other. The arithmetic itself is pinned exhaustively in
