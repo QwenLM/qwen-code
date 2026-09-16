@@ -244,7 +244,7 @@ describe('ProcessRegistry', () => {
     expect(mockExecFile).toHaveBeenCalledWith(
       PS,
       ['-A', '-o', 'pid=,ppid=,pgid=,state=,nlwp='],
-      expect.objectContaining({ encoding: 'utf8', timeout: 2_000 }),
+      expect.objectContaining({ encoding: 'utf8', timeout: 0 }),
       expect.any(Function),
     );
     expect(killSpy).toHaveBeenCalledWith(-1236, 'SIGTERM');
@@ -258,6 +258,113 @@ describe('ProcessRegistry', () => {
     expect(killSpy).toHaveBeenCalledWith(-1234, 'SIGKILL');
     expect(registry.activeProcessCount).toBe(0);
   });
+
+  it('cancels the query timer when output arrives before its deadline', async () => {
+    vi.useFakeTimers();
+    setPlatform('darwin');
+    const ps = fakeChild(4321);
+    mockExecFile.mockImplementation((...args: unknown[]) => {
+      const callback = args[3] as StringExecCallback;
+      callback(null, '1234 1 1234 S\n', '');
+      return ps;
+    });
+    const child = fakeChild(1234);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+    const aliveGroups = new Set([1234]);
+    mockGroupKills(aliveGroups, (group, signal) => {
+      if (signal === 'SIGTERM') {
+        aliveGroups.delete(group);
+        child.emit('exit', 0, null);
+      }
+    });
+
+    await tracked.terminate();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(ps.kill).not.toHaveBeenCalled();
+  });
+
+  it('reads the complete process table after a late query timeout', async () => {
+    vi.useFakeTimers();
+    setPlatform('darwin');
+    const ps = fakeChild(4321);
+    let finishSnapshot!: StringExecCallback;
+    mockExecFile.mockImplementation((...args: unknown[]) => {
+      finishSnapshot = args[3] as StringExecCallback;
+      return ps;
+    });
+    const child = fakeChild(1234);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+    const aliveGroups = new Set([1234, 1236]);
+    const killSpy = mockGroupKills(aliveGroups, (group, signal) => {
+      if (signal === 'SIGTERM') {
+        aliveGroups.delete(group);
+        if (group === 1234) child.emit('exit', 0, null);
+      }
+    });
+
+    const terminating = tracked.terminate();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(ps.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ps.kill).toHaveBeenCalledExactlyOnceWith('SIGTERM');
+    expect(mockExecFile).toHaveBeenCalledWith(
+      PS,
+      ['-A', '-o', 'pid=,ppid=,pgid=,state='],
+      expect.objectContaining({ timeout: 0, maxBuffer: 8 * 1024 * 1024 }),
+      expect.any(Function),
+    );
+    finishSnapshot(null, '1234 1 1234 S\n1236 1234 1236 S\n', '');
+
+    await expect(terminating).resolves.toBeUndefined();
+    expect(killSpy).toHaveBeenCalledWith(-1236, 'SIGTERM');
+    expect(killSpy).toHaveBeenCalledWith(-1234, 'SIGTERM');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['signal exit', 'kill throws'])(
+    'rejects a query timeout when %s',
+    async (failure) => {
+      vi.useFakeTimers();
+      setPlatform('darwin');
+      const ps = fakeChild(4321);
+      const queryError = new Error('ps timeout failure');
+      mockExecFile.mockImplementation((...args: unknown[]) => {
+        const callback = args[3] as StringExecCallback;
+        vi.mocked(ps.kill).mockImplementation(() => {
+          if (failure === 'kill throws') throw queryError;
+          callback(queryError, '1234 1 1234 S\n', '');
+          return true;
+        });
+        return ps;
+      });
+      const child = fakeChild(1234);
+      const tracked = new ProcessRegistry()
+        .reserve()
+        .attach(child, { ownsProcessTree: true });
+      const aliveGroups = new Set([1234]);
+      mockGroupKills(aliveGroups, (group, signal) => {
+        if (signal === 'SIGTERM') {
+          aliveGroups.delete(group);
+          child.emit('exit', 0, null);
+        }
+      });
+      const terminating = tracked.terminate().catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(ps.kill).toHaveBeenCalledExactlyOnceWith('SIGTERM');
+      await expect(terminating).resolves.toMatchObject({
+        message: expect.stringContaining('ps timeout failure'),
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 
   it('does not treat root exit as tree teardown completion', async () => {
     vi.useFakeTimers();
@@ -626,37 +733,49 @@ describe('ProcessRegistry', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
-  it('reports an unverified snapshot after applying the root-group fallback', async () => {
-    setPlatform('linux');
-    mockExecFile.mockImplementation((...args: unknown[]) => {
-      const callback = args[3] as StringExecCallback;
-      callback(errno('ENOENT'), '', '');
-      return new EventEmitter();
-    });
-    const child = fakeChild(1234);
-    let rootAlive = true;
-    vi.spyOn(process, 'kill').mockImplementation(((
-      _pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      if (signal === 0) {
-        if (!rootAlive) throw errno('ESRCH');
+  it.each([
+    { name: 'unavailable command', error: errno('ENOENT'), stdout: '' },
+    { name: 'empty output', error: null, stdout: '' },
+    { name: 'malformed output', error: null, stdout: 'not a process table' },
+    {
+      name: 'truncated output',
+      error: errno('ERR_CHILD_PROCESS_STDIO_MAXBUFFER'),
+      stdout: '1234 1 1234 S',
+    },
+  ])(
+    'rejects an unverified snapshot ($name) after the root-group fallback',
+    async ({ error, stdout }) => {
+      setPlatform('linux');
+      mockExecFile.mockImplementation((...args: unknown[]) => {
+        const callback = args[3] as StringExecCallback;
+        callback(error, stdout, '');
+        return new EventEmitter();
+      });
+      const child = fakeChild(1234);
+      let rootAlive = true;
+      vi.spyOn(process, 'kill').mockImplementation(((
+        _pid: number,
+        signal?: NodeJS.Signals | number,
+      ) => {
+        if (signal === 0) {
+          if (!rootAlive) throw errno('ESRCH');
+          return true;
+        }
+        if (signal === 'SIGTERM') {
+          rootAlive = false;
+          child.emit('exit', 0, null);
+        }
         return true;
-      }
-      if (signal === 'SIGTERM') {
-        rootAlive = false;
-        child.emit('exit', 0, null);
-      }
-      return true;
-    }) as typeof process.kill);
-    const tracked = new ProcessRegistry()
-      .reserve()
-      .attach(child, { ownsProcessTree: true });
+      }) as typeof process.kill);
+      const tracked = new ProcessRegistry()
+        .reserve()
+        .attach(child, { ownsProcessTree: true });
 
-    await expect(tracked.terminate()).rejects.toThrow(
-      'process-tree snapshot failed',
-    );
-  });
+      await expect(tracked.terminate()).rejects.toThrow(
+        'process-tree snapshot failed',
+      );
+    },
+  );
 
   it('does not trust a tree snapshot when the root is not its group leader', async () => {
     setPlatform('linux');
