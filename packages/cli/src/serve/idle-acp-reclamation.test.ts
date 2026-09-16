@@ -88,10 +88,31 @@ function setup() {
 describe('daemon idle ACP reclamation', () => {
   it('reclaims the oldest eligible workspace once, excluding the requester', async () => {
     const { a, b, c, reclaim } = setup();
-    await reclaim('a');
+    const controller = new AbortController();
+    await reclaim('a', controller.signal);
     expect(a.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
     expect(b.bridge.reclaimIdleChannel).toHaveBeenCalledTimes(1);
+    expect(b.bridge.reclaimIdleChannel).toHaveBeenCalledWith(
+      { channelId: 'b', runtimeEpoch: 1, lastUsedAt: 20 },
+      controller.signal,
+    );
     expect(c.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
+  });
+
+  it('does not let an untrusted requester reclaim trusted workspaces', async () => {
+    const { a, b, c, reclaim } = setup();
+    Object.assign(a, { trusted: false });
+    await reclaim('a');
+    for (const runtime of [a, b, c])
+      expect(runtime.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
+  });
+
+  it('continues scanning when an eligible runtime has no idle channel', async () => {
+    const { a, b, reclaim } = setup();
+    vi.mocked(a.bridge.getIdleChannelCandidate!).mockReturnValue(undefined);
+    await reclaim('new');
+    expect(a.bridge.reclaimIdleChannel).not.toHaveBeenCalled();
+    expect(b.bridge.reclaimIdleChannel).toHaveBeenCalledTimes(1);
   });
 
   it('allows an idle primary and ignores removal permission', async () => {

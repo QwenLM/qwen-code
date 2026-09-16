@@ -29,8 +29,11 @@ export function createIdleAcpReclaimer(options: {
 }): IdleAcpReclaimer {
   return async (requesterWorkspaceId, signal) => {
     const policy = options.policy.snapshot();
+    const requester =
+      options.registry.getEntryByWorkspaceId(requesterWorkspaceId);
     if (
       signal?.aborted ||
+      (requester?.state === 'active' && !requester.current?.runtime.trusted) ||
       policy.mode !== 'admit' ||
       options.processes.committedProcessCount < policy.maxConcurrentChildren!
     ) {

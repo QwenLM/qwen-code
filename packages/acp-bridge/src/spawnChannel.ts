@@ -445,6 +445,7 @@ export function createSpawnChannelFactory(
     workspaceCwd,
     childEnvOverrides,
     signal,
+    startup,
   ) => {
     if (signal?.aborted) {
       throw signal.reason instanceof Error
@@ -489,15 +490,22 @@ export function createSpawnChannelFactory(
         options.reclaimIdleChild
       ) {
         reservation.cancel();
-        let reclamationFailed = false;
+        if (startup) {
+          startup.getTimeoutError = () =>
+            new AcpChildCapacityExceededError(
+              options.childHeapPolicy!.snapshot().maxConcurrentChildren!,
+              processRegistry.committedProcessCount,
+            );
+        }
         try {
           await options.reclaimIdleChild(signal);
         } catch (error) {
-          reclamationFailed = true;
           options.onDiagnosticLine?.(
             `Idle ACP reclamation failed: ${String(error)}`,
             'warn',
           );
+        } finally {
+          if (startup) delete startup.getTimeoutError;
         }
         if (signal?.aborted) {
           throw signal.reason instanceof Error
@@ -505,10 +513,7 @@ export function createSpawnChannelFactory(
             : new Error('ACP channel spawn was aborted');
         }
         const limit = options.childHeapPolicy.snapshot().maxConcurrentChildren!;
-        if (
-          reclamationFailed ||
-          processRegistry.committedProcessCount >= limit
-        ) {
+        if (processRegistry.committedProcessCount >= limit) {
           throw new AcpChildCapacityExceededError(
             limit,
             processRegistry.committedProcessCount,

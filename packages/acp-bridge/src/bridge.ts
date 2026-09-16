@@ -55,7 +55,11 @@ import {
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
-import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
+import type {
+  AcpChannel,
+  AcpChannelTransportGuard,
+  ChannelFactoryStartupContext,
+} from './channel.js';
 import { channelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import {
   EventBus,
@@ -4672,6 +4676,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const acpChannelId = randomUUID();
       const startupStartedAt = Date.now();
       const startupAbort = new AbortController();
+      const startup: ChannelFactoryStartupContext = {};
       const factoryPromise = telemetry.withSpan(
         'channel.spawn',
         {
@@ -4687,6 +4692,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
             },
             startupAbort.signal,
+            startup,
           ),
       );
       let channel: AcpChannel;
@@ -4697,7 +4703,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel factory',
         );
       } catch (error) {
-        startupAbort.abort(error);
+        const failure =
+          error instanceof BridgeTimeoutError
+            ? (startup.getTimeoutError?.() ?? error)
+            : error;
+        startupAbort.abort(failure);
         void factoryPromise.then(
           (lateChannel) =>
             terminateChannel(lateChannel, 'late channel factory result').catch(
@@ -4709,7 +4719,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
           () => undefined,
         );
-        throw error;
+        throw failure;
       }
       const sessionIds = new Set<string>();
       const infoRef: { current?: ChannelInfo } = {};

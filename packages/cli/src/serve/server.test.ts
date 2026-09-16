@@ -3157,7 +3157,14 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
-  it.each(['managed', 'unowned', 'missing_activity', 'busy'] as const)(
+  it.each([
+    'managed',
+    'unowned',
+    'missing_activity',
+    'busy',
+    'acpConnections',
+    'memoryTasks',
+  ] as const)(
     'wires idle reclamation with %s runtime observations',
     async (mode) => {
       const bridge = fakeBridge();
@@ -3216,6 +3223,16 @@ describe('createServeApp', () => {
             : { workspaceRuntimeRemoval: runtimeRemoval }),
         },
       );
+      const acpHandle = app.locals['acpHandle'] as {
+        getWorkspaceActivity: (workspaceId: string) => {
+          acpConnections: number;
+          memoryTasks: number;
+        };
+      };
+      vi.spyOn(acpHandle, 'getWorkspaceActivity').mockReturnValue({
+        acpConnections: mode === 'acpConnections' ? 1 : 0,
+        memoryTasks: mode === 'memoryTasks' ? 1 : 0,
+      });
       try {
         await (app.locals['reclaimIdleAcp'] as IdleAcpReclaimer)(
           'another-workspace',

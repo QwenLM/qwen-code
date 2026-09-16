@@ -1222,12 +1222,16 @@ export function createServeApp(
             channelFactory: createSpawnChannelFactory({
               processRegistry: deps.managedChildProcesses?.registry,
               childHeapPolicy: deps.managedChildProcesses?.policy,
-              reclaimIdleChild: async (signal) => {
-                await reclaimIdleAcp?.(
-                  hashDaemonWorkspace(boundWorkspace),
-                  signal,
-                );
-              },
+              ...(deps.managedChildProcesses
+                ? {
+                    reclaimIdleChild: async (signal?: AbortSignal) => {
+                      await reclaimIdleAcp?.(
+                        hashDaemonWorkspace(boundWorkspace),
+                        signal,
+                      );
+                    },
+                  }
+                : {}),
               extraArgs: acpChildArgs,
             }),
           }

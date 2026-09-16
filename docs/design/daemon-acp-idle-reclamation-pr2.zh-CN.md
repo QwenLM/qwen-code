@@ -60,6 +60,8 @@ PR1 已交付可选启用的 daemon 全局 ACP 进程数量准入，以及可识
 
 这些规则有意优先保护 session，而不是尽可能多地回收。这样无需新增“持久化进行中”信号，也无需定义只有内存状态的 session 如何安全关闭。现有 session reaper 及条件关闭行为保持不变。
 
+已注册且不可信的请求 workspace 不能回收其他 workspace 的子进程。尚未发布到 registry 的内部请求方保留共享回调。请求 workspace 替换进程时，旧进程在 registry 释放前仍占名额；这一重叠可能回收其他符合条件的预热子进程，使其下次使用需要冷启动。初始请求也会在现有启动预算内承担候选进程退出的延迟。
+
 ## 5. LRU 与时间策略
 
 使用当前 ACP channel 最近一次实际使用时间，不使用注册时间或状态页面轮询时间。在当前 channel 的内部状态中增加一个 `lastUsedAt`，channel 可用时初始化，在实际 session 活动或 workspace control/preheat 工作接受、完成时更新。内部候选 token 包含 channel 身份/epoch 和该时间戳。不为排序单独增加公开 status 字段。
@@ -73,7 +75,7 @@ PR1 已交付可选启用的 daemon 全局 ACP 进程数量准入，以及可识
 | 组件                                            | 建议变更与消费方                                                                                                                                                                                                                           |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `spawnChannel.ts`                               | factory options 增加一个可选、供内部接线使用的回收回调。仅在 `admit` 的类型化容量拒绝上调用；等待前取消被拒 reservation，随后最多重新 reserve/decide 一次。所有新路径继续处理取消和清理。                                                  |
-| serve 回收 helper                               | 一个 daemon 持有的小 helper 读取 workspace registry 和共享活动事实，排除请求方及不支持的 runtime，排序并调用一次 bridge 回收。它不维护第二个进程 registry、容量公式、持久队列或 HTTP 重试。                                                |
+| serve 回收 helper                               | 一个 daemon 持有的小 helper 读取 workspace registry 和共享活动事实，排除请求方及不支持的 runtime，排序并调用一次 bridge 回收。它读取共享 registry 计数和策略公布的上限，不维护独立容量模型、第二个 registry、持久队列或 HTTP 重试。        |
 | `bridgeTypes.ts` 与 `bridge.ts`                 | bridge 接口增加可选的候选读取和空闲 channel 回收能力，轻量 fake 与注入 bridge 可以省略。重新核对当前身份和已有无工作条件，拒绝 condemned/stopping channel，然后复用被跟踪的退出。维护内部使用时间，并且只清理被退出 channel 的软保温状态。 |
 | `run-qwen-serve.ts` 与 `server.ts`              | primary、secondary/dynamic 及受管理内部创建路径通过 factory 闭包绑定请求方身份。共享 helper 使用同一 policy/registry。在 registry/活动接线完成前，回调无法回收，沿用容量错误。独立 `createApp` 构建受管理 factory 时也必须遵循同一契约。   |
 | `routes/workspace-management.ts` 与 coordinator | 复用现有活动数据源，保留 removal 行为。不为让 session 可回收而放宽 `hasActiveWork()`，也不调用 `dispose()`。保守的零 session 规则不需要另增只表示管理工作的生命周期 API。                                                                  |
@@ -85,9 +87,9 @@ PR1 已交付可选启用的 daemon 全局 ACP 进程数量准入，以及可识
 
 沿用讨论中约定的简单候选检查和已有生命周期保护，不引入新的原子驱逐事务、daemon 全局 drain 协议或驱逐锁。bridge 最终身份/无工作检查与标记所选 channel 为 dying 之间不能插入 await；这是保持原有 channel 关闭约束，不是另建协议。
 
-回收前取消的请求不选择候选。如果取消发生在候选退出已经开始之后，让该自有资源清理完成，但不再启动请求的新 child，也不尝试其他候选。等待受已有 factory startup abort/deadline 与终止预算限制；超时不能让迟到 factory 结果逃脱清理。回收耗时计入原启动超时，不新增无限等待额度。
+回收前取消的请求不选择候选。如果取消发生在候选退出已经开始之后，让该自有资源清理完成，但不再启动请求的新 child，也不尝试其他候选。等待受已有 factory startup abort/deadline 与终止预算限制；超时不能让迟到 factory 结果逃脱清理。回收耗时计入原启动超时，不新增无限等待额度。factory 等待回收期间，通过可选启动上下文为 bridge 的 deadline 提供容量错误；bridge 使用该错误取消启动，并保留迟到结果清理。回收结束后立即清除该覆盖，后续无关启动超时保持原有错误。
 
-两个调用方同时选择同一候选时，已有 dying/identity 检查让后者跳过，不能强制关闭两次。刚释放的名额不归任何请求专有；其他请求已启动时，最终 reserve/decide 仍是唯一依据。退出失败或后代仍被跟踪时继续报告容量不足，不能手工减 registry 计数或运行宽泛 kill 命令。
+两个调用方同时选择同一候选时，已有 dying/identity 检查让后者跳过，不能强制关闭两次。刚释放的名额不归任何请求专有；其他请求已启动时，最终 reserve/decide 仍是唯一依据。退出后共享 registry 仍无空闲名额（包括后代仍被跟踪）时继续报告容量不足。registry 已释放名额后的退出错误本身不阻止准入；不能手工减 registry 计数或运行宽泛 kill 命令。
 
 候选观测与外部并发活动不是整个 workspace 的事务快照。首版依赖已有保护，并排除所有 live session；不承诺原子停止每个外部参与者。候选在选择过程中变化可能降低回收成功率，应返回容量失败，而不是强制关闭或无限搜索。
 
