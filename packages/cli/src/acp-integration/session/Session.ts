@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
+
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
@@ -5359,6 +5361,19 @@ export class Session implements SessionContext {
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
+      // Refresh the process-global cache-safe slot at the turn boundary.
+      // `#recordPromptCompletionEffects` only captures on a fresh user turn
+      // with managed auto-memory on, but the slot's other consumer —
+      // `generatePromptSuggestion`, reached through
+      // `#maybeEmitFollowupSuggestion` below — has no freshness check and
+      // prefers the slot over the live history tail it is handed. Without
+      // this, a continue/retry turn that still ends `end_turn` would get a
+      // suggestion generated from a transcript missing that turn. Mirrors the
+      // interactive path, which captures on every main turn in
+      // `LlmClient.sendMessageStream`.
+      if (completedResult.stopReason === 'end_turn') {
+        this.config.getLlmClient().captureCacheSafeParams();
+      }
       this.#maybeEmitFollowupSuggestion(completedResult);
       if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
@@ -8760,6 +8775,7 @@ export class Session implements SessionContext {
     ) {
       return;
     }
+    this.config.getLlmClient().captureCacheSafeParams();
     const memoryManager = this.config.getMemoryManager();
     const history = this.#getCurrentChat().getHistoryShallow();
     void memoryManager
@@ -13205,6 +13221,34 @@ export class Session implements SessionContext {
           );
         }
 
+        // ---- Media-policy modelAccess gate (mirrors CoreToolScheduler) ----
+        // Every ACP-originated call is a model call: there is no in-process
+        // fixed_policy caller on this path, so the origin is pinned rather
+        // than read from the (untrusted) protocol payload.
+        const mediaPolicyGate = evaluateMediaPolicyToolCall({
+          config: this.config,
+          tool,
+          args,
+          executionOrigin: { kind: 'model' },
+        });
+        if (mediaPolicyGate.outcome === 'reject') {
+          return earlyErrorResponse(
+            new Error(mediaPolicyGate.message),
+            toolName,
+            {
+              status: 'error',
+              executionStatus: 'not_started',
+              errorType:
+                mediaPolicyGate.reason === 'invalid_params'
+                  ? ToolErrorType.INVALID_TOOL_PARAMS
+                  : ToolErrorType.EXECUTION_DENIED,
+              recordInvalidToolParams:
+                mediaPolicyGate.reason === 'invalid_params',
+            },
+          );
+        }
+        args = mediaPolicyGate.args;
+
         // Detect TodoWriteTool early - route to plan updates instead of tool_call events
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
         // Core exposes TodoWriteTool as a type only. The bundle's keepNames
@@ -14786,6 +14830,46 @@ export class Session implements SessionContext {
             : toolResult.error
               ? 'error'
               : 'success';
+          // ACP runs its own tool executor, so it must capture the policy
+          // artifact batch itself and call the SAME core memory boundary
+          // the scheduler and the fixed-policy orchestrator use (memory
+          // design M §17). Captured from the tool's OWN result, before any
+          // PostToolUse hook artifacts are merged below — hook artifacts
+          // must never impersonate policy outputs. Never throws; a
+          // collection failure cannot affect the tool result (D12).
+          if (
+            status === 'success' &&
+            !nestedPermissionCancelled &&
+            tool.mediaPolicyDescriptor &&
+            toolResult.artifacts &&
+            toolResult.artifacts.length > 0
+          ) {
+            // Deep subpath, not the root or `omni` barrel: both are
+            // statically imported across the CLI, so re-exporting this
+            // through either drags the whole policy graph — and, via
+            // iconvHelper's top-level iconv-lite import, its ~550 KB of
+            // encoding tables — into the ACP agent's static closure
+            // (scripts/check-serve-fast-path-bundle.js enforces that).
+            const { collectModelPolicyCall } = await import(
+              '@qwen-code/qwen-code-core/omniPolicyCollection'
+            );
+            await collectModelPolicyCall({
+              config: this.config,
+              batch: {
+                toolName,
+                invocationId: callId,
+                // Same pin as the modelAccess gate above: every
+                // ACP-originated call is a model call. Recording 'client'
+                // here made the PolicyExecution provenance contradict the
+                // gate that admitted the very same call.
+                executionOrigin: { kind: 'model' },
+                artifacts: toolResult.artifacts,
+              },
+              descriptor: tool.mediaPolicyDescriptor,
+              args,
+              signal: activeToolAbortSignal ?? abortSignal,
+            });
+          }
 
           if (isTrustedTodoWriteTool && !toolResult.error) {
             this.todoStopGuard.observeTodoWrite(
@@ -14907,6 +14991,22 @@ export class Session implements SessionContext {
             }
           }
 
+          // Omni second normalization trigger point (parity with
+          // CoreToolScheduler.processToolResultImages, design §8.2):
+          // inline tool-result media becomes oss:// fileData before the
+          // vision bridge runs, which then skips the converted parts.
+          if (this.config.isOmniEnabled?.()) {
+            // Dynamic import: keeps omni out of the ACP static closure
+            // (serve fast-path bundle-closure CI check).
+            const { processToolResultOmniMedia } = await import(
+              '@qwen-code/qwen-code-core/omni'
+            );
+            responseParts = await processToolResultOmniMedia(
+              responseParts,
+              this.config,
+              activeToolAbortSignal,
+            );
+          }
           const visionBridgeNotices: string[] = [];
           responseParts = await bridgeToolResultImages({
             config: this.config,
