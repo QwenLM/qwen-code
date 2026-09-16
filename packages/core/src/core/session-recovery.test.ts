@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Content } from '@google/genai';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import type { ConversationRecord } from '../services/sessionService.js';
 import {
   buildSessionRecoveryPlan,
@@ -28,6 +29,50 @@ function conversation(messages: Content[]): ConversationRecord {
       version: 'test',
       message,
     })),
+  };
+}
+
+/** The envelope the background registries emit as a notification's modelText. */
+function taskNotification(summary: string): string {
+  return (
+    '<task-notification>' +
+    '<task-id>agent-1</task-id>' +
+    '<status>completed</status>' +
+    `<summary>${summary}</summary>` +
+    '</task-notification>'
+  );
+}
+
+/**
+ * A record shaped like `ChatRecordingService.createNotificationRecord` output:
+ * user-role, `subtype: 'notification'`, `provenance: 'system'`, envelope as its
+ * only part. Neither the subtype nor the provenance survives into `Content`, so
+ * the api history projection holds a plain `role: 'user'` entry that role alone
+ * cannot tell apart from a real prompt.
+ */
+function notificationRecord(index: number, summary: string): ChatRecord {
+  return {
+    uuid: `m-${index}`,
+    parentUuid: index === 0 ? null : `m-${index - 1}`,
+    sessionId: 'session-1',
+    timestamp: '2026-07-11T00:00:00.000Z',
+    type: 'user',
+    subtype: 'notification',
+    provenance: 'system',
+    cwd: '/tmp/project',
+    version: 'test',
+    message: { role: 'user', parts: [{ text: taskNotification(summary) }] },
+    systemPayload: { displayText: 'Background task completed.' },
+  };
+}
+
+function conversationFromRecords(messages: ChatRecord[]): ConversationRecord {
+  return {
+    sessionId: 'session-1',
+    projectHash: 'project-1',
+    startTime: '2026-07-11T00:00:00.000Z',
+    lastUpdated: '2026-07-11T00:00:00.000Z',
+    messages,
   };
 }
 
@@ -156,6 +201,92 @@ describe('buildSessionRecoveryPlan', () => {
       type: 'history_gap',
       childUuid: 'm-1',
       missingParentUuid: 'missing',
+    });
+  });
+});
+
+/**
+ * A recorded-but-unanswered `<task-notification>` tail is not an interrupted
+ * turn. The daemon persists every background notification before its automatic
+ * turn runs, and a notification whose turn never ran leaves a `role: 'user'`
+ * projection tail that nothing ever answers — which used to classify as
+ * `interrupted_prompt` with `canContinue: true`, pinning the Web Shell recovery
+ * banner on a session whose last real turn ended with `end_turn`.
+ */
+describe('buildSessionRecoveryPlan with unanswered notifications', () => {
+  const promptRecord = (index: number, text: string): ChatRecord => ({
+    uuid: `m-${index}`,
+    parentUuid: index === 0 ? null : `m-${index - 1}`,
+    sessionId: 'session-1',
+    timestamp: '2026-07-11T00:00:00.000Z',
+    type: 'user',
+    cwd: '/tmp/project',
+    version: 'test',
+    message: { role: 'user', parts: [{ text }] },
+  });
+
+  const modelRecord = (index: number, content: Content): ChatRecord => ({
+    uuid: `m-${index}`,
+    parentUuid: index === 0 ? null : `m-${index - 1}`,
+    sessionId: 'session-1',
+    timestamp: '2026-07-11T00:00:00.000Z',
+    type: 'assistant',
+    cwd: '/tmp/project',
+    version: 'test',
+    message: content,
+  });
+
+  it('reports clean for a completed turn followed by unanswered notifications', () => {
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        promptRecord(0, 'run the agent in the background'),
+        modelRecord(1, { role: 'model', parts: [{ text: 'all done' }] }),
+        notificationRecord(2, 'Agent "explore" completed.'),
+        notificationRecord(3, 'Agent "build" completed.'),
+      ]),
+    });
+
+    expect(plan.kind).toBe('clean');
+    expect(plan.canContinue).toBe(false);
+    expect(plan.continuation).toBeUndefined();
+  });
+
+  it('still recovers a genuinely interrupted prompt sitting after a notification', () => {
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        notificationRecord(0, 'Agent "explore" completed.'),
+        promptRecord(1, 'do the thing'),
+      ]),
+    });
+
+    // Reverse guard: trimming the notification tail must not blind detection to
+    // a real orphaned prompt that follows it.
+    expect(plan.kind).toBe('interrupted_prompt');
+    expect(plan.canContinue).toBe(true);
+    expect(plan.continuation?.mode).toBe('retry_user_parts');
+    expect(plan.continuation?.parts).toContainEqual({ text: 'do the thing' });
+  });
+
+  it('keeps a dangling tool call interrupted when a notification follows it', () => {
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        promptRecord(0, 'read file'),
+        modelRecord(1, {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
+        }),
+        notificationRecord(2, 'Agent "explore" completed.'),
+      ]),
+    });
+
+    expect(plan.kind).toBe('interrupted_turn');
+    expect(plan.canContinue).toBe(true);
+    expect(plan.continuation).toMatchObject({
+      mode: 'tool_result_parts',
+      parts: [{ functionResponse: { id: 'call-1', name: 'read_file' } }],
     });
   });
 });

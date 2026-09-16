@@ -5,7 +5,11 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { isSystemReminderContent } from './environmentContext.js';
+import {
+  isSystemReminderContent,
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+} from './environmentContext.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted
@@ -27,7 +31,9 @@ import { isSystemReminderContent } from './environmentContext.js';
  *    signal that needs no synthetic user text.
  *  - `none`: the turn ended cleanly (model text tail), the tail is a
  *    structural pure system-reminder entry (strip refuses to pop those, so a
- *    Retry would duplicate content), or history is empty.
+ *    Retry would duplicate content), the tail is only system-injected
+ *    background notifications (recorded before their automatic turn ran, so
+ *    nothing owes them a response), or history is empty.
  *
  * A model text tail that was truncated mid-stream is indistinguishable from
  * a clean finish without persisted stop_reason metadata, so it classifies as
@@ -67,6 +73,59 @@ export function completedToolCallBoundary(
   return Math.max(0, ...boundaries.values());
 }
 
+// Envelope the background registries wrap a notification's `modelText` in
+// (`background-tasks.ts`, `workflow-run-registry.ts`,
+// `background-notification-queue.ts`, `create-sub-session.ts`). Every
+// interpolated value goes through `escapeXml`, and monitor output additionally
+// defangs these tag names (`sanitizeMonitorLine`), so a verbatim close tag can
+// only come from the emitter — the same trust model `isSystemReminderContent`
+// relies on for `<system-reminder>`.
+const TASK_NOTIFICATION_OPEN = '<task-notification>';
+const TASK_NOTIFICATION_CLOSE = '</task-notification>';
+
+function isWrappedIn(part: Part, open: string, close: string): boolean {
+  const text = part.text;
+  return (
+    typeof text === 'string' &&
+    text.startsWith(open) &&
+    text.trimEnd().endsWith(close)
+  );
+}
+
+/**
+ * Whether `content` is a system-injected background notification rather than
+ * user input: at least one part is a `<task-notification>` envelope and every
+ * part is structural (an envelope, or a `<system-reminder>`).
+ *
+ * The "every part" requirement mirrors `isSystemReminderContent` and is what
+ * keeps a real prompt out: per-turn reminders ride alongside the prompt text in
+ * the SAME `user` entry, and a mid-turn drain can merge background parts into
+ * a genuine user message — both have a non-structural part, so neither matches.
+ * Reminders are allowed because a delivered notification turn opens with
+ * `[...systemReminders, ...notificationParts]` as one entry.
+ *
+ * Needed at all because the record's `subtype: 'notification'` and
+ * `provenance: 'system'` do not survive the projection into `Content`
+ * (`session-api-history.ts`), so the live history tail carries no metadata to
+ * read.
+ */
+function isSystemNotificationContent(content: Content): boolean {
+  const parts = content.parts;
+  if (!parts || parts.length === 0) return false;
+  if (
+    !parts.some((part) =>
+      isWrappedIn(part, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE),
+    )
+  ) {
+    return false;
+  }
+  return parts.every(
+    (part) =>
+      isWrappedIn(part, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE) ||
+      isWrappedIn(part, SYSTEM_REMINDER_OPEN, SYSTEM_REMINDER_CLOSE),
+  );
+}
+
 /**
  * Detect whether the last turn of `history` was left unfinished, and if so
  * what kind of continuation applies. Pure read — never mutates `history`.
@@ -83,15 +142,22 @@ export function detectTurnInterruption(
   completedToolCallIds?: readonly string[],
 ): TurnInterruption {
   const boundary = completedToolCallBoundary(history, completedToolCallIds);
-  if (boundary === history.length) return { kind: 'none' };
-  const last = history[history.length - 1];
+  // Trailing background notifications are not an unfinished turn: the daemon
+  // persists each one before its automatic turn runs, so a notification whose
+  // turn never ran leaves a `user` tail that nothing will ever answer. Left in
+  // place it classifies as `interrupted_prompt`, which keeps the recovery
+  // banner pinned on a session whose last real turn ended cleanly.
+  let end = history.length;
+  while (end > 0 && isSystemNotificationContent(history[end - 1]!)) end--;
+  if (boundary >= end) return { kind: 'none' };
+  const last = history[end - 1];
   if (!last) {
     return { kind: 'none' };
   }
 
   if (last.role === 'user') {
     const trailingUserEntries: Content[] = [];
-    for (let i = history.length - 1; i >= boundary; i--) {
+    for (let i = end - 1; i >= boundary; i--) {
       const entry = history[i];
       if (!entry || entry.role !== 'user') {
         break;

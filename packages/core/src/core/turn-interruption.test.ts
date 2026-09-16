@@ -236,6 +236,95 @@ describe('detectTurnInterruption', () => {
   });
 });
 
+describe('detectTurnInterruption with background notifications', () => {
+  const notification = (summary: string) => ({
+    text:
+      `<task-notification><task-id>agent-1</task-id>` +
+      `<status>completed</status><summary>${summary}</summary>` +
+      `</task-notification>`,
+  });
+
+  it('returns none when an unanswered notification is the whole tail', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'run it in the background' }] },
+      { role: 'model', parts: [{ text: 'done' }] },
+      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+      { role: 'user', parts: [notification('Agent "build" completed.')] },
+    ];
+    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+  });
+
+  it('returns none for a history that is only notifications', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+    ];
+    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+  });
+
+  it('treats a delivered notification turn entry (reminders + envelope) as structural', () => {
+    // A live notification turn opens with `[...systemReminders, ...notification]`
+    // as ONE user entry; while it runs, that entry is the history tail.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'earlier prompt' }] },
+      { role: 'model', parts: [{ text: 'earlier answer' }] },
+      {
+        role: 'user',
+        parts: [reminder('plan mode is active'), notification('Agent done.')],
+      },
+    ];
+    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+  });
+
+  it('still classifies a real prompt carrying a merged notification part', () => {
+    // A mid-turn drain can merge background parts into a genuine user message.
+    // That entry has a non-structural part, so it stays an orphaned prompt.
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [notification('Agent done.'), { text: 'and now do this' }],
+      },
+    ];
+    expect(detectTurnInterruption(history)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [notification('Agent done.'), { text: 'and now do this' }],
+    });
+  });
+
+  it('classifies a dangling tool call under a trailing notification', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'read it' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
+      },
+      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+    ];
+    expect(detectTurnInterruption(history)).toEqual({
+      kind: 'interrupted_turn',
+      danglingCalls: [{ callId: 'call-1', name: 'read_file' }],
+    });
+  });
+
+  it('returns none when a completed tool boundary is followed only by notifications', () => {
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'ended', name: 'shell' } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          { functionResponse: { id: 'ended', name: 'shell', response: {} } },
+        ],
+      },
+      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+    ];
+    expect(detectTurnInterruption(history, ['ended'])).toEqual({
+      kind: 'none',
+    });
+  });
+});
+
 describe('buildSyntheticToolResponseParts', () => {
   it('builds one error functionResponse per dangling call, matching repair shape', () => {
     const parts = buildSyntheticToolResponseParts(

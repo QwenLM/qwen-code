@@ -5488,13 +5488,16 @@ export class Session implements SessionContext {
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
     const recoveryPlan = this.#getRecoveryPlan(false);
-    // A prompt (or an earlier continuation) is still in flight: there is no
-    // settled turn to continue. Reject rather than abort the live turn.
+    // A turn is still in flight, so there is no settled turn to continue.
+    // `pendingPrompt` alone misses the automatic turns: notification and cron
+    // turns run their own streaming loop under `notificationAbortController` /
+    // `cronAbortController` and never install it. Accepting there is not
+    // neutral — the bridge drives an accepted continuation through normal
+    // prompt admission, which aborts both controllers, so the recovery button
+    // would kill a healthy running turn.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
-      canContinue:
-        recoveryPlan?.canContinue === true &&
-        !(this.pendingPrompt && !this.pendingPrompt.signal.aborted),
+      canContinue: recoveryPlan?.canContinue === true && !this.#hasActiveTurn(),
     };
   }
 

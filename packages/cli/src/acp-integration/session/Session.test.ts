@@ -5439,6 +5439,154 @@ describe('Session', () => {
       });
       expect(promptSpy).not.toHaveBeenCalled();
     });
+
+    it('reports clean for a restored session whose tail is an unanswered notification', async () => {
+      // The daemon persists every background notification before its automatic
+      // turn runs. When such a notification's turn never ran, a cold load
+      // projects it as a plain `role: 'user'` tail (the record's subtype and
+      // provenance do not survive into `Content`) that nothing will ever
+      // answer — so the session used to come back as `interrupted_prompt`, with
+      // the recovery banner pinned on a turn that had ended with `end_turn`.
+      // Drive the same projection `GeminiClient` seeds the live chat with on
+      // restore (`buildSessionHistoryFromConversation`).
+      const notificationRecord = (index: number, summary: string) => ({
+        uuid: `m-${index}`,
+        parentUuid: index === 0 ? null : `m-${index - 1}`,
+        sessionId: 'test-session-id',
+        timestamp: '2026-09-16T00:00:00.000Z',
+        type: 'user' as const,
+        subtype: 'notification' as const,
+        provenance: 'system' as const,
+        cwd: '/tmp/project',
+        version: 'test',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text:
+                `<task-notification><task-id>agent-1</task-id>` +
+                `<status>completed</status><summary>${summary}</summary>` +
+                `</task-notification>`,
+            },
+          ],
+        },
+        systemPayload: { displayText: 'Background task completed.' },
+      });
+      const restored = core.buildSessionHistoryFromConversation({
+        messages: [
+          {
+            uuid: 'm-0',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: '2026-09-16T00:00:00.000Z',
+            type: 'user' as const,
+            cwd: '/tmp/project',
+            version: 'test',
+            message: {
+              role: 'user',
+              parts: [{ text: 'run it in the background' }],
+            },
+          },
+          {
+            uuid: 'm-1',
+            parentUuid: 'm-0',
+            sessionId: 'test-session-id',
+            timestamp: '2026-09-16T00:00:01.000Z',
+            type: 'assistant' as const,
+            cwd: '/tmp/project',
+            version: 'test',
+            message: { role: 'model', parts: [{ text: 'all done' }] },
+          },
+          notificationRecord(2, 'Agent "explore" completed.'),
+          notificationRecord(3, 'Agent "build" completed.'),
+        ],
+      });
+      // Sanity: the projection really does end in unanswered user entries, so
+      // this exercises the classifier instead of an already-clean tail.
+      expect(restored.apiHistory.at(-1)?.role).toBe('user');
+      vi.mocked(mockChat.getHistory).mockReturnValue(restored.apiHistory);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects when an automatic notification turn is in flight', async () => {
+      // The harmful half: a notification turn runs under
+      // `notificationAbortController` and never installs `pendingPrompt`, so the
+      // re-entrancy guard used to miss it and report `canContinue: true`. The
+      // bridge then drives the continuation through the normal prompt-admission
+      // path, which aborts `notificationAbortController` — the recovery button
+      // killed a healthy turn.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as {
+        notificationAbortController: AbortController | null;
+        notificationProcessing: boolean;
+      };
+      const liveTurn = new AbortController();
+      internals.notificationAbortController = liveTurn;
+      internals.notificationProcessing = true;
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(promptSpy).not.toHaveBeenCalled();
+        expect(liveTurn.signal.aborted).toBe(false);
+      } finally {
+        internals.notificationAbortController = null;
+        internals.notificationProcessing = false;
+      }
+    });
+
+    it('rejects when an automatic cron turn is in flight', async () => {
+      // Same guard gap as the notification turn: cron runs under
+      // `cronAbortController`, which prompt admission aborts as well.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      const internals = session as unknown as {
+        cronAbortController: AbortController | null;
+        cronProcessing: boolean;
+      };
+      const liveTurn = new AbortController();
+      internals.cronAbortController = liveTurn;
+      internals.cronProcessing = true;
+
+      try {
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+        });
+        expect(liveTurn.signal.aborted).toBe(false);
+      } finally {
+        internals.cronAbortController = null;
+        internals.cronProcessing = false;
+      }
+    });
   });
 
   describe('restoreAskUserQuestion prompt', () => {
