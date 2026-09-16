@@ -222,7 +222,10 @@ jobs:
     # Skip filing only when the one bounded re-run actually started. A skipped
     # rerun job (an ordinary failure with steps) and a failed one (the re-run
     # request itself errored) both fall through to the normal issue path.
-    if: "${{ needs.analyze.result == 'success' && needs.rerun_never_started.result != 'success' }}"
+    # always() is load-bearing: without a status check function Actions
+    # implicitly prepends success(), and a skipped rerun_never_started is not
+    # a success, so the condition below would never be evaluated.
+    if: "${{ always() && needs.analyze.result == 'success' && needs.rerun_never_started.result != 'success' }}"
     # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
     # and the pool being the REASON CI broke would queue the report behind
     # the very failure it documents.

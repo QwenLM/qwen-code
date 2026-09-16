@@ -194,6 +194,12 @@ describe('main CI failure issue workflow', () => {
     expect(String(jobs.file_issue.if)).toContain(
       "needs.rerun_never_started.result != 'success'",
     );
+    // always() is the token that makes the two pins above reachable: without
+    // a status check function Actions implicitly prepends success() to the
+    // expression, and a skipped rerun job is not a success, so file_issue
+    // would be skipped — on every ordinary failure and every attempt-2
+    // recurrence — before the condition is ever evaluated.
+    expect(String(jobs.file_issue.if)).toContain('always()');
   });
 
   it('re-reads an existing issue so recorded recurrences survive the update', () => {
