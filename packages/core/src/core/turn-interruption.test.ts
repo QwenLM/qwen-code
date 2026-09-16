@@ -261,9 +261,37 @@ describe('detectTurnInterruption with background notifications', () => {
     expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
   });
 
-  it('treats a delivered notification turn entry (reminders + envelope) as structural', () => {
-    // A live notification turn opens with `[...systemReminders, ...notification]`
-    // as ONE user entry; while it runs, that entry is the history tail.
+  it('re-submits the orphaned prompt together with the notification after it', () => {
+    // The Retry send path (`stripOrphanedUserEntriesFromHistory`) pops the
+    // ENTIRE trailing user run, notification entries included — its only
+    // break-guard is `isSystemReminderContent`, which is false for an
+    // envelope. Detection must therefore re-submit exactly that run: trimming
+    // the notification out of `parts` while the strip still pops it drops the
+    // recorded-but-undelivered payload from live history for good, because
+    // `persistedBackgroundNotificationTaskIds` is primed from the transcript
+    // itself and the queue never re-delivers it.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'do the thing' }] },
+      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+    ];
+    expect(detectTurnInterruption(history)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [
+        { text: 'do the thing' },
+        notification('Agent "explore" completed.'),
+      ],
+    });
+  });
+
+  it('keeps a delivered notification turn entry (reminders + envelope) interrupted', () => {
+    // An automatic notification turn that was admitted, ran, then failed
+    // mid-stream pushes no model entry (`willPersistToHistory` is false), so
+    // its `[...systemReminders, ...notificationParts]` user entry is the
+    // history tail with nothing in flight to guard it. That is the textbook
+    // `interrupted_prompt`, and the queue item is already gone — trimming the
+    // entry would certify `clean` and leave the turn with no re-drive at all.
+    // Only the single-part cold projection (a recorded notification whose turn
+    // never ran) is structural, so the reminder allowance must not apply.
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'earlier prompt' }] },
       { role: 'model', parts: [{ text: 'earlier answer' }] },
@@ -272,7 +300,30 @@ describe('detectTurnInterruption with background notifications', () => {
         parts: [reminder('plan mode is active'), notification('Agent done.')],
       },
     ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+    expect(detectTurnInterruption(history)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [reminder('plan mode is active'), notification('Agent done.')],
+    });
+  });
+
+  it('keeps a user entry that quotes an envelope inside its text', () => {
+    // The anchoring axis: `isWrappedIn` requires the envelope to START the
+    // text. A real prompt that quotes a notification inside its own text is
+    // user input, and trimming it would report `clean` for a session that
+    // died with an unanswered prompt — silent loss, worse than a spurious
+    // banner. One part, so the `every` quantifier cannot carry the assertion.
+    const text =
+      'what does this mean: <task-notification><status>completed</status></task-notification>';
+    expect(
+      detectTurnInterruption([{ role: 'user', parts: [{ text }] }]),
+    ).toEqual({ kind: 'interrupted_prompt', parts: [{ text }] });
+  });
+
+  it('keeps a user entry with a leading label before the envelope', () => {
+    const text = `Background task update:\n${notification('Agent "explore" completed.').text}`;
+    expect(
+      detectTurnInterruption([{ role: 'user', parts: [{ text }] }]),
+    ).toEqual({ kind: 'interrupted_prompt', parts: [{ text }] });
   });
 
   it('does not trim a MODEL entry whose text is a bare envelope', () => {

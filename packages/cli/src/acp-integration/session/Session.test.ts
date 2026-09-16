@@ -5625,6 +5625,47 @@ describe('Session', () => {
         internals.closing = false;
       }
     });
+
+    it('recovers a FAILED automatic notification turn that carries reminders', async () => {
+      // Sibling of the in-flight case above, for the state where the turn is
+      // already over. A notification turn pushes its
+      // `[...systemReminders, ...notificationParts]` user entry into live
+      // history before any attempt; if the stream then fails mid-turn with no
+      // `functionCall` delivered, no model entry is pushed, so that entry IS
+      // the tail — and the `catch` does not re-queue while the `finally`
+      // clears `notificationAbortController`, so `#hasActiveTurn()` is false.
+      // Trimming that entry as structural certifies `clean` and leaves the
+      // turn with no re-drive at all (`persistedBackgroundNotificationTaskIds`
+      // already holds the taskId). Nothing is in flight here, on purpose.
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier answer' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nplan mode is active\n</system-reminder>',
+            },
+            {
+              text:
+                `<task-notification><task-id>agent-1</task-id>` +
+                `<status>failed</status>` +
+                `<summary>Agent "explore" failed.</summary>` +
+                `</task-notification>`,
+            },
+          ],
+        },
+      ]);
+
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+    });
   });
 
   describe('restoreAskUserQuestion prompt', () => {

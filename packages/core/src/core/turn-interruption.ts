@@ -5,11 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import {
-  isSystemReminderContent,
-  SYSTEM_REMINDER_CLOSE,
-  SYSTEM_REMINDER_OPEN,
-} from './environmentContext.js';
+import { isSystemReminderContent } from './environmentContext.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted
@@ -104,9 +100,8 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
 
 /**
  * Whether `content` is a system-injected background notification rather than
- * user input: the entry is user-role, at least one part is a
- * `<task-notification>` envelope, and every part is structural (an envelope,
- * or a `<system-reminder>`).
+ * user input: the entry is user-role and EVERY part is a `<task-notification>`
+ * envelope.
  *
  * The role check is the provenance signal, and it has to come first: the
  * envelope shape is not defanged against model output (see the trust-model
@@ -120,12 +115,30 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * (`packages/core/src/services/chatRecordingService.ts`) builds every one from
  * `createBaseRecord('user')`.
  *
- * The "every part" requirement mirrors `isSystemReminderContent` and is what
- * keeps a real prompt out: per-turn reminders ride alongside the prompt text in
- * the SAME `user` entry, and a mid-turn drain can merge background parts into
- * a genuine user message — both have a non-structural part, so neither matches.
- * Reminders are allowed because a delivered notification turn opens with
- * `[...systemReminders, ...notificationParts]` as one entry.
+ * The "every part" requirement is what keeps a real prompt out, and it is
+ * deliberately NOT relaxed for `<system-reminder>` parts: per-turn reminders
+ * ride alongside the prompt text in the SAME `user` entry, and a mid-turn
+ * drain can merge background parts into a genuine user message — both have a
+ * non-structural part, so neither matches. A DELIVERED notification turn
+ * (`[...systemReminders, ...notificationParts]` as one entry) is therefore
+ * left in place on purpose. Only the cold projection this trim exists for is
+ * single-part (`recordNotification([{ text: item.modelText }], …)` →
+ * `createNotificationRecord` → `createUserContent`; a co-recorded
+ * `droppedSummary` is a separate record, so adjacent cold entries each trim
+ * individually). Allowing reminders would also trim a notification turn that
+ * was admitted, ran and then failed mid-stream — no `functionCall` delivered,
+ * so no model entry was pushed and that user entry is the tail with nothing in
+ * flight — certifying `clean` for the textbook `interrupted_prompt` documented
+ * above and leaving it with no re-drive at all. The in-flight window the
+ * reminder allowance was meant to cover is refused independently by the
+ * `#hasActiveTurn()` guard in `Session.getRecoveryStatus()`.
+ *
+ * Residual, by shape alone: a FAILED live notification turn whose entry
+ * carries no reminders (no plan mode, no output style, no active todo chain)
+ * is a single-envelope user entry, indistinguishable from a cold record, and
+ * is still trimmed. Closing that needs `provenance` to survive the projection
+ * (`session-api-history.ts`) or a daemon-side re-drive; no shape predicate at
+ * this layer can reach it.
  *
  * Needed at all because the record's `subtype: 'notification'` and
  * `provenance: 'system'` do not survive the projection into `Content`
@@ -136,17 +149,8 @@ function isSystemNotificationContent(content: Content): boolean {
   if (content.role !== 'user') return false;
   const parts = content.parts;
   if (!parts || parts.length === 0) return false;
-  if (
-    !parts.some((part) =>
-      isWrappedIn(part, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE),
-    )
-  ) {
-    return false;
-  }
-  return parts.every(
-    (part) =>
-      isWrappedIn(part, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE) ||
-      isWrappedIn(part, SYSTEM_REMINDER_OPEN, SYSTEM_REMINDER_CLOSE),
+  return parts.every((part) =>
+    isWrappedIn(part, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE),
   );
 }
 
@@ -200,7 +204,17 @@ export function detectTurnInterruption(
 
   if (last.role === 'user') {
     const trailingUserEntries: Content[] = [];
-    for (let i = end - 1; i >= boundary; i--) {
+    // Walk from the REAL end, not the trimmed one, while the verdict above
+    // still reads `history[end - 1]`. The Retry send path
+    // (`stripOrphanedUserEntriesFromHistory`) pops the ENTIRE trailing user
+    // run — its only break-guard is `isSystemReminderContent`, which is false
+    // for an envelope — so the re-submission has to carry every entry the
+    // strip removes. Collecting from `end - 1` instead would drop a
+    // recorded-but-undelivered notification from live history permanently:
+    // `enqueueBackgroundNotification` short-circuits on
+    // `persistedBackgroundNotificationTaskIds`, which `collectSessionTurnState`
+    // primes from the transcript itself, so nothing re-delivers it.
+    for (let i = history.length - 1; i >= boundary; i--) {
       const entry = history[i];
       if (!entry || entry.role !== 'user') {
         break;

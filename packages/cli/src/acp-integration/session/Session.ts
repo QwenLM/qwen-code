@@ -5533,6 +5533,34 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
     const recovery = this.getRecoveryStatus();
+    if (!recovery.canContinue && recovery.kind !== 'clean') {
+      // Name the veto that fired. `canContinue` collapses `closing` plus the
+      // ten `#hasActiveTurn()` members into one boolean and the only UI
+      // consumer renders nothing for it, so without this a leaked flag —
+      // recovery disabled for the rest of the session — is indistinguishable
+      // from a healthy automatic turn in flight. Logged here rather than in
+      // `getRecoveryStatus()` to stay off the per-poll
+      // `buildSessionContextStatus` path, and gated on a non-clean kind so
+      // the ordinary "nothing to continue" no-op stays quiet.
+      debugLogger.debug('[Session] recovery canContinue vetoed', {
+        kind: recovery.kind,
+        closing: this.closing,
+        pendingPrompt: Boolean(this.pendingPrompt),
+        pendingPromptCompletion: Boolean(this.pendingPromptCompletion),
+        historyMutation: this.historyMutationActive,
+        notification: Boolean(
+          this.notificationProcessing ||
+            this.notificationAbortController ||
+            this.notificationCompletion,
+        ),
+        cron: Boolean(
+          this.cronProcessing ||
+            this.cronAbortController ||
+            this.cronCompletion,
+        ),
+        goal: this.goalProcessing,
+      });
+    }
     return {
       accepted: recovery.canContinue,
       interruption:

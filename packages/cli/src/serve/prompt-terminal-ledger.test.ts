@@ -1003,6 +1003,48 @@ describe('reconcileDanglingPromptTerminals', () => {
     ]);
   });
 
+  it('fails closed when the visible tail is a real prompt shaped like a notification', async () => {
+    // Reconciliation classifies one tail with two models of "system-injected":
+    // record `provenance` for attribution (above) and rendered text shape for
+    // the verdict (`effectiveHistoryEnd`). A real prompt whose whole text
+    // happens to be an envelope — pasted out of a transcript, or forwarded
+    // verbatim by a channel/SDK client — is `provenance: 'real_user'`, so it
+    // counts as the target's own write; the classifier then trims that same
+    // entry, exposing the previous turn's model text as the tail and returning
+    // `none`. Without a provenance-bound guard the ledger synthesizes
+    // `completed` for a prompt the model never answered, and because the
+    // ledger is append-only that wrong terminal is what every later load
+    // serves. `main` stamped `interrupted / daemon_lost` here.
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 1500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'earlier question', RECORD_BASE_MS),
+      recordAt(fixture, 'a1', 'u1', 'earlier answer', RECORD_BASE_MS + 1000),
+      recordAt(
+        fixture,
+        'u2',
+        'a1',
+        '<task-notification><task-id>agent-1</task-id>' +
+          '<status>completed</status>' +
+          '<summary>Agent "explore" completed.</summary>' +
+          '</task-notification>',
+        RECORD_BASE_MS + 2000,
+      ),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+  });
+
   it('is idempotent: a second reconcile appends nothing new', async () => {
     const fixture = makeFixture();
     writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);

@@ -193,12 +193,29 @@ Covered immediately:
   unless the repair API is later extended to return them.
 - Duplicate tool result: drop duplicate.
 - Parent-chain gap: `degraded_history`.
+- Trailing system-injected `<task-notification>` entries: `none`. The daemon
+  records every background notification BEFORE its automatic turn runs, so a
+  notification whose turn never ran leaves a `role: 'user'` projection tail
+  that nothing will ever answer. `effectiveHistoryEnd` trims those entries
+  before classification (user-role, and EVERY part is a bare envelope), so the
+  verdict reads the entry beneath them — while the re-submitted
+  `interrupted_prompt.parts` still cover the whole trailing user run the Retry
+  send path strips, notification entries included.
 
 Not covered yet:
 
 - A model text stream that disconnects midway but leaves a tail that looks like
   ordinary model text.
 - Fine-grained distinction between graceful abort and unknown crash.
+- A live notification turn that was admitted, ran, then failed mid-stream
+  WITHOUT any reminder part alongside its envelope. Such an entry is a single
+  envelope, shape-identical to a cold notification record, so the trim still
+  removes it and the turn reports `clean` with no way to re-drive it.
+  Distinguishing the two needs the record's `provenance` to survive the
+  projection into `Content` (`session-api-history.ts`), or a daemon-side
+  re-drive; no shape predicate at this layer can reach it. With at least one
+  reminder part — plan mode, an output style, an active todo chain — the
+  entry is NOT trimmed and recovers as `interrupted_prompt`.
 
 Completeness here does not come from adding a large amount of code at once. It
 comes from consolidating current capabilities into a unified plan so the states
@@ -373,6 +390,23 @@ Core fixtures:
 6. Compression checkpoint:
    - Tail after the latest compression is detected correctly.
    - System records do not enter API history.
+
+7. Background notifications:
+   - Clean model tail followed by unanswered notification records: `clean`,
+     `canContinue = false`.
+   - Notification records followed by a real orphaned prompt:
+     `interrupted_prompt`, whose continuation parts cover BOTH the
+     notification and the prompt.
+   - Orphaned prompt followed by an unanswered notification:
+     `interrupted_prompt`, again carrying both entries.
+   - Dangling tool call followed by a notification: `interrupted_turn`.
+   - Delivered notification turn entry (`[...systemReminders, ...envelope]` as
+     ONE user entry) with nothing in flight: `interrupted_prompt`.
+   - User entry whose text merely CONTAINS an envelope, or carries a label
+     before it: `interrupted_prompt` — the envelope has to START the text to
+     count as structural.
+   - Model-role entry whose whole text is a bare envelope: `none`. The model
+     answered; the envelope shape alone cannot prove provenance.
 
 Entrypoint adapter tests:
 

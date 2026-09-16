@@ -262,11 +262,16 @@ describe('buildSessionRecoveryPlan with unanswered notifications', () => {
     });
 
     // Reverse guard: trimming the notification tail must not blind detection to
-    // a real orphaned prompt that follows it.
+    // a real orphaned prompt that follows it. `toEqual`, not `toContainEqual`:
+    // the continuation re-submits the whole trailing user run the Retry send
+    // path strips, so the leading notification belongs in `parts` too.
     expect(plan.kind).toBe('interrupted_prompt');
     expect(plan.canContinue).toBe(true);
     expect(plan.continuation?.mode).toBe('retry_user_parts');
-    expect(plan.continuation?.parts).toContainEqual({ text: 'do the thing' });
+    expect(plan.continuation?.parts).toEqual([
+      { text: taskNotification('Agent "explore" completed.') },
+      { text: 'do the thing' },
+    ]);
   });
 
   it('keeps a dangling tool call interrupted when a notification follows it', () => {

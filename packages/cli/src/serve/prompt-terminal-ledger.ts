@@ -212,6 +212,7 @@ export async function reconcileDanglingPromptTerminals(
   // last write on the raw stream instead would let evidence that the
   // verdict never sees pass the guard.
   let lastVisibleWriteMs = NaN;
+  let lastVisibleNonSystemType: ChatRecord['type'] | undefined;
   let compressedAfterAdmission = false;
   for (let idx = 0; idx < messages.length; idx++) {
     const record = messages[idx];
@@ -247,6 +248,7 @@ export async function reconcileDanglingPromptTerminals(
     // classifier owns that trim (`effectiveHistoryEnd` below).
     if (record.provenance === 'system') continue;
     if (Number.isFinite(writeMs)) lastVisibleWriteMs = writeMs;
+    lastVisibleNonSystemType = record.type;
   }
   // FIFO evidence: under FIFO admission the target's turn can only start
   // after every other prompt settled, so any visible tail not strictly
@@ -295,6 +297,31 @@ export async function reconcileDanglingPromptTerminals(
   );
   const interrupted =
     verdict.kind !== 'none' || tailHoldsAnyFunctionCall(classifiableTail);
+  // Provenance-bound completion guard. A `none` verdict rests on the
+  // classifier's TEXT-SHAPE trim, which cannot tell a real prompt whose whole
+  // text happens to be an envelope (pasted out of a transcript, or forwarded
+  // verbatim by a channel/SDK client — `createBaseRecord` stamps it
+  // `provenance: 'real_user'`, so the attribution loop above counts it as the
+  // target's own write) from a system-injected one. Trimming that entry
+  // exposes the PREVIOUS turn's model text as the tail, so `verdict.kind` is
+  // `none` and `tailHoldsAnyFunctionCall` is false, and a `completed`
+  // terminal would be synthesized for a prompt the model never answered —
+  // then served by every later load, because the ledger is append-only and
+  // `settledPromptIds` filters it. Only a model-facing write by the target's
+  // own turn can certify completion, so bind the stamp to the authoritative
+  // `provenance` signal instead of to the shape-derived verdict.
+  //
+  // `tool_result` is accepted alongside `assistant`: a history ending in the
+  // user-role `functionResponse` that closed the final tool call legitimately
+  // reaches `none` via `boundary >= end` in `detectTurnInterruption`, and that
+  // response is recorded as a `tool_result` record.
+  if (
+    !interrupted &&
+    lastVisibleNonSystemType !== 'assistant' &&
+    lastVisibleNonSystemType !== 'tool_result'
+  ) {
+    return; // Fail closed: a user-role tail cannot prove the turn completed.
+  }
   // TOCTOU fence: a prompt admitted while `loadSession` ran appended its
   // `in_flight` after the snapshot above, and the visible tail may now
   // belong to it — the verdict computed from the snapshot must not be
