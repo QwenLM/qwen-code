@@ -88,3 +88,11 @@ In an interactive terminal or a Web Shell turn with an attached client, the mode
 Turn it off with `goals.modelProposed: "disabled"` in your user settings. Because the setting decides whether the model may ask you to start an autonomous loop, it is honored only from user and system scope; a workspace `.qwen/settings.json` value is ignored with a warning.
 
 The skill is instructed to be read-only, and only its non-mutating tools are auto-approved (`get_goal`, `read_file`, `glob`, `grep_search`). `ask_user_question` is deliberately not auto-approved, so its question dialog is shown before the skill drafts from your answers. Like other bundled skills, a project or personal skill named `goal-draft` overrides it, and `skills.disabled` can turn it off. See [Skills](./skills.md) for how bundled skills are discovered.
+
+## Telemetry
+
+Goal transitions are reported through two independent settings: [telemetry](../../developers/development/telemetry.md) enables OpenTelemetry events and metrics, while `privacy.usageStatisticsEnabled` controls usage statistics and is on by default. The OpenTelemetry event is named `qwen-code.goal_state`; usage statistics report the same transition data without the Goal id.
+
+Reported transitions are set, replace, edit, pause, resume, clear, verifier rejection, completion, blocking, and usage limits. Events carry turn count, token spend, active time, and any configured budgets. A `clear` event identifies only the removed Goal and its revision, with no usage figures. A `replace` event describes the new Goal, not the removed Goal's final spend. User pauses and automatic no-progress pauses share the same `pause` cause; events include the raw no-progress streak when available. Only completion, blocking, and usage limits contribute to the outcome histograms. A resumed session does not re-report the transition its Goal was recovered from. A new stop committed during recovery, including a replayed checkpoint reaching a limit, is reported normally.
+
+The Goal event itself contains no objective text or stop reasons, only the objective's length in code points. Other telemetry can contain that text: tool-call telemetry records the arguments of `propose_goal` and `update_goal`, including the objective or model-authored reason, even when `telemetry.logPrompts` is off.

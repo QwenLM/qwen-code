@@ -580,6 +580,8 @@ export default {
     'Это расширение установит следующие подагенты:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     'Это расширение установит следующие рабочие процессы (скрипты JavaScript, которые могут запускать подагентов):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Эти скрипты рабочих процессов изменились по сравнению с установленной версией: {{names}}.',
   'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',
@@ -743,6 +745,12 @@ export default {
   '{{count}} hooks configured': '{{count}} хуков настроено',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Откройте это меню повторно, чтобы перезагрузить определения хуков.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Изменения параметров управления хуками и настроек безопасности HTTP требуют перезапуска.',
+  'Failed to reload hook definitions: {{error}}':
+    'Не удалось перезагрузить определения хуков: {{error}}',
   'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',
   // Hooks - Detail Step
   'Exit codes:': 'Коды выхода:',
@@ -1486,6 +1494,11 @@ export default {
   'No tasks currently running': 'Нет запущенных задач',
   'No entry to show.': 'Нет записи для отображения.',
   'needs approval': 'требует подтверждения',
+  'Large workflow': 'Большой workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Большой workflow: запланировано агентов: {{agents}} (порог предупреждения {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Большой workflow: ожидается ~{{tokens}} выходных токенов (порог предупреждения {{cap}}).',
   'rejected — edit config to re-approve':
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',

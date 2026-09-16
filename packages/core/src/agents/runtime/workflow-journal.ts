@@ -47,6 +47,10 @@ import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../workflow-correlation.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
 
@@ -85,10 +89,13 @@ export interface JournalFailedEntry {
 export type JournalEntry =
   | JournalStartedEntry
   | JournalResultEntry
-  | JournalFailedEntry;
+  | JournalFailedEntry
+  | { type: 'source'; version: 1; sourceRef: WorkflowSourceRef };
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
+  sourceRef?: WorkflowSourceRef;
+  sourceError?: string;
   /** key → the completed result entry (last write wins). */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
@@ -215,6 +222,8 @@ export function deriveArgsSeed(args: unknown): string {
  * one understands.
  */
 export function buildReplay(entries: JournalEntry[]): JournalReplay {
+  let sourceRef: WorkflowSourceRef | undefined;
+  let sourceError: string | undefined;
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
   const failed = new Set<string>();
@@ -231,9 +240,30 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
       else started.set(e.key, [e]);
     } else if (e.type === 'failed') {
       failed.add(e.key);
+    } else if (e.type === 'source') {
+      try {
+        const ref = readWorkflowSourceRef(e.sourceRef);
+        if (
+          e.version !== 1 ||
+          !ref ||
+          (sourceRef &&
+            (sourceRef.id !== ref.id || sourceRef.revision !== ref.revision))
+        ) {
+          throw new Error('Conflicting or unsupported workflow source record.');
+        }
+        sourceRef = ref;
+      } catch {
+        sourceError = 'Workflow journal contains invalid source metadata.';
+      }
     }
   }
-  return { results, started, failed };
+  return {
+    results,
+    started,
+    failed,
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(sourceError ? { sourceError } : {}),
+  };
 }
 
 /**

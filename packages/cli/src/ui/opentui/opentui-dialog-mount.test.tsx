@@ -208,9 +208,11 @@ vi.mock('./dialogs-misc.js', () => ({
   OpenTuiTrustDialog: mocks.stub('trust'),
 }));
 
+const mockGetHookSystem = vi.fn<Config['getHookSystem']>();
 const recordSlashCommand = vi.fn();
 const CONFIG = {
   getModel: () => 'fake-model',
+  getHookSystem: mockGetHookSystem,
   getChatRecordingService: () => ({ recordSlashCommand }),
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
@@ -303,6 +305,7 @@ describe('OpenTuiDialogMount routing', () => {
     mocks.state.helpLineCount = 0;
     mocks.state.terminalHeight = 40;
     vi.clearAllMocks();
+    mockGetHookSystem.mockReset();
   });
 
   it('routes every dialog request to its own component', () => {
@@ -313,6 +316,23 @@ describe('OpenTuiDialogMount routing', () => {
       unmount();
     }
   });
+
+  it.each([true, false])(
+    'gates the hooks reload notice on hook system availability: %s',
+    (available) => {
+      mockGetHookSystem.mockReturnValue(
+        available ? ({} as ReturnType<Config['getHookSystem']>) : undefined,
+      );
+
+      mount({ dialog: 'hooks' });
+
+      expect(mocks.state.dialogProps['hooks']?.['notice']).toBe(
+        available
+          ? 'Reopen this menu to reload hook definitions.\nHook controls and HTTP security settings require a restart.'
+          : undefined,
+      );
+    },
+  );
 
   it('persists working-directory changes made in the permissions dialog', () => {
     mount({ dialog: 'permissions' });

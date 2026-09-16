@@ -45,6 +45,73 @@ describe('EventBus', () => {
     expect(bus.lastEventId).toBe(2);
   });
 
+  it('projects before ring retention and fanout without consuming filtered IDs', async () => {
+    const bus = new EventBus();
+    const iter = bus.subscribe()[Symbol.asyncIterator]();
+    bus.setEventDetailMode('summary');
+    const nested = {
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'private detail' },
+          _meta: { parentToolCallId: 'agent-1' },
+        },
+      },
+    };
+    expect(bus.publish(nested)).toBeUndefined();
+    const childUsage = {
+      ...nested,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            parentToolCallId: 'agent-1',
+            usage: { inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+    };
+    expect(bus.publish(childUsage)).toBeUndefined();
+    expect(bus.lastEventId).toBe(0);
+    const result = bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'agent-1',
+          status: 'completed',
+          rawOutput: {
+            type: 'task_execution',
+            toolCalls: ['detail'],
+            taskPrompt: 'prompt',
+            result: 'answer',
+            tokenCount: 2,
+            executionSummary: { inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+    });
+    expect(result?.id).toBe(1);
+    expect(result).toHaveProperty('data.update.rawOutput.executionSummary', {
+      inputTokens: 10,
+      outputTokens: 2,
+    });
+    expect(result).toHaveProperty('data.update.rawOutput.tokenCount', 2);
+    expect((await iter.next()).value).toEqual(result);
+    expect(JSON.stringify(result)).not.toContain('toolCalls');
+    bus.setEventDetailMode('full');
+    expect(bus.publish(nested)?.id).toBe(2);
+    expect((await iter.next()).value?.data).toEqual(nested.data);
+    const replay = await collect(bus.subscribe({ lastEventId: 0 }), 3);
+    expect(replay.slice(0, 2).map((e) => e.id)).toEqual([1, 2]);
+    expect(replay[0]).toEqual(result);
+    expect(replay[2]?.type).toBe('replay_complete');
+    await iter.return?.();
+    bus.close();
+  });
+
   it('rejects invalid maxQueuedBytes options', () => {
     expect(
       () => new EventBus(100, undefined, undefined, { maxQueuedBytes: 0 }),

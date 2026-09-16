@@ -55,13 +55,18 @@ import {
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
-import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
+import type {
+  AcpChannel,
+  AcpChannelTransportGuard,
+  ChannelFactoryStartupContext,
+} from './channel.js';
 import { channelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
+  type LiveReplayMode,
 } from './eventBus.js';
 import {
   JOURNAL_GROWTH_HARD_CAP_BYTES,
@@ -73,6 +78,7 @@ import {
   type JournalGrowthSessionLimit,
 } from './compactionEngine.js';
 import { createJournalGrowthPolicy } from './journalGrowthPolicy.js';
+import { summarizeReplay } from './replay-summary.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -962,6 +968,7 @@ function takeRestoreAskUserQuestionHint(state: BridgeSessionState): {
 
 interface ChannelInfo {
   id: string;
+  lastUsedAt: number;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
@@ -3144,6 +3151,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   let activePromptCounter = 0;
   function touchActivity(): void {
     lastActivityTimestamp = Date.now();
+    if (channelInfo && !channelInfo.isDying) {
+      channelInfo.lastUsedAt = lastActivityTimestamp;
+    }
   }
 
   /**
@@ -3750,6 +3760,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    */
   function settleActivePromptState(entry: SessionEntry, promptId: string) {
     if (entry.activePromptId !== promptId) return;
+    entry.events.setEventDetailMode('full');
     delete entry.activePromptId;
     delete entry.activePromptOriginatorClientId;
     if (entry.promptActive) {
@@ -3954,6 +3965,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   function finishWorkspaceMcpDiscovery(ci: ChannelInfo): void {
+    ci.lastUsedAt = Date.now();
     ci.workspaceMcpDiscoveryInFlight = false;
     if (ci.workspaceMcpDiscoveryTimer) {
       clearTimeout(ci.workspaceMcpDiscoveryTimer);
@@ -4100,8 +4112,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function withWorkspaceControl<T>(
     ci: ChannelInfo,
     fn: () => Promise<T>,
+    recordUse = true,
   ): Promise<T> {
     if (liveChannelInfo() === ci) cancelIdleTimer();
+    if (recordUse) ci.lastUsedAt = Date.now();
     ci.workspaceControlInFlight++;
     try {
       return await fn();
@@ -4109,6 +4123,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       await retireChannelOnTimeout(ci, error, 'workspace control timeout');
       throw error;
     } finally {
+      if (recordUse) ci.lastUsedAt = Date.now();
       ci.workspaceControlInFlight = Math.max(
         0,
         ci.workspaceControlInFlight - 1,
@@ -4136,7 +4151,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ci: ChannelInfo,
     fn: () => Promise<T>,
   ): Promise<T> {
-    return withWorkspaceControl(ci, fn);
+    return withWorkspaceControl(ci, fn, false);
   }
 
   function startSessionReaper(): void {
@@ -4664,6 +4679,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const acpChannelId = randomUUID();
       const startupStartedAt = Date.now();
       const startupAbort = new AbortController();
+      const startup: ChannelFactoryStartupContext = {};
       const factoryPromise = telemetry.withSpan(
         'channel.spawn',
         {
@@ -4679,6 +4695,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
             },
             startupAbort.signal,
+            startup,
           ),
       );
       let channel: AcpChannel;
@@ -4689,7 +4706,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel factory',
         );
       } catch (error) {
-        startupAbort.abort(error);
+        const failure =
+          error instanceof BridgeTimeoutError
+            ? (startup.getTimeoutError?.() ?? error)
+            : error;
+        startupAbort.abort(failure);
         void factoryPromise.then(
           (lateChannel) =>
             terminateChannel(lateChannel, 'late channel factory result').catch(
@@ -4701,7 +4722,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
           () => undefined,
         );
-        throw error;
+        throw failure;
       }
       const sessionIds = new Set<string>();
       const infoRef: { current?: ChannelInfo } = {};
@@ -4917,6 +4938,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // handshaking channel.
       const info: ChannelInfo = {
         id: acpChannelId,
+        lastUsedAt: Date.now(),
         channel,
         connection,
         client,
@@ -5303,6 +5325,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw epochError;
       }
       runtimeEpoch = nextRuntimeEpoch;
+      info.lastUsedAt = Date.now();
       channelInfo = info;
       info.handshakeComplete = true;
       if (channelLivenessNegotiated) {
@@ -6614,6 +6637,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             server.authenticationState !== 'pending'
           ) {
             info.workspaceMcpAuthenticationServerNames.delete(serverName);
+            info.lastUsedAt = Date.now();
             const timer = info.workspaceMcpAuthenticationTimers.get(serverName);
             if (timer) clearTimeout(timer);
             info.workspaceMcpAuthenticationTimers.delete(serverName);
@@ -8121,6 +8145,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       daemonOwnedStandaloneRestore?: boolean;
     } = {},
   ): Promise<BridgeRestoredSession> {
+    if (
+      req.compactedReplayMode !== undefined &&
+      req.compactedReplayMode !== 'full' &&
+      req.compactedReplayMode !== 'summary'
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid compactedReplayMode; expected full or summary',
+      );
+    }
+    const restored = await restoreSessionWithReplay(action, req, options);
+    return action === 'load' &&
+      req.compactedReplayMode === 'summary' &&
+      restored.compactedReplay
+      ? {
+          ...restored,
+          compactedReplay: summarizeReplay(restored.compactedReplay),
+        }
+      : restored;
+  }
+
+  async function restoreSessionWithReplay(
+    action: 'load' | 'resume',
+    req: BridgeRestoreSessionRequest,
+    options: {
+      skipFreshSessionAdmission?: boolean;
+      suppressRestorePrompt?: boolean;
+      deferRestorePrompt?: boolean;
+      daemonOwnedStandaloneRestore?: boolean;
+    } = {},
+  ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
     }
@@ -9483,6 +9538,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     text: string,
     originatorClientId?: string,
     content?: readonly BridgePromptContentBlock[],
+    eventDetailMode?: LiveReplayMode,
   ) => {
     // Drop references that are already gone BEFORE admission: the admission
     // check throws on the first dead reference, and the fallback would then
@@ -9518,6 +9574,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.sessionId,
         {
           sessionId: entry.sessionId,
+          eventDetailMode,
           prompt: withAttachmentDegradationMarker(
             text ? [{ type: 'text', text } as ContentBlock] : [],
           ),
@@ -9531,6 +9588,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.sessionId,
         {
           sessionId: entry.sessionId,
+          eventDetailMode,
           prompt,
         },
         undefined,
@@ -9583,6 +9641,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         message.text,
         message.originatorClientId,
         message.content,
+        message.eventDetailMode,
       );
     }
   };
@@ -9838,6 +9897,46 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         runtimeEpoch: runtimeLive ? runtimeEpoch : sourceRuntimeEpoch,
         activeWork,
       };
+    },
+
+    getIdleChannelCandidate() {
+      const info = liveChannelInfo();
+      if (
+        shuttingDown ||
+        !info ||
+        byId.size > 0 ||
+        channelShouldReapWhenIdle(info) ||
+        bridgeApi.getWorkspaceRuntimeLifecycleSnapshot!().activeWork
+      ) {
+        return undefined;
+      }
+      return {
+        channelId: info.id,
+        runtimeEpoch,
+        lastUsedAt: info.lastUsedAt,
+      };
+    },
+
+    async reclaimIdleChannel(candidate, signal) {
+      if (signal?.aborted) return false;
+      const current = bridgeApi.getIdleChannelCandidate!();
+      if (
+        !current ||
+        current.channelId !== candidate.channelId ||
+        current.runtimeEpoch !== candidate.runtimeEpoch ||
+        current.lastUsedAt !== candidate.lastUsedAt
+      ) {
+        return false;
+      }
+      const info = liveChannelInfo()!;
+      // Retire only this child; shutdown would permanently seal the bridge.
+      info.isDying = true;
+      cancelIdleTimer();
+      keepAliveUntil = 0;
+      info.channelLiveness?.stop();
+      writeStderrLine(`qwen serve: reclaiming idle ACP channel ${info.id}`);
+      await terminateChannel(info.channel, 'capacity reclamation');
+      return true;
     },
 
     get pendingPermissionCount() {
@@ -10317,6 +10416,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // Keep this method non-async: admission failures must throw before
     // HTTP routes return 202.
     sendPrompt(sessionId, req, signal, context) {
+      if (
+        req.eventDetailMode !== undefined &&
+        req.eventDetailMode !== 'full' &&
+        req.eventDetailMode !== 'summary'
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid eventDetailMode; expected full or summary',
+        );
+      }
+      const eventDetailMode = req.eventDetailMode ?? 'full';
       opts.onDiagnosticLine?.(
         `qwen serve: bridge sendPrompt for session=${sessionId}`,
         'info',
@@ -10432,6 +10542,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ? '[image]'
               : '');
       const pendingEntry: PendingPromptEntry = {
+        eventDetailMode,
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
@@ -10690,9 +10801,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
-                  } as PromptRequest & { retry?: unknown; delivery?: unknown };
+                  } as PromptRequest & {
+                    retry?: unknown;
+                    delivery?: unknown;
+                    eventDetailMode?: LiveReplayMode;
+                  };
                   delete copy.retry;
                   delete copy.delivery;
+                  delete copy.eventDetailMode;
                   const meta =
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
@@ -10778,6 +10894,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }
                   return copy;
                 })();
+                entry.events.setEventDetailMode(eventDetailMode);
                 entry.backgroundStartsSuspended = false;
                 let resolveTerminal!: () => void;
                 entry.activePromptTerminal = {
@@ -13927,6 +14044,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+      const eventDetailMode = options?.eventDetailMode ?? 'full';
+      if (eventDetailMode !== 'full' && eventDetailMode !== 'summary') {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid eventDetailMode; expected full or summary',
+        );
+      }
       const trimmed = message.trim();
       // Attachment blocks travel with the message through drain and promotion;
       // text blocks are dropped so the drain never duplicates the message text.
@@ -13951,11 +14075,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           const sameMedia =
             JSON.stringify(existing.content ?? []) ===
             JSON.stringify(mediaBlocks);
-          if (existing.text === trimmed && sameMedia) {
+          if (
+            existing.text === trimmed &&
+            sameMedia &&
+            (existing.eventDetailMode ?? 'full') === eventDetailMode
+          ) {
             return { accepted: true, messageId: requestedMessageId };
           }
           writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(requestedMessageId)}: text or content mismatch`,
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(requestedMessageId)}: text, content or mode mismatch`,
           );
           return { accepted: false };
         }
@@ -13972,11 +14100,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             promoted.text === '[image]' && trimmed.length === 0
               ? ''
               : promoted.text;
-          if (promotedText === trimmed && sameMedia) {
+          if (
+            promotedText === trimmed &&
+            sameMedia &&
+            (promoted.eventDetailMode ?? 'full') === eventDetailMode
+          ) {
             return { accepted: true, messageId: requestedMessageId };
           }
           writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text or content mismatch`,
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text, content or mode mismatch`,
           );
           return { accepted: false };
         }
@@ -14051,6 +14183,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           trimmed,
           originatorClientId,
           mediaBlocks.length > 0 ? mediaBlocks : undefined,
+          eventDetailMode,
         );
         return { accepted: true, messageId };
       }
@@ -14062,6 +14195,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return { accepted: false };
       }
       const queuedMessage: MidTurnQueueEntry = {
+        eventDetailMode,
         messageId,
         text: trimmed,
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
@@ -15480,7 +15614,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel.preheat',
           { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
           async () => {
-            await ensureChannel();
+            const info = await ensureChannel();
+            info.lastUsedAt = Date.now();
             if (keepAliveMs !== undefined) {
               keepAliveUntil = Math.max(
                 keepAliveUntil,
