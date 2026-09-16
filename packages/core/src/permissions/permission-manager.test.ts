@@ -591,6 +591,60 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&', 'b']);
   });
 
+  // Rows starting with a plain `'c\'` are split only by bash's reading, so
+  // they pin the ANSI-C tracking.
+  it.each([
+    ["echo 'a\\' ; touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo 'a\\' && touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo 'a\\' | sh", ["echo 'a\\'", 'sh']],
+    ["echo 'a\\' & touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo 'a\\'\ntouch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo $'a\\'' ; touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
+    [
+      "echo 'c\\' $'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' \\\\$'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' \\\\$'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    ["echo \\$'a\\' ; touch /tmp/x", ["echo \\$'a\\'", 'touch /tmp/x']],
+    ["echo $$'a\\' ; touch /tmp/x", ["echo $$'a\\'", 'touch /tmp/x']],
+    ['echo "$"\'a\\\' ; touch /tmp/x', ['echo "$"\'a\\\'', 'touch /tmp/x']],
+  ])('splits after the quoted word in %s', async (command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  it('keeps an escaped quote inside double quotes and a line continuation', async () => {
+    expect(splitCompoundCommand('echo "a\\" ; touch /tmp/x"')).toEqual([
+      'echo "a\\" ; touch /tmp/x"',
+    ]);
+    expect(splitCompoundCommand('echo a\\\nb')).toEqual(['echo a\\\nb']);
+  });
+
+  // The last row is one command to bash but stays split, as on main.
+  it.each([
+    [
+      "echo done # note 'a\\''\nrm -rf /tmp/x",
+      ["echo done # note 'a\\''", 'rm -rf /tmp/x'],
+    ],
+    [
+      "echo `echo 'a\\''` ; rm -rf /tmp/x",
+      ["echo `echo 'a\\''`", 'rm -rf /tmp/x'],
+    ],
+    [
+      "cat <<EOF\necho safe 'a\\''\nEOF\nrm -rf /tmp/x",
+      ['cat <<EOF', "echo safe 'a\\''", 'EOF', 'rm -rf /tmp/x'],
+    ],
+    ["echo 'a\\'' ; rm x'", ["echo 'a\\''", "rm x'"]],
+  ])('keeps the boundaries main found in %s', async (command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
   it('trims whitespace around sub-commands', async () => {
     expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
       'git status',
@@ -2314,6 +2368,43 @@ describe('PermissionManager', () => {
           command: 'echo hello; rm -rf /',
         }),
       ).toBe('deny');
+    });
+
+    it.each<[string, string[], string]>([
+      ["echo 'a\\' ; rm -rf /tmp/x", [], 'ask'],
+      ["echo 'a\\' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo $'a\\'' ; rm -rf /tmp/x", [], 'ask'],
+      ["echo $'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo $\\\n'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo done # note 'a\\''\nrm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      [
+        "cat <<EOF\necho safe 'a\\''\nEOF\nrm -rf /tmp/x",
+        ['Bash(rm *)'],
+        'deny',
+      ],
+      [
+        "echo done # note 'a\\''\necho {} > .qwen/settings.json",
+        ['Write(.qwen/settings.json)'],
+        'deny',
+      ],
+      ["echo 'a\\'' ; rm x'", ['Bash(rm *)'], 'deny'],
+    ])('%j with deny %j is %s', async (command, deny, expected) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)', 'Bash(cat *)'],
+          permissionsDeny: deny,
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command,
+          cwd: '/repo',
+        }),
+      ).toBe(expected);
     });
 
     it('|| compound: all allowed → allow', async () => {
