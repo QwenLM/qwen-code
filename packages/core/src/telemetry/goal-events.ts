@@ -56,6 +56,7 @@ export function goalStateEventFromSnapshot(
     limit_kind: goal.limitKind,
     turn_count: goal.turnCount,
     tokens_used: goal.tokensUsed,
+    no_progress_turns: goal.noProgressTurns,
     token_budget: goal.tokenBudget,
     turn_budget: goal.turnBudget,
     active_time_ms: elapsedActiveTime(goal, now),

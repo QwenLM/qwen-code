@@ -3366,6 +3366,8 @@ describe('goal runtime', () => {
       verifier,
       checkpointVerifier,
     });
+    const causes: Array<GoalStateCause | undefined> = [];
+    runtime.subscribe((_snapshot, cause) => causes.push(cause));
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
     const permit = host.started[0]!;
@@ -3382,6 +3384,13 @@ describe('goal runtime', () => {
 
     await runtime.finishTurn(permit);
 
+    expect(causes).toEqual([
+      'create',
+      undefined,
+      'turn_finished',
+      'verifier_reject',
+      'checkpoint',
+    ]);
     expect(checkpointVerifier).toHaveBeenCalledOnce();
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',

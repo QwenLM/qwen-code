@@ -20,7 +20,7 @@ Codex 在指标里统计 goal 结果，Claude Code 发出 `tengu_goal_*` 分析�
 
 **不带自由文本。** 事件只携带标识、枚举和数字：Goal id 与 revision、转换后的状态、限制类型、轮数与轮数预算、已用 token 与 token 预算、活跃时长与活跃时长预算，以及目标按码点计的长度。目标、停止原因和 checkpoint 失败信息一律不包含。别处用来控制 prompt 文本的开关 `telemetry.logPrompts` 默认开启，所以把目标放在它后面就等于默认上报。active 状态的 Goal 已提交的 `activeTimeMs` 落后于时钟，所以事件按广播时刻读取。
 
-**指标保持有界。** `qwen-code.goal.transition.count` 统计每个事件，属性为 `cause`、`status` 和 `limit_kind`。在 `complete`、`blocked` 和 `usage_limited` 时，直方图 `qwen-code.goal.tokens_used` 与 `qwen-code.goal.turn_count` 记录 Goal 到此为止的花费，属性为 `cause` 和 `limit_kind`。Goal id 只留在日志记录上：每个 Goal 都是一个新值，这正是指标模块默认对 `session.id` 所拒绝的无界时间序列膨胀。
+**指标保持有界。** `qwen-code.goal.transition.count` 统计每个事件，属性为 `cause`、`status` 和 `limit_kind`。在 `complete`、`blocked` 和 `usage_limited` 时，直方图 `qwen-code.goal.tokens_used` 与 `qwen-code.goal.turn_count` 记录 Goal 到此为止的花费，属性为 `cause` 和 `limit_kind`。Goal id 只留在日志记录上：每个 Goal 都是一个新值，这正是指标模块默认对 `session.id` 所拒绝的无界时间序列膨胀。 恢复后的 Goal 每次停止都会贡献一个观测值，其中花费和轮数按整个 Goal 生命周期累计。因此直方图 `_count` 统计停止次数而非不同 Goal 的数量，`_sum` 不能作为 Goal 的总花费。
 
 **两个 sink。** 与其他所有事件一样，OpenTelemetry SDK 初始化时日志记录发往 OpenTelemetry，启用使用统计时分析 sink 收到该事件。分析 sink 的载荷不含 Goal id，因为该 sink 按安装实例聚合。
 

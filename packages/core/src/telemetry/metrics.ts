@@ -48,8 +48,13 @@ type GoalOutcomeCause = Extract<
   GoalStateEventCause,
   'complete' | 'blocked' | 'usage_limited'
 >;
-const GOAL_OUTCOME_CAUSES: ReadonlySet<GoalStateEventCause> =
-  new Set<GoalOutcomeCause>(['complete', 'blocked', 'usage_limited']);
+function isGoalOutcomeCause(
+  cause: GoalStateEventCause,
+): cause is GoalOutcomeCause {
+  return (
+    cause === 'complete' || cause === 'blocked' || cause === 'usage_limited'
+  );
+}
 
 // Arena Metrics
 const ARENA_SESSION_COUNT = `${SERVICE_NAME}.arena.session.count`;
@@ -281,7 +286,7 @@ const HISTOGRAM_DEFINITIONS = {
     advice: {
       explicitBucketBoundaries: [
         1_000, 10_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
-        30_000_000,
+        30_000_000, 100_000_000, 300_000_000, 600_000_000,
       ] as number[],
     },
     assign: (h: Histogram) => (goalTokensUsedHistogram = h),
@@ -295,6 +300,11 @@ const HISTOGRAM_DEFINITIONS = {
       'Turns a Goal had finished when it completed, was blocked, or reached a usage limit.',
     unit: '{turn}',
     valueType: ValueType.INT,
+    advice: {
+      explicitBucketBoundaries: [
+        1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000, 10_000, 25_000, 50_000,
+      ] as number[],
+    },
     assign: (h: Histogram) => (goalTurnCountHistogram = h),
     attributes: {} as {
       cause: GoalOutcomeCause;
@@ -706,7 +716,7 @@ export function recordGoalStateMetrics(
     ...(event.status ? { status: event.status } : {}),
     ...limitKind,
   });
-  if (!GOAL_OUTCOME_CAUSES.has(event.cause)) return;
+  if (!isGoalOutcomeCause(event.cause)) return;
   const outcome = { ...common, cause: event.cause, ...limitKind };
   if (event.tokens_used !== undefined) {
     goalTokensUsedHistogram?.record(event.tokens_used, outcome);

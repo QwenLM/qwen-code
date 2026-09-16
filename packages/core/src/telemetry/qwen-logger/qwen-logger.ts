@@ -632,6 +632,7 @@ export class QwenLogger {
       'limit_kind',
       'turn_count',
       'tokens_used',
+      'no_progress_turns',
       'token_budget',
       'turn_budget',
       'active_time_ms',

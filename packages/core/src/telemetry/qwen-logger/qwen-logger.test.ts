@@ -469,6 +469,7 @@ describe('QwenLogger', () => {
           status: 'blocked',
           turn_count: 7,
           tokens_used: 9_000,
+          no_progress_turns: 3,
         }),
       );
 
@@ -483,6 +484,7 @@ describe('QwenLogger', () => {
           status: 'blocked',
           turn_count: 7,
           tokens_used: 9_000,
+          no_progress_turns: 3,
         },
       });
       const keys = Object.keys(rumEvent.properties ?? {});
@@ -504,6 +506,7 @@ describe('QwenLogger', () => {
           limit_kind: 'time_budget',
           turn_count: 7,
           tokens_used: 9_000,
+          no_progress_turns: 3,
           token_budget: 80_000,
           turn_budget: 50,
           active_time_ms: 60_000,
@@ -520,6 +523,7 @@ describe('QwenLogger', () => {
         limit_kind: 'time_budget',
         turn_count: 7,
         tokens_used: 9_000,
+        no_progress_turns: 3,
         token_budget: 80_000,
         turn_budget: 50,
         active_time_ms: 60_000,

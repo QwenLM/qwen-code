@@ -138,6 +138,36 @@ describe('goalStateEventFromSnapshot', () => {
     }
   });
 
+  it('carries the raw no-progress streak without adding a stop classification', () => {
+    expect(
+      goalStateEventFromSnapshot(
+        snapshot(goal({ noProgressTurns: 3 })),
+        'pause',
+        NOW,
+      ),
+    ).toMatchObject({ cause: 'pause', no_progress_turns: 3 });
+    expect(
+      goalStateEventFromSnapshot(snapshot(goal()), 'pause', NOW),
+    ).not.toHaveProperty('no_progress_turns');
+    expect(
+      goalStateEventFromSnapshot(
+        snapshot(
+          goal({
+            status: 'usage_limited',
+            limitKind: 'token_budget',
+            noProgressTurns: 3,
+          }),
+        ),
+        'usage_limited',
+        NOW,
+      ),
+    ).toMatchObject({
+      cause: 'usage_limited',
+      limit_kind: 'token_budget',
+      no_progress_turns: 3,
+    });
+  });
+
   it('preserves zero figures on a newly created Goal', () => {
     const event = goalStateEventFromSnapshot(
       snapshot(

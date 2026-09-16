@@ -1148,6 +1148,7 @@ export interface GoalStateEvent extends BaseTelemetryEvent {
   limit_kind?: GoalLimitKind;
   turn_count?: number;
   tokens_used?: number;
+  no_progress_turns?: number;
   token_budget?: number;
   turn_budget?: number;
   active_time_ms?: number;
