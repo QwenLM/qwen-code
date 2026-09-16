@@ -48316,7 +48316,7 @@ describe('Session', () => {
       let userInputDelivered = false;
       mockGuardBridge(() => {
         // The drain right after Stop 2 delivers user input, which discards
-        // that Stop's allow before it is applied.
+        // that Stop's block before it is applied.
         if (stopCalls === 2 && !userInputDelivered) {
           userInputDelivered = true;
           return {
@@ -48334,7 +48334,7 @@ describe('Session', () => {
           }
           stopCalls++;
           stopActiveFlags.push(request.input?.stop_hook_active);
-          return stopCalls === 1 || stopCalls === 3
+          return stopCalls <= 3
             ? {
                 success: true,
                 output: { decision: 'block', reason: `block ${stopCalls}` },
@@ -48350,7 +48350,7 @@ describe('Session', () => {
       await runGuardPrompt();
 
       expect(userInputDelivered).toBe(true);
-      expect(stopActiveFlags.slice(0, 3)).toEqual([false, true, false]);
+      expect(stopActiveFlags.slice(0, 4)).toEqual([false, true, false, true]);
       // Stop 3 blocked the user's turn: one block, not two consecutive ones.
       expect(stopCalls).toBeGreaterThanOrEqual(4);
       expect(agentMessageChunks()).not.toContain(
