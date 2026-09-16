@@ -749,6 +749,14 @@ describe('useReactToolScheduler', () => {
       // branch, and the request must never reach the scheduler.
       expect(mockTool.execute).not.toHaveBeenCalled();
       expect(scheduleSpy).not.toHaveBeenCalled();
+      // The production comment promises the error path *and its log line*;
+      // the user-visible message alone would survive deleting the
+      // `debugLogger.error` call in `completeAsSchedulingError`, so pin it.
+      expect(
+        debugLoggerErrors.filter((line) =>
+          line.includes('Full-turn tool scheduling failed: missing route'),
+        ),
+      ).toHaveLength(1);
       expect(onComplete).toHaveBeenCalledTimes(1);
       expect(onComplete).toHaveBeenCalledWith([
         expect.objectContaining({
@@ -830,6 +838,79 @@ describe('useReactToolScheduler', () => {
     }
   });
 
+  it('classifies the rejection Core actually produces as a cancellation', async () => {
+    // Contract pin for the cancellation classifier. Every other test here
+    // stubs `schedule()` with its own copy of Core's queue-rejection text, so
+    // all of them stay green if Core rewords that string and the hook's
+    // `error.message === …` comparison silently stops matching — which would
+    // send a user's Esc back down the error path (#11148). This one drives
+    // Core's real busy branch instead, so the rejection being classified is
+    // produced by Core's own code and the two sides cannot drift apart
+    // unnoticed.
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const realSchedule = CoreToolScheduler.prototype.schedule;
+    // Put the real scheduler in its busy state rather than faking the
+    // rejection: `schedule()` rejects a request whose signal already aborted
+    // while it is scheduling, which is the branch under test.
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(function (
+        this: CoreToolScheduler,
+        ...args: Parameters<typeof realSchedule>
+      ) {
+        (this as unknown as { isScheduling: boolean }).isScheduling = true;
+        return realSchedule.apply(this, args);
+      });
+    try {
+      const { result } = renderScheduler();
+      const request = {
+        callId: 'real-core-queue-rejection-call',
+        name: 'mockTool',
+        args: {},
+      } as ToolCallRequestInfo;
+      const abortController = new AbortController();
+      abortController.abort();
+
+      act(() => {
+        result.current[1]([request], abortController.signal, 'vision-agent\0');
+      });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      expect(mockTool.execute).not.toHaveBeenCalled();
+      expect(scheduleSpy).toHaveBeenCalledTimes(1);
+      // Core's own rejection was read as a user cancellation: no error
+      // history item, no UNHANDLED_EXCEPTION reported back to the model.
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(onComplete).toHaveBeenCalledWith([
+        expect.objectContaining({
+          status: 'cancelled',
+          request,
+          response: expect.objectContaining({
+            callId: 'real-core-queue-rejection-call',
+            error: undefined,
+            errorType: undefined,
+            executionStatus: 'not_started',
+          }),
+        }),
+      ]);
+    } finally {
+      scheduleSpy.mockRestore();
+    }
+  });
+
   it('contains a rejected full-turn cancellation completion without a second completion', async () => {
     mockToolRegistry.getTool.mockReturnValue(mockTool);
     const runtimeView = {
@@ -877,11 +958,18 @@ describe('useReactToolScheduler', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       // The terminal handler logs the failure instead of letting it escape…
-      expect(
-        debugLoggerErrors.filter((line) =>
-          line.includes('Full-turn tool completion failed: cleanup failed'),
-        ),
-      ).toHaveLength(1);
+      const completionFailures = debugLoggerErrors.filter((line) =>
+        line.includes('Full-turn tool completion failed'),
+      );
+      expect(completionFailures).toHaveLength(1);
+      // …naming the batch it failed to complete…
+      expect(completionFailures[0]).toContain(
+        'callIds rejected-completion-full-turn-call',
+      );
+      // …and keeping the stack, not just the message, so the throw site is
+      // recoverable from the line alone.
+      expect(completionFailures[0]).toContain('Error: cleanup failed');
+      expect(completionFailures[0]).toMatch(/\n\s+at /);
       // …without retrying the completion a second time…
       expect(onComplete).toHaveBeenCalledTimes(1);
       // …and without an unhandled rejection.

@@ -237,8 +237,10 @@ export function useReactToolScheduler(
         });
         return;
       }
+      // Declared outside the detached task so the terminal handler below can
+      // name the batch it failed to complete.
+      const requests = Array.isArray(request) ? request : [request];
       void (async () => {
-        const requests = Array.isArray(request) ? request : [request];
         const completeAsSchedulingError = async (error: unknown) => {
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
@@ -342,11 +344,18 @@ export function useReactToolScheduler(
         // above are caller-supplied and may reject. Containing that here
         // keeps a rejected completion from surfacing as an unhandled
         // rejection, and deliberately does not retry or complete the batch a
-        // second time.
+        // second time. Reaching it means the batch never got submitted to the
+        // model and the ownership registered for its callIds was never
+        // released, so keep the stack and the callIds: they are the only way
+        // to tie this line back to a turn.
+        const detail =
+          error instanceof Error
+            ? (error.stack ?? error.message)
+            : String(error);
         debugLogger.error(
-          `Full-turn tool completion failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `Full-turn tool completion failed for callIds ${requests
+            .map((toolRequest) => toolRequest.callId)
+            .join(', ')}: ${detail}`,
         );
       });
     },
