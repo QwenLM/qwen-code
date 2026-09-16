@@ -102,28 +102,41 @@ Example:
 
 ### Configuration Options
 
-#### Required Fields
+#### Transport Fields
 
-| Option    | Type   | Description                                                                                                                                       |
-| --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `command` | string | Command to start the LSP server. Supports bare command names resolved via `PATH` (e.g. `clangd`) and absolute paths (e.g. `/opt/llvm/bin/clangd`) |
+| Option    | Type   | Description                                                             |
+| --------- | ------ | ----------------------------------------------------------------------- |
+| `command` | string | Required only for `stdio`. Resolved through `PATH` or an absolute path. |
 
 #### Optional Fields
 
-| Option                  | Type     | Default   | Description                                             |
-| ----------------------- | -------- | --------- | ------------------------------------------------------- |
-| `args`                  | string[] | `[]`      | Command line arguments                                  |
-| `transport`             | string   | `"stdio"` | Transport type: `stdio`, `tcp`, or `socket`             |
-| `env`                   | object   | -         | Environment variables                                   |
-| `initializationOptions` | object   | -         | LSP initialization options                              |
-| `settings`              | object   | -         | Server settings via `workspace/didChangeConfiguration`  |
-| `extensionToLanguage`   | object   | -         | Maps file extensions to language identifiers            |
-| `workspaceFolder`       | string   | -         | Override workspace folder (must be within project root) |
-| `startupTimeout`        | number   | `10000`   | Startup timeout in milliseconds                         |
-| `shutdownTimeout`       | number   | `5000`    | Shutdown timeout in milliseconds                        |
-| `restartOnCrash`        | boolean  | `false`   | Auto-restart on crash                                   |
-| `maxRestarts`           | number   | `3`       | Maximum restart attempts                                |
-| `trustRequired`         | boolean  | `true`    | Require trusted workspace                               |
+| Option                  | Type     | Default   | Description                                                                                                                                           |
+| ----------------------- | -------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `args`                  | string[] | `[]`      | Command line arguments                                                                                                                                |
+| `transport`             | string   | `"stdio"` | Transport type: `stdio`, `tcp`, or `socket`                                                                                                           |
+| `env`                   | object   | -         | Environment variables                                                                                                                                 |
+| `initializationOptions` | object   | -         | LSP initialization options                                                                                                                            |
+| `settings`              | object   | -         | Server settings via `workspace/didChangeConfiguration`                                                                                                |
+| `extensionToLanguage`   | object   | -         | Maps file extensions to language identifiers                                                                                                          |
+| `workspaceFolder`       | string   | -         | Override workspace folder (must be within project root)                                                                                               |
+| `startupTimeout`        | number   | `10000`   | Spawn or socket connection timeout (milliseconds)                                                                                                     |
+| `shutdownTimeout`       | number   | `5000`    | Shutdown timeout in milliseconds                                                                                                                      |
+| `restartOnCrash`        | boolean  | `false`   | Auto-restart on crash                                                                                                                                 |
+| `maxRestarts`           | number   | `3`       | Maximum restart attempts                                                                                                                              |
+| `trustRequired`         | boolean  | `true`    | Require a trusted workspace. Project `.lsp.json` always forces `true`; only extension configs can set `false`. See [Trust Controls](#trust-controls). |
+
+The top-level key is the language identifier. When any transport specifies
+`command`, that value is also used as the server name; configurations without a
+command use the language identifier as their name. The server name identifies
+entries both within one source and across sources. When several entries resolve
+to the same name, the last entry in a source wins, and project configuration
+replaces extension configuration. To use one command for several file types,
+prefer one entry with an `extensionToLanguage` map instead of repeating the
+command under several language keys.
+
+Qwen Code watches the project-root `.lsp.json` for semantic changes and
+reconciles added, removed, and changed servers. Invalid JSON leaves the current
+LSP runtime unchanged and reports the configuration error.
 
 ### TCP/Socket Transport
 
@@ -148,7 +161,7 @@ For servers that use TCP or Unix socket transport:
 
 Qwen Code exposes LSP functionality through the unified `lsp` tool. Here are the available operations:
 
-Location-based operations (`goToDefinition`, `findReferences`, `hover`, `goToImplementation`, and `prepareCallHierarchy`) require an exact `filePath` + `line` + `character` position. If you do not know the exact position, use `workspaceSymbol` or `documentSymbol` first to locate the symbol.
+Location-based operations (`goToDefinition`, `findReferences`, `hover`, `goToImplementation`, and `prepareCallHierarchy`) require `filePath` and `line`. `character` is optional and defaults to column 1. If you do not know the exact position, use `workspaceSymbol` or `documentSymbol` first to locate the symbol.
 
 ### Code Navigation
 
@@ -161,7 +174,8 @@ Operation: goToDefinition
 Parameters:
   - filePath: Path to the file
   - line: Line number (1-based)
-  - character: Column number (1-based)
+  - character: Column number (optional, defaults to 1)
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 #### Find References
@@ -173,8 +187,9 @@ Operation: findReferences
 Parameters:
   - filePath: Path to the file
   - line: Line number (1-based)
-  - character: Column number (1-based)
+  - character: Column number (optional, defaults to 1)
   - includeDeclaration: Include the declaration itself (optional)
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 #### Go to Implementation
@@ -186,7 +201,8 @@ Operation: goToImplementation
 Parameters:
   - filePath: Path to the file
   - line: Line number (1-based)
-  - character: Column number (1-based)
+  - character: Column number (optional, defaults to 1)
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 ### Symbol Information
@@ -200,7 +216,8 @@ Operation: hover
 Parameters:
   - filePath: Path to the file
   - line: Line number (1-based)
-  - character: Column number (1-based)
+  - character: Column number (optional, defaults to 1)
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 #### Document Symbols
@@ -211,6 +228,7 @@ Get all symbols in a document.
 Operation: documentSymbol
 Parameters:
   - filePath: Path to the file
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 #### Workspace Symbol Search
@@ -235,7 +253,8 @@ Operation: prepareCallHierarchy
 Parameters:
   - filePath: Path to the file
   - line: Line number (1-based)
-  - character: Column number (1-based)
+  - character: Column number (optional, defaults to 1)
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 #### Incoming Calls
@@ -246,6 +265,7 @@ Find all functions that call the given function.
 Operation: incomingCalls
 Parameters:
   - callHierarchyItem: Item from prepareCallHierarchy
+  - serverName: Registered server name shown by /lsp (optional, defaults to the item's server)
 ```
 
 #### Outgoing Calls
@@ -256,6 +276,7 @@ Find all functions called by the given function.
 Operation: outgoingCalls
 Parameters:
   - callHierarchyItem: Item from prepareCallHierarchy
+  - serverName: Registered server name shown by /lsp (optional, defaults to the item's server)
 ```
 
 ### Diagnostics
@@ -268,6 +289,7 @@ Get diagnostic messages (errors, warnings) for a file.
 Operation: diagnostics
 Parameters:
   - filePath: Path to the file
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 #### Workspace Diagnostics
@@ -278,7 +300,14 @@ Get all diagnostic messages across the workspace.
 Operation: workspaceDiagnostics
 Parameters:
   - limit: Maximum results (optional)
+  - serverName: Registered server name shown by /lsp (optional)
 ```
+
+Diagnostics use the LSP pull methods `textDocument/diagnostic` and
+`workspace/diagnostic`; servers must support the corresponding method. Qwen
+Code does not currently consume pushed `publishDiagnostics` notifications.
+Because failed or unsupported requests are skipped, an empty result does not
+reliably prove that the file or workspace has no diagnostics.
 
 ### Code Actions
 
@@ -291,11 +320,12 @@ Operation: codeActions
 Parameters:
   - filePath: Path to the file
   - line: Start line number (1-based)
-  - character: Start column number (1-based)
+  - character: Start column number (optional, defaults to 1)
   - endLine: End line number (optional, defaults to line)
   - endCharacter: End column (optional, defaults to character)
   - diagnostics: Diagnostics to get actions for (optional)
   - codeActionKinds: Filter by action kind (optional)
+  - serverName: Registered server name shown by /lsp (optional)
 ```
 
 Code action kinds:
@@ -310,31 +340,24 @@ Code action kinds:
 
 ## Security
 
-LSP servers are only started in trusted workspaces by default. This is because language servers run with your user permissions and can execute code.
+Language servers run with the permissions of the Qwen Code process and can
+execute code. Project `.lsp.json` entries are always loaded with
+`trustRequired: true`, so a project file cannot opt itself out of the trust
+check. The check blocks a server only when the workspace is considered
+untrusted. Folder trust (`security.folderTrust.enabled`) is disabled by default;
+while disabled, every workspace is considered trusted and `/trust` is not
+available. An IDE may also report a workspace as untrusted.
 
 ### Trust Controls
 
-- **Trusted Workspace**: LSP servers start if configured
-- **Untrusted Workspace**: LSP servers won't start unless `trustRequired: false` is set in the server configuration
+- **Project `.lsp.json`**: The configured `trustRequired` value is ignored and
+  forced to `true`; it blocks startup only when the workspace is considered
+  untrusted
+- **Extension configuration**: An extension may set `trustRequired: false` for
+  an individual server, but the global folder-trust setting can still require
+  all servers to run only in trusted workspaces
 
-To mark a workspace as trusted, use the `/trust` command.
-
-### Per-Server Trust Override
-
-You can override trust requirements for specific servers in their configuration:
-
-```json
-{
-  "safe-server": {
-    "command": "safe-language-server",
-    "args": ["--stdio"],
-    "trustRequired": false,
-    "extensionToLanguage": {
-      ".safe": "safe"
-    }
-  }
-}
-```
+When folder trust is enabled, use `/trust` to mark a workspace as trusted.
 
 ## Troubleshooting
 
@@ -343,19 +366,19 @@ You can override trust requirements for specific servers in their configuration:
 1. **Verify `--experimental-lsp` flag**: Make sure you're using the flag when starting Qwen Code
 2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
 3. **Check the command**: The server binary must be in your system `PATH`, or specified as an absolute path (e.g. `/opt/llvm/bin/clangd`). Relative paths that escape the workspace are blocked
-4. **Check workspace trust**: The workspace must be trusted for LSP (use `/trust`)
+4. **Check workspace trust**: If folder trust is enabled, use `/trust`; if your IDE reports the workspace as untrusted, trust it in the IDE
 5. **Check logs**: Start Qwen Code with `--debug`, then search for LSP-related entries in the debug log (see Debugging section below)
 6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 
 ### Slow Performance
 
 1. **Large projects**: Consider excluding `node_modules` and other large directories
-2. **Server timeout**: Increase `startupTimeout` in server configuration for slow servers
+2. **Transport timeout**: Increase `startupTimeout` when process creation or a socket connection is slow. Protocol requests, including `initialize`, use a separate fixed 15-second timeout
 
 ### No Results
 
 1. **Server not ready**: The server may still be indexing. For C/C++ projects with clangd, ensure `--background-index` is in the args and a `compile_commands.json` (or `compile_flags.txt`) exists in the project root or a parent directory. Use `--compile-commands-dir=<path>` if it is in a build subdirectory
-2. **File not saved**: Save your file for the server to pick up changes
+2. **Stale file contents**: Qwen Code sends `textDocument/didOpen` on first access but does not currently send `didChange` or `didSave`. Saving an already opened file does not guarantee that the server receives the new contents; restart the session to reopen it
 3. **Wrong language**: Check if the correct server is running for your language
 4. **Check the process**: Run `ps aux | grep <server-name>` to verify the server is actually running
 
@@ -403,8 +426,8 @@ For per-server details, run `/lsp`:
 
 | Server | Command | Languages | Status |
 |--------|---------|-----------|--------|
-| clangd | `clangd` | c, cpp | READY |
-| pyright | `pyright-langserver` | python | FAILED - startup failed |
+| clangd | `clangd` | cpp | READY |
+| pyright-langserver | `pyright-langserver` | python | FAILED - startup failed |
 ```
 
 Common error messages to look for:
@@ -412,7 +435,7 @@ Common error messages to look for:
 ```text
 command path is unsafe        -> relative path escapes workspace, use absolute path or add to PATH
 command not found             -> server binary not installed or not in PATH
-requires trusted workspace    -> run /trust first
+requires trusted workspace    -> use /trust when folder trust is enabled, or trust the workspace in your IDE
 LSP connection closed         -> server started but exited or closed stdio before replying to initialize
 ```
 
@@ -483,8 +506,24 @@ LSP uses Qwen Code's normal `--debug` mode; there is no separate LSP debug flag.
 
 ### Q: Can I use multiple language servers for the same file type?
 
-Yes, but only one will be used for each operation. The first server that returns results wins.
+Yes. Most document and navigation operations try ready servers sequentially
+and return the first non-empty result. This includes definitions, references,
+hover, document symbols, implementations, call hierarchy, and code actions.
+Workspace symbols, file diagnostics, and workspace diagnostics instead
+aggregate results from all ready servers. Every operation except
+`workspaceSymbol` accepts `serverName` to target one server. The value must
+exactly match the registered name shown by `/lsp`: the `command` value when one
+is configured, otherwise the language key. A name that matches no ready server
+returns an empty result rather than an error. `workspaceSymbol` always searches
+all ready servers.
 
 ### Q: Does LSP work in sandbox mode?
 
-LSP servers run outside the sandbox to access your code. They're subject to workspace trust controls.
+Yes, subject to the sandbox environment. Qwen Code starts `stdio` language
+servers as child processes of the current CLI process, so when the CLI runs in
+a sandbox the server binary and its dependencies must also be available there.
+For `tcp` and `socket` transports without `command`, Qwen Code connects to an
+externally managed server, which must be reachable from the sandbox. When those
+transports specify `command`, Qwen Code starts that process first, so its binary
+and dependencies must also be available inside the sandbox. Workspace trust
+controls still apply.
