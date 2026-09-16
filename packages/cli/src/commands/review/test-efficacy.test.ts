@@ -665,6 +665,13 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
         ['config', '--global', 'filter.lfs.clean', 'git-lfs clean -- %f'],
         { cwd: dir },
       );
+      // The repository may legitimately include that exact user-owned source.
+      // The origin-aware screen must not reclassify it as a repo-local plant.
+      execFileSync(
+        'git',
+        ['config', 'include.path', join(isolation.home, '.gitconfig')],
+        { cwd: dir },
+      );
 
       // It gets all the way to the runner, which this bare fixture does not
       // have — the throw is from `findVitestBin`, and that IS the observation:
