@@ -34,6 +34,14 @@ afterEach(async () => {
 });
 
 describe('strict worktree session markers', () => {
+  it.each(['', ' \n'])('repairs an invalid regular marker', async (content) => {
+    await fs.writeFile(path.join(repo, '.qwen-session'), content, 'utf8');
+
+    await writeWorktreeSessionMarker(repo, 'session-b');
+
+    await expect(readWorktreeSessionMarker(repo)).resolves.toBe('session-b');
+  });
+
   it.each([
     'GIT_ASKPASS',
     'SSH_ASKPASS',
@@ -107,6 +115,9 @@ describe('strict worktree session markers', () => {
 
     await expect(
       replaceWorktreeSessionMarker(repo, 'session-a', 'session-b'),
+    ).rejects.toBeDefined();
+    await expect(
+      writeWorktreeSessionMarker(repo, 'session-b'),
     ).rejects.toBeDefined();
     await expect(readWorktreeSessionMarker(repo)).resolves.toBeNull();
     expect(await fs.readFile(target, 'utf8')).toBe('session-a');
@@ -188,6 +199,24 @@ describe('prepared worktree cleanup', () => {
     await expect(
       service.getPreparedUserWorktreeBranchTip('cleanup'),
     ).resolves.toBeNull();
+  });
+
+  it('removes a prepared worktree with an orphaned marker temp file', async () => {
+    const { baseCommit, service, worktreePath } =
+      await createPreparedWorktree('marker-temp');
+    await fs.writeFile(
+      path.join(worktreePath, '.qwen-session.deadbeef.tmp'),
+      'staged',
+      'utf8',
+    );
+
+    await expect(
+      service.removePreparedUserWorktree(
+        'marker-temp',
+        'session-a',
+        baseCommit,
+      ),
+    ).resolves.toEqual({ success: true });
   });
 
   it('removes the owning worktree despite an inherited GIT_DIR', async () => {

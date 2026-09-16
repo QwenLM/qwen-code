@@ -83,6 +83,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 // Named subpath: the core barrel pulls shell/glob/chokidar into the serve
 // pre-listen static closure.
 import {
@@ -193,7 +194,6 @@ import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import { recoverBranchWorktreePreparations } from './branch-worktree-preparation.js';
-import { createWorkspaceRuntimeSessionService } from './workspace-runtime-storage.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
@@ -3289,6 +3289,14 @@ function bridgeHasLiveSessionWithin(
   });
 }
 
+function createBranchRecoverySessionService(
+  runtime: WorkspaceRuntime,
+): SessionService {
+  return new SessionService(runtime.workspaceCwd, {
+    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+  });
+}
+
 let brokenPipeGuardInstalled = false;
 
 /**
@@ -6044,7 +6052,7 @@ async function runQwenServeImpl(
     if (trustedWorkspace) {
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
-        sessionService: createWorkspaceRuntimeSessionService(
+        sessionService: createBranchRecoverySessionService(
           workspaceRuntimes[0],
         ),
         assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
@@ -7422,7 +7430,7 @@ async function runQwenServeImpl(
       if (wsRuntime.primary && wsRuntime.trusted) {
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
-          sessionService: createWorkspaceRuntimeSessionService(wsRuntime),
+          sessionService: createBranchRecoverySessionService(wsRuntime),
           assertGenerationOpen: () => generationGuard.assertOpen(),
           isWorktreeOccupied: (worktreePath) =>
             bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),

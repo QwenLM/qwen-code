@@ -23,9 +23,9 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import type { BridgeSessionExecutionSnapshot } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isWithinRoot } from '../config/path-comparison.js';
-import { getHeadCommit } from './server/git-branch-ops.js';
 
 const execFileAsync = promisify(execFile);
 const BRANCH_WORKTREE_JOURNAL_MAX_BYTES = 64 * 1024;
@@ -710,7 +710,17 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
     return null;
   }
 
-  const headCommit = await getHeadCommit(canonicalCheckoutTop);
+  const headCommit = await execFileAsync(
+    'git',
+    [...NO_EXEC_CONFIG, 'rev-parse', 'HEAD'],
+    {
+      cwd: canonicalCheckoutTop,
+      timeout: 30_000,
+      env: gitEnv(),
+    },
+  )
+    .then(({ stdout }) => stdout.trim())
+    .catch(() => undefined);
   if (!headCommit) return null;
   const branch = await effectiveGit.getCurrentBranch().catch(() => 'HEAD');
   return {

@@ -108,6 +108,7 @@ import {
   SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  SessionResetPendingError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
@@ -4231,13 +4232,6 @@ export function registerSessionRoutes(
               if (!contained) {
                 throw new Error('worktree sidecar path failed containment');
               }
-              const marker = await readWorktreeSessionMarkerStrict(realTarget);
-              if (
-                marker.state !== 'valid' ||
-                marker.sessionId !== restoredStorageSessionId
-              ) {
-                throw new Error('Worktree marker ownership is invalid');
-              }
             } catch (error) {
               validationError = error;
               realTarget = undefined;
@@ -5711,6 +5705,7 @@ export function registerSessionRoutes(
                   error instanceof SessionBusyError ||
                   error instanceof SessionLimitExceededError ||
                   error instanceof SessionNotFoundError ||
+                  error instanceof SessionResetPendingError ||
                   errorKind === 'branch_point_invalid' ||
                   errorKind === 'session_not_found' ||
                   errorKind === 'session_busy';

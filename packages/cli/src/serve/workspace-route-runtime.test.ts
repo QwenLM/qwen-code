@@ -462,13 +462,35 @@ describe('resolveSessionManagedGitCwd', () => {
   it('allows a contained cwd when the workspace is deterministically non-git', () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'non-git-'));
     const subdirectory = path.join(workspace, 'packages', 'app');
+    const nestedRepo = path.join(workspace, 'inner');
+    const worktree = path.join(nestedRepo, '.qwen', 'worktrees', 'task');
     fs.mkdirSync(subdirectory, { recursive: true });
+    fs.mkdirSync(nestedRepo);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: nestedRepo });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: nestedRepo,
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: nestedRepo });
+    fs.writeFileSync(path.join(nestedRepo, 'base.txt'), 'base\n');
+    execFileSync('git', ['add', '.'], { cwd: nestedRepo });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: nestedRepo });
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-q', '-b', 'worktree-task', worktree, 'HEAD'],
+      { cwd: nestedRepo },
+    );
     try {
       expect(
         resolveSessionManagedGitCwd(fakeReq(subdirectory), {
           workspaceCwd: workspace,
         } as unknown as WorkspaceRuntime),
       ).toBe(fs.realpathSync(subdirectory));
+      expect(
+        resolveSessionManagedGitCwd(fakeReq(worktree), {
+          workspaceCwd: workspace,
+        } as unknown as WorkspaceRuntime),
+      ).toBeNull();
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
     }

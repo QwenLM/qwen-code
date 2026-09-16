@@ -467,7 +467,7 @@ describe('persistStartupWorktreeSidecar', () => {
   }
 
   it.each(['missing', 'foreign-host'] as const)(
-    'refuses an unverifiable %s owner when re-attaching',
+    'keeps an unverifiable %s owner when re-attaching',
     async (statusKind) => {
       tempRepo = await makeTempRepo();
       process.chdir(tempRepo);
@@ -500,24 +500,20 @@ describe('persistStartupWorktreeSidecar', () => {
       }
 
       const config = makeConfig(setup.context.worktreePath, 'new-session');
-      await expect(
-        persistStartupWorktreeSidecar(config, {
-          ...setup.context,
-          wasReattached: true,
-        }),
-      ).rejects.toMatchObject({
-        name: WorktreeOwnershipConflictError.name,
-        ownerSessionId: 'old-session',
+      const result = await persistStartupWorktreeSidecar(config, {
+        ...setup.context,
+        wasReattached: true,
       });
 
       expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
         'old-session',
       );
       await expect(
-        readWorktreeSession(
-          config.getSessionService().getWorktreeSessionPath('new-session'),
-        ),
-      ).resolves.toBeNull();
+        readWorktreeSession(result.sidecarPath),
+      ).resolves.toMatchObject({
+        slug: setup.context.slug,
+        worktreePath: setup.context.worktreePath,
+      });
     },
   );
 

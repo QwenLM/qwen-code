@@ -148,6 +148,7 @@ import {
   SessionBusyError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  SessionResetPendingError,
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
   WorkspaceMismatchError,
@@ -26247,6 +26248,12 @@ describe('createServeApp', () => {
         error: () => new SessionLimitExceededError(1),
         status: 503,
         code: 'session_limit_exceeded',
+      },
+      {
+        name: 'worktree reset is armed',
+        error: () => new SessionResetPendingError('source-session'),
+        status: 409,
+        code: 'worktree_reset_active',
       },
     ])(
       'cleans a prepared worktree when the $name at dispatch',

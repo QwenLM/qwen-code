@@ -583,38 +583,50 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
-  it.each(['missing', 'invalid'] as const)(
-    'rejects and preserves a sidecar when the marker is %s',
-    async (markerState) => {
-      const liveCwd = path.join(tmpDir, `repo-${markerState}`);
-      const liveWorktree = path.join(
-        liveCwd,
-        '.qwen',
-        'worktrees',
-        markerState,
-      );
-      await fs.mkdir(liveWorktree, { recursive: true });
-      const live: WorktreeSession = {
-        ...sample,
-        slug: markerState,
-        originalCwd: liveCwd,
-        worktreePath: liveWorktree,
-      };
-      await writeWorktreeSession(filePath, live);
-      if (markerState === 'invalid') {
-        await fs.mkdir(path.join(liveWorktree, '.qwen-session'));
-      }
+  it('clears a sidecar whose marker is missing', async () => {
+    const liveCwd = path.join(tmpDir, 'repo-missing');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'missing');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'missing',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
 
-      const result = await restoreWorktreeContext(
-        filePath,
-        undefined,
-        'session-owner',
-      );
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
 
-      expect(result).toEqual({ contextMessage: null, session: null });
-      expect(await readWorktreeSession(filePath)).toEqual(live);
-    },
-  );
+    expect(result).toEqual({ contextMessage: null, session: null });
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('rejects and preserves a sidecar when the marker is invalid', async () => {
+    const liveCwd = path.join(tmpDir, 'repo-invalid');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'invalid');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'invalid',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
+    await fs.mkdir(path.join(liveWorktree, '.qwen-session'));
+
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
+
+    expect(result).toEqual({ contextMessage: null, session: null });
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
 
   it('refuses to restore a live worktree whose sidecar names a replacement session', async () => {
     // A worktree reset moves ownership of the checkout to the replacement

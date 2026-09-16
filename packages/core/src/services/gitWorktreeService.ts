@@ -357,15 +357,63 @@ export async function writeWorktreeSessionMarker(
   worktreePath: string,
   sessionId: string,
 ): Promise<void> {
-  const owner = await readWorktreeSessionMarker(worktreePath);
-  if (owner === sessionId) {
+  assertValidWorktreeSessionMarkerOwner(sessionId);
+  const marker = await readWorktreeSessionMarkerStrict(worktreePath);
+  if (marker.state === 'valid' && marker.sessionId === sessionId) {
     await ensureWorktreeSessionMarkerExcluded(worktreePath);
     return;
   }
-  if (owner !== null) {
+  if (marker.state === 'valid') {
     throw new WorktreeSessionMarkerOwnerChangedError();
   }
-  await createWorktreeSessionMarker(worktreePath, sessionId);
+  if (marker.state === 'missing') {
+    await createWorktreeSessionMarker(worktreePath, sessionId);
+    return;
+  }
+  if (marker.reason !== 'invalid marker owner') {
+    throw new Error(`Worktree marker is invalid: ${marker.reason}`);
+  }
+
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  const before = await fs.lstat(markerPath);
+  const confirmed = await readWorktreeSessionMarkerStrict(worktreePath);
+  const confirmedStat = await fs.lstat(markerPath);
+  if (
+    !before.isFile() ||
+    before.nlink !== 1 ||
+    before.ino === 0 ||
+    before.size > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+    confirmed.state !== 'invalid' ||
+    confirmed.reason !== 'invalid marker owner' ||
+    confirmedStat.dev !== before.dev ||
+    confirmedStat.ino !== before.ino
+  ) {
+    throw new WorktreeSessionMarkerOwnerChangedError();
+  }
+  const euid = process.geteuid?.();
+  if (euid !== undefined && confirmedStat.uid !== euid) {
+    throw new Error('Worktree marker is owned by a different uid');
+  }
+  await atomicWriteFile(markerPath, sessionId, {
+    mode: 0o600,
+    noFollow: true,
+    assertCanCommit: () => {
+      const current = readWorktreeSessionMarkerStrictSync(worktreePath);
+      const currentStat = nodeFs.lstatSync(markerPath);
+      if (
+        current.state !== 'invalid' ||
+        current.reason !== 'invalid marker owner' ||
+        !currentStat.isFile() ||
+        currentStat.nlink !== 1 ||
+        currentStat.dev !== confirmedStat.dev ||
+        currentStat.ino !== confirmedStat.ino ||
+        currentStat.uid !== confirmedStat.uid
+      ) {
+        throw new WorktreeSessionMarkerOwnerChangedError();
+      }
+    },
+  });
+  await ensureWorktreeSessionMarkerExcluded(worktreePath);
 }
 
 async function readBoundedMarker(
@@ -2890,6 +2938,8 @@ export class GitWorktreeService {
               '-ndx',
               '-e',
               `/${WORKTREE_SESSION_FILE}`,
+              '-e',
+              `/${WORKTREE_SESSION_FILE}.*.tmp`,
             ])
           ).trim().length === 0
         );

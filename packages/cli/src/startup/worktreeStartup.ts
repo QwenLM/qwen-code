@@ -457,16 +457,17 @@ export async function persistStartupWorktreeSidecar(
           throw new WorktreeOwnershipConflictError(observedOwner);
         }
         if (ownerLiveness === 'unknown') {
-          throw new WorktreeOwnershipConflictError(
+          debugLogger.warn(
+            `persistStartupWorktreeSidecar: cannot verify marker owner ${observedOwner} at ` +
+              `${path.join(context.worktreePath, '.qwen-session')}; preserving ownership`,
+          );
+        } else {
+          await replaceWorktreeSessionMarker(
+            context.worktreePath,
             observedOwner,
-            'unverifiable',
+            sessionId,
           );
         }
-        await replaceWorktreeSessionMarker(
-          context.worktreePath,
-          observedOwner,
-          sessionId,
-        );
       }
     }
   } catch (error) {

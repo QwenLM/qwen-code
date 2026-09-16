@@ -631,7 +631,7 @@ export interface WorktreeRestoreResult {
  * 3. The sidecar exists but `readWorktreeSession` threw a non-ENOENT I/O
  *    error (e.g. permission, EIO) — we still attempt cleanup so the next
  *    resume isn't stuck reading the same broken file.
- * 4. The worktree marker is missing or no longer names the resumed session.
+ * 4. The worktree marker is missing.
  *
  * A sidecar carrying `supersededBy` is refused the same way but deliberately
  * NOT cleared: a worktree reset moved ownership of that checkout to the
@@ -738,13 +738,25 @@ export async function restoreWorktreeContext(
 
   if (expectedSessionId !== undefined) {
     const marker = await readWorktreeSessionMarkerStrict(session.worktreePath);
+    if (marker.state === 'missing') {
+      onWarn?.(
+        new Error(
+          `Worktree marker is missing for session ${expectedSessionId}; ` +
+            'clearing its stale sidecar.',
+        ),
+      );
+      try {
+        await clearWorktreeSession(sidecarPath);
+      } catch (error) {
+        onWarn?.(error);
+      }
+      return { contextMessage: null, session: null };
+    }
     if (marker.state !== 'valid' || marker.sessionId !== expectedSessionId) {
       const markerOwner =
         marker.state === 'valid'
           ? marker.sessionId
-          : marker.state === 'missing'
-            ? '(missing)'
-            : `(invalid: ${marker.reason})`;
+          : `(invalid: ${marker.reason})`;
       onWarn?.(
         new Error(
           `Worktree marker owner ${markerOwner} does not match session ` +

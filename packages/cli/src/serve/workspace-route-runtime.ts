@@ -485,6 +485,15 @@ function markerIsOwnedBy(markerPath: string, sessionId: string): boolean {
   }
 }
 
+function isManagedWorktreePath(cwd: string): boolean {
+  const commonDir = resolveGitCommonDir(cwd);
+  if (commonDir === null) return false;
+  return isWithinRoot(
+    cwd,
+    path.join(path.dirname(commonDir), '.qwen', 'worktrees'),
+  );
+}
+
 export function resolveSessionManagedGitCwd(
   req: Request,
   runtime: WorkspaceRuntime,
@@ -517,7 +526,8 @@ export function resolveSessionManagedGitCwd(
     if (
       typeof stderr === 'string' &&
       /not a git repository/i.test(stderr) &&
-      isWithinRoot(requested, workspace)
+      isWithinRoot(requested, workspace) &&
+      !isManagedWorktreePath(requested)
     ) {
       return requested;
     }
