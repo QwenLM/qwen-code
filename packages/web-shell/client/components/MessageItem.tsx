@@ -31,6 +31,7 @@ import {
 } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
+import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
 import { isSummaryRunId } from './summaryRunId';
 import { PlanMessage } from './messages/PlanMessage';
 import { BtwMessage } from './messages/BtwMessage';
@@ -48,6 +49,7 @@ interface MessageItemProps {
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
   onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
@@ -82,6 +84,7 @@ export const MessageItem = memo(function MessageItem({
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
+  onTurnOutputOpen,
   onInsightReportOpen,
   workspaceCwd,
   showRetryHint = false,
@@ -213,6 +216,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ToolGroup
             tools={message.tools}
+            onTurnOutputOpen={onTurnOutputOpen}
             thoughts={message.thoughts}
             compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
@@ -404,6 +408,7 @@ function areMessageItemPropsEqual(
     return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
+  if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;

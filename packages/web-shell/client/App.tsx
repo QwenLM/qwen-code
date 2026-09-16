@@ -5435,6 +5435,7 @@ export function App({
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
       sourcePreview = false,
+      silentUnavailable = false,
     ) => {
       if (
         onWorkspaceFileOpen &&
@@ -5480,7 +5481,11 @@ export function App({
         };
         setArtifactPanelTabs((tabs) =>
           tabs.some((item) => item.id === tab.id)
-            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            ? tabs.map((item) =>
+                item.id === tab.id && item.kind === 'file'
+                  ? { ...tab, previewVersion: (item.previewVersion ?? 0) + 1 }
+                  : item,
+              )
             : [tab, ...tabs],
         );
         setActiveArtifactPanelTabId(tab.id);
@@ -5530,7 +5535,8 @@ export function App({
           })
           .catch((error: unknown) => {
             if (!owner.isCurrent()) return;
-            pushToast('error', formatError(error, 'Failed to preview file'));
+            if (!silentUnavailable)
+              pushToast('error', formatError(error, 'Failed to preview file'));
           });
         return;
       }
@@ -6644,6 +6650,8 @@ export function App({
           },
           request.workspaceCwd,
           request.sourceSessionId,
+          false,
+          request.silentUnavailable,
         );
         return;
       }
