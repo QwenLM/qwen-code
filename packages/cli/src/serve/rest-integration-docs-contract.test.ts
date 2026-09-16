@@ -559,6 +559,19 @@ describe('REST integration documentation contract', () => {
 
   it('points every guide flow command at the published server', () => {
     const guide = readFileSync(GUIDE, 'utf8');
+    const minimalFlow = guide.match(
+      /## Minimal flow\n([\s\S]*?)\n## Operations/,
+    )?.[1];
+    expect(minimalFlow).toBeTruthy();
+    const flowCommands = [
+      ...(minimalFlow ?? '').matchAll(/```bash\n([\s\S]*?)```/g),
+    ]
+      .map((match) => match[1])
+      .filter((block) => /\bcurl\s+-/.test(block));
+    expect(flowCommands).toHaveLength(5);
+    expect(
+      flowCommands.filter((command) => !command.includes('$DAEMON_URL/')),
+    ).toEqual([]);
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
     ) as OpenApiDocument;
