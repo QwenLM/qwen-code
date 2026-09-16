@@ -12,22 +12,86 @@ integration surface and links to its OpenAPI 3.1 contract. The full protocol is
 
 ## Which paths exist
 
-Six ways to build on the daemon, separated by one question — **how much of the
+Seven ways to build on the daemon, separated by one question — **how much of the
 front end do you own?**
 
-| Path                                 | You own                           | Status                                                                                                                                                                                                                                                                 |
-| ------------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| daemon + bundled Web Shell           | nothing — use it as shipped       | ships today ([user guide](../users/qwen-serve.md))                                                                                                                                                                                                                     |
-| daemon `--no-web` + your own UI      | the entire front end              | ships today — **this page**                                                                                                                                                                                                                                            |
-| daemon + branded Web Shell           | branding, not code                | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                                                                                                                                                                                                 |
-| daemon + self-hosted Web Shell build | the front-end build               | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                                                                                 |
-| daemon via SDK `DaemonClient`        | client code, never raw HTTP       | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP                                                             |
-| daemon via MCP bridge                | nothing — another agent drives it | ships as `qwen-serve-mcp` in `@qwen-code/sdk` — see the [bridge README](https://github.com/QwenLM/qwen-code/blob/main/packages/sdk-typescript/src/daemon-mcp/serve-bridge/README.md); `QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE` optionally permits global-scope write mutations |
+| Path                                 | You own                                      | Status                                                                                                                                                                                                     |
+| ------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| daemon + bundled Web Shell           | nothing — use it as shipped                  | ships today ([user guide](../users/qwen-serve.md))                                                                                                                                                         |
+| daemon `--no-web` + your own UI      | the entire front end                         | ships today — **this page**                                                                                                                                                                                |
+| daemon + branded Web Shell           | branding, not code                           | not built ([#11357](https://github.com/QwenLM/qwen-code/issues/11357))                                                                                                                                     |
+| daemon + self-hosted Web Shell build | the front-end build                          | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                     |
+| daemon via SDK `DaemonClient`        | client code, never raw HTTP                  | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP |
+| daemon via MCP bridge                | nothing — another agent drives it            | ships as `qwen-serve-mcp` in `@qwen-code/sdk` — see [Drive the daemon through MCP](#drive-the-daemon-through-mcp)                                                                                          |
+| embeddable Web Shell components      | your app and server; QC supplies the chat UI | ships as `@qwen-code/web-shell` — see [Embed the Web Shell](#embed-the-web-shell)                                                                                                                          |
 
 Headless `qwen -p` and ACP over stdio for editors are separate integration
 paths. Channels and extensions can also run through the daemon; see the
 [channel guide](../users/features/channels/overview.md) and
 [Extension reference](./qwen-serve-protocol.md#extension-management-v2-wire-contract).
+
+### Drive the daemon through MCP
+
+`@qwen-code/sdk` publishes `qwen-serve-mcp`, a stdio MCP server that maps its
+tools to a running daemon. Start `qwen serve`, then add this server to any MCP
+client on Node.js 22 or newer:
+
+```json
+{
+  "mcpServers": {
+    "qwen-serve-bridge": {
+      "command": "npx",
+      "args": ["-y", "-p", "@qwen-code/sdk", "qwen-serve-mcp"],
+      "env": {
+        "QWEN_DAEMON_URL": "http://127.0.0.1:4170",
+        "QWEN_DAEMON_TOKEN": "<your-token>",
+        "QWEN_WORKSPACE_CWD": "/path/to/your/project"
+      }
+    }
+  }
+}
+```
+
+`QWEN_DAEMON_URL` defaults to `http://127.0.0.1:4170`;
+`QWEN_DAEMON_TOKEN` carries the daemon bearer token when authentication is
+enabled; and `QWEN_WORKSPACE_CWD` optionally supplies the default workspace for
+session creation.
+Leave `QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE` unset unless the MCP client is trusted
+to perform restricted global-scope writes such as changing approval mode,
+toggling tools, and restarting MCP servers. Set it to `true` to enable those
+operations. The package's
+[bridge README](https://github.com/QwenLM/qwen-code/blob/main/packages/sdk-typescript/src/daemon-mcp/serve-bridge/README.md)
+lists every tool and the programmatic API.
+
+### Embed the Web Shell
+
+Use `@qwen-code/web-shell` when your React application should own the page and
+server while Qwen Code supplies the chat UI:
+
+```bash
+npm install @qwen-code/web-shell @qwen-code/sdk react react-dom
+```
+
+```tsx
+import { WebShellWithProviders } from '@qwen-code/web-shell';
+
+<WebShellWithProviders
+  baseUrl="https://daemon.example.com"
+  token={daemonToken}
+  sessionId={sessionId}
+  sessionContext={{ kind: 'standalone' }}
+/>;
+```
+
+This direct browser connection is suitable only for the trusted,
+single-operator model described below: the `token` grants the browser full
+daemon authority. When the application and daemon use different origins, start
+the daemon with `--allow-origin <application-origin>`. The package also exports
+providers for sharing one daemon session across several views and a separate
+`@qwen-code/web-shell/transcript` entry point for read-only transcript
+rendering. See the
+[package README](https://github.com/QwenLM/qwen-code/blob/main/packages/web-shell/README.md)
+for those variants and the complete prop contract.
 
 ## Two things to know before designing
 
