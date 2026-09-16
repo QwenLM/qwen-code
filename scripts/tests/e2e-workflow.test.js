@@ -326,8 +326,12 @@ describe('e2e workflow', () => {
     it('chowns the host-side docker lock directory back to the runner', () => {
       expect(heal).toBeDefined();
       expect(heal.run).toContain('[ -d "${HOME}/.cache/qwen-code-ci" ]');
+      // The whole fallback chain as one contiguous pin: each half alone
+      // contains the short pin, so dropping `-R` from the unprivileged
+      // attempt or dropping the `sudo -n` fallback leaves a substring pin
+      // green while the heal dies on the pool (measured on #11974).
       expect(heal.run).toContain(
-        'chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci"',
+        'chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci"',
       );
     });
 
