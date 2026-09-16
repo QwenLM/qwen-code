@@ -3033,46 +3033,58 @@ describe('runNonInteractive', () => {
     },
   );
 
-  it('surfaces a Stop hook cap warning from a queued notification turn', async () => {
-    setupMetricsMock();
-    mockMonitorRegistry.setNotificationCallback.mockImplementation(
-      (callback) => {
-        if (!callback) return;
-        callback(
-          'Monitor event',
-          '<task-notification>ready</task-notification>',
-          {
-            monitorId: 'mon_1',
-            toolUseId: 'tool_mon_1',
-            status: 'running',
-            eventCount: 1,
-          },
-        );
-      },
-    );
-    const warning =
-      'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'done' },
-          ...finishedEvents,
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.HookSystemMessage, value: warning },
-          ...finishedEvents,
-        ]),
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'sanitizes queued Stop hook messages only in text mode (%s)',
+    async (format) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      mockMonitorRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          if (!callback) return;
+          callback(
+            'Monitor event',
+            '<task-notification>ready</task-notification>',
+            {
+              monitorId: 'mon_1',
+              toolUseId: 'tool_mon_1',
+              status: 'running',
+              eventCount: 1,
+            },
+          );
+        },
       );
-    await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-drain');
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(
-      processStderrSpy.mock.calls.filter(([text]) =>
-        String(text).includes(warning),
-      ),
-    ).toHaveLength(1);
-  });
+      const warning =
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'done' },
+            ...finishedEvents,
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.HookSystemMessage,
+              value: '\u001b[2J' + warning + '\u202e',
+            },
+            ...finishedEvents,
+          ]),
+        );
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-drain');
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        processStderrSpy.mock.calls.filter(([text]) =>
+          String(text).includes(warning),
+        ),
+      ).toHaveLength(format === OutputFormat.TEXT ? 1 : 0);
+      const output = processStderrSpy.mock.calls
+        .map(([text]) => String(text))
+        .join('');
+      expect(output).not.toContain('\u001b');
+      expect(output).not.toContain('\u202e');
+    },
+  );
 
   it('neutralizes terminal control characters in Stop hook system messages', async () => {
     setupMetricsMock();
