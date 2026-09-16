@@ -709,6 +709,13 @@ export interface CreateSubSessionInfo {
   model?: string;
   /** Optional named group for a scheduled-task run session. */
   groupId?: string;
+  /**
+   * Optional approval mode applied at spawn (same values as
+   * `tools.approvalMode` / `session/set_mode`). Unattended scheduled-task
+   * fires must pass an explicit mode — typically `auto` — so the child does
+   * not inherit an ask-everything default nobody can answer.
+   */
+  approvalMode?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
   /** Optional immutable creator attribution for the fresh session. */

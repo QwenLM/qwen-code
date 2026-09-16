@@ -42,6 +42,7 @@ import {
   SessionService,
   Storage,
   stripTerminalControlSequences,
+  type ApprovalMode,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -893,6 +894,9 @@ export function createSubSessionLauncher(
             ...(info.sourceType ? { sourceType: info.sourceType } : {}),
             ...(info.sourceId ? { sourceId: info.sourceId } : {}),
             ...(info.model ? { modelServiceId: info.model } : {}),
+            ...(info.approvalMode
+              ? { approvalMode: info.approvalMode as ApprovalMode }
+              : {}),
           },
           info.prompt,
         );
@@ -909,6 +913,7 @@ export function createSubSessionLauncher(
           ...(info.sourceType ? { sourceType: info.sourceType } : {}),
           ...(info.sourceId ? { sourceId: info.sourceId } : {}),
           ...(info.model ? { modelServiceId: info.model } : {}),
+          ...(info.approvalMode ? { approvalMode: info.approvalMode } : {}),
         });
       }
       spawnedSession = sub;

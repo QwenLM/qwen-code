@@ -9576,6 +9576,11 @@ export class Session implements SessionContext {
             job.name ?? job.prompt,
             triggeredAt,
           ),
+          // Unattended cron fires have no client to answer
+          // session/request_permission. Pass AUTO explicitly so the child
+          // does not inherit the attended ACP ask-permissions boot default
+          // and park forever on its first write.
+          approvalMode: ApprovalMode.AUTO,
           ...(job.id
             ? {
                 sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,

@@ -392,6 +392,26 @@ describe('sub-session launcher', () => {
     expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
   });
 
+  it('forwards approvalMode into spawnOrAttach', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'do the thing',
+      completion: 'sent',
+      approvalMode: 'auto',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(fake.spawns[0]).toMatchObject({
+      parentSessionId: 'caller-1',
+      approvalMode: 'auto',
+    });
+  });
+
   it('keeps scheduled-task run titles flat and persists their attribution', async () => {
     const fake = makeFakeBridge();
     const launcher = createSubSessionLauncher({

@@ -4,13 +4,13 @@ Qwen Code offers five distinct permission modes that allow you to flexibly contr
 
 ## Permission Modes Comparison
 
-| Mode                 | File Editing                | Shell Commands              | Best For                                                                                               | Risk Level |
-| -------------------- | --------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ | ---------- |
-| **Plan**​            | ❌ Read-only analysis only  | ❌ Not executed             | • Code exploration <br>• Planning complex changes <br>• Safe code review                               | Lowest     |
-| **Ask Permissions**​ | ✅ Manual approval required | ✅ Manual approval required | • New/unfamiliar codebases <br>• Critical systems <br>• Team collaboration <br>• Learning and teaching | Low        |
-| **Auto-Edit**​       | ✅ Auto-approved            | ❌ Manual approval required | • Daily development tasks <br>• Refactoring and code improvements <br>• Safe automation                | Medium     |
-| **Auto**​            | ✅ Classifier-evaluated     | ✅ Classifier-evaluated     | • Long autonomous sessions <br>• When Auto-Edit is too cautious but YOLO is too risky                  | Medium     |
-| **YOLO**​            | ✅ Auto-approved            | ✅ Auto-approved            | • Trusted personal projects <br>• Automated scripts/CI/CD <br>• Batch processing tasks                 | Highest    |
+| Mode                 | File Editing                | Shell Commands                                     | Best For                                                                                               | Risk Level |
+| -------------------- | --------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ---------- |
+| **Plan**​            | ❌ Read-only analysis only  | ❌ Not executed                                    | • Code exploration <br>• Planning complex changes <br>• Safe code review                               | Lowest     |
+| **Ask Permissions**​ | ✅ Manual approval required | ✅ Manual for writes; read-only shell auto-allowed | • New/unfamiliar codebases <br>• Critical systems <br>• Team collaboration <br>• Learning and teaching | Low        |
+| **Auto-Edit**​       | ✅ Auto-approved            | ✅ Manual for writes; read-only shell auto-allowed | • Daily development tasks <br>• Refactoring and code improvements <br>• Safe automation                | Medium     |
+| **Auto**​            | ✅ Classifier-evaluated     | ✅ Classifier-evaluated                            | • Long autonomous sessions <br>• When Auto-Edit is too cautious but YOLO is too risky                  | Medium     |
+| **YOLO**​            | ✅ Auto-approved            | ✅ Auto-approved                                   | • Trusted personal projects <br>• Automated scripts/CI/CD <br>• Batch processing tasks                 | Highest    |
 
 > [!NOTE]
 >
@@ -19,8 +19,9 @@ Qwen Code offers five distinct permission modes that allow you to flexibly contr
 ### Quick Reference Guide
 
 - **Start in Plan Mode**: Great for understanding before making changes
-- **Auto Mode (default)**: The default out-of-the-box experience — an LLM classifier auto-approves safe actions and blocks risky ones, minimizing interruptions while keeping a safety net
-- **Switch to Ask Permissions**: When you want manual approval for every file edit and shell command
+- **Auto Mode (default for the TUI / headless CLI)**: The default out-of-the-box experience — an LLM classifier auto-approves safe actions and blocks risky ones, minimizing interruptions while keeping a safety net
+- **Ask Permissions (default for `qwen --acp`)**: ACP sessions boot here so hosts receive `session/request_permission` for writes and non-read-only shell; use `session/set_mode` or `--approval-mode` to opt into Auto / Auto-Edit / YOLO
+- **Switch to Ask Permissions**: When you want manual approval for every file edit and non-read-only shell command
 - **Switch to Auto-Edit**: When you're making lots of safe code changes
 - **Use YOLO sparingly**: Only for trusted automation in controlled environments
 
@@ -122,19 +123,27 @@ You can switch into Ask Permissions Mode during a session using **Shift+Tab**�
 
 **Start a new session in Ask Permissions Mode**
 
-Ask Permissions Mode is the initial mode when you start Qwen Code. If you've changed modes and want to return to Ask Permissions Mode, use:
+Interactive TUI and headless CLI sessions boot in **Auto Mode** by default. Ask Permissions is the boot default for `qwen --acp` (so ACP hosts receive `session/request_permission`). To enter Ask Permissions from the TUI after changing modes, use:
 
 ```
 /approval-mode default
 ```
 
+Or start explicitly:
+
+```
+qwen --approval-mode default
+```
+
 **Run "headless" queries in Ask Permissions Mode**
 
-When running headless commands, Ask Permissions Mode is the default behavior. You can explicitly specify it with:
+Headless CLI commands (`qwen --prompt …` without `--acp`) default to **Auto Mode**, not Ask Permissions. To force Ask Permissions:
 
 ```
-qwen --prompt "Analyze this code for potential bugs"
+qwen --approval-mode default --prompt "Analyze this code for potential bugs"
 ```
+
+ACP hosts that want Auto after boot can call `session/set_mode` with `auto` / `auto-edit` / `yolo`, or launch with `--approval-mode`.
 
 ### Example: Safely implementing a feature
 
