@@ -844,10 +844,9 @@ describe('splitCompoundCommand', () => {
   // it is dropped from the output rather than emitted as its own segment —
   // the most common comment placement in a multi-line command (#11815).
   it('drops a full-line comment between two commands', async () => {
-    expect(splitCompoundCommand('npm install\n# run the tests\nnpm test')).toEqual([
-      'npm install',
-      'npm test',
-    ]);
+    expect(
+      splitCompoundCommand('npm install\n# run the tests\nnpm test'),
+    ).toEqual(['npm install', 'npm test']);
   });
 
   // The composition the Bash-rule paths use: heredoc bodies are stripped
@@ -856,9 +855,11 @@ describe('splitCompoundCommand', () => {
   it('keeps the tail its own segment after a heredoc with a stray backtick', async () => {
     expect(
       splitCompoundCommand(
-        stripHeredocBodies("cat <<'EOF'\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x"),
+        stripHeredocBodies(
+          "cat <<'EOF'\n`\nEOF\necho a # x'` y'\nrm -rf /tmp/x",
+        ),
       ),
-    ).toEqual(['cat <<\'EOF\'', "echo a # x'` y'", 'rm -rf /tmp/x']);
+    ).toEqual(["cat <<'EOF'", "echo a # x'` y'", 'rm -rf /tmp/x']);
   });
 
   // A commented-out `<<EOF` opens no heredoc, so the following line is a real
