@@ -3676,6 +3676,28 @@ export class DingtalkChannel extends ChannelBase {
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
+      // A user-scope 1:1 DM gets no [sender] tag from ChannelBase — that prefix
+      // needs isGroup or sessionScope 'single' — so neither the model nor the
+      // transcript (which renders exactly the prompt) would record who sent
+      // this. metadata is appended AFTER command parsing, so locally dispatched
+      // DM commands and `!` shell never see it; an agent-exposed command does,
+      // and its parser sweeps everything past the command path into `args`, so
+      // command-shaped text is skipped (base suppresses its own prefix for
+      // recognized commands likewise). It stays one line because that append
+      // folds CR/LF to spaces. The nick is attacker-controlled and the ID is
+      // platform-opaque, so both go through the shared name sanitizer. The ID is
+      // spelled out only next to a nick, otherwise the same value reads twice.
+      const dmSenderId =
+        senderNick && senderId
+          ? ` (sender ID: ${sanitizeSenderName(senderId)})`
+          : '';
+      const dmSenderMetadata =
+        !isGroup &&
+        this.config.sessionScope !== 'single' &&
+        !content.text.trimStart().startsWith('/')
+          ? `Direct message from ${sanitizeSenderName(senderNick || senderId)}${dmSenderId}`
+          : undefined;
+
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -3687,6 +3709,7 @@ export class DingtalkChannel extends ChannelBase {
         text: content.text,
         ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
+        ...(dmSenderMetadata ? { metadata: dmSenderMetadata } : {}),
         isGroup,
         isMentioned,
         isReplyToBot: quoted.isReplyToBot,
