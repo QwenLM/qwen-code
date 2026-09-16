@@ -326,6 +326,7 @@ export interface ChatRecord {
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
+    | 'goal_turn_end'
     | 'realtime_message'
     | 'turn_result';
   /** Explicit source classification used by Goal evidence validation. */
@@ -392,6 +393,7 @@ export interface ChatRecord {
     | SessionSourcesSnapshot
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
+    | GoalTurnEndRecordPayload
     | TurnResultRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -518,6 +520,11 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  completedToolCallIds?: string[];
+}
+
+export interface GoalTurnEndRecordPayload {
+  toolCallId: string;
 }
 
 export interface SlashCommandRecordPayload {
@@ -1951,6 +1958,18 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving Goal runtime message:', error);
     }
+  }
+
+  async recordGoalTurnEnd(
+    toolCallId: string,
+    goalContext: GoalTurnPermit,
+  ): Promise<void> {
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'goal_turn_end',
+      goalContext: copyGoalContext(goalContext),
+      systemPayload: { toolCallId },
+    });
   }
 
   /**

@@ -40,6 +40,7 @@ import {
   EVENT_MODEL_SLASH_COMMAND,
   EVENT_EXTENSION_DISABLE,
   EVENT_SUBAGENT_EXECUTION,
+  EVENT_GOAL_STATE,
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_INVALID_CHUNK,
   EVENT_AUTH,
@@ -71,6 +72,7 @@ import {
   recordInvalidChunk,
   recordModelSlashCommand,
   recordSubagentExecutionMetrics,
+  recordGoalStateMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
   recordToolExecutionMetrics,
@@ -119,6 +121,7 @@ import type {
   ExtensionInstallEvent,
   ModelSlashCommandEvent,
   SubagentExecutionEvent,
+  GoalStateEvent,
   MalformedJsonResponseEvent,
   InvalidChunkEvent,
   AuthEvent,
@@ -1045,6 +1048,26 @@ export function logSubagentExecution(
     event.status,
     event.terminate_reason,
   );
+}
+
+export function logGoalState(config: Config, event: GoalStateEvent): void {
+  QwenLogger.getInstance(config)?.logGoalStateEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_GOAL_STATE,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Goal ${event.cause}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordGoalStateMetrics(config, event);
 }
 
 export function logModelSlashCommand(
