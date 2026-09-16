@@ -26,61 +26,85 @@ import {
 const NOW = '2026-09-16T00:00:00.000Z';
 const LONG_AGO = '2000-01-01T00:00:00.000Z';
 
+const chat = (
+  id: string,
+  limit: { context?: number; input?: number; output?: number },
+  input: string[] = ['text'],
+) => ({
+  id,
+  tool_call: true,
+  limit,
+  modalities: { input, output: ['text'] },
+});
+
 const api: ModelsDevApi = {
   anthropic: {
     models: {
-      'claude-x': {
-        id: 'claude-x',
-        limit: { context: 200000, output: 64000 },
-        modalities: { input: ['text', 'image', 'pdf'] },
-      },
+      'claude-x': chat('claude-x', { context: 200000, output: 64000 }, [
+        'text',
+        'image',
+        'pdf',
+      ]),
     },
   },
   openai: {
     models: {
-      'gpt-x': {
-        id: 'gpt-x',
-        limit: { context: 400000, input: 272000, output: 128000 },
-        modalities: { input: ['text', 'image'] },
+      'gpt-x': chat(
+        'gpt-x',
+        { context: 400000, input: 272000, output: 128000 },
+        ['text', 'image'],
+      ),
+      // Not an agent model: no tool calling.
+      'embed-x': {
+        id: 'embed-x',
+        tool_call: false,
+        limit: { context: 8192, output: 1 },
+        modalities: { input: ['text'], output: ['text'] },
       },
+      // Not an agent model: does not answer in text.
+      'tts-x': {
+        id: 'tts-x',
+        tool_call: true,
+        limit: { context: 8192, output: 16384 },
+        modalities: { input: ['text'], output: ['audio'] },
+      },
+    },
+  },
+  zai: {
+    models: {
+      // Same id as the alibaba-cn entry below, different serving limits.
+      'glm-x': chat('glm-x', { context: 204800, output: 131072 }),
     },
   },
   'alibaba-cn': {
     models: {
-      'qwen-x': {
-        id: 'qwen-x',
-        limit: { context: 1000000, output: 65536 },
-        modalities: { input: ['text', 'image', 'video'] },
-      },
-      'qwen-x-20260101': {
-        id: 'qwen-x-20260101',
-        limit: { context: 1, output: 1 },
-      },
-      'foo-v3': {
-        id: 'foo-v3',
-        release_date: '2025-01-01',
-        limit: { context: 3000 },
-      },
-      'image-only': {
-        id: 'image-only',
-        limit: { context: 0, output: 0 },
-        modalities: { input: ['text'] },
-      },
+      'qwen-x': chat('qwen-x', { context: 1000000, output: 65536 }, [
+        'text',
+        'image',
+        'video',
+      ]),
+      // Normalizes onto `qwen-x`, which exists verbatim, so it loses.
+      'qwen-x-20260101': chat('qwen-x-20260101', { context: 1, output: 1 }),
+      'glm-x': chat('glm-x', { context: 202752, output: 16384 }),
+      // Both normalize onto `foo`, neither verbatim, and they disagree.
+      'foo-v3': chat('foo-v3', { context: 3000 }),
+      'foo-v4': chat('foo-v4', { context: 4000 }),
+      // Every field empty once zeroes are dropped.
+      'nothing-known': chat('nothing-known', { context: 0, output: 0 }),
     },
   },
   alibaba: {
     models: {
-      'qwen-x': { id: 'qwen-x', limit: { context: 2, output: 2 } },
-      'foo-v4': {
-        id: 'foo-v4',
-        release_date: '2026-01-01',
-        limit: { context: 4000 },
-      },
+      'qwen-x': chat('qwen-x', { context: 1000000, output: 65536 }, [
+        'text',
+        'image',
+        'video',
+      ]),
     },
   },
   openrouter: {
     models: {
-      'router-only': { id: 'router-only', limit: { context: 9, output: 9 } },
+      'router-only': chat('router-only', { context: 9, output: 9 }),
     },
   },
 };
@@ -91,7 +115,6 @@ const trimmed = {
     output: 64000,
     modalities: { image: true, pdf: true },
   },
-  foo: { context: 4000 },
   'gpt-x': { context: 272000, output: 128000, modalities: { image: true } },
   'qwen-x': {
     context: 1000000,
@@ -114,6 +137,39 @@ describe('trimModelsDevCatalog', () => {
       fetchedAt: NOW,
       models: trimmed,
     });
+  });
+
+  it('prefers the verbatim id over one that normalizes onto it', () => {
+    expect(trimModelsDevCatalog(api, NOW).models['qwen-x']).toEqual(
+      trimmed['qwen-x'],
+    );
+  });
+
+  it('drops an id whose providers disagree instead of picking one', () => {
+    // glm-x is served by zai and alibaba-cn with different output limits, so
+    // the regex tables keep their current answer.
+    expect(trimModelsDevCatalog(api, NOW).models).not.toHaveProperty('glm-x');
+  });
+
+  it('drops an id whose aliases disagree and none is verbatim', () => {
+    expect(trimModelsDevCatalog(api, NOW).models).not.toHaveProperty('foo');
+  });
+
+  it('keeps an id two providers agree on', () => {
+    // qwen-x is listed identically by alibaba-cn and alibaba.
+    expect(trimModelsDevCatalog(api, NOW).models['qwen-x']).toBeDefined();
+  });
+
+  it('drops models that cannot drive an agent turn', () => {
+    const models = trimModelsDevCatalog(api, NOW).models;
+    expect(models).not.toHaveProperty('embed-x');
+    expect(models).not.toHaveProperty('tts-x');
+  });
+
+  it('drops a model with no usable field and providers outside the list', () => {
+    const models = trimModelsDevCatalog(api, NOW).models;
+    expect(models).not.toHaveProperty('nothing-known');
+    expect(models).not.toHaveProperty('router-only');
   });
 
   it('records the source it was trimmed from', () => {
@@ -156,7 +212,7 @@ describe('projectCustomCatalog', () => {
           ...api,
           'my-gateway': {
             models: {
-              'my-model': { id: 'my-model', limit: { context: 7, output: 8 } },
+              'my-model': chat('my-model', { context: 7, output: 8 }),
             },
           },
         },

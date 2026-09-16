@@ -34,7 +34,7 @@
 - `https://models.dev/api.json`：4.6 MB，217 个 provider、7805 个模型，无鉴权，约 0.15 s；**支持 ETag，条件请求返回 304 且 0 字节**。
 - `alibaba`（国际站）55 个模型、`alibaba-cn`（国内站）87 个。qwen3.8-max / qwen3.8-flash 已收录，带 `limit`、`modalities`、`reasoning_options`（含 effort 档位 `low/medium/xhigh`、budget 上限、`interleaved.field = reasoning_content`）。
 - **全量拍平不可行**：把 217 个 provider 按模型 id 拍平会混入 helicone、poe、cortecs、qiniu-ai 等中转站的错误别名（如 `claude-4.5-sonnet` 输出 8192）。
-- **限定 12 个一线厂商后**：237 个唯一（归一化后）模型 id，pretty JSON 约 30 KB。
+- **限定 12 个一线厂商后**：237 个唯一（归一化后）模型 id。再滤掉非对话模型与各 provider 数值打架的条目后剩 192 个，pretty JSON 约 24 KB（见 §4.2）。
 - 与现有正则表 diff（一线厂商范围内），限制值的分歧全部是 models.dev 更准：
 
 | 模型                             | 现有表           | models.dev                   |
@@ -82,7 +82,8 @@ alibaba-cn, alibaba, modelscope, volcengine
 ```
 
 - 厂商在前、DashScope 在后：Qwen 只在 alibaba\* 下，自然取 alibaba-cn；GLM/DeepSeek/MiniMax/Kimi 取厂商自家数值（与现有正则表的取向一致，例如 deepseek-v4 的 1M/384K 就是厂商值）。
-- 同一 key 出现多次：**"自身即归一化形式"的精确 id 胜过被折叠的别名**（`qwen3-max` 胜 `qwen3-max-20260123`）；都是别名时 `release_date` 最新者胜；其余先到先得。
+- **只收录能跑 agent 回合的模型**：要求 `tool_call === true` 且 `modalities.output` 含 `text`。不加这条会混进 embedding、TTS、图像/视频生成、OCR、翻译模型，它们的"上限"含义完全不同（`gemini-embedding-001` 输出上限是 1，`veo-3.1-generate` 上下文是 480），一旦进目录就会压过今天让这些 id 保持无害的家族兜底。实测滤掉 34 个，没有误杀任何真实对话模型。
+- **同一 key 出现多次时，先取精确 id，仍不一致就整条丢弃**。"自身即归一化形式"的 id 胜过被折叠的别名（`qwen3-max` 胜 `qwen3-max-20260123`），因为那是用户真正会输入的字符串。若剩下的候选仍然数值不同，说明是不同 endpoint 的服务策略差异，目录无法知道请求会打到哪个，于是不记录，让正则表保持今天的答案。实测丢掉 11 个。
 - 排除 openrouter / requesty 等路由商（它们的 id 带 `vendor/` 前缀，归一化后会与厂商条目撞 key，且上限是路由商自己的）。
 
 ### 4.3 读取顺序与优先级
@@ -147,7 +148,12 @@ alibaba-cn, alibaba, modelscope, volcengine
 
 ## 6. 我不确定、希望评审重点推敲的决策
 
-1. **拍平 vs 按 provider 作用域查询**。拍平最简单、文件最小，但 DashScope 托管的 GLM/DeepSeek/MiniMax 会取厂商值而非 DashScope 值（例如 `glm-5` 输出 131072 vs alibaba-cn 的 16384）。按 baseUrl 映射到 models.dev provider 更准，但要维护 qwen-code 认证类型/预设 → models.dev provider 的别名表（Hermes 的做法），且 `modelConfigResolver` 需要把 baseUrl 传进来。设计文档 #9851 说先 YAGNI。
+1. ~~**拍平 vs 按 provider 作用域查询**~~ —— **已决，结论与本文初稿相反**。初稿写"先拍平、按 provider 查属于 YAGNI"，这个判断站不住：上限是 endpoint 的服务策略，不是权重的属性，`glm-5` 在 Z.ai 是 131072 输出、在 DashScope 是 16384，两个数都对，拍平必然对一半用户是错的；`kimi-k2.6` 更糟，今天没有匹配的输出规则所以走"未知模型、尊重用户配置"，接上目录后反而被钳到 262144，比现状更差。
+
+   但按 provider 查也不是这个 PR 该做的：它要改 `tokenLimit()` 的签名和 cli/core 两侧全部调用点，正好撞上 AGENTS.md 的核心模块门槛，而收益上限只有 11 个模型。实测 237 个 id 里 220 个各 provider 数值一致，冲突只占 7%。
+
+   所以采用第三个方案：**冲突就丢弃**。这 11 个回落到正则表，行为与今天完全一致零回归；220 个无歧义的照常修正。对这些模型"没有数据"比"猜一个"更诚实。真要救它们，加一张十几行的 override 表比重构签名划算，所以按 provider 作用域查很可能永远不需要做。
+
 2. **`claude-sonnet-4-5/4-6/5` 的 1M 上下文**。models.dev 标 1M，但 Anthropic 早期的 1M 需要 beta header；若 API 默认仍是 200K，1M 会让压缩阈值算错、撞 400。现有 `CLAUDE_OPUS_EXTENDED` 只放开 Opus。可能需要一张小 override 表，或对 anthropic 条目做特殊处理。
 3. **模态取并集**是否合适，还是应该"目录优先、缺失回落正则"再配 override 表修 `qwen-vl-*` 的 video 缺漏（设计文档原意）。
 4. **`normalize()` 的折叠副作用**：`deepseek-v3.2` 会折叠成 `deepseek`，与 alibaba-cn 的某个 deepseek 条目撞 key（现在取 163840/65536，今天正则给 128K/默认）。折叠是 normalize 的既有行为，但目录把它显性化了。

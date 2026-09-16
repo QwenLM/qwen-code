@@ -58,9 +58,9 @@ export const MODELS_DEV_PROVIDERS: readonly string[] = [
 
 interface ModelsDevModel {
   id: string;
-  release_date?: string;
+  tool_call?: boolean;
   limit?: { context?: number; input?: number; output?: number };
-  modalities?: { input?: string[] };
+  modalities?: { input?: string[]; output?: string[] };
 }
 
 export type ModelsDevApi = Record<
@@ -109,11 +109,40 @@ function sortedModels(
 }
 
 /**
+ * Only models that can drive the agent loop are worth recording: they must
+ * accept tool calls and answer in text. models.dev also lists embedding,
+ * text-to-speech, image and video models whose limits mean something else
+ * entirely — `gemini-embedding-001` reports an output limit of 1 and
+ * `veo-3.1-generate` a context of 480 — and those numbers would then outrank
+ * the family fallbacks that keep such ids harmless today.
+ */
+function servesAgentTurns(model: ModelsDevModel): boolean {
+  return (
+    model.tool_call === true &&
+    (model.modalities?.output ?? []).includes('text')
+  );
+}
+
+/** `toEntry` builds its keys in a fixed order, so this compares by value. */
+function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
  * Projects a models.dev `api.json` payload onto the catalog shape: one entry
- * per normalized model id with only the fields the limit and modality
- * tables consume. An id that is its own normalized form (`qwen3-max`) beats
- * one that collapses onto it (`qwen3-max-20260123`); among collapsed
- * aliases the newest release wins.
+ * per normalized model id with only the fields the limit and modality tables
+ * consume.
+ *
+ * Two ids can land on the same key, either because they normalize together
+ * (`qwen3-max` and `qwen3-max-20260123`) or because several providers serve
+ * the same model. An id that is already its own normalized form wins, since
+ * it is the one a user types. If what remains still disagrees, the key is
+ * dropped rather than guessed: a context window or output limit is a property
+ * of the endpoint, not of the weights, and the catalog cannot tell which
+ * endpoint a request will reach. DashScope caps GLM-5 output at 16,384 while
+ * Z.ai allows 131,072, and both numbers are correct for their own endpoint.
+ * Recording either one would be wrong for half of the users, so such models
+ * keep the answer the regex tables give them today.
  */
 export function trimModelsDevCatalog(
   api: ModelsDevApi,
@@ -121,38 +150,40 @@ export function trimModelsDevCatalog(
   source: string = MODELS_DEV_URL,
   providers: readonly string[] = MODELS_DEV_PROVIDERS,
 ): ModelCatalog {
-  const picked = new Map<
+  const candidates = new Map<
     string,
-    { exact: boolean; releaseDate: string; entry: ModelCatalogEntry }
+    Array<{ exact: boolean; entry: ModelCatalogEntry }>
   >();
   for (const provider of providers) {
     for (const model of Object.values(api[provider]?.models ?? {})) {
-      if (typeof model.id !== 'string') {
-        continue;
-      }
-      const key = normalize(model.id);
-      const exact = key === model.id.toLowerCase();
-      const releaseDate = model.release_date ?? '';
-      const previous = picked.get(key);
-      if (
-        previous &&
-        (previous.exact || (!exact && releaseDate <= previous.releaseDate))
-      ) {
+      if (typeof model.id !== 'string' || !servesAgentTurns(model)) {
         continue;
       }
       const entry = toEntry(model);
-      if (entry) {
-        picked.set(key, { exact, releaseDate, entry });
+      if (!entry) {
+        continue;
+      }
+      const key = normalize(model.id);
+      const candidate = { exact: key === model.id.toLowerCase(), entry };
+      const existing = candidates.get(key);
+      if (existing) {
+        existing.push(candidate);
+      } else {
+        candidates.set(key, [candidate]);
       }
     }
   }
-  return {
-    source,
-    fetchedAt,
-    models: sortedModels(
-      [...picked].map(([key, { entry }]) => [key, entry] as const),
-    ),
-  };
+  const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
+  for (const [key, all] of candidates) {
+    const preferred = all.some((c) => c.exact)
+      ? all.filter((c) => c.exact)
+      : all;
+    const first = preferred[0]!.entry;
+    if (preferred.every((c) => sameEntry(c.entry, first))) {
+      agreed.push([key, first]);
+    }
+  }
+  return { source, fetchedAt, models: sortedModels(agreed) };
 }
 
 /**

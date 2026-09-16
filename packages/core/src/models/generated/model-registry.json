@@ -1,12 +1,7 @@
 {
   "source": "/tmp/claude-0/-root-workspace-qwen-code/6d44229e-2f5c-47c5-b5ef-9bf1e13377d5/scratchpad/api.json",
-  "fetchedAt": "2026-09-15T16:03:52.655Z",
+  "fetchedAt": "2026-09-16T14:17:59.537Z",
   "models": {
-    "chatgpt-image": {
-      "modalities": {
-        "image": true
-      }
-    },
     "claude-fable-5": {
       "context": 1000000,
       "output": 128000,
@@ -115,10 +110,6 @@
         "video": true
       }
     },
-    "deepseek": {
-      "context": 163840,
-      "output": 65536
-    },
     "deepseek-flash": {
       "context": 1000000,
       "output": 384000,
@@ -169,13 +160,6 @@
     "deepseek-v3.1-terminus": {
       "context": 163840,
       "output": 65536
-    },
-    "deepseek-v4-flash": {
-      "context": 1000000,
-      "output": 384000,
-      "modalities": {
-        "image": true
-      }
     },
     "deepseek-v4-flash-ga": {
       "context": 1000000,
@@ -302,13 +286,6 @@
         "video": true
       }
     },
-    "gemini-2.5-flash-image": {
-      "context": 32768,
-      "output": 32768,
-      "modalities": {
-        "image": true
-      }
-    },
     "gemini-2.5-flash-lite": {
       "context": 1048576,
       "output": 65536,
@@ -318,10 +295,6 @@
         "audio": true,
         "video": true
       }
-    },
-    "gemini-2.5-flash-tts": {
-      "context": 8192,
-      "output": 16384
     },
     "gemini-2.5-pro": {
       "context": 1048576,
@@ -333,10 +306,6 @@
         "video": true
       }
     },
-    "gemini-2.5-pro-tts": {
-      "context": 8192,
-      "output": 16384
-    },
     "gemini-3-flash": {
       "context": 1048576,
       "output": 65536,
@@ -344,22 +313,6 @@
         "image": true,
         "pdf": true,
         "audio": true,
-        "video": true
-      }
-    },
-    "gemini-3-pro-image": {
-      "context": 131072,
-      "output": 32768,
-      "modalities": {
-        "image": true
-      }
-    },
-    "gemini-3.1-flash-image": {
-      "context": 65536,
-      "output": 65536,
-      "modalities": {
-        "image": true,
-        "pdf": true,
         "video": true
       }
     },
@@ -388,10 +341,6 @@
         "audio": true,
         "video": true
       }
-    },
-    "gemini-3.1-flash-tts": {
-      "context": 8192,
-      "output": 16384
     },
     "gemini-3.1-pro": {
       "context": 1048576,
@@ -433,13 +382,6 @@
         "video": true
       }
     },
-    "gemini-3.5-live-translate": {
-      "context": 16384,
-      "output": 32768,
-      "modalities": {
-        "audio": true
-      }
-    },
     "gemini-3.6-flash": {
       "context": 1048576,
       "output": 65536,
@@ -470,20 +412,6 @@
         "video": true
       }
     },
-    "gemini-embedding-001": {
-      "context": 2048,
-      "output": 1
-    },
-    "gemini-embedding-2": {
-      "context": 8192,
-      "output": 1,
-      "modalities": {
-        "image": true,
-        "pdf": true,
-        "audio": true,
-        "video": true
-      }
-    },
     "gemini-flash": {
       "context": 1048576,
       "output": 65536,
@@ -501,14 +429,6 @@
         "image": true,
         "pdf": true,
         "audio": true,
-        "video": true
-      }
-    },
-    "gemini-omni-flash": {
-      "context": 131072,
-      "output": 65536,
-      "modalities": {
-        "image": true,
         "video": true
       }
     },
@@ -570,24 +490,12 @@
       "context": 200000,
       "output": 131072
     },
-    "glm-5": {
-      "context": 204800,
-      "output": 131072
-    },
     "glm-5-2": {
       "context": 1000000,
       "output": 131072
     },
     "glm-5-turbo": {
       "context": 200000,
-      "output": 131072
-    },
-    "glm-5.1": {
-      "context": 200000,
-      "output": 131072
-    },
-    "glm-5.2": {
-      "context": 1000000,
       "output": 131072
     },
     "glm-5.3": {
@@ -611,10 +519,6 @@
         "pdf": true,
         "video": true
       }
-    },
-    "gpt-3.5-turbo": {
-      "context": 16385,
-      "output": 4096
     },
     "gpt-4": {
       "context": 8192,
@@ -851,26 +755,6 @@
         "pdf": true
       }
     },
-    "gpt-image": {
-      "modalities": {
-        "image": true
-      }
-    },
-    "gpt-image-1": {
-      "modalities": {
-        "image": true
-      }
-    },
-    "gpt-image-1-mini": {
-      "modalities": {
-        "image": true
-      }
-    },
-    "gpt-image-2": {
-      "modalities": {
-        "image": true
-      }
-    },
     "gpt-realtime": {
       "context": 96000,
       "output": 32000,
@@ -888,14 +772,6 @@
       }
     },
     "grok-4.20-0309-reasoning": {
-      "context": 1000000,
-      "output": 30000,
-      "modalities": {
-        "image": true,
-        "pdf": true
-      }
-    },
-    "grok-4.20-multi-agent": {
       "context": 1000000,
       "output": 30000,
       "modalities": {
@@ -935,28 +811,6 @@
         "pdf": true
       }
     },
-    "grok-imagine-image": {
-      "context": 16000,
-      "modalities": {
-        "image": true,
-        "pdf": true
-      }
-    },
-    "grok-imagine-image-quality": {
-      "context": 16000,
-      "modalities": {
-        "image": true,
-        "pdf": true
-      }
-    },
-    "grok-imagine-video": {
-      "context": 1024,
-      "modalities": {
-        "image": true,
-        "pdf": true,
-        "video": true
-      }
-    },
     "kimi-k2-thinking": {
       "context": 262144,
       "output": 16384
@@ -964,14 +818,6 @@
     "kimi-k2.5": {
       "context": 262144,
       "output": 32768,
-      "modalities": {
-        "image": true,
-        "video": true
-      }
-    },
-    "kimi-k2.6": {
-      "context": 262144,
-      "output": 262144,
       "modalities": {
         "image": true,
         "video": true
@@ -999,20 +845,6 @@
       "modalities": {
         "image": true,
         "video": true
-      }
-    },
-    "lyria-3-clip": {
-      "context": 1048576,
-      "output": 65536,
-      "modalities": {
-        "image": true
-      }
-    },
-    "lyria-3-pro": {
-      "context": 1048576,
-      "output": 65536,
-      "modalities": {
-        "image": true
       }
     },
     "minimax-m2": {
@@ -1123,18 +955,6 @@
       "context": 4096,
       "output": 3072
     },
-    "qwen-max": {
-      "context": 131072,
-      "output": 8192
-    },
-    "qwen-mt-plus": {
-      "context": 16384,
-      "output": 8192
-    },
-    "qwen-mt-turbo": {
-      "context": 16384,
-      "output": 8192
-    },
     "qwen-omni-turbo": {
       "context": 32768,
       "output": 2048,
@@ -1171,13 +991,6 @@
     "qwen-vl-max": {
       "context": 131072,
       "output": 8192,
-      "modalities": {
-        "image": true
-      }
-    },
-    "qwen-vl-ocr": {
-      "context": 34096,
-      "output": 4096,
       "modalities": {
         "image": true
       }
@@ -1276,13 +1089,6 @@
       "context": 131072,
       "output": 8192
     },
-    "qwen3-asr-flash": {
-      "context": 53248,
-      "output": 4096,
-      "modalities": {
-        "audio": true
-      }
-    },
     "qwen3-coder-30b-a3b-instruct": {
       "context": 262144,
       "output": 65536
@@ -1298,15 +1104,6 @@
     "qwen3-coder-plus": {
       "context": 1048576,
       "output": 65536
-    },
-    "qwen3-livetranslate-flash-realtime": {
-      "context": 53248,
-      "output": 4096,
-      "modalities": {
-        "image": true,
-        "audio": true,
-        "video": true
-      }
     },
     "qwen3-max": {
       "context": 262144,
@@ -1327,14 +1124,6 @@
         "image": true,
         "audio": true,
         "video": true
-      }
-    },
-    "qwen3-omni-flash-realtime": {
-      "context": 65536,
-      "output": 16384,
-      "modalities": {
-        "image": true,
-        "audio": true
       }
     },
     "qwen3-vl-235b-a22b": {
@@ -1385,14 +1174,6 @@
         "video": true
       }
     },
-    "qwen3.5-397b-a17b": {
-      "context": 262144,
-      "output": 65536,
-      "modalities": {
-        "image": true,
-        "video": true
-      }
-    },
     "qwen3.5-flash": {
       "context": 1000000,
       "output": 65536,
@@ -1435,10 +1216,6 @@
         "video": true
       }
     },
-    "qwen3.6-max": {
-      "context": 245800,
-      "output": 65536
-    },
     "qwen3.6-plus": {
       "context": 1000000,
       "output": 65536,
@@ -1458,14 +1235,6 @@
     "qwen3.7-max": {
       "context": 1000000,
       "output": 65536
-    },
-    "qwen3.7-plus": {
-      "context": 1000000,
-      "output": 64000,
-      "modalities": {
-        "image": true,
-        "video": true
-      }
     },
     "qwen3.8-flash": {
       "context": 1000000,
@@ -1491,44 +1260,6 @@
     "qwq-plus": {
       "context": 131072,
       "output": 8192
-    },
-    "text-embedding-3-large": {
-      "context": 8191,
-      "output": 3072
-    },
-    "text-embedding-3-small": {
-      "context": 8191,
-      "output": 1536
-    },
-    "text-embedding-ada-002": {
-      "context": 8192,
-      "output": 1536
-    },
-    "tongyi-intent-detect": {
-      "context": 8192,
-      "output": 1024
-    },
-    "veo-3.1-fast-generate": {
-      "context": 480,
-      "output": 8192,
-      "modalities": {
-        "image": true,
-        "video": true
-      }
-    },
-    "veo-3.1-generate": {
-      "context": 480,
-      "output": 8192,
-      "modalities": {
-        "image": true
-      }
-    },
-    "veo-3.1-lite-generate": {
-      "context": 480,
-      "output": 8192,
-      "modalities": {
-        "image": true
-      }
     }
   }
 }

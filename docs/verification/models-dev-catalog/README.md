@@ -10,7 +10,7 @@ Every number below came from the authoring machine, which **never ran the CLI, n
 
 | Ran                                                            | Result                                    |
 | -------------------------------------------------------------- | ----------------------------------------- |
-| `npm run generate:model-catalog` against a downloaded api.json | 237 models, 29,824 bytes, under budget    |
+| `npm run generate:model-catalog` against a downloaded api.json | 192 models, 24,685 bytes, under budget    |
 | `tsx` probe of `tokenLimit()` / `defaultModalities()`          | Numbers in the table below                |
 | `tsx` probe of `refreshModelCatalog()` with a local overlay    | Overlay applied per field, cache written  |
 | `prettier --experimental-cli --check`                          | Clean                                     |
@@ -66,6 +66,8 @@ Expected. Both columns were measured by the probe on the authoring machine again
 | `claude-fable-5-1` | 1,000,000 / 128,000         | 200,000 / 65,536             |
 | `gpt-5`            | 272,000 / 128,000           | 272,000 / 131,072            |
 | `unknown-model`    | 200,000 / 32,000            | 200,000 / 32,000             |
+| `glm-5`            | 202,752 / 131,072           | 202,752 / 131,072            |
+| `kimi-k2.6`        | 262,144 / 32,000            | 262,144 / 32,000             |
 
 Modalities, same probe, same method:
 
@@ -77,7 +79,9 @@ Modalities, same probe, same method:
 
 `qwen3-vl-plus` is the union at work: models.dev lists image only, the regex table adds video, and the merged result keeps both. If it ever reports image only, the union broke and that is a real regression, because attaching video to that model works today.
 
-`unknown-model` is the control. It must be identical in both columns.
+`glm-5` and `kimi-k2.6` are the other control. They are served by two providers with different limits, so the catalog records nothing for them and the regex tables keep their current answer. Both columns must be identical, exactly like `unknown-model`. If either moves, the conflict-dropping rule broke, and the numbers it would move to are wrong for DashScope users: that endpoint caps both at 16,384 output while the vendors allow 131,072 and 262,144.
+
+`unknown-model` is the control for a model neither source knows. It must be identical in both columns.
 
 ## 2 — Background refresh lands, then throttles
 
