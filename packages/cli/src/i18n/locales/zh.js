@@ -222,6 +222,23 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.DownsampleImage': '降采样图像',
+  'toolDisplayName.DownscaleVideo': '降采样视频',
+  'toolDisplayName.DownsampleAudio': '降采样音频',
+  'toolDisplayName.ExtractKeyframes': '提取关键帧',
+  'toolDisplayName.ExtractAudio': '提取音轨',
+  'toolDisplayName.ClipVideo': '剪辑视频',
+  'toolDisplayName.ClipImage': '裁剪图像',
+  'toolDisplayName.ClipAudio': '剪辑音频',
+  'toolDisplayName.CaptionImage': '描述图像',
+  'toolDisplayName.CaptionAudio': '描述音频',
+  'toolDisplayName.OcrImage': '识别图像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解视频',
+  'toolDisplayName.ConvertImage': '转换图像',
+  'toolDisplayName.TranscribeAudio': '转写音频',
+  'toolDisplayName.RecallMediaMemory': '召回媒体记忆',
+  '[fixed-only: runs via media policies, not the model]':
+    '［仅固定策略：由媒体策略调用，不开放给模型］',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1066,6 +1083,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新打开此菜单可重新加载 Hook 定义。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制项和 HTTP 安全设置需要重启后生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新加载 Hook 定义失败：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
   // Hooks - Detail Step
   'Exit codes:': '退出码：',

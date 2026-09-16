@@ -56,6 +56,7 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
+  ServeWorkflowActionInput,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -849,6 +850,12 @@ export interface BridgePendingUserQuestionInteraction {
   title?: string;
   questions: BridgePendingUserQuestion[];
   options: BridgePendingInteractionOption[];
+}
+
+export interface BridgeIdleChannelCandidate {
+  channelId: string;
+  runtimeEpoch: number;
+  lastUsedAt: number;
 }
 
 export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
@@ -2127,7 +2134,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
 
-  /** Control a run, delete history, or start a saved workflow definition. */
+  /**
+   * Control a run, delete history, or start a new one — from a saved
+   * definition (`run-saved`, where `taskId` is the definition name) or from a
+   * script the caller supplies (`run-script`, where `taskId` is the caller's
+   * own start key). `input` carries what the two start actions run with.
+   */
   controlSessionWorkflowTask(
     sessionId: string,
     taskId: string,
@@ -2137,8 +2149,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved',
+      | 'run-saved'
+      | 'run-script',
     context?: BridgeClientRequestContext,
+    input?: ServeWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: ServeSessionWorkflowTaskStatus['status'];
@@ -2612,6 +2626,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * workspace runtime control when it is absent.
    */
   getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
+
+  getIdleChannelCandidate?(): BridgeIdleChannelCandidate | undefined;
+  reclaimIdleChannel?(
+    candidate: BridgeIdleChannelCandidate,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;

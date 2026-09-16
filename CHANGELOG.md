@@ -12,6 +12,105 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.24.0](https://github.com/QwenLM/qwen-code/releases/tag/v0.24.0) - 2026-09-16
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+- fix(core)!: let bash expand project directory variables in command hooks ([#11864](https://github.com/QwenLM/qwen-code/pull/11864)) by @qqqys
+
+### Complete Change List
+
+#### Features
+
+- feat(core): cap web_search calls per session ([#11852](https://github.com/QwenLM/qwen-code/pull/11852)) by @qqqys
+- feat: track background result execution across daemon and web shell ([#11636](https://github.com/QwenLM/qwen-code/pull/11636)) by @ytahdn
+- feat(cli): full /hooks dialog in OpenTUI ([#11903](https://github.com/QwenLM/qwen-code/pull/11903)) by @qqqys
+- feat(core): emit hook progress events ([#11906](https://github.com/QwenLM/qwen-code/pull/11906)) by @qqqys
+- feat(extensions): ship dynamic workflows from extensions ([#11805](https://github.com/QwenLM/qwen-code/pull/11805)) by @qqqys
+- feat(channels): add shared output modes with DingTalk support ([#11822](https://github.com/QwenLM/qwen-code/pull/11822)) by @qqqys
+- feat(web-shell): slide the active pill between tabs ([#11844](https://github.com/QwenLM/qwen-code/pull/11844)) by @callmeYe
+- feat(daemon): enumerate installed extension skills locally ([#11281](https://github.com/QwenLM/qwen-code/pull/11281)) by @callmeYe
+- feat(web-shell): follow the reading position in the global turn navigation ([#11801](https://github.com/QwenLM/qwen-code/pull/11801)) by @callmeYe
+- feat(workflows): share a per-turn token budget from a +Nk directive ([#11917](https://github.com/QwenLM/qwen-code/pull/11917)) by @qqqys
+- feat(serve): add budget-based ACP child admission ([#11911](https://github.com/QwenLM/qwen-code/pull/11911)) by @doudouOUC
+- feat(cli): add bwrap kernel sandbox backend for Linux ([#11614](https://github.com/QwenLM/qwen-code/pull/11614)) by @doudouOUC
+- feat(core): support external reasoning profiles and defaults ([#11856](https://github.com/QwenLM/qwen-code/pull/11856)) by @callmeYe
+- feat(settings): turn cross-session messaging on by default ([#11840](https://github.com/QwenLM/qwen-code/pull/11840)) by @qqqys
+- feat(core): run saved workflows by name and pin workflow grants to script content ([#11943](https://github.com/QwenLM/qwen-code/pull/11943)) by @qqqys
+- feat(workflow): preserve source references across runs and resumes ([#11931](https://github.com/QwenLM/qwen-code/pull/11931)) by @qqqys
+- feat(workflow): correlate agent dispatches and nested workflow calls ([#11932](https://github.com/QwenLM/qwen-code/pull/11932)) by @qqqys
+- feat(workflows): size guideline, structure preview and large-run warning ([#11939](https://github.com/QwenLM/qwen-code/pull/11939)) by @qqqys
+- feat(workflows): let the model invoke extension workflows that declare whenToUse ([#11957](https://github.com/QwenLM/qwen-code/pull/11957)) by @qqqys
+- feat(daemon): support summary projection for prompt and replay APIs ([#11920](https://github.com/QwenLM/qwen-code/pull/11920)) by @ytahdn
+- feat(web-shell): add footnote previews and per-turn sources ([#11480](https://github.com/QwenLM/qwen-code/pull/11480)) by @callmeYe
+- feat(telemetry): emit a Goal lifecycle event and metrics ([#11927](https://github.com/QwenLM/qwen-code/pull/11927)) by @qqqys
+- feat(cli): reload hook registry when /hooks opens ([#11904](https://github.com/QwenLM/qwen-code/pull/11904)) by @qqqys
+- feat(serve): reclaim idle ACP children when admission is full ([#11940](https://github.com/QwenLM/qwen-code/pull/11940)) by @doudouOUC
+- feat(web-shell): connect to a selected remote daemon ([#11548](https://github.com/QwenLM/qwen-code/pull/11548)) by @yiliang114
+- feat(web-shell): preview files from expanded tool details ([#11982](https://github.com/QwenLM/qwen-code/pull/11982)) by @ytahdn
+- feat(serve): start workflow runs with args, sourceRef and a caller-supplied script ([#11979](https://github.com/QwenLM/qwen-code/pull/11979)) by @qqqys
+- feat(web-shell): customize context details and collapse snapshots ([#11996](https://github.com/QwenLM/qwen-code/pull/11996)) by @ytahdn
+- feat(goal): bill foreground subagents and verifier token usage ([#11998](https://github.com/QwenLM/qwen-code/pull/11998)) by @qqqys
+- feat(dingtalk): carry sender identity in direct messages ([#12017](https://github.com/QwenLM/qwen-code/pull/12017)) by @BenGuanRan
+- feat(goal): show turn and active-time budgets ([#11999](https://github.com/QwenLM/qwen-code/pull/11999)) by @qqqys
+- feat(omni): integrate multimodal media pipeline into main ([#12019](https://github.com/QwenLM/qwen-code/pull/12019)) by @LaZzyMan
+
+#### Bug Fixes
+
+- fix(cua): preserve Linux observations and REPL diagnostics ([#11829](https://github.com/QwenLM/qwen-code/pull/11829)) by @DragonnZhang
+- fix(cua): make Linux input delivery adaptive ([#11876](https://github.com/QwenLM/qwen-code/pull/11876)) by @LaZzyMan
+- fix(core): keep escaped whitespace at pipe-list entry edges ([#11860](https://github.com/QwenLM/qwen-code/pull/11860)) by @qqqys
+- fix(serve): resolve skill identity from the catalog for toggle guards ([#11831](https://github.com/QwenLM/qwen-code/pull/11831)) by @harjothkhara
+- fix(standalone): bundle @lydell/node-pty prebuilds so the web terminal works ([#11881](https://github.com/QwenLM/qwen-code/pull/11881)) by @yiliang114
+- fix(cua): bound Linux observations and prepare SDK 0.20.9 ([#11910](https://github.com/QwenLM/qwen-code/pull/11910)) by @LaZzyMan
+- fix(cli): scope the ACP permission queue to the session ([#11802](https://github.com/QwenLM/qwen-code/pull/11802)) by @chiga0
+- fix(ci): separate autofix runner labels from queued reviews ([#11912](https://github.com/QwenLM/qwen-code/pull/11912)) by @yiliang114
+- fix(cli): restore shared Skill status and runner CI checks ([#11933](https://github.com/QwenLM/qwen-code/pull/11933)) by @qqqys
+- fix(vscode): retire legacy ACP input bridges ([#11928](https://github.com/QwenLM/qwen-code/pull/11928)) by @yiliang114
+- fix(web-shell): show Qwen Live tasks in session sidebar ([#11830](https://github.com/QwenLM/qwen-code/pull/11830)) by @qqqys
+- fix(ci): isolate runner schedule fixture module scope ([#11938](https://github.com/QwenLM/qwen-code/pull/11938)) by @doudouOUC
+- fix(core): carry the PTY load reason on the call, not in module state ([#11923](https://github.com/QwenLM/qwen-code/pull/11923)) by @yiliang114
+- fix(core): keep escaped trailing whitespace when trimming hook matchers ([#11871](https://github.com/QwenLM/qwen-code/pull/11871)) by @yiliang114
+- fix(core): expand ${session_id} and stamp User-Agent on the Responses wire ([#11947](https://github.com/QwenLM/qwen-code/pull/11947)) by @yiliang114
+- fix(core): keep tool parameters on the MiniMax chat-completions wire ([#11842](https://github.com/QwenLM/qwen-code/pull/11842)) by @yiliang114
+- fix(web-shell): stop the approval sheet resizing while reading ([#11930](https://github.com/QwenLM/qwen-code/pull/11930)) by @ytahdn
+- fix(release): gate pool-routed validation jobs on a disk floor ([#11972](https://github.com/QwenLM/qwen-code/pull/11972)) by @qwen-code-dev-bot
+- fix(web-shell): preserve separators in tool description paths ([#11977](https://github.com/QwenLM/qwen-code/pull/11977)) by @ytahdn
+- fix(core): persist Goal turn endings outside model history ([#11924](https://github.com/QwenLM/qwen-code/pull/11924)) by @qqqys
+- fix(web-shell): keep the recap below a turn's outputs and dedupe it ([#11986](https://github.com/QwenLM/qwen-code/pull/11986)) by @ytahdn
+- fix(ci): heal the docker lock cache ownership in e2e-test-linux (#11990) ([#11992](https://github.com/QwenLM/qwen-code/pull/11992)) by @qwen-code-dev-bot
+- fix(cli): register model-invocable commands before headless turns ([#11994](https://github.com/QwenLM/qwen-code/pull/11994)) by @qqqys
+- fix(vscode): reach the workspace daemon from a remote window's webview ([#11983](https://github.com/QwenLM/qwen-code/pull/11983)) by @yiliang114
+- fix(cli): make the ink useBoxMetrics loop guard independent of machine speed ([#11835](https://github.com/QwenLM/qwen-code/pull/11835)) by @yiliang114
+- fix(ci): skip completed desktop releases ([#12013](https://github.com/QwenLM/qwen-code/pull/12013)) by @yiliang114
+- fix(web-shell): honor ui.theme and general.language in the standalone Web Shell ([#11961](https://github.com/QwenLM/qwen-code/pull/11961)) by @yiliang114
+
+#### Documentation
+
+- docs(hooks): complete the event catalog and correct stale claims ([#11863](https://github.com/QwenLM/qwen-code/pull/11863)) by @qqqys
+- docs(goal): retire the Stop-hook era prose after the implementation was removed ([#11922](https://github.com/QwenLM/qwen-code/pull/11922)) by @qqqys
+- docs(serve): clarify daemon event recovery contracts ([#12015](https://github.com/QwenLM/qwen-code/pull/12015)) by @wenshao
+- docs(users): point onboarding at Token Plan instead of Coding Plan ([#11980](https://github.com/QwenLM/qwen-code/pull/11980)) by @wenshao
+- docs(daemon): complete integration path guide ([#12005](https://github.com/QwenLM/qwen-code/pull/12005)) by @yiliang114
+
+#### Internal Changes
+
+- test: record what the Windows inode gates are hiding, and un-skip one ([#11853](https://github.com/QwenLM/qwen-code/pull/11853)) by @yiliang114
+- chore(pnpm): correct the range-key rationale and cover the version union ([#11845](https://github.com/QwenLM/qwen-code/pull/11845)) by @yiliang114
+- test(cli): mock realpathSync in the review cleanup suite so the cwd witness holds on Windows ([#11893](https://github.com/QwenLM/qwen-code/pull/11893)) by @yiliang114
+- refactor(goal): delete the first-generation Stop-hook Goal implementation ([#11900](https://github.com/QwenLM/qwen-code/pull/11900)) by @qqqys
+- refactor(vscode): remove unused token limit mirror ([#11946](https://github.com/QwenLM/qwen-code/pull/11946)) by @yiliang114
+- ci(desktop): publish the desktop app when the CLI releases ([#11575](https://github.com/QwenLM/qwen-code/pull/11575)) by @yiliang114
+- test(cli): unbreak the bwrap sandbox suites on the Windows lane (#11968) ([#11970](https://github.com/QwenLM/qwen-code/pull/11970)) by @qwen-code-dev-bot
+- refactor(serve): separate ACP control plane and channel harness ([#11916](https://github.com/QwenLM/qwen-code/pull/11916)) by @wenshao
+- test(serve): harden REST docs contract checks ([#12009](https://github.com/QwenLM/qwen-code/pull/12009)) by @yiliang114
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.23.4...v0.24.0
+
 ## [0.23.4](https://github.com/QwenLM/qwen-code/releases/tag/v0.23.4) - 2026-09-14
 
 ### Highlights
