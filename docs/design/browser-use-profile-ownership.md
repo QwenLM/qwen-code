@@ -31,10 +31,13 @@ not authenticate other processes running as the same OS user.
 
 During discovery, an incompatible Qwen extension does not prevent a compatible
 profile from connecting within the normal connection timeout. If none connects,
-the error identifies whether the extension or Qwen Code needs updating. After a
-profile is selected, only that disconnected profile can supply this diagnostic;
-unrelated profiles cannot override it. A compatible connection or stopping the
-transport clears the diagnostic.
+the request fails with `EXTENSION_VERSION_MISMATCH`, whose message identifies
+whether the extension or Qwen Code needs updating. Browser discovery surfaces
+this error instead of reporting an empty browser list, which it reports only
+for a plain `BROWSER_DISCONNECTED`. After a profile is selected, only that
+disconnected profile can supply this diagnostic; unrelated profiles cannot
+override it. A compatible connection or stopping the transport clears the
+diagnostic.
 
 The first valid handshake selects a profile for the current transport lifetime.
 Initial selection depends on connection order, not a prediction of the user's
@@ -48,8 +51,10 @@ A disconnect fails the selected connection's pending requests and invalidates
 its tab handles using the existing lifecycle. It retains the selected instance
 identity. Only that instance can reconnect; another connected profile cannot
 take over while it is absent. Requests time out with `BROWSER_DISCONNECTED` if
-the selected profile does not return. Existing pages may be rediscovered and
-claimed after reconnection; old handles are not transparently restored.
+the selected profile does not return, or with `EXTENSION_VERSION_MISMATCH` if
+it returned with an incompatible protocol version. Existing pages may be
+rediscovered and claimed after reconnection; old handles are not transparently
+restored.
 
 Stopping the transport closes active and idle connections and clears selection.
 A new transport lifetime can select a different profile. The extension's

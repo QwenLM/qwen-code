@@ -291,7 +291,7 @@ test.each([' ', 'Enter'])(
   },
 );
 
-test.each(['persist', 'group', 'attach'])(
+test.each(['persist', 'attach'])(
   'create failure during %s removes only the new tab',
   async (stage) => {
     const f = await fixture();
@@ -299,8 +299,6 @@ test.each(['persist', 'group', 'attach'])(
       f.chromeApi.storage.session.set.mockRejectedValueOnce(
         new Error('create failed'),
       );
-    if (stage === 'group')
-      f.chromeApi.tabs.group.mockRejectedValueOnce(new Error('create failed'));
     if (stage === 'attach')
       f.chromeApi.debugger.attach.mockRejectedValueOnce(
         new Error('create failed'),
@@ -412,4 +410,71 @@ test('user cancellation persists even while grouping another tab is pending', as
   await creating;
   await vi.advanceTimersByTimeAsync(0);
   expect(f.chromeApi.tabs.ungroup).toHaveBeenCalledWith(1);
+});
+
+test('a grouping failure during create keeps the new tab owned and attached', async () => {
+  const f = await fixture();
+  f.chromeApi.tabs.group.mockRejectedValueOnce(
+    new Error('Tabs cannot be edited right now (user may be dragging a tab).'),
+  );
+  await expect(f.dispatch('tabs.create', {})).resolves.toMatchObject({
+    providerTabId: 2,
+  });
+  expect(f.chromeApi.tabs.remove).not.toHaveBeenCalled();
+  expect(f.tabs.has(2)).toBe(true);
+  expect(f.attached.has(2)).toBe(true);
+  expect(f.agentOwnedTabs.has(2)).toBe(true);
+  expect(f.saved.agentOwnedTabs).toEqual([2]);
+  await f.dispatch('tabs.release', { tabId: 2 });
+  expect(f.chromeApi.tabs.ungroup).toHaveBeenCalledWith(2);
+  expect(f.saved.agentOwnedTabs).toEqual([]);
+});
+
+test('closing an owned tab that already vanished is not a failure', async () => {
+  const f = await fixture();
+  await f.dispatch('tabs.attach', { tabId: 1 });
+  f.chromeApi.tabs.remove.mockRejectedValueOnce(
+    new Error('No tab with id: 1.'),
+  );
+  await expect(f.dispatch('tabs.close', { tabId: 1 })).resolves.toBeNull();
+  f.chromeApi.tabs.remove.mockRejectedValueOnce(
+    new Error('Tabs cannot be edited right now.'),
+  );
+  await expect(f.dispatch('tabs.close', { tabId: 1 })).rejects.toThrow(
+    'cannot be edited',
+  );
+});
+
+test('a tab vanishing before the debugger attaches is reported as stale', async () => {
+  const f = await fixture();
+  f.chromeApi.debugger.attach.mockRejectedValueOnce(
+    new Error('No tab with id: 1.'),
+  );
+  await expect(f.dispatch('tabs.attach', { tabId: 1 })).rejects.toMatchObject({
+    code: 'STALE_TAB',
+  });
+  expect(f.attachedTabs.has(1)).toBe(false);
+});
+
+test('listed tab titles and urls stay within the SDK schema bound', async () => {
+  const f = await fixture();
+  f.tabs.set(4, {
+    id: 4,
+    title: 't'.repeat(30_000),
+    url: `https://example.test/?q=${'u'.repeat(30_000)}`,
+    windowId: 1,
+    groupId: -1,
+  });
+  const listed = (await f.dispatch('tabs.queryOpen', {})) as Array<{
+    providerTabId: number;
+    title: string | null;
+    url: string | null;
+  }>;
+  const long = listed.find((tab) => tab.providerTabId === 4);
+  expect(long?.url?.length).toBe(20_000);
+  expect(long?.url?.startsWith('https://example.test/?q=u')).toBe(true);
+  expect(long?.title?.length).toBe(20_000);
+  const short = listed.find((tab) => tab.providerTabId === 1);
+  expect(short?.url).toBe('https://example.test');
+  expect(short?.title).toBeNull();
 });

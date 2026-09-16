@@ -46,11 +46,15 @@ Playwright's browser-level CDP adapter.
 does not add a local WebSocket server.
 
 Browser Use ships with Qwen Code as a bundled skill and its runtime resources.
-No separate Qwen extension installation is required. The skill's `runtime/`
-directory contains the Browser SDK, Native Host, and pinned Playwright
-dependency. The skill registers `runtime/node_modules` with the existing Node
+No separate Browser Use runtime package or second Qwen extension is required;
+the existing Qwen Chrome extension is reused. The skill's `runtime/` directory
+contains the Browser SDK, Native Host, and pinned Playwright dependency. The
+skill registers `runtime/node_modules` with the existing Node
 REPL and imports `runtime/index.js`; the CLI does not execute browser logic.
-Source development, transpiled builds, and the published CLI use this same
+The kernel evaluates that import in an isolated realm without Node globals, so
+the runtime bundle binds `process` itself at its top through `createRequire`;
+the build's load check runs in the main realm and cannot detect a missing
+binding, so a kernel-backed test pins it. Source development, transpiled builds, and the published CLI use this same
 layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
@@ -87,7 +91,8 @@ Installing the Qwen Chrome extension opts into this automatic local setup on
 first use. The launcher and Native Messaging registrations persist after
 Qwen exits. The installer refuses to overwrite
 foreign files: a conflicting launcher aborts initialization, while a
-conflicting browser manifest is skipped. Running
+conflicting browser manifest is skipped and named in a warning on stderr.
+Running
 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` removes
 files owned by Browser Use; `status` checks them and `install` explicitly
 registers them. To prevent automatic registration on a later Browser Use
@@ -220,9 +225,10 @@ Metadata travels on the image event and is returned immediately before each
 retained image, independently of the ordinary text output budget. Rejected or
 omitted images do not leave metadata behind. There is no metadata-specific size
 cap; the existing protocol-frame and client output limits still apply.
-Node REPL distribution/version synchronization is deferred to a follow-up that
-will consider bundling the MCP server with Qwen Code. This protocol support is
-not available in the published 0.1.2 and 0.1.3 packages verified for this change.
+Bundling the Node REPL MCP server with Qwen Code is deferred to a follow-up.
+This protocol support first ships in `@qwen-code/node-repl-mcp` 0.1.6 and is
+absent from the published 0.1.2 through 0.1.5 packages, so the Browser Use
+skill pins that version instead of `latest`.
 Viewport screenshots are limited by their encoded byte size rather than rejected
 from viewport dimensions alone. Explicit clips and full-page captures retain a
 pixel budget because their dimensions are caller-controlled or potentially

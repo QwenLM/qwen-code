@@ -35,6 +35,10 @@ const RECONNECT_ALARM = 'browser-use-reconnect';
 const NATIVE_MESSAGE_CHUNK_TYPE = 'qwen.browser.chunk';
 const MAX_NATIVE_MESSAGE_CHUNKS = 32;
 const DEFAULT_SESSION_NAME = 'Qwen Browser';
+// The SDK's userTabInfo schema (packages/browser-use/src/core/schemas.ts)
+// caps title and url at 20 000 characters, and claimTab compares the listed
+// object back by equality, so the relay must never emit a longer value.
+const MAX_TAB_TEXT_LENGTH = 20_000;
 const AGENT_OVERLAY_GLOBAL = '__qwenBrowserOverlay';
 const AGENT_OVERLAY_BOOTSTRAP = `(() => {
   const globalName = "${AGENT_OVERLAY_GLOBAL}";
@@ -488,7 +492,10 @@ async function dispatch(method, params, generation = connectionGeneration) {
       try {
         agentOwnedTabs.add(tabId);
         await persistState(generation);
-        await groupAgentOwnedTab(tab, generation);
+        // Grouping is cosmetic: Chrome refuses it while the user drags a tab
+        // ("Tabs cannot be edited right now"), and that must not close a tab
+        // that was just created. The next grouped tab re-applies the title.
+        await groupAgentOwnedTab(tab, generation).catch(() => undefined);
         await ensureAttached(tabId, generation);
       } catch (error) {
         await chrome.tabs.remove(tabId).then(
@@ -547,7 +554,11 @@ async function dispatch(method, params, generation = connectionGeneration) {
         );
       }
       assertActiveGeneration(generation);
-      await chrome.tabs.remove(tabId);
+      // The tab may vanish between the ownership check and the remove; the
+      // postcondition already holds, so a missing tab is not a failure.
+      await chrome.tabs.remove(tabId).catch((error) => {
+        if (!isMissingTabError(error)) throw error;
+      });
       return null;
     }
     case 'cdp.send': {
@@ -755,12 +766,14 @@ async function ensureAttached(tabId, generation) {
       }
       newlyAttached = true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       if (message.includes('Another debugger is already attached')) {
         throw bridgeError(
           'TAB_DEBUGGER_CONFLICT',
           `Another debugger is already attached to tab ${tabId}`,
         );
+      } else if (isMissingTabError(error)) {
+        throw bridgeError('STALE_TAB', 'The Chrome tab no longer exists');
       } else {
         throw error;
       }
@@ -882,8 +895,8 @@ function tabInfo(tab, tabGroup) {
   const tabId = tab.id;
   return {
     providerTabId: tabId,
-    title: tab.title || null,
-    url: tab.url || null,
+    title: clampTabText(tab.title),
+    url: clampTabText(tab.url),
     active: tab.active === true,
     windowId: tab.windowId,
     ...(typeof tab.lastAccessed === 'number' &&
@@ -1063,6 +1076,28 @@ function numberParam(params, name) {
   return value;
 }
 
+/** @param {string | undefined} text */
+function clampTabText(text) {
+  if (!text) return null;
+  return text.length > MAX_TAB_TEXT_LENGTH
+    ? text.slice(0, MAX_TAB_TEXT_LENGTH)
+    : text;
+}
+
+/** @param {unknown} error */
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Chrome's tabs and debugger APIs both reject with "No tab with id: N." once
+ * a tab is gone; the same wording the SDK classifies as STALE_TAB.
+ * @param {unknown} error
+ */
+function isMissingTabError(error) {
+  return /no tab with id/i.test(errorMessage(error));
+}
+
 /**
  * @param {string} code
  * @param {string} message
@@ -1106,18 +1141,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onCreated.addListener(trackDerivedTab);
 
 chrome.debugger.onDetach.addListener((source, reason) => {
+  // onDetach only ever reports the tab's root session; a child target
+  // (out-of-process iframe) going away arrives as Target.detachedFromTarget
+  // through onEvent instead.
   if (source.tabId == null) return;
-  const sessionId = /** @type {{ sessionId?: string }} */ (source).sessionId;
-  if (typeof sessionId === 'string' && sessionId !== '') {
-    // A child session (iframe target) went away; the tab itself is still attached.
-    postEvent(
-      source.tabId,
-      'qwenBrowser.sessionDetached',
-      { reason: reason || 'unknown' },
-      sessionId,
-    );
-    return;
-  }
   derivedTabDeadlines.delete(source.tabId);
   attachedTabs.delete(source.tabId);
   overlayScriptIds.delete(source.tabId);

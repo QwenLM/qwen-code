@@ -39,7 +39,7 @@ flowchart TB
 
 `playwright-core@1.62.1` 通过 `chromium.connectOverCDP(transport)` 接受公共自定义 CDP transport。因此 Qwen 保留 Native Messaging，不添加本地 WebSocket server。
 
-Browser Use 以内置 skill 及其运行时资源随 Qwen Code 一起发布，无需单独安装 Qwen 扩展。Skill 的 `runtime/` 目录包含 Browser SDK、Native Host 和固定版本的 Playwright 依赖。Skill 向现有 Node REPL 注册 `runtime/node_modules` 并导入 `runtime/index.js`；CLI 本身不执行浏览器逻辑。源码开发、转译构建和发布的 CLI 使用同一布局。仍需配置通用 Node REPL MCP server，并在浏览器安装 Qwen Chrome 扩展。内置资源不会在 CLI 启动时连接 Chrome；SDK 在首次使用时才连接。
+Browser Use 以内置 skill 及其运行时资源随 Qwen Code 一起发布，无需单独安装 Browser Use 运行时包或第二个 Qwen 扩展，复用现有的 Qwen Chrome 扩展。Skill 的 `runtime/` 目录包含 Browser SDK、Native Host 和固定版本的 Playwright 依赖。Skill 向现有 Node REPL 注册 `runtime/node_modules` 并导入 `runtime/index.js`；CLI 本身不执行浏览器逻辑。kernel 在没有 Node 全局对象的隔离 realm 中执行该导入，因此运行时 bundle 在开头通过 `createRequire` 自行绑定 `process`；构建时的加载检查运行在主 realm，无法发现缺失的绑定，故由一个基于 kernel 的测试固定该行为。源码开发、转译构建和发布的 CLI 使用同一布局。仍需配置通用 Node REPL MCP server，并在浏览器安装 Qwen Chrome 扩展。内置资源不会在 CLI 启动时连接 Chrome；SDK 在首次使用时才连接。
 
 Browser Use 包编译成功后会为源码开发准备运行时资源，正常安装的 `prepare` hook 会执行该构建。修改 Browser Use 源码或依赖后，运行 `npm run build --workspace=@qwen-code/browser-use` 刷新运行时。`npm run dev` 复用这些产物，不执行构建或复制；CLI 和 Core 仍直接运行 TypeScript 源码。若运行时缺失，调用 skill 时已有的 setup 检查会报告资源不完整。
 
@@ -47,7 +47,7 @@ Browser Use 默认对模型可用，由模型根据用户任务选择。用户�
 
 Native Host 注册属于本机产品初始化，不由 Chrome 扩展执行。在 macOS 和 Linux 上，Browser runtime 首次初始化时检查 Google Chrome、Chrome for Testing 和 Chromium 的标准 `Default`、`Profile N` profile 中是否安装 Qwen 扩展。它读取 `Secure Preferences` 或 `Preferences` 中的扩展注册信息，并确认 manifest 存在，同时支持打包和解压安装。仅有残留扩展目录不视为已安装。若未找到扩展，初始化会提示安装方式，不写入 Native Host 文件。检测成功后，为已存在的浏览器根目录幂等安装 launcher 和 manifest。配置了 `QWEN_BROWSER_USE_SOCKET_PATH` 时继续使用外部管理的安装。
 
-安装 Qwen Chrome 扩展即同意首次使用时自动完成上述本机配置。Qwen 退出后，launcher 和 Native Messaging 注册仍然保留。安装器拒绝覆盖其他程序的文件：launcher 冲突会终止初始化，浏览器 manifest 冲突则跳过该 manifest。运行 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` 可删除 Browser Use 拥有的文件；`status` 检查这些文件，`install` 显式注册。若要阻止后续 Browser Use 初始化时自动注册，还需卸载 Chrome 扩展。只有文件不存在才视为缺失；其他读取失败会终止操作，不覆盖无法读取的文件。Chrome 扩展仅通过 `connectNative()` 打开已注册的 host。
+安装 Qwen Chrome 扩展即同意首次使用时自动完成上述本机配置。Qwen 退出后，launcher 和 Native Messaging 注册仍然保留。安装器拒绝覆盖其他程序的文件：launcher 冲突会终止初始化，浏览器 manifest 冲突则跳过该 manifest，并在 stderr 上给出指明该文件的警告。运行 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` 可删除 Browser Use 拥有的文件；`status` 检查这些文件，`install` 显式注册。若要阻止后续 Browser Use 初始化时自动注册，还需卸载 Chrome 扩展。只有文件不存在才视为缺失；其他读取失败会终止操作，不覆盖无法读取的文件。Chrome 扩展仅通过 `connectNative()` 打开已注册的 host。
 
 ## 职责
 
@@ -98,7 +98,7 @@ Locator plan 的每个数组最多包含 32 步，最多嵌套 32 层，顶层�
 
 Playwright 公共 CDP session API 提供坐标 CUA 的按钮 4（后退）和 5（前进）；较高层的 Playwright mouse API 不暴露它们。快照截断、截图编码和预算、会话失效检测及 JSON 传输封装属于运行时实现细节，不作为面向模型的选项。
 
-视口截图返回 JPEG 字节、MIME 类型及元数据。元数据包含原始图像尺寸、视口、设备像素比和 CSS 像素坐标空间，使模型客户端缩放预览后视觉坐标仍可用。Skill 将完整截图传给 `nodeRepl.emitImage()`。元数据随图像事件传递，紧邻每张保留图像之前返回，独立于普通文本输出预算。被拒绝或省略的图像不会遗留元数据。没有元数据专用大小上限；已有协议帧和客户端输出限制仍然适用。Node REPL 的分发和版本同步留待后续工作，届时将考虑把 MCP server 随 Qwen Code 一起打包。本次核验的已发布 0.1.2 和 0.1.3 包尚不具备该协议支持。视口截图根据编码字节数限制，不会仅因视口尺寸而拒绝。显式 clip 和整页截图保留像素预算，因为其尺寸由调用方控制或可能无界。从页面脚本探测到的设备像素比只在真实 Chrome 窗口可能报告的范围内被信任；当截图像素与请求的 CSS 区域不一致时，运行时根据 Chrome 自身的输出推算真实像素比并重拍一次。
+视口截图返回 JPEG 字节、MIME 类型及元数据。元数据包含原始图像尺寸、视口、设备像素比和 CSS 像素坐标空间，使模型客户端缩放预览后视觉坐标仍可用。Skill 将完整截图传给 `nodeRepl.emitImage()`。元数据随图像事件传递，紧邻每张保留图像之前返回，独立于普通文本输出预算。被拒绝或省略的图像不会遗留元数据。没有元数据专用大小上限；已有协议帧和客户端输出限制仍然适用。把 Node REPL MCP server 随 Qwen Code 一起打包留待后续工作。该协议支持自 `@qwen-code/node-repl-mcp` 0.1.6 起首次发布；已发布的 0.1.2 至 0.1.5 包不具备该支持，因此 Browser Use skill 固定使用该版本而非 `latest`。视口截图根据编码字节数限制，不会仅因视口尺寸而拒绝。显式 clip 和整页截图保留像素预算，因为其尺寸由调用方控制或可能无界。从页面脚本探测到的设备像素比只在真实 Chrome 窗口可能报告的范围内被信任；当截图像素与请求的 CSS 区域不一致时，运行时根据 Chrome 自身的输出推算真实像素比并重拍一次。
 
 截图获取采用 Codex Browser Use 策略，独立于 Playwright 的截图准备。短暂且有上限的渲染同步让待处理绘制在截图前完成。普通视口截图请求新的 CDP screencast 帧，帧期限为两秒，然后回退到命令超时为五秒的 `Page.captureScreenshot`。Clip 和整页截图直接使用后者。请求之前的旧帧会被丢弃；每个标签页的截图串行执行，事件监听器和 screencast 均会清理。运行时拥有这些事件，Playwright 不会重复确认同一帧。图像采用 JPEG quality 80，保留 CSS 像素坐标，不需要激活标签页或将 Chrome 置于前台。单次截图超时不会断开浏览器会话。
 

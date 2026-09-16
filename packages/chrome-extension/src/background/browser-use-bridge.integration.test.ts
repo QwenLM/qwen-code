@@ -7,20 +7,81 @@
 import assert from 'node:assert/strict';
 import { createHash, webcrypto } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import path, { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test, vi } from 'vitest';
 import vm from 'node:vm';
 
-const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
-const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser';
+// Resolved from this module, not process.cwd(), so the suite also passes via
+// `vitest run --root packages/chrome-extension` from the repository root.
+// (String form: under jsdom the global URL is not one Node's fs accepts.)
+const extensionRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../..',
+);
+const bridgeSource = await readFile(
+  join(extensionRoot, 'src/background/browser-use-bridge.js'),
+  'utf8',
+);
 
-const extensionRoot = process.cwd();
+// AGENTS.md forbids relative imports between packages, so the SDK's identity
+// and protocol constants are pinned by reading their source text, the way
+// packages/live-host/src/main/__tests__/protocol.test.ts pins the live protocol.
+const sdkProtocolSource = await readFile(
+  join(extensionRoot, '../browser-use/src/bridge/protocol.ts'),
+  'utf8',
+);
+const sdkChunkSource = await readFile(
+  join(
+    extensionRoot,
+    '../browser-use/src/bridge/native-host/native-messaging-output.ts',
+  ),
+  'utf8',
+);
+
+function sourceConstant(source: string, name: string): string {
+  const match = source.match(
+    new RegExp(`\\b${name} = (?:'([^']*)'|(\\d+));`, 'u'),
+  );
+  assert.ok(match, `${name} must be declared as a string or integer literal`);
+  return match[1] ?? match[2];
+}
+
+const CHROME_EXTENSION_ID = sourceConstant(
+  sdkProtocolSource,
+  'CHROME_EXTENSION_ID',
+);
+const CHROME_NATIVE_HOST_NAME = sourceConstant(
+  sdkProtocolSource,
+  'CHROME_NATIVE_HOST_NAME',
+);
+const CHROME_BRIDGE_PROTOCOL_VERSION = Number(
+  sourceConstant(sdkProtocolSource, 'CHROME_BRIDGE_PROTOCOL_VERSION'),
+);
+const NATIVE_MESSAGE_CHUNK_TYPE = sourceConstant(
+  sdkChunkSource,
+  'NATIVE_MESSAGE_CHUNK_TYPE',
+);
+
+test('bridge identity and protocol constants match the SDK source of truth', () => {
+  assert.match(CHROME_EXTENSION_ID, /^[a-p]{32}$/);
+  assert.ok(Number.isInteger(CHROME_BRIDGE_PROTOCOL_VERSION));
+  assert.equal(
+    Number(sourceConstant(bridgeSource, 'PROTOCOL_VERSION')),
+    CHROME_BRIDGE_PROTOCOL_VERSION,
+  );
+  assert.equal(
+    sourceConstant(bridgeSource, 'NATIVE_MESSAGE_CHUNK_TYPE'),
+    NATIVE_MESSAGE_CHUNK_TYPE,
+  );
+  assert.equal(
+    sourceConstant(bridgeSource, 'NATIVE_HOST'),
+    CHROME_NATIVE_HOST_NAME,
+  );
+});
 
 test('profile identity persists before hello and survives reconnects and worker restarts', async () => {
-  const source = await readFile(
-    join(extensionRoot, 'src/background/browser-use-bridge.js'),
-    'utf8',
-  );
+  const source = bridgeSource;
   const startWorker = async (
     localState: Record<string, unknown>,
     failSave = false,
@@ -94,7 +155,7 @@ test('profile identity persists before hello and survives reconnects and worker 
   await vi.waitFor(() => assert.equal(first.hellos.length, 1));
   const identity = first.hellos[0].extensionInstanceId;
   assert.match(identity, /^[0-9a-f-]{36}$/);
-  assert.equal(first.hellos[0].protocolVersion, 2);
+  assert.equal(first.hellos[0].protocolVersion, CHROME_BRIDGE_PROTOCOL_VERSION);
   first.listeners.disconnect();
   first.listeners.alarm({ name: 'browser-use-reconnect' });
   await vi.waitFor(() => assert.equal(first.hellos.length, 2));
@@ -105,13 +166,13 @@ test('profile identity persists before hello and survives reconnects and worker 
   assert.notEqual(other.hellos[0].extensionInstanceId, identity);
 });
 
-test('unpacked extension has a stable id and the expected least-privilege bridge permissions', async () => {
+// The permission list itself is owned by sidepanel-assets.test.ts.
+test('unpacked extension has a stable id matching the SDK and asks for nothing optional', async () => {
   const manifest = JSON.parse(
     await readFile(join(extensionRoot, 'public/manifest.json'), 'utf8'),
   ) as {
     key: string;
     minimum_chrome_version: string;
-    permissions: string[];
     optional_permissions?: string[];
     background: { service_worker: string };
   };
@@ -125,16 +186,6 @@ test('unpacked extension has a stable id and the expected least-privilege bridge
     .join('');
   assert.equal(extensionId, CHROME_EXTENSION_ID);
   assert.equal(manifest.minimum_chrome_version, '125');
-  assert.deepEqual([...manifest.permissions].sort(), [
-    'alarms',
-    'debugger',
-    'history',
-    'nativeMessaging',
-    'sidePanel',
-    'storage',
-    'tabGroups',
-    'tabs',
-  ]);
   assert.equal(manifest.optional_permissions, undefined);
   assert.equal(
     manifest.background.service_worker,
@@ -147,11 +198,10 @@ test('unpacked extension has a stable id and the expected least-privilege bridge
   );
 });
 
-test('extension service worker enumerates user tabs over Native Messaging without exposing a debug port', async () => {
-  const source = await readFile(
-    join(extensionRoot, 'src/background/browser-use-bridge.js'),
-    'utf8',
-  );
+// Pins browser-use-bridge.js only: service-worker.ts legitimately opens a
+// WebSocket for the daemon ACP socket, so this must not widen to the bundle.
+test('browser-use-bridge.js drives Chrome over Native Messaging and CDP without a debug port or socket of its own', () => {
+  const source = bridgeSource;
   assert.match(
     source,
     new RegExp(CHROME_NATIVE_HOST_NAME.split('.').join('\\.')),
@@ -185,10 +235,7 @@ test('extension service worker enumerates user tabs over Native Messaging withou
 });
 
 test('smoke: openTabs lists eligible user tabs and derived popups need recent agent input on a controlled opener', async () => {
-  const source = await readFile(
-    join(extensionRoot, 'src/background/browser-use-bridge.js'),
-    'utf8',
-  );
+  const source = bridgeSource;
   const tabs = new Map<number, Record<string, unknown>>([
     [
       1,
@@ -230,6 +277,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   let releaseSlowCreate: (() => void) | undefined;
   let nextTabId = 5;
   let failUngroupTabId: number | undefined;
+  let failGroupUpdateOnce = false;
   let hangOverlayCleanup = false;
   let hangCursorOverlay = false;
   let nextGroupId = 100;
@@ -257,7 +305,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     TextEncoder,
     Uint8Array,
     chrome: {
-      runtime: { id: 'extension-id', connectNative: () => port },
+      runtime: { id: CHROME_EXTENSION_ID, connectNative: () => port },
       alarms: {
         get: async () => undefined,
         create: async () => undefined,
@@ -368,6 +416,13 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
           groupId: number,
           update: { title: string; color: string },
         ) {
+          if (failGroupUpdateOnce) {
+            failGroupUpdateOnce = false;
+            // Chromium's kTabStripNotEditableError, e.g. during a tab drag.
+            throw new Error(
+              'Tabs cannot be edited right now (user may be dragging a tab).',
+            );
+          }
           groupUpdates.push({ groupId, ...update });
         },
       },
@@ -389,8 +444,10 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
               title: 'Invoice missing timestamp',
             },
             {
+              // Matches the 'invoice' query so the bridge, not this mock,
+              // has to keep the chrome:// scheme out of the result.
               url: 'chrome://history/',
-              title: 'History',
+              title: 'Invoice history',
               lastVisitTime: 3_000,
             },
           ].filter(
@@ -451,7 +508,9 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     },
   });
   vm.runInContext(
-    `${source}\n;globalThis.__popupTest = { attachedTabs, inFlightDispatches, dispatch, trackDerivedTab, waitForGroups: () => groupOperation };`,
+    // trackDerivedTab persists before it groups, so the barrier must cover the
+    // in-flight dispatch as well as groupOperation (cleanupBackendState's shape).
+    `${source}\n;globalThis.__popupTest = { attachedTabs, inFlightDispatches, dispatch, trackDerivedTab, waitForGroups: () => Promise.all([...inFlightDispatches, groupOperation]).then(() => undefined) };`,
     context,
   );
   const api = (
@@ -479,6 +538,17 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     >;
 
   await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(
+    plain(postedMessages[0]),
+    {
+      type: 'hello',
+      protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+      extensionId: CHROME_EXTENSION_ID,
+      extensionInstanceId: 'test-profile',
+    },
+    'the hello frame must carry the SDK-pinned protocol version and extension id',
+  );
 
   // Installing the extension is the consent: an untouched HTTP(S) user tab is
   // already discoverable, while other URL schemes stay out of user discovery.
@@ -573,6 +643,20 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   tabs.set(3, derived);
   api.trackDerivedTab(derived);
   await api.waitForGroups();
+  assert.deepEqual(
+    (plain(postedMessages) as Array<Record<string, unknown>>).filter(
+      (message) => message.method === 'qwenBrowser.derivedTabTracked',
+    ),
+    [
+      {
+        type: 'event',
+        tabId: 3,
+        method: 'qwenBrowser.derivedTabTracked',
+        params: { openerTabId: 1 },
+      },
+    ],
+    'the backend must learn about a derived popup once it is tracked and grouped',
+  );
   assert.equal(
     (await listedDerived()).find((tab) => tab.providerTabId === 3)
       ?.derivedFromProviderTabId,
@@ -655,6 +739,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   assert.ok(overlayBootstrap);
   assertOverlayLifecycle(String(overlayBootstrap.params.source));
   assertOverlayLifecycle(String(overlayBootstrap.params.source), true);
+  assertOverlayToleratesBareDocument(String(overlayBootstrap.params.source));
 
   const responseFor = (id: string) =>
     postedMessages.find(
@@ -720,9 +805,36 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     'releasing a created tab must clear extension ownership',
   );
 
+  // Grouping is cosmetic: Chrome refuses tab-strip edits while the user drags
+  // a tab, and that must not close the tab tabs.create just opened.
+  failGroupUpdateOnce = true;
+  const groupUpdatesBeforeFault = groupUpdates.length;
+  const survivor = (await api.dispatch('tabs.create')) as {
+    providerTabId: number;
+  };
+  assert.equal(failGroupUpdateOnce, false, 'the group title fault must fire');
+  assert.ok(
+    tabs.has(survivor.providerTabId),
+    'a failed tab-group edit must not close the tab that was just created',
+  );
+  assert.ok(api.attachedTabs.has(survivor.providerTabId));
+  assert.ok(
+    (plain(sessionState.agentOwnedTabs) as number[]).includes(
+      survivor.providerTabId,
+    ),
+    'ownership of the surviving tab must be persisted',
+  );
+  assert.equal(groupUpdates.length, groupUpdatesBeforeFault);
+
   const disposable = (await api.dispatch('tabs.create')) as {
     providerTabId: number;
   };
+  assert.ok(
+    groupUpdates
+      .slice(groupUpdatesBeforeFault)
+      .some((update) => update.title === 'Research run'),
+    'the next created tab must re-apply the session title to the group',
+  );
   const disposableTab = tabs.get(disposable.providerTabId);
   assert.ok(disposableTab);
   disposableTab.url = 'data:text/plain,disposable';
@@ -732,6 +844,8 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     false,
     'cleanup must close an owned tab even after it navigates off HTTP(S)',
   );
+  await api.dispatch('tabs.close', { tabId: survivor.providerTabId });
+  assert.equal(tabs.has(survivor.providerTabId), false);
 
   assert.deepEqual(
     plain(
@@ -777,7 +891,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     chunkedRequest.subarray(splitAt),
   ].entries()) {
     listeners['nativeMessage']?.({
-      type: 'qwen.browser.chunk',
+      type: NATIVE_MESSAGE_CHUNK_TYPE,
       id: 'chunk-1',
       index,
       total: 2,
@@ -819,6 +933,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     ),
   );
   hangOverlayCleanup = true;
+  assert.equal(sessionState.sessionName, 'Research run');
   listeners['nativeDisconnect']?.();
   releaseSlowCreate();
   await waitFor(() => detachedTabIds.length === 1);
@@ -829,9 +944,8 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     false,
     'a tab created after disconnect must not regain Browser Use ownership',
   );
-  assert.equal(
-    tabs.has(6),
-    false,
+  await waitFor(
+    () => !tabs.has(slowCreatedTabId),
     'a tab created after disconnect must be closed instead of orphaned',
   );
   assert.equal(
@@ -848,6 +962,11 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   assert.deepEqual(plain(sessionState.agentOwnedTabs), []);
   assert.deepEqual(plain(sessionState.derivedTabParents), []);
   assert.deepEqual(plain(sessionState.managedGroupIdsByWindow), []);
+  assert.equal(
+    sessionState.sessionName,
+    'Qwen Browser',
+    'disconnect must reset the session name so a new session does not inherit it',
+  );
   assert.equal(api.inFlightDispatches.size, 0);
 });
 
@@ -904,28 +1023,37 @@ function assertOverlayLifecycle(source: string, preplant = false): void {
   assert.equal(planted?.outerHTML, plantedHtml);
   const firstRoot = ownedRoot();
   assert.ok(firstRoot);
+  assertOverlayHostVisible(firstRoot);
   assert.equal(firstRoot.style.transform, 'translate3d(12px, 34px, 0)');
   assert.equal(firstRoot.style.pointerEvents, 'none');
   assert.equal(firstRoot.getAttribute('aria-hidden'), 'true');
-  assert.equal(
+  const pressed = () =>
     firstRoot.shadowRoot
       ?.querySelector('.shell')
-      ?.classList.contains('pressed'),
-    true,
-  );
+      ?.classList.contains('pressed');
+  assert.equal(pressed(), true);
   assert.equal(
     firstRoot.style.all,
     '',
     'the inline reset expands into hundreds of serialized CSS declarations',
   );
   assert.ok((firstRoot.getAttribute('style')?.length ?? 0) < 500);
+  const overlayStyle =
+    firstRoot.shadowRoot?.querySelector('style')?.textContent ?? '';
+  assert.ok(overlayStyle.includes(':host{all:initial}'));
   assert.ok(
-    firstRoot.shadowRoot
-      ?.querySelector('style')
-      ?.textContent?.includes(':host{all:initial}'),
+    overlayStyle.includes(
+      '.shell.pressed .cursor,.shell.pressed .label{background:#d93025}',
+    ),
+    'a press must recolour the cursor and label so the user sees the click',
+  );
+  assert.ok(
+    overlayStyle.includes('.shell.pressed .ring{opacity:1;transform:scale(1)}'),
+    'a press must reveal the click ring',
   );
 
   controller.move(56, 78, false);
+  assert.equal(pressed(), false, 'a release must clear the pressed state');
   assert.equal(timers.size, 1, 'new input must reset the expiry timer');
   const expire = timers.get(nextTimerId);
   assert.ok(expire);
@@ -945,6 +1073,7 @@ function assertOverlayLifecycle(source: string, preplant = false): void {
     firstRoot,
     'later input must remount the overlay',
   );
+  assertOverlayHostVisible(secondRoot);
   assert.equal(secondRoot.style.transform, 'translate3d(90px, 12px, 0)');
   controller.destroy();
   assert.equal(timers.size, 0);
@@ -955,10 +1084,55 @@ function assertOverlayLifecycle(source: string, preplant = false): void {
   );
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
+// The host is created display:none and must be shown, viewport-fixed (CDP
+// coordinates are viewport-relative) and above every page stacking context.
+function assertOverlayHostVisible(root: HTMLDivElement): void {
+  assert.equal(root.style.display, 'block', 'input must show the overlay host');
+  assert.equal(root.style.position, 'fixed');
+  assert.equal(root.style.zIndex, '2147483647');
+}
+
+function assertOverlayToleratesBareDocument(source: string): void {
+  const bareDocument = document.implementation.createHTMLDocument('Bare');
+  bareDocument.removeChild(bareDocument.documentElement);
+  assert.equal(bareDocument.documentElement, null);
+  // Only the doctype node remains; nothing may be added beside it.
+  const bareChildCount = bareDocument.childNodes.length;
+  const timers: Array<() => void> = [];
+  const context = vm.createContext({
+    document: bareDocument,
+    setTimeout(callback: () => void) {
+      timers.push(callback);
+      return timers.length;
+    },
+    clearTimeout() {},
+  });
+  vm.runInContext(source, context);
+  const controller = vm.runInContext(
+    'globalThis.__qwenBrowserOverlay',
+    context,
+  ) as { move(x: number, y: number, pressed: boolean): void; destroy(): void };
+  assert.doesNotThrow(
+    () => controller.move(1, 2, true),
+    'a document without a root element must not break the bootstrap',
+  );
+  assert.equal(
+    bareDocument.childNodes.length,
+    bareChildCount,
+    'nothing may be mounted into a document without a root element',
+  );
+  assert.equal(bareDocument.documentElement, null);
+  assert.equal(timers.length, 0);
+  assert.doesNotThrow(() => controller.destroy());
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  message = 'Timed out waiting for Browser Use bridge cleanup',
+): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error('Timed out waiting for Browser Use bridge cleanup');
+  throw new Error(message);
 }

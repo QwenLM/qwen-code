@@ -26,7 +26,9 @@ Native Host 继续只转发消息。这些标识用于区分兼容的实例，�
 身份运行的其他进程。
 
 发现连接时，不兼容的 Qwen 扩展不会阻止兼容 profile 在正常连接超时窗口内接入。
-如果没有兼容连接，错误会明确指出需要更新扩展还是 Qwen Code。选定 profile 后，
+如果没有兼容连接，请求以 `EXTENSION_VERSION_MISMATCH` 失败，其消息会明确指出
+需要更新扩展还是 Qwen Code。浏览器发现会直接报告该错误，而不是返回空的浏览器
+列表；只有普通的 `BROWSER_DISCONNECTED` 才会被报告为空列表。选定 profile 后，
 只有该 profile 断线后的握手可以提供这一诊断，其他 profile 不能覆盖它。
 兼容连接建立或停止 transport 时会清除诊断。
 
@@ -39,7 +41,8 @@ Native Host 继续只转发消息。这些标识用于区分兼容的实例，�
 
 连接断开时，按照现有生命周期让该连接的待完成请求失败，并使标签页句柄失效，
 但保留选中的实例身份。只有同一实例可以重连；原实例不在线时，其他已连接 profile
-也不能接管。如果选中的 profile 未返回，请求超时后报告 `BROWSER_DISCONNECTED`。
+也不能接管。如果选中的 profile 未返回，请求超时后报告 `BROWSER_DISCONNECTED`；
+如果它以不兼容的协议版本返回，则报告 `EXTENSION_VERSION_MISMATCH`。
 重连后可以重新发现并认领已有页面；旧句柄不会透明恢复。
 
 停止 transport 会关闭活跃连接和待命连接，并清除选择。新的 transport 生命周期

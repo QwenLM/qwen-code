@@ -6,7 +6,11 @@
 
 import { z } from 'zod';
 
-import { SNAPSHOT_REF_PATTERN, type LocatorStep } from './primitives.js';
+import {
+  FINALIZE_TAB_STATUSES,
+  SNAPSHOT_REF_PATTERN,
+  type LocatorStep,
+} from './primitives.js';
 import {
   MAX_SCREENSHOT_EDGE,
   MAX_SCREENSHOT_PIXELS,
@@ -273,7 +277,7 @@ export const commandSchemas = {
           z
             .object({
               tabId: id,
-              status: z.enum(['handoff', 'deliverable']),
+              status: z.enum(FINALIZE_TAB_STATUSES),
             })
             .strict(),
         )

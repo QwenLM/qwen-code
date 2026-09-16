@@ -8,7 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const installer = vi.hoisted(() => ({
   extensionInstalled: vi.fn(async () => true),
-  install: vi.fn(async () => undefined),
+  install: vi.fn(async () => ({
+    launcherPath: '/tmp/qwen-home/.qwen/browser-use/native-host.sh',
+    manifestPaths: [] as string[],
+    installedPaths: [] as string[],
+    skippedForeignPaths: [] as string[],
+  })),
   home: vi.fn(() => '/tmp/qwen-home'),
 }));
 
@@ -35,8 +40,13 @@ describe('createBrowserBackend', () => {
   it('checks extension installation before registering the Native Host', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
     vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
 
     await createBrowserBackend();
+
+    expect(stderr).not.toHaveBeenCalled();
 
     expect(installer.extensionInstalled).toHaveBeenCalledWith({
       homeDir: '/tmp/qwen-home',
@@ -133,6 +143,30 @@ describe('createBrowserBackend', () => {
 
     await expect(createBrowserBackend()).rejects.toThrow('read failed');
     expect(installer.install).not.toHaveBeenCalled();
+  });
+
+  it('warns about a skipped foreign manifest without aborting', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    const foreign =
+      '/tmp/qwen-home/.config/google-chrome/NativeMessagingHosts/com.qwen.browser.json';
+    installer.install.mockResolvedValue({
+      launcherPath: '/tmp/qwen-home/.qwen/browser-use/native-host.sh',
+      manifestPaths: [foreign],
+      installedPaths: ['/tmp/qwen-home/.qwen/browser-use/native-host.sh'],
+      skippedForeignPaths: [foreign],
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    await expect(createBrowserBackend()).resolves.toBeDefined();
+
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(stderr.mock.calls[0]![0]).toContain(foreign);
+    expect(stderr.mock.calls[0]![0]).toContain(
+      'another program owns the Chrome Native Messaging manifest',
+    );
   });
 
   it('does not install when a managed socket is configured', async () => {

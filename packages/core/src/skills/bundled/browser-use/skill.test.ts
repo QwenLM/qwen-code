@@ -13,6 +13,12 @@ import { SkillManager } from '../../skill-manager.js';
 
 const skillUrl = new URL('./SKILL.md', import.meta.url);
 const skill = fs.readFileSync(skillUrl, 'utf8');
+const nodeReplPackage = JSON.parse(
+  fs.readFileSync(
+    new URL('../../../../../node-repl/package.json', import.meta.url),
+    'utf8',
+  ),
+) as { version: string };
 
 describe('bundled browser-use skill', () => {
   it('is discovered without a Qwen extension', async () => {
@@ -30,7 +36,10 @@ describe('bundled browser-use skill', () => {
   it('loads its bundled runtime through the generic Node REPL', () => {
     expect(skill).toContain('If `node_repl` is unavailable');
     expect(skill).toContain('qwen mcp add --scope user node-repl');
-    expect(skill).toContain('@qwen-code/node-repl-mcp@latest');
+    expect(skill).toContain(
+      `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
+    );
+    expect(skill).not.toContain('@qwen-code/node-repl-mcp@latest');
     expect(skill).toContain('node_repl_add_node_module_dir');
     expect(skill).toContain('<skill-base>/runtime/node_modules');
     expect(skill).toContain('node_modules/playwright-core/package.json');
@@ -38,6 +47,23 @@ describe('bundled browser-use skill', () => {
     expect(skill).not.toContain('<extension-root>');
     expect(skill).not.toContain('qwen extensions install');
     expect(skill).not.toContain('npm install --no-save');
+  });
+
+  it('pins the Node REPL version that carries screenshot metadata', () => {
+    const pin = skill.match(
+      /^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@(\S+)$/m,
+    )?.[1];
+    expect(pin).toBe(nodeReplPackage.version);
+    expect(skill.replace(/\s+/g, ' ')).toContain(
+      `Screenshot metadata requires \`@qwen-code/node-repl-mcp\` ${nodeReplPackage.version} or later`,
+    );
+  });
+
+  it('names where the Qwen Chrome extension comes from', () => {
+    expect(skill).toContain('no store listing yet');
+    expect(skill).toContain('`packages/chrome-extension`');
+    expect(skill).toContain('`dist/extension`');
+    expect(skill).toContain('Load unpacked');
   });
 
   it('uses the current Browser SDK contract', () => {

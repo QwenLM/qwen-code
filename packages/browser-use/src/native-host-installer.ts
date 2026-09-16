@@ -99,7 +99,7 @@ export async function isChromeExtensionInstalled(
 
 export async function installChromeNativeHost(
   options: NativeHostInstallOptions,
-): Promise<NativeHostInstallResult> {
+): Promise<NativeHostInstallResult & { installedPaths: string[] }> {
   const resolved = resolveOptions(options);
   await access(resolved.nativeHostPath);
   const existingLauncher = await readExistingFile(resolved.launcherPath);
@@ -141,6 +141,7 @@ export async function installChromeNativeHost(
       null,
       2,
     ) + '\n';
+  const installedPaths: string[] = [];
   const skippedForeignPaths: string[] = [];
   for (const manifestPath of resolved.manifestPaths) {
     const existing = await readExistingFile(manifestPath);
@@ -159,10 +160,14 @@ export async function installChromeNativeHost(
     }
     await mkdir(dirname(manifestPath), { recursive: true });
     await atomicWrite(manifestPath, manifest, 0o600, existing);
+    installedPaths.push(manifestPath);
   }
+  // Same order as statusChromeNativeHost: manifests first, then the launcher.
+  installedPaths.push(resolved.launcherPath);
   return {
     launcherPath: resolved.launcherPath,
     manifestPaths: resolved.manifestPaths,
+    installedPaths,
     skippedForeignPaths,
   };
 }
@@ -229,7 +234,8 @@ export async function statusChromeNativeHost(
 export function nativeHostInstallHome(
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  return resolve(environment['QWEN_BROWSER_USE_INSTALL_HOME'] ?? homedir());
+  const configured = environment['QWEN_BROWSER_USE_INSTALL_HOME']?.trim();
+  return resolve(configured ? configured : homedir());
 }
 
 function resolveOptions(options: NativeHostInstallOptions): {

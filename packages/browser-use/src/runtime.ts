@@ -43,7 +43,21 @@ export async function createBrowserBackend(): Promise<BrowserBackend> {
         setTimeout(resolve, Math.min(1_000, remainingMs)),
       );
     }
-    await installChromeNativeHost(options);
+    const installed = await installChromeNativeHost(options);
+    if (installed.skippedForeignPaths.length > 0) {
+      // A foreign manifest under a browser root the user does not run is
+      // harmless, so this is a warning rather than a failure; but when it is
+      // the browser in use, Chrome keeps launching the other program's host
+      // and the bridge only ever reports a generic connection timeout.
+      process.stderr.write(
+        'Browser Use: another program owns the Chrome Native Messaging ' +
+          'manifest at ' +
+          installed.skippedForeignPaths.join(', ') +
+          '. It was left unchanged; if that browser is the one you use, ' +
+          'Chrome will launch that host instead of Qwen Code. ' +
+          'Remove or move the file, then retry Browser Use.\n',
+      );
+    }
   }
   return new PlaywrightRuntime({
     bridge: new ChromeExtensionTransport(),

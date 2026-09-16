@@ -168,6 +168,10 @@ try {
         event: 'download',
         timeoutMs: 5_000,
       });
+      // The waiter is only awaited after the click succeeds; if downloadMedia
+      // rejects first, this keeps the waiter's own rejection from surfacing
+      // as an unhandled rejection while the later await still reports it.
+      mediaDownload.catch(() => undefined);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
       await runtime.dispatch('locator.downloadMedia', {
         tabId: claimed['id'],

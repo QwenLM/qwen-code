@@ -255,7 +255,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
         (await socketAcceptsConnections(this.socketPath));
       const message = addressInUse
         ? `Chrome bridge socket is already in use: ${this.socketPath}`
-        : 'Could not start the local Chrome bridge';
+        : `Could not start the local Chrome bridge: ${errorMessage(error)}`;
       const runtimeError = new BrowserRuntimeError(
         busy ? 'BROWSER_USE_BUSY' : 'TRANSPORT_UNAVAILABLE',
         message,
@@ -290,7 +290,10 @@ export class ChromeExtensionTransport implements ChromeBridge {
                 message.extensionInstanceId ===
                   this.selectedExtensionInstanceId)
             ) {
-              this.incompatibleExtensionError = disconnectedError(
+              // Not BROWSER_DISCONNECTED: discovery maps that code to an
+              // empty browser list, which would hide the update guidance.
+              this.incompatibleExtensionError = new BrowserRuntimeError(
+                'EXTENSION_VERSION_MISMATCH',
                 message.protocolVersion < CHROME_BRIDGE_PROTOCOL_VERSION
                   ? 'The Qwen Code Chrome extension is out of date. Update or reload it at chrome://extensions to match this Qwen Code version, then retry Browser Use.'
                   : 'This Qwen Code version is older than the Chrome extension. Update Qwen Code to match the installed extension, then retry Browser Use.',
@@ -700,6 +703,14 @@ function disconnectedError(
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return isObject(error) &&
+    typeof error.message === 'string' &&
+    error.message !== ''
+    ? error.message
+    : String(error);
 }
 
 async function closeServer(server: Server): Promise<void> {

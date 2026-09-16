@@ -2795,6 +2795,51 @@ describe('PlaywrightRuntime command contracts', () => {
     );
   });
 
+  it('rejects an unknown kept tab id before finalization mutates Chrome', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [{ tabId: 'tab-not-registered', status: 'deliverable' }],
+      }),
+    ).rejects.toMatchObject({ code: 'STALE_TAB' });
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+  });
+
+  it('rejects a kept tab whose page already closed before finalization mutates Chrome', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const closeHandler = fixture.page.on.mock.calls.find(
+      ([name]) => name === 'close',
+    )?.[1];
+    expect(closeHandler).toBeDefined();
+    closeHandler?.();
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [{ tabId: tab.id, status: 'deliverable' }],
+      }),
+    ).rejects.toMatchObject({ code: 'STALE_TAB' });
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+  });
+
   it('rejects an invalid keep set without cleanup even when synchronization fails', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);

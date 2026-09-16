@@ -16,9 +16,11 @@ the SDK checks for it before automatically registering the local Native
 Messaging host. If it is not detected immediately, the SDK retries for up to
 30 seconds so Chrome can finish saving a new installation. If setup still
 cannot detect it, tell a user who just installed it to wait a few seconds and
-retry; if it is not installed, direct them to `chrome://extensions`
-(Developer mode → Load unpacked). Then stop. Do not run the Native Host
-installer to bypass this check.
+retry; if it is not installed, tell them there is no store listing yet: build
+the extension from `packages/chrome-extension` in the Qwen Code repository (its
+README) and load the built `dist/extension` directory through
+`chrome://extensions` (Developer mode → Load unpacked). Then stop. Do not run
+the Native Host installer to bypass this check.
 
 Installing the Chrome extension opts into this automatic local setup. Its
 Native Host files persist after Qwen exits. The user can inspect or remove
@@ -29,11 +31,12 @@ on a later Browser Use initialization.
 If `node_repl` is unavailable, configure it with:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@latest
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
 ```
 
 Then tell the user to restart Qwen Code and stop. Do not start a separate
-Browser Use MCP server.
+Browser Use MCP server. Screenshot metadata requires `@qwen-code/node-repl-mcp`
+0.1.6 or later, so keep this exact pin.
 
 Qwen reports the absolute `Base directory for this skill` when loading this
 file. Use that directory as `<skill-base>`. Confirm that
