@@ -884,6 +884,22 @@ describe('splitCompoundCommand', () => {
     ).toEqual(['echo hi # note <<EOF', 'rm -rf /tmp/x']);
   });
 
+  // A marker line ending in `\<newline>` is not finished: bash deletes the pair
+  // and continues the logical line, so the body does not start at the next
+  // physical line — that line is still command text bash runs
+  // (`bash --noprofile --norc -c $'echo hi && cat <<EOF \\\n && touch m\nbody\nEOF'`
+  // creates `m`). The projection cannot prove where the body starts there, so it
+  // returns the unstripped text and every line keeps its own segment.
+  it('does not strip when the heredoc marker line is continued', async () => {
+    expect(
+      splitCompoundCommand(
+        stripHeredocBodies(
+          'echo hi && cat <<EOF \\\n && rm -rf /tmp/x\nbody\nEOF',
+        ),
+      ),
+    ).toEqual(['echo hi', 'cat <<EOF \\', 'rm -rf /tmp/x', 'body', 'EOF']);
+  });
+
   // The comment ends at the *physical* newline, and that newline stays a
   // boundary: `bash -xc $'echo hi # c\nrm -rf /tmp/x'` traces both commands, so
   // the `rm` must keep its own segment and its own rule check.
@@ -2958,6 +2974,26 @@ describe('PermissionManager', () => {
           command: 'xargs rm <<EOF\n# hi ; rm -rf /tmp/x\nEOF',
         }),
       ).toBe('ask');
+    });
+
+    // Pinned at evaluate level: bash runs the continued `&& rm -rf …` line, so
+    // a projection that starts the body at the first physical line hides a
+    // command bash executes from every Bash rule, and a `Bash(*)` allow then
+    // covers the whole folded text. Over-splitting keeps the deny alive.
+    it('heredoc marker continued onto the next line: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(*)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hi && cat <<EOF \\\n && rm -rf /tmp/x\nbody\nEOF',
+        }),
+      ).toBe('deny');
     });
 
     // A commented-out `<<EOF` opens no heredoc, so the following line is a

@@ -2187,6 +2187,9 @@ export function stripHeredocBodies(command: string): string {
   const lines = command.split('\n');
   const kept: string[] = [];
   const pendingDelimiters: string[] = [];
+  // Whether a line that registered a delimiter was itself continued onto the
+  // next physical line. See the fail-closed note below.
+  let continuedMarker = false;
 
   for (const line of lines) {
     if (pendingDelimiters.length > 0) {
@@ -2197,7 +2200,11 @@ export function stripHeredocBodies(command: string): string {
     }
 
     kept.push(line);
-    pendingDelimiters.push(...getHeredocDelimiters(line));
+    const registered = getHeredocDelimiters(line);
+    if (registered.length > 0 && endsWithLineContinuation(line)) {
+      continuedMarker = true;
+    }
+    pendingDelimiters.push(...registered);
   }
 
   // A delimiter that is never satisfied means the `<<` that registered it was
@@ -2205,11 +2212,36 @@ export function stripHeredocBodies(command: string): string {
   // construct this scan does not model. Deleting every following line on that
   // guess is fail-open (the dropped lines never reach their own rule check), so
   // fall back to the unstripped text and let the splitter see the whole command.
-  if (pendingDelimiters.length > 0) {
+  //
+  // The same fallback covers a marker line that ends in an odd number of
+  // backslashes: bash deletes the `\<newline>` pair, so the logical line — and
+  // with it the start of the body — continues past the next physical line, and
+  // that line is a command bash really runs. Taking the body from the first
+  // physical line deleted it, and with the Bash-rule paths reading the
+  // projection a configured deny stopped applying
+  // (`bash --noprofile --norc -c $'echo hi && cat <<EOF \\\n && touch m\nbody\nEOF'`
+  // creates `m`). Over-splitting the unstripped text is the documented bias of
+  // this projection, so refuse it rather than guess where the body starts.
+  if (pendingDelimiters.length > 0 || continuedMarker) {
     return command;
   }
 
   return kept.join('\n');
+}
+
+/**
+ * Whether `line` ends in an odd number of backslashes, so the newline after it
+ * is escaped and bash continues the logical line onto the next physical one.
+ */
+function endsWithLineContinuation(line: string): boolean {
+  let backslashes = 0;
+  while (
+    backslashes < line.length &&
+    line[line.length - 1 - backslashes] === '\\'
+  ) {
+    backslashes++;
+  }
+  return backslashes % 2 === 1;
 }
 
 function getHeredocDelimiters(line: string): string[] {
