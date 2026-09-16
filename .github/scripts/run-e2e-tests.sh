@@ -35,8 +35,10 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     # The resolver falls back to a job-private directory when a root-owned
     # leftover the heal step cannot repair makes the shared lock dir
     # unwritable (#12006); without it every `exec` below dies on EACCES
-    # before a test runs.
-    ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh)"
+    # before a test runs. Passing the three lock names keeps an unwritable
+    # lock from another family (sdk-java-tests.lock) from vetoing a shared
+    # dir that is usable for this leg's own files.
+    ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock docker-sandbox-build.lock "docker-sandbox-build-e2e-${GITHUB_SHA}.lock")"
     # Host daemon lock, shared for the whole step and never
     # upgraded: it only keeps the age-based prune (which takes it
     # exclusively, non-blocking) off a daemon with Docker work in

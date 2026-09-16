@@ -327,7 +327,13 @@ jobs:
         if: |-
           ${{ always() && matrix.sandbox == 'sandbox:docker' && runner.environment == 'self-hosted' }}
         run: |-
-          ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh)"
+          # always() also runs this step when Checkout failed and the
+          # resolver is not on disk; aborting at 127 there would cost the
+          # host its prune, so fall back to the job-private dir inline.
+          ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)" || {
+            ci_lock_dir="${RUNNER_TEMP:-/tmp}/qwen-code-ci-locks"
+            mkdir -p "${ci_lock_dir}"
+          }
           exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"
           if flock --nonblock 9; then
             docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' 9>&- || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
