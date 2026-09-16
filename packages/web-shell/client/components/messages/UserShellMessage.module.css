@@ -13,9 +13,9 @@
   max-height: 200px;
 }
 
-.compact {
-  overflow: hidden;
+:global([data-transcript-render-mode='document']) .message {
   max-height: none;
+  overflow: visible;
 }
 
 .header {
@@ -57,10 +57,4 @@
   line-height: 1.45;
   overflow-x: auto;
   white-space: pre-wrap;
-}
-
-.compactHint {
-  color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1.35;
 }

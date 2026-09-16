@@ -6,20 +6,26 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
+import type { DOMElement } from 'ink';
 import { useMemo, useRef } from 'react';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
-import { ToolMessage } from './ToolMessage.js';
+import { TOOL_ARGS_INLINE_MAX_LINES, ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import {
   CompactToolGroupDisplay,
   estimateCompactToolGroupHeight,
+  getOverallStatus,
   isCollapsibleTool,
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { useShowToolCallArgs } from '../../hooks/use-show-tool-call-args.js';
 import { ICON } from '../../constants.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
+import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
 
 function isAgentWithPendingConfirmation(
   rd: IndividualToolCallDisplay['resultDisplay'],
@@ -43,6 +49,10 @@ function isRunningAgent(
     (rd as AgentResultDisplay).type === 'task_execution' &&
     (rd as AgentResultDisplay).status === 'running'
   );
+}
+
+function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
+  return Boolean(tool.images?.length || tool.omittedImageCount);
 }
 
 /**
@@ -150,14 +160,64 @@ interface ToolGroupMessageProps {
   memoryReadCount?: number;
   isUserInitiated?: boolean;
   /**
-   * Transcript full-detail mode (Ctrl+O). When true, force `forceExpandAll`
+   * Full-detail mode (Ctrl+O). When true, force `forceExpandAll`
    * (skip the type-based partition so every tool renders individually), pass
    * `forceShowResult=true` to each `ToolMessage`, and lift the per-tool
    * terminal-height truncation. Default false (main view keeps the #5661
    * type-based partition baseline).
    */
   fullDetail?: boolean;
+  /** Render only status, tool name/count, elapsed time, and an expand hint. */
+  hideDetails?: boolean;
+  expandHint?: string;
+  summaryRef?: React.Ref<DOMElement>;
 }
+
+const HiddenToolDetailsSummary: React.FC<{
+  toolCalls: IndividualToolCallDisplay[];
+  contentWidth: number;
+  expandHint?: string;
+  summaryRef?: React.Ref<DOMElement>;
+}> = ({ toolCalls, contentWidth, expandHint, summaryRef }) => {
+  if (toolCalls.length === 0) return null;
+
+  const status = getOverallStatus(toolCalls);
+  const activeTool =
+    toolCalls.find((tool) => tool.status === ToolCallStatus.Confirming) ??
+    toolCalls.find((tool) => tool.status === ToolCallStatus.Executing) ??
+    toolCalls.find((tool) => tool.status === ToolCallStatus.Pending) ??
+    toolCalls[toolCalls.length - 1];
+  const names = Array.from(
+    new Set(toolCalls.map((tool) => localizeToolDisplayName(tool.name))),
+  );
+  const label =
+    toolCalls.length === 1
+      ? names[0]
+      : names.length === 1
+        ? `${names[0]} × ${toolCalls.length}`
+        : `${names.join(', ')} · ${toolCalls.length} tool calls`;
+
+  return (
+    <Box ref={summaryRef} flexDirection="row" width={contentWidth}>
+      <ToolStatusIndicator status={status} name={activeTool.name} />
+      <Box flexGrow={1}>
+        <Text bold wrap="truncate-end">
+          {label}
+          {expandHint && (
+            <Text bold={false} dimColor>
+              {' '}
+              · {expandHint}
+            </Text>
+          )}
+        </Text>
+      </Box>
+      <ToolElapsedTime
+        status={status}
+        executionStartTime={activeTool.executionStartTime}
+      />
+    </Box>
+  );
+};
 
 // Main component maps the tools using ToolMessage
 export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
@@ -172,8 +232,12 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   memoryReadCount,
   isUserInitiated,
   fullDetail = false,
+  hideDetails = false,
+  expandHint,
+  summaryRef,
 }) => {
   const config = useConfig();
+  const showToolCallArgs = useShowToolCallArgs();
 
   const hasConfirmingTool = toolCalls.some(
     (t) => t.status === ToolCallStatus.Confirming,
@@ -218,6 +282,26 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
           )
         : toolCalls,
     [isPending, toolCalls],
+  );
+
+  // `ui.showToolCallArgs` may only tear down the compact partition when this
+  // group can actually pay for it with an args row — otherwise a `Read 3 files`
+  // fold expands into three rows carrying nothing, a noisier transcript that
+  // reads as "these tools were called with no arguments".
+  //
+  // The live path is where that bites: a batch invoked with `{}`. Daemon-built
+  // groups carry no args across the boundary either (see
+  // `daemon-tui-adapter.ts`), but they never reach this fold anyway —
+  // `isCollapsibleTool` keys on display names ('ReadFile') while the adapter
+  // fills `name` from the ACP kind ('read_file'), so an attached session is
+  // already one row per call, with or without this setting.
+  const hasRenderableToolCallArgs = useMemo(
+    () =>
+      showToolCallArgs &&
+      inlineToolCalls.some(
+        (t) => t.args != null && Object.keys(t.args).length > 0,
+      ),
+    [showToolCallArgs, inlineToolCalls],
   );
 
   // Determine which subagent tools currently have a pending confirmation.
@@ -268,6 +352,18 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
 
+  if (hideDetails) {
+    if (isPending && inlineToolCalls.length === 0) return null;
+    return (
+      <HiddenToolDetailsSummary
+        toolCalls={inlineToolCalls}
+        contentWidth={contentWidth}
+        expandHint={expandHint}
+        summaryRef={summaryRef}
+      />
+    );
+  }
+
   // Pure parallel agent group (≥2 agents, nothing else).
   //
   // Render through the SAME `inlineToolCalls` hand-off as every other group:
@@ -283,7 +379,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // header's "N · done/N" honest, and `availableTerminalHeight` is a hard cap
   // backstop for degenerate cases (many agents finishing at once).
   //
-  // Skipped in transcript full-detail mode (fullDetail) so every agent
+  // Skipped in full-detail mode (fullDetail) so every agent
   // falls through to its own full ToolMessage instead of the dense panel.
   if (
     !fullDetail &&
@@ -332,11 +428,14 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Memory-only groups get their own compact rendering with read/write
   // counts. Check BEFORE the partition logic so they aren't routed through
-  // the collapsible/non-collapsible split. Skipped in transcript full-detail
-  // mode (fullDetail) so each memory op renders as its own full ToolMessage
-  // rather than collapsing to the "Recalled/Wrote N memories" badge.
+  // the collapsible/non-collapsible split. Skipped in full-detail
+  // mode (fullDetail), and under `ui.showToolCallArgs`, so each memory op
+  // renders as its own full ToolMessage — otherwise "Wrote 1 memory" would
+  // hide the very parameters the setting exists to surface — rather than
+  // collapsing to the "Recalled/Wrote N memories" badge.
   const allMemOpsComplete =
     !fullDetail &&
+    !hasRenderableToolCallArgs &&
     isMemoryOnlyGroup &&
     !hasErrorTool &&
     toolCalls.every((t) => t.status === ToolCallStatus.Success);
@@ -367,12 +466,15 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Force-expand ALL tools individually when the user must interact or
   // must see full details: confirmation prompts, errors, user-initiated
-  // batches, focused shells, terminal subagents. Transcript full-detail
+  // batches, focused shells, terminal subagents. Full-detail
   // mode (fullDetail) also forces it so every tool renders individually
-  // instead of collapsing read/search into a partition summary.
+  // instead of collapsing read/search into a partition summary, as does
+  // `ui.showToolCallArgs` — an args row is meaningless on a batch that
+  // collapsed its calls into a single "Read 3 files" line.
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const forceExpandAll =
     fullDetail ||
+    hasRenderableToolCallArgs ||
     hasConfirmingTool ||
     hasSubagentPendingConfirmation ||
     hasErrorTool ||
@@ -388,13 +490,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     ? []
     : inlineToolCalls.filter(
         (t) =>
-          isCollapsibleTool(t.name) && t.status !== ToolCallStatus.Canceled,
+          isCollapsibleTool(t.name) &&
+          t.status !== ToolCallStatus.Canceled &&
+          !hasInlineImageOutput(t),
       );
   const nonCollapsibleTools = forceExpandAll
     ? inlineToolCalls
     : inlineToolCalls.filter(
         (t) =>
-          !isCollapsibleTool(t.name) || t.status === ToolCallStatus.Canceled,
+          !isCollapsibleTool(t.name) ||
+          t.status === ToolCallStatus.Canceled ||
+          hasInlineImageOutput(t),
       );
 
   // Memory badge — shared between all-collapsible and mixed paths.
@@ -439,8 +545,23 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     contentWidth,
   );
   const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
+  // `ui.showToolCallArgs` draws an args row under each tool header. That row is
+  // bounded to `TOOL_ARGS_INLINE_MAX_LINES` wrapped rows (ToolMessage.tsx), but
+  // it renders outside `availableTerminalHeightPerToolMessage` (which only
+  // reaches the result renderers) and outside `countOneLineToolCalls` (which
+  // still counts a result-less tool as one line). Reserve it here, the way
+  // `collapsibleSummaryHeight` is reserved, so the per-tool result budget below
+  // does not hand out height the args rows have already spent.
+  const inlineArgsHeight = showToolCallArgs
+    ? nonCollapsibleTools.filter(
+        (t) => t.args != null && Object.keys(t.args).length > 0,
+      ).length * TOOL_ARGS_INLINE_MAX_LINES
+    : 0;
   const staticHeight =
-    /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;
+    /* marginBottom */ 1 +
+    collapsibleSummaryHeight +
+    memoryBadgeHeight +
+    inlineArgsHeight;
   // ToolConfirmationMessage still has its own padding={1}, so it needs
   // the -2 reservation. ToolMessage no longer pads itself (paddingX was
   // removed in the icon-alignment PR), so it gets the full contentWidth.
@@ -448,13 +569,16 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   let countToolCallsWithResults = 0;
   for (const tool of nonCollapsibleTools) {
-    if (tool.resultDisplay !== undefined && tool.resultDisplay !== '') {
+    if (
+      (tool.resultDisplay !== undefined && tool.resultDisplay !== '') ||
+      hasInlineImageOutput(tool)
+    ) {
       countToolCallsWithResults++;
     }
   }
   const countOneLineToolCalls =
     nonCollapsibleTools.length - countToolCallsWithResults;
-  // In transcript full-detail mode, lift the per-tool height truncation so
+  // In full-detail mode, lift the per-tool height truncation so
   // each tool's output renders in full (combined with forceShowResult below).
   const availableTerminalHeightPerToolMessage = fullDetail
     ? undefined
@@ -502,6 +626,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
                 fullDetail={fullDetail}
+                showToolCallArgs={showToolCallArgs}
                 forceShowResult={
                   fullDetail ||
                   isUserInitiated ||

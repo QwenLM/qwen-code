@@ -13,7 +13,12 @@
  */
 
 // Exporter packages sdk-node eagerly require()s: the three OTLP signals across
-// grpc/http/proto transports, plus zipkin and prometheus.
+// grpc/http/proto transports, plus zipkin and prometheus. From sdk-node 0.221
+// on, the env auto-configuration helpers were extracted into
+// `@opentelemetry/configuration`, `@opentelemetry/otlp-exporter-base`, and
+// `@opentelemetry/otlp-grpc-exporter-base`, which sdk-node's utils/start
+// modules now require eagerly; the grpc one pulls @grpc/grpc-js and
+// protobufjs, so all three need the same stub treatment.
 export const SDK_NODE_STUBBED_EXPORTERS = new RegExp(
   '^@opentelemetry/(' +
     [
@@ -22,6 +27,9 @@ export const SDK_NODE_STUBBED_EXPORTERS = new RegExp(
       'exporter-metrics-otlp-(grpc|http|proto)',
       'exporter-zipkin',
       'exporter-prometheus',
+      'configuration',
+      'otlp-exporter-base',
+      'otlp-grpc-exporter-base',
     ].join('|') +
     ')$',
 );

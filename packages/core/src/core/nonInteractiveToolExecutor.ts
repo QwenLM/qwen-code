@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  ToolCallRequestInfo,
-  ToolCallResponseInfo,
-  Config,
-} from '../index.js';
+import type { ToolCallRequestInfo, ToolCallResponseInfo } from './turn.js';
+import type { Config } from '../config/config.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   CoreToolScheduler,
   type AllToolCallsCompleteHandler,
@@ -23,6 +21,7 @@ export interface ExecuteToolCallOptions {
   onToolResultFullTurnModel?: (model: string) => boolean;
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
+  runtimeView?: RuntimeContentGeneratorView;
 }
 
 /**
@@ -53,7 +52,7 @@ export async function executeToolCall(
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })
-      .schedule(toolCallRequest, abortSignal)
+      .schedule(toolCallRequest, abortSignal, options.runtimeView)
       .catch(reject);
   });
 }

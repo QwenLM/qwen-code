@@ -9,7 +9,10 @@ type Translate = ReturnType<typeof useI18n>['t'];
  * 'interactive' mode only). These are merged with ACP-provided commands,
  * with ACP taking precedence on duplicates.
  */
-export function getLocalCommands(t: Translate): CommandInfo[] {
+export function getLocalCommands(
+  t: Translate,
+  options: { sideTaskAvailable?: boolean } = {},
+): CommandInfo[] {
   const commands: CommandInfo[] = [
     { name: 'help', description: t('local.help') },
     {
@@ -24,11 +27,18 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       argumentHint: 'ui [en|zh-CN]',
       subcommands: ['ui'],
     },
-    { name: 'plan', description: t('local.plan'), argumentHint: '<prompt>' },
+    {
+      name: 'plan',
+      description: t('local.plan'),
+      argumentHint: '[on|off|exit|<prompt>]',
+      subcommands: ['on', 'off', 'exit'],
+    },
     {
       name: 'btw',
       description: t('local.btw'),
-      argumentHint: '<your question>',
+      argumentHint: options.sideTaskAvailable
+        ? '[side] <your question>'
+        : '<your question>',
     },
     {
       name: 'copy',
@@ -175,6 +185,7 @@ const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   batch: 'skilldesc.batch',
   dataviz: 'skilldesc.dataviz',
   'extension-creator': 'skilldesc.extensionCreator',
+  'goal-draft': 'skilldesc.goalDraft',
   loop: 'skilldesc.loop',
   'new-app': 'skilldesc.newApp',
   'qc-helper': 'skilldesc.qcHelper',
@@ -188,13 +199,11 @@ const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   bugfix: 'skilldesc.bugfix',
   codegraph: 'skilldesc.codegraph',
   'create-issue': 'skilldesc.createIssue',
-  'desktop-pet': 'skilldesc.desktopPet',
   'docs-audit-and-refresh': 'skilldesc.docsAuditAndRefresh',
   'docs-update-from-diff': 'skilldesc.docsUpdateFromDiff',
   'e2e-testing': 'skilldesc.e2eTesting',
   'feat-dev': 'skilldesc.featDev',
   'memory-leak-debug': 'skilldesc.memoryLeakDebug',
-  'openwork-desktop-sync': 'skilldesc.openworkDesktopSync',
   'prepare-pr': 'skilldesc.preparePr',
   'qwen-code-claw': 'skilldesc.qwenCodeClaw',
   'structured-debugging': 'skilldesc.structuredDebugging',

@@ -18,11 +18,14 @@ import { glob as globAsync } from 'glob';
 // don't repeat the regression.
 
 import {
+  CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
   StandardFileSystemService,
+  TextScanBudgetExceededError,
   decodeBufferWithEncodingInfoAsync,
   detectLineEnding,
   encodeTextFileContentAsync,
+  isUtf8CompatibleEncoding,
   loadIgnoreRules,
   isWithinRoot,
   type Ignore,
@@ -35,9 +38,20 @@ import {
   type AuditPublisher,
   createAuditPublisher,
 } from './audit.js';
-import { FsError, wrapAsFsError, type FsErrorKind } from './errors.js';
+import {
+  FsError,
+  isFsError,
+  wrapAsFsError,
+  type FsErrorKind,
+} from './errors.js';
+import {
+  assertCursorMatchesFile,
+  decodeTextCursor,
+  encodeTextCursor,
+} from './text-cursor.js';
 import {
   canonicalizeWorkspaces,
+  hasSuspiciousPathPattern,
   resolveWithinWorkspace,
   type Intent,
   type ResolvedPath,
@@ -45,6 +59,8 @@ import {
 import {
   BINARY_PROBE_BYTES,
   MAX_READ_BYTES,
+  MAX_TEXT_SCAN_BYTES,
+  MAX_UPLOAD_BYTES,
   assertTrustedForIntent,
   enforceReadSize,
   enforceWriteSize,
@@ -83,11 +99,33 @@ export interface ReadMeta {
   truncated?: boolean;
   matchedIgnore?: 'file' | 'directory';
   originalLineCount?: number;
+  /**
+   * Resume token for the next page. Present only when content remains *and* a
+   * file byte offset is derivable — a non-UTF-8 snapshot read has more to give
+   * but cannot be paged by byte, which is why `hasMore` is a separate field
+   * rather than a restatement of this one.
+   */
+  nextCursor?: string;
+  /** Whether content remains beyond what was returned, for any reason. */
+  hasMore?: boolean;
 }
 
+/**
+ * Above `MAX_READ_BYTES` at least one of these must be set. Any of them is
+ * the caller stating it accepts partial content, which is all the streamed
+ * path returns; with none of them the read is refused rather than silently
+ * handing back a truncated "whole file". Which one is set does not affect
+ * cost — that is bounded by `MAX_TEXT_SCAN_BYTES`.
+ */
 export interface ReadTextOptions {
   /** Returned-byte cap in [1, MAX_READ_BYTES]; defaults to MAX_READ_BYTES. */
   maxBytes?: number;
+  /**
+   * Opaque resume token from a previous read's `meta.nextCursor`. Mutually
+   * exclusive with `line` — both name a starting point. Reaches any offset in
+   * O(1), where `line` must scan from byte 0.
+   */
+  cursor?: string;
   /**
    * 1-based starting line for partial reads. `1` returns the file
    * from its first line. The boundary converts to the 0-based slice
@@ -162,6 +200,47 @@ export type WriteMode = 'create' | 'replace' | 'overwrite';
  */
 export type AtomicWriteMode = Exclude<WriteMode, 'overwrite'>;
 
+/**
+ * Mode policy for NEW files created by text writes
+ * (`writeTextAtomic` / `writeTextOverwrite` / `edit` / `editAtomic`
+ * and the same-host built-in-tool write route).
+ *
+ *   - `'owner'` (default) — owner-only `0o600`, independent of the
+ *     daemon's umask. This is the long-standing fail-closed posture:
+ *     a fresh agent-created file is never world/group readable by
+ *     accident, regardless of how permissive the process umask is.
+ *   - `'system'` — the standard POSIX `0o666 & ~umask` handling, so
+ *     agent-created files follow the daemon process's umask like any
+ *     other process on the machine (e.g. `0664` under `umask 0002`).
+ *     Operators running the daemon under a supervisor that sets
+ *     `UMask=` (systemd drop-ins, containers) can opt in via
+ *     `QWEN_SERVE_NEW_FILE_MODE=system`.
+ *
+ * Existing-file mode preservation is unaffected by either policy —
+ * editing a `0600` secret keeps it `0600`, an executable keeps `+x`.
+ * Binary uploads (`writeBytesAtomic`) always create at `0o600`
+ * regardless of this policy.
+ */
+export type NewFileModePolicy = 'owner' | 'system';
+
+/** Owner-only mode bits applied to new files under the default policy. */
+export const OWNER_ONLY_NEW_FILE_MODE = 0o600;
+
+/**
+ * Resolve the mode bits for a NEW file under the given policy.
+ * `umask` is read lazily only when the `system` policy consumes it; the
+ * default `owner` policy never touches the process umask. Tests pass an
+ * explicit value to stay deterministic without mutating process state.
+ */
+export function resolveNewFileModeBits(
+  policy: NewFileModePolicy,
+  umask?: number,
+): number {
+  return policy === 'system'
+    ? 0o666 & ~(umask ?? process.umask())
+    : OWNER_ONLY_NEW_FILE_MODE;
+}
+
 export interface WriteTextAtomicOptions extends WriteTextFileOptions {
   mode: AtomicWriteMode;
   expectedHash?: ContentHash;
@@ -184,6 +263,17 @@ export interface WriteOutcome {
 export interface RequestContext extends AuditContext {
   /** Mostly redundant with `originatorClientId`; kept for forward-compat with future ACP fields. */
   ownerSessionId?: string;
+}
+
+/** Host-only write input after the bridge adapter validates tool provenance. */
+export interface SameHostToolTextWriteRequest {
+  path: string;
+  content: string;
+  meta?: {
+    bom?: boolean;
+    encoding?: string;
+    lineEnding?: 'crlf' | 'lf';
+  };
 }
 
 /**
@@ -213,10 +303,12 @@ export interface WorkspaceFileSystem {
   /**
    * Unconditional create-or-overwrite (no `expectedHash` gate). Atomic
    * temp+rename with target-mode preservation: a `0o600` secret survives
-   * the edit at `0o600`; a new file is created at `0o600` (NOT umask
-   * default). Used by protocols whose wire format carries no client-side
-   * hash — e.g. ACP `WriteTextFileRequest` is just `{path, content,
-   * sessionId}` so the CAS-gated `writeTextAtomic` doesn't fit.
+   * the edit at `0o600`. New files are created under the factory's
+   * `NewFileModePolicy` — `0o600` by default, or the umask-derived
+   * `0o666 & ~umask` under `'system'`. Used by protocols whose wire
+   * format carries no client-side hash — e.g. ACP `WriteTextFileRequest`
+   * is just `{path, content, sessionId}` so the CAS-gated
+   * `writeTextAtomic` doesn't fit.
    *
    * Symlinks at the target are rejected (`symlink_escape`) consistent
    * with `writeTextAtomic` and HTTP `POST /file`.
@@ -243,6 +335,34 @@ export interface WorkspaceFileSystem {
     newText: string,
     opts: { expectedHash: ContentHash },
   ): Promise<WriteOutcome>;
+  /**
+   * Single-purpose no-clobber binary create. Writes `data` atomically
+   * (temp + publish) at `p`; it cannot modify or replace existing file
+   * content. An existing target (including a final-component symlink)
+   * throws `file_already_exists` (`symlink_escape` for a symlink). The
+   * caller is responsible for choosing a free name; the upload route owns
+   * the numbered-candidate policy; the collision is expected control flow
+   * there and emits no `fs.denied` audit event. `data` is size-checked
+   * against `MAX_UPLOAD_BYTES` here — the binary-ingress policy, NOT the
+   * `MAX_WRITE_BYTES` text default. Trust and generation guards are enforced
+   * at entry, inside the path lock, and at the final publish checkpoint.
+   * New files are created at `0o600`.
+   */
+  writeBytesAtomic(
+    p: ResolvedPath,
+    data: Buffer,
+  ): Promise<{ sizeBytes: number; hash: ContentHash }>;
+  /**
+   * Create a directory at `p` (already resolved within the workspace).
+   * `recursive: true` also creates missing intermediate components; every
+   * created component is re-checked with `lstat` right after `mkdir` and
+   * each parent is re-checked before the next `mkdir`, so a symlink
+   * swapped in mid-creation is rejected (`symlink_escape`) rather than
+   * followed. An existing directory is left untouched; an existing
+   * non-directory or symlink at `p` is rejected. Directories are created
+   * at `0o755` (modulo the process umask).
+   */
+  mkdir(p: ResolvedPath, opts?: { recursive?: boolean }): Promise<void>;
 }
 
 /**
@@ -252,6 +372,11 @@ export interface WorkspaceFileSystem {
 export interface WorkspaceFileSystemFactory {
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
   assertCanWrite(): void;
+  /** Optional so existing custom factories remain workspace-only by default. */
+  writeSameHostToolText?(
+    ctx: RequestContext,
+    request: SameHostToolTextWriteRequest,
+  ): Promise<void>;
 }
 
 export interface CreateWorkspaceFileSystemFactoryDeps {
@@ -275,6 +400,14 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
   pathLocks?: PathMutexRegistry;
   /** Runtime-generation guard checked at mutation commit points. */
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /**
+   * Mode policy for NEW files created by text writes. Defaults to
+   * `'owner'` (`0o600`, umask-independent). `'system'` follows the
+   * daemon process's umask (`0o666 & ~umask`). Production wiring
+   * derives this from `QWEN_SERVE_NEW_FILE_MODE`; see
+   * `NewFileModePolicy`.
+   */
+  newFileMode?: NewFileModePolicy;
 }
 
 /**
@@ -320,25 +453,203 @@ export function createWorkspaceFileSystemFactory(
   });
   const lowFs = new StandardFileSystemService();
   const pathLocks = deps.pathLocks ?? new PathMutexRegistry();
+  const newFileMode: NewFileModePolicy = deps.newFileMode ?? 'owner';
+
+  const forRequest = (ctx: RequestContext): WorkspaceFileSystem =>
+    new WorkspaceFileSystemImpl({
+      primaryWorkspace,
+      workspaces,
+      trusted: deps.trusted,
+      audit,
+      ctx,
+      lowFs,
+      pathLocks,
+      generationGuard: deps.generationGuard,
+      newFileMode,
+    });
 
   return {
     assertCanWrite() {
       deps.generationGuard?.assertOpen();
       assertTrustedForIntent(deps.trusted, 'write');
     },
-    forRequest(ctx) {
-      return new WorkspaceFileSystemImpl({
-        primaryWorkspace,
-        workspaces,
-        trusted: deps.trusted,
-        audit,
-        ctx,
-        lowFs,
-        pathLocks,
-        generationGuard: deps.generationGuard,
-      });
+    forRequest,
+    async writeSameHostToolText(ctx, request) {
+      try {
+        deps.generationGuard?.assertOpen();
+      } catch (err) {
+        throw recordSameHostToolWriteDenied(audit, ctx, request.path, err);
+      }
+
+      let resolved: ResolvedPath;
+      try {
+        resolved = await resolveWithinWorkspace(
+          request.path,
+          workspaces.map((workspace) => workspace.path),
+          'write',
+        );
+        deps.generationGuard?.assertOpen();
+      } catch (err) {
+        if (
+          !(err instanceof FsError && err.kind === 'path_outside_workspace')
+        ) {
+          throw recordSameHostToolWriteDenied(audit, ctx, request.path, err);
+        }
+        try {
+          await writeSameHostToolTextOutsideWorkspace({
+            request,
+            trusted: deps.trusted,
+            audit,
+            ctx,
+            pathLocks,
+            generationGuard: deps.generationGuard,
+            newFileMode,
+          });
+          return;
+        } catch (outsideErr) {
+          throw recordSameHostToolWriteDenied(
+            audit,
+            ctx,
+            request.path,
+            outsideErr,
+          );
+        }
+      }
+
+      try {
+        await forRequest(ctx).writeTextOverwrite(resolved, request.content);
+      } catch (err) {
+        if (isWorkspaceGenerationClosedError(err)) {
+          recordSameHostToolWriteDenied(audit, ctx, request.path, err);
+        }
+        throw err;
+      }
     },
   };
+}
+
+interface SameHostToolTextWriteDeps {
+  request: SameHostToolTextWriteRequest;
+  trusted: boolean;
+  audit: AuditPublisher;
+  ctx: RequestContext;
+  pathLocks: PathMutexRegistry;
+  generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /** New-file mode policy for the external host-writer route. */
+  newFileMode: NewFileModePolicy;
+}
+
+async function writeSameHostToolTextOutsideWorkspace(
+  deps: SameHostToolTextWriteDeps,
+): Promise<void> {
+  const start = performance.now();
+  deps.generationGuard?.assertOpen();
+  assertTrustedForIntent(deps.trusted, 'write');
+  enforceWriteSize(Buffer.byteLength(deps.request.content, 'utf-8'));
+  const target = await resolveSameHostToolWriteTarget(deps.request.path);
+  await deps.pathLocks.runExclusive(target, async () => {
+    deps.generationGuard?.assertOpen();
+    const meta = mergeWriteMeta(undefined, deps.request.meta ?? {});
+    const content =
+      meta.bom && deps.request.content.charCodeAt(0) === 0xfeff
+        ? deps.request.content.slice(1)
+        : deps.request.content;
+    const result = await atomicWriteTextResolvedFile({
+      target,
+      content,
+      mode: 'overwrite',
+      meta,
+      newFileModeBits: resolveNewFileModeBits(deps.newFileMode),
+      assertGenerationOpen: () => deps.generationGuard?.assertOpen(),
+    });
+    deps.audit.recordAccess(deps.ctx, {
+      intent: 'write',
+      absolute: target,
+      durationMs: performance.now() - start,
+      sizeBytes: result.sizeBytes,
+    });
+  });
+}
+
+async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
+  if (!path.isAbsolute(input)) {
+    throw new FsError(
+      'path_outside_workspace',
+      `same-host external tool write requires an absolute path: ${input}`,
+    );
+  }
+  if (hasSuspiciousPathPattern(input)) {
+    throw new FsError(
+      'path_outside_workspace',
+      `path contains suspicious pattern: ${input}`,
+    );
+  }
+
+  let leaf: Awaited<ReturnType<typeof fsp.lstat>>;
+  try {
+    leaf = await fsp.lstat(input, { bigint: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      throw err;
+    }
+    const parent = await fsp.realpath(path.dirname(input));
+    const parentStat = await fsp.lstat(parent, { bigint: true });
+    if (!parentStat.isDirectory()) {
+      throw new FsError(
+        'parse_error',
+        `parent path is not a directory: ${parent}`,
+      );
+    }
+    return path.join(parent, path.basename(input));
+  }
+
+  if (leaf.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path is a symlink and cannot be overwritten: ${input}`,
+      { hint: 'resolve the target explicitly before writing' },
+    );
+  }
+  if (!leaf.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${input}`);
+  }
+  const canonical = await fsp.realpath(input);
+  const canonicalStat = await fsp.lstat(canonical, { bigint: true });
+  if (!canonicalStat.isFile()) {
+    throw new FsError(
+      'parse_error',
+      `canonical path is not a regular file: ${canonical}`,
+    );
+  }
+  assertSameFile(leaf, canonicalStat, input, 'write');
+  return canonical;
+}
+
+function isWorkspaceGenerationClosedError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    error.code === 'workspace_generation_closed'
+  );
+}
+
+function recordSameHostToolWriteDenied(
+  audit: AuditPublisher,
+  ctx: RequestContext,
+  input: string,
+  error: unknown,
+): Error {
+  const fsError = wrapAsFsError(error);
+  audit.recordDenied(ctx, {
+    intent: 'write',
+    input,
+    errorKind: fsError.kind,
+    hint: fsError.hint,
+    message: fsError.message,
+  });
+  return isWorkspaceGenerationClosedError(error) && error instanceof Error
+    ? error
+    : fsError;
 }
 
 interface WorkspaceRoot {
@@ -355,6 +666,8 @@ interface ImplDeps {
   lowFs: StandardFileSystemService;
   pathLocks: PathMutexRegistry;
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /** Mode policy for NEW files created by text writes. */
+  newFileMode: NewFileModePolicy;
 }
 
 function assertNoNestedWorkspaces(workspaces: readonly string[]): void {
@@ -471,6 +784,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         throw new FsError(
           'parse_error',
           `limit must be a positive integer, got ${opts.limit}`,
+        );
+      }
+      // Both name a starting point; honouring one and ignoring the other
+      // would silently return the wrong window.
+      if (opts.cursor !== undefined && opts.line !== undefined) {
+        throw new FsError(
+          'parse_error',
+          'cursor and line are mutually exclusive; a cursor already encodes where to resume',
         );
       }
       if (
@@ -920,6 +1241,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: opts.mode,
             expectedHash: opts.expectedHash,
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1023,6 +1345,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             content,
             mode: 'overwrite',
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1160,6 +1483,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: 'replace',
             expectedHash: opts.expectedHash,
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1231,6 +1555,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           content: next,
           mode: 'overwrite',
           meta: mergeWriteMeta(snapshot.meta, {}),
+          newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
           assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
         });
         const verdict = this.ignoreVerdict(p, 'file');
@@ -1248,6 +1573,79 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async writeBytesAtomic(
+    p: ResolvedPath,
+    data: Buffer,
+  ): Promise<{ sizeBytes: number; hash: ContentHash }> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      enforceWriteSize(data.length, MAX_UPLOAD_BYTES);
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          await assertCreateTargetAbsent(p as string);
+          this.deps.generationGuard?.assertOpen();
+          const result = await atomicPublishResolvedFile({
+            target: p,
+            buf: data,
+            mode: 'create',
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
+          });
+          const verdict = this.ignoreVerdict(p, 'file');
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: verdict.ignored ? verdict.category : undefined,
+          });
+          return { sizeBytes: result.sizeBytes, hash: result.hash };
+        },
+      );
+      return out;
+    } catch (err) {
+      // A no-clobber collision is the upload route's expected candidate-loop
+      // outcome (it numbers on), not a boundary policy denial; auditing it
+      // would emit one `fs.denied` per skipped occupied name.
+      throw this.recordAndWrap(err, 'write', p as string, {
+        audit: !(isFsError(err) && err.kind === 'file_already_exists'),
+      });
+    }
+  }
+
+  async mkdir(p: ResolvedPath, opts?: { recursive?: boolean }): Promise<void> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          await ensureResolvedDirectory(p as string, {
+            recursive: opts?.recursive ?? false,
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
+          });
+          this.deps.generationGuard?.assertOpen();
+          const verdict = this.ignoreVerdict(p, 'directory');
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: 0,
+            operation: 'mkdir',
+            matchedIgnore: verdict.ignored ? verdict.category : undefined,
+          });
+          return undefined;
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'write', p as string);
+    }
+  }
+
   /**
    * Coerce an arbitrary thrown value into an `FsError`, emit the
    * matching `fs.denied` audit event, and return the typed error
@@ -1261,7 +1659,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
    *   - routes can still rely on `instanceof FsError`
    *     for their `sendFsError` serializer.
    */
-  private recordAndWrap(err: unknown, intent: Intent, input: string): Error {
+  private recordAndWrap(
+    err: unknown,
+    intent: Intent,
+    input: string,
+    opts?: { audit?: boolean },
+  ): Error {
     if (
       err instanceof Error &&
       'code' in err &&
@@ -1270,6 +1673,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       return err;
     }
     const fs = wrapAsFsError(err);
+    if (opts?.audit === false) {
+      return fs;
+    }
     this.deps.audit.recordDenied(this.deps.ctx, {
       intent,
       input,
@@ -1299,11 +1705,18 @@ export function isContentHash(value: unknown): value is ContentHash {
 }
 
 interface AtomicWriteTextInput {
-  target: ResolvedPath;
+  target: string;
   content: string;
   mode: WriteMode;
   expectedHash?: ContentHash;
   meta: ReadMeta;
+  /**
+   * Mode bits for a NEW target (existing targets always preserve their
+   * on-disk mode). Undefined falls back to the owner-only `0o600`
+   * default; callers wired with a `NewFileModePolicy` pass
+   * `resolveNewFileModeBits(policy)` here.
+   */
+  newFileModeBits?: number;
   assertGenerationOpen?: () => void;
 }
 
@@ -1375,13 +1788,34 @@ async function readTextFromResolvedFile(
     throw new FsError('parse_error', `path is not a regular file: ${p}`);
   }
 
-  if (pre.size > MAX_READ_BYTES && opts.limit !== undefined) {
-    return readLargeTextWindowFromResolvedFile(
-      p,
-      pre,
-      { ...opts, limit: opts.limit },
-      lowFs,
-    );
+  // Any explicit window argument is the caller stating it accepts partial
+  // content, which is what the large-file path returns. Gating on `limit`
+  // alone got this backwards in both directions: `{ line: 900_000_000,
+  // limit: 20 }` was admitted despite costing a full scan, while
+  // `{ maxBytes: 4096 }` — satisfiable from the first 4 KiB — was refused.
+  // Cost is bounded by MAX_TEXT_SCAN_BYTES, not by which knob was set.
+  //
+  // A read with no window argument at all still fails: an agent that
+  // believes it holds the whole file may write it back truncated. The
+  // omitted `hash` blocks that for `editText`/`writeTextAtomic`, but
+  // `writeTextOverwrite` takes no hash, so `truncated: true` is the only
+  // signal on that path — refusing the unbounded read keeps the caller
+  // from ever being in that position by accident.
+  // Cursor reads branch before the size check, not by widening `wantsWindow`.
+  // Adding `cursor` there would fix only large files: a cursor read of a file
+  // *under* MAX_READ_BYTES would still land on the snapshot path, which knows
+  // only `line`/`limit` and would silently ignore the cursor and return from
+  // line 0 — a wrong answer, worse than the refusal the large case would give.
+  if (opts.cursor !== undefined) {
+    return readTextCursorWindowFromResolvedFile(p, pre, opts, lowFs);
+  }
+
+  const wantsWindow =
+    opts.limit !== undefined ||
+    opts.maxBytes !== undefined ||
+    opts.line !== undefined;
+  if (pre.size > MAX_READ_BYTES && wantsWindow) {
+    return readLargeTextWindowFromResolvedFile(p, pre, opts, lowFs);
   }
   return readTextSnapshotFromResolvedFile(p, opts, pre);
 }
@@ -1430,10 +1864,16 @@ async function readTextSnapshotFromResolvedFile(
   const maxOutputBytes = opts.maxBytes ?? MAX_READ_BYTES;
   const sizeOutcome = enforceReadSize(raw.length, maxOutputBytes);
   let content = sliced.content;
+  let byteTruncated = false;
   const meta: TextSnapshot['meta'] = {
     encoding: decoded.encoding,
     bom: decoded.bom,
-    lineEnding: detectLineEnding(content),
+    // Detected across the whole decoded file, not the returned slice. A slice
+    // holding one CRLF line arrives as text ending in '\r' with the '\n'
+    // consumed as its terminator, so testing the slice reports 'lf' — and one
+    // page of a cursor sequence would then disagree with the next about the
+    // same file.
+    lineEnding: detectLineEnding(decoded.content),
     sizeBytes: raw.length,
     originalLineCount: sliced.originalLineCount,
     hash: hashBuffer(raw),
@@ -1442,8 +1882,8 @@ async function readTextSnapshotFromResolvedFile(
   const output = Buffer.from(content, 'utf-8');
   if (output.length > maxOutputBytes) {
     content = safeUtf8Truncate(output, maxOutputBytes).toString('utf-8');
-    meta.lineEnding = detectLineEnding(content);
     meta.truncated = true;
+    byteTruncated = true;
   }
   if (sizeOutcome.truncated) {
     meta.truncated = true;
@@ -1457,30 +1897,231 @@ async function readTextSnapshotFromResolvedFile(
     meta.truncated = true;
   }
 
+  const pageableLineCount =
+    sliced.originalLineCount - (decoded.content.endsWith('\n') ? 1 : 0);
+  meta.hasMore = byteTruncated || sliced.endLine < pageableLineCount;
+  // A byte offset into the file is only derivable when the decoded text and
+  // the file agree byte-for-byte. For GBK, Shift_JIS, or UTF-16 the decoded
+  // string is a UTF-8 re-encoding whose lengths are unrelated to the file's,
+  // so a cursor built from it would point at the wrong byte. Such a read still
+  // reports `hasMore` honestly — it has more to give, it just cannot be paged.
+  // A byte-truncated slice ends mid-line, so there is no line start to resume
+  // from; `hasMore` still says content remains. Every cursor this boundary
+  // mints points at a line start, so a client following cursors never skips
+  // the tail of a line it was only shown part of.
+  const bomBytes = decoded.bom ? 3 : 0;
+  const decodedBytesMatchSource =
+    isUtf8CompatibleEncoding(decoded.encoding) &&
+    Buffer.from(decoded.content, 'utf-8').equals(raw.subarray(bomBytes));
+  if (meta.hasMore && !byteTruncated && decodedBytesMatchSource) {
+    // `decodeBufferWithEncodingInfoAsync` strips the BOM, so decoded offsets
+    // run short by its length. A BOM on a byte-compatible encoding is UTF-8,
+    // whose marker is three bytes.
+    const startByte = bomBytes + sliced.startByteOffset;
+    const contentBytes = Buffer.byteLength(content, 'utf-8');
+    // Whole lines consumed their terminator; a byte-truncated slice stopped
+    // mid-line and resumes at exactly what was returned.
+    const nextOffset = startByte + contentBytes + 1;
+    if (nextOffset < raw.length) {
+      meta.nextCursor = encodeTextCursor({
+        off: nextOffset,
+        size: raw.length,
+        dev: String(pre.dev),
+        ino: String(pre.ino),
+      });
+    }
+  }
+
   return { content, meta };
+}
+
+/**
+ * Stability check for a streamed *prefix* window.
+ *
+ * The full-snapshot path can demand byte-for-byte stability (`size` and
+ * `mtimeMs` unchanged) because it returns the whole file: any change
+ * invalidates the result. A line window does not return the whole file, so
+ * demanding whole-file stability rejects reads whose returned bytes are
+ * still perfectly valid — and the case it rejects is the one this feature
+ * exists for. Appending to a log does not change lines 1-20, but under an
+ * equality check every read of a live log is a coin flip.
+ *
+ * So the streamed path accepts growth, but rejects shrinkage and same-size
+ * version changes. The latter preserves the stable-read protection against
+ * in-place overwrites while still allowing append-only logs.
+ *
+ * The residual gap is a writer that changes existing bytes and grows past the
+ * original size inside one read window while keeping the same inode. Metadata
+ * cannot distinguish that from a pure append; hashing the prefix would make
+ * every page O(n), defeating the cursor.
+ */
+function assertStreamWindowStable(
+  before: {
+    size: number | bigint;
+    mtimeMs: number | bigint;
+    ctimeMs: number | bigint;
+  },
+  after: {
+    size: number | bigint;
+    mtimeMs: number | bigint;
+    ctimeMs: number | bigint;
+  },
+  p: ResolvedPath,
+  reason: string,
+): void {
+  const beforeSize = toBigInt(before.size);
+  const afterSize = toBigInt(after.size);
+  if (
+    afterSize < beforeSize ||
+    (afterSize === beforeSize &&
+      (after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs))
+  ) {
+    throw new FsError('hash_mismatch', `${reason}: ${p}`, {
+      hint: 'retry after re-reading the latest file',
+    });
+  }
+}
+
+/**
+ * Byte-cursor page. Reaches any offset in O(1), so `MAX_TEXT_SCAN_BYTES` does
+ * not apply here — that budget exists only because line offsets must be
+ * resolved by scanning.
+ *
+ * The fd-bound TOCTOU discipline is lifted verbatim from
+ * `readLargeTextWindowFromResolvedFile`. It is deliberately *not* copied from
+ * `readBytesWindow`, which sits next door and looks like the closer model but
+ * still demands `size`/`mtimeMs` equality after the read — the check `e784e6d`
+ * relaxed precisely because it fails every page of an actively-written log.
+ */
+async function readTextCursorWindowFromResolvedFile(
+  p: ResolvedPath,
+  pre: Awaited<ReturnType<typeof fsp.lstat>>,
+  opts: ReadTextOptions,
+  lowFs: StandardFileSystemService,
+): Promise<TextReadOutcome> {
+  const cursor = decodeTextCursor(opts.cursor as string);
+  const fh = await fsp.open(p as string, 'r');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let afterRead: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let window:
+    | Awaited<ReturnType<StandardFileSystemService['readTextCursorFromHandle']>>
+    | undefined;
+  let primaryError: unknown;
+  let hasPrimaryError = false;
+  try {
+    opened = await fh.stat();
+    assertSameFile(pre, opened, p as string, 'read');
+    assertStreamWindowStable(pre, opened, p, 'file changed before read');
+    assertCursorMatchesFile(cursor, opened, p as string);
+
+    try {
+      const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
+      if (probe.length > 0) {
+        const { bytesRead } = await fh.read(probe, 0, probe.length, 0);
+        if (looksBinary(probe.subarray(0, bytesRead))) {
+          throw new FsError('binary_file', `binary file: ${p}`, {
+            hint: 'use readBytes for binary content',
+          });
+        }
+      }
+
+      window = await lowFs.readTextCursorFromHandle({
+        fileHandle: fh,
+        startOffset: cursor.off,
+        fileSize: opened.size,
+        maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,
+        maxSnapBytes: MAX_TEXT_SCAN_BYTES,
+        ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+      });
+    } catch (err) {
+      hasPrimaryError = true;
+      primaryError = err;
+    }
+
+    afterRead = await fh.stat();
+  } finally {
+    await fh.close();
+  }
+
+  if (opened === undefined || afterRead === undefined) {
+    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
+  }
+  const post = await fsp.lstat(p as string);
+  if (post.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path was replaced with a symlink during read: ${p}`,
+      { hint: 'TOCTOU swap detected via post-read lstat' },
+    );
+  }
+  assertSameFile(opened, afterRead, p as string, 'read');
+  assertStreamWindowStable(opened, afterRead, p, 'file changed during read');
+  assertSameFile(opened, post, p as string, 'read');
+  assertStreamWindowStable(opened, post, p, 'file changed during read');
+
+  if (hasPrimaryError) {
+    if (primaryError instanceof LargeNonUtf8TextError) {
+      throw new FsError('binary_file', primaryError.message, {
+        cause: primaryError,
+        hint: 'convert the file to UTF-8, or use readBytes for the raw bytes',
+      });
+    }
+    // The offset is malformed, not the file oversized — a cursor this daemon
+    // issued always lands on a line start.
+    if (primaryError instanceof CursorNotAtLineBoundaryError) {
+      throw new FsError('parse_error', primaryError.message, {
+        cause: primaryError,
+        hint: 'pass a cursor returned by a previous read',
+      });
+    }
+    throw primaryError;
+  }
+  if (window === undefined) {
+    throw new FsError(
+      'internal_error',
+      `cursor text read returned no result: ${p}`,
+    );
+  }
+
+  const meta: TextReadOutcome['meta'] = {
+    encoding: window.encoding,
+    bom: window.bom,
+    lineEnding: window.lineEnding,
+    sizeBytes: opened.size,
+    truncated: true,
+    hasMore:
+      window.nextOffset !== undefined || window.truncatedByBytes === true,
+  };
+  if (window.nextOffset !== undefined) {
+    meta.nextCursor = encodeTextCursor({
+      off: window.nextOffset,
+      size: opened.size,
+      dev: String(opened.dev),
+      ino: String(opened.ino),
+    });
+  }
+  return { content: window.content, meta };
 }
 
 async function readLargeTextWindowFromResolvedFile(
   p: ResolvedPath,
   pre: Awaited<ReturnType<typeof fsp.lstat>>,
-  opts: ReadTextOptions & { limit: number },
+  opts: ReadTextOptions,
   lowFs: StandardFileSystemService,
 ): Promise<TextReadOutcome> {
   const fh = await fsp.open(p as string, 'r');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let afterRead: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  let result:
+    | Awaited<ReturnType<StandardFileSystemService['readTextFileFromHandle']>>
+    | undefined;
+  let primaryError: unknown;
+  let hasPrimaryError = false;
   try {
-    const opened = await fh.stat();
+    opened = await fh.stat();
     assertSameFile(pre, opened, p as string, 'read');
-    if (didFileVersionChange(pre, opened)) {
-      throw new FsError('hash_mismatch', `file changed before read: ${p}`, {
-        hint: 'retry after re-reading the latest file',
-      });
-    }
+    assertStreamWindowStable(pre, opened, p, 'file changed before read');
 
-    let result:
-      | Awaited<ReturnType<StandardFileSystemService['readTextFileFromHandle']>>
-      | undefined;
-    let primaryError: unknown;
-    let hasPrimaryError = false;
     try {
       const probe = Buffer.alloc(Math.min(BINARY_PROBE_BYTES, opened.size));
       if (probe.length > 0) {
@@ -1493,91 +2134,94 @@ async function readLargeTextWindowFromResolvedFile(
       }
 
       result = await lowFs.readTextFileFromHandle({
-        path: p as string,
         fileHandle: fh,
-        stats: opened,
-        limit: opts.limit,
+        fileSize: opened.size,
+        limit: opts.limit ?? Number.POSITIVE_INFINITY,
         line: opts.line !== undefined ? opts.line - 1 : 0,
         maxOutputBytes: opts.maxBytes ?? MAX_READ_BYTES,
+        maxScanBytes: MAX_TEXT_SCAN_BYTES,
       });
     } catch (err) {
       hasPrimaryError = true;
       primaryError = err;
     }
 
-    const afterRead = await fh.stat();
-    const post = await fsp.lstat(p as string);
-    if (post.isSymbolicLink()) {
-      throw new FsError(
-        'symlink_escape',
-        `path was replaced with a symlink during read: ${p}`,
-        { hint: 'TOCTOU swap detected via post-read lstat' },
-      );
-    }
-    assertSameFile(opened, afterRead, p as string, 'read');
-    assertSameFile(opened, post, p as string, 'read');
-    if (
-      didFileVersionChange(opened, afterRead) ||
-      didFileVersionChange(opened, post)
-    ) {
-      throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
-        hint: 'retry after re-reading the latest file',
-      });
-    }
-
-    if (hasPrimaryError) {
-      if (primaryError instanceof LargeNonUtf8TextError) {
-        throw new FsError('file_too_large', primaryError.message, {
-          cause: primaryError,
-          hint: 'convert the file to UTF-8 before requesting a large line window',
-        });
-      }
-      throw primaryError;
-    }
-
-    if (result === undefined) {
-      throw new FsError(
-        'internal_error',
-        `large text range read returned no result: ${p}`,
-      );
-    }
-
-    const meta: TextReadOutcome['meta'] = {
-      encoding: result._meta?.encoding,
-      bom: result._meta?.bom,
-      lineEnding: detectLineEnding(result.content),
-      sizeBytes: opened.size,
-      truncated: true,
-    };
-    if (
-      result._meta?.originalLineCountExact === true &&
-      result._meta.originalLineCount !== undefined
-    ) {
-      meta.originalLineCount = result._meta.originalLineCount;
-    }
-    return { content: result.content, meta };
+    afterRead = await fh.stat();
   } finally {
     await fh.close();
   }
-}
 
-function didFileVersionChange(
-  before: {
-    size: number | bigint;
-    mtimeMs: number | bigint;
-    ctimeMs: number | bigint;
-  },
-  after: {
-    size: number | bigint;
-    mtimeMs: number | bigint;
-    ctimeMs: number | bigint;
-  },
-): boolean {
-  return (
-    after.size !== before.size ||
-    after.mtimeMs !== before.mtimeMs ||
-    after.ctimeMs !== before.ctimeMs
-  );
+  if (opened === undefined || afterRead === undefined) {
+    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
+  }
+  const post = await fsp.lstat(p as string);
+  if (post.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path was replaced with a symlink during read: ${p}`,
+      { hint: 'TOCTOU swap detected via post-read lstat' },
+    );
+  }
+  assertSameFile(opened, afterRead, p as string, 'read');
+  assertStreamWindowStable(opened, afterRead, p, 'file changed during read');
+  assertSameFile(opened, post, p as string, 'read');
+  assertStreamWindowStable(opened, post, p, 'file changed during read');
+
+  if (hasPrimaryError) {
+    // An encoding the text route can't represent is the same class of refusal
+    // as sniffed-binary content, and `binary_file` already tells clients to
+    // fall back to `readBytes`.
+    if (primaryError instanceof LargeNonUtf8TextError) {
+      throw new FsError('binary_file', primaryError.message, {
+        cause: primaryError,
+        hint: 'convert the file to UTF-8, or use readBytes for the raw bytes',
+      });
+    }
+    if (primaryError instanceof TextScanBudgetExceededError) {
+      throw new FsError('file_too_large', primaryError.message, {
+        cause: primaryError,
+        hint: `line offsets are resolved by scanning from byte 0 and stop after ${MAX_TEXT_SCAN_BYTES} bytes; page with the cursor from a shallower read to reach this offset in O(1), or use readBytes for raw bytes`,
+      });
+    }
+    throw primaryError;
+  }
+  if (result === undefined) {
+    throw new FsError(
+      'internal_error',
+      `large text range read returned no result: ${p}`,
+    );
+  }
+  const content = result.content;
+  const readMeta = result._meta;
+
+  const meta: TextReadOutcome['meta'] = {
+    encoding: readMeta?.encoding,
+    bom: readMeta?.bom,
+    lineEnding: readMeta?.lineEnding ?? detectLineEnding(content),
+    // Size as of `open`, not as of now: it describes the snapshot the
+    // returned window was cut from. A file that grew during the read
+    // reports the smaller, consistent number.
+    sizeBytes: opened.size,
+    truncated: true,
+    hasMore:
+      readMeta?.nextByteOffset !== undefined ||
+      readMeta?.truncatedByBytes === true,
+  };
+  if (readMeta?.nextByteOffset !== undefined) {
+    meta.nextCursor = encodeTextCursor({
+      off: readMeta.nextByteOffset,
+      size: opened.size,
+      dev: String(opened.dev),
+      ino: String(opened.ino),
+    });
+  }
+  if (
+    readMeta?.originalLineCountExact === true &&
+    readMeta?.originalLineCount !== undefined
+  ) {
+    meta.originalLineCount = readMeta.originalLineCount;
+  }
+  return { content, meta };
 }
 
 async function readStableRegularFileBuffer(
@@ -1632,14 +2276,27 @@ function sliceDecodedText(
   content: string,
   startLine: number,
   limit: number,
-): { content: string; originalLineCount: number } {
+): {
+  content: string;
+  originalLineCount: number;
+  /** Byte offset of `startLine` within the decoded text (BOM excluded). */
+  startByteOffset: number;
+  /** Index just past the last returned line. */
+  endLine: number;
+} {
   const lines = content.split('\n');
   const originalLineCount = lines.length;
   const endLine = Math.min(startLine + limit, originalLineCount);
   const actualStartLine = Math.min(startLine, originalLineCount);
+  let startByteOffset = 0;
+  for (let i = 0; i < actualStartLine; i++) {
+    startByteOffset += Buffer.byteLength(lines[i]!, 'utf-8') + 1;
+  }
   return {
     content: lines.slice(actualStartLine, endLine).join('\n'),
     originalLineCount,
+    startByteOffset,
+    endLine,
   };
 }
 
@@ -1705,7 +2362,137 @@ function mergeWriteMeta(
 async function atomicWriteTextResolvedFile(
   input: AtomicWriteTextInput,
 ): Promise<AtomicWriteTextOutcome> {
-  const target = input.target as string;
+  const buf = await encodeTextFileContentAsync(
+    input.target,
+    input.content,
+    buildWriteMeta(input.meta),
+  );
+  // Text writes keep the `MAX_WRITE_BYTES` policy. The byte upload path
+  // validates its own buffer against `MAX_UPLOAD_BYTES` before calling the
+  // shared publisher, so the two policies stay distinct.
+  enforceWriteSize(buf.length);
+  return atomicPublishResolvedFile({
+    target: input.target,
+    buf,
+    mode: input.mode,
+    expectedHash: input.expectedHash,
+    newFileModeBits: input.newFileModeBits,
+    assertGenerationOpen: input.assertGenerationOpen,
+  });
+}
+
+/**
+ * Ensure `target` exists as a real directory (never a symlink). With
+ * `recursive`, walk up to the deepest existing ancestor and create each
+ * missing component one at a time, verifying with `lstat` immediately after
+ * each `mkdir` — and checking each component's parent before the next
+ * `mkdir` — so a symlink swapped in mid-creation is rejected instead of
+ * followed. `target` must already be resolved within the workspace; the
+ * caller holds the path lock.
+ */
+async function ensureResolvedDirectory(
+  target: string,
+  opts: {
+    recursive: boolean;
+    assertGenerationOpen: () => void;
+  },
+): Promise<void> {
+  const assertRealDirectory = async (p: string): Promise<void> => {
+    const st = await fsp.lstat(p);
+    if (st.isSymbolicLink()) {
+      throw new FsError('symlink_escape', `directory path is a symlink: ${p}`, {
+        hint: 're-resolve the target after detecting symlink swaps',
+      });
+    }
+    if (!st.isDirectory()) {
+      throw new FsError(
+        'parse_error',
+        `path exists and is not a directory: ${p}`,
+      );
+    }
+  };
+  // `lstat` does not follow the FINAL component, so the per-component
+  // re-check above cannot see a symlink swapped into an intermediate
+  // ancestor mid-creation; reject one before the next `mkdir` would
+  // create through it.
+  const assertParentNotSymlink = async (p: string): Promise<void> => {
+    const parent = path.dirname(p);
+    const st = await fsp.lstat(parent);
+    if (st.isSymbolicLink()) {
+      throw new FsError(
+        'symlink_escape',
+        `directory parent is a symlink: ${parent}`,
+        { hint: 're-resolve the target after detecting symlink swaps' },
+      );
+    }
+  };
+  try {
+    await assertRealDirectory(target);
+    return;
+  } catch (err) {
+    if (isFsError(err)) throw err;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  if (!opts.recursive) {
+    opts.assertGenerationOpen();
+    await assertParentNotSymlink(target);
+    try {
+      await fsp.mkdir(target, { mode: 0o755 });
+    } catch (err) {
+      // Lost a create race; the winner may be a directory we can reuse.
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    await assertRealDirectory(target);
+    return;
+  }
+  const missing: string[] = [];
+  let current = target;
+  while (true) {
+    try {
+      await assertRealDirectory(current);
+      break;
+    } catch (err) {
+      if (isFsError(err)) throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      missing.push(current);
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      current = parent;
+    }
+  }
+  for (const entry of missing.reverse()) {
+    opts.assertGenerationOpen();
+    await assertParentNotSymlink(entry);
+    try {
+      await fsp.mkdir(entry, { mode: 0o755 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    await assertRealDirectory(entry);
+  }
+}
+
+/**
+ * Shared atomic temp+publish core. `buf` MUST already be size-validated by
+ * the caller against its own policy (`MAX_WRITE_BYTES` for text,
+ * `MAX_UPLOAD_BYTES` for binary uploads). This function does not re-check
+ * size; it only handles the filesystem mechanics: parent validation, temp
+ * reservation, precondition checks, generation gating, and publication.
+ */
+async function atomicPublishResolvedFile(input: {
+  target: string;
+  buf: Buffer;
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+  /**
+   * Mode bits for a NEW target. Existing targets preserve their on-disk
+   * mode regardless. Undefined falls back to the owner-only `0o600`
+   * default (`OWNER_ONLY_NEW_FILE_MODE`).
+   */
+  newFileModeBits?: number;
+  assertGenerationOpen?: () => void;
+}): Promise<AtomicWriteTextOutcome> {
+  const target = input.target;
   const parent = path.dirname(target);
   const parentStat = await fsp.lstat(parent);
   // Defense-in-depth against a parent-symlink swap. A full fix requires
@@ -1723,30 +2510,46 @@ async function atomicWriteTextResolvedFile(
       `parent path is not a directory: ${parent}`,
     );
   }
-  const tmpPath = path.join(
-    parent,
-    `.${path.basename(target)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
-  );
+  const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  // The temp name is `.<basename><suffix>`. When the target basename is itself
+  // near the filesystem NAME_MAX (255 bytes) — a 255-byte upload, say — the
+  // untruncated temp name would exceed it and `open()` would fail ENAMETOOLONG
+  // before the atomic publish could run. Cap the basename portion (UTF-8-safe).
+  const tmpNameMaxBytes = 255;
+  const tmpBaseMaxBytes =
+    tmpNameMaxBytes - 1 - Buffer.byteLength(tmpSuffix, 'utf-8');
+  let tmpBase = path.basename(target);
+  if (Buffer.byteLength(tmpBase, 'utf-8') > tmpBaseMaxBytes) {
+    tmpBase = safeUtf8Truncate(
+      Buffer.from(tmpBase, 'utf-8'),
+      tmpBaseMaxBytes,
+    ).toString('utf-8');
+  }
+  const tmpPath = path.join(parent, `.${tmpBase}${tmpSuffix}`);
   let tempLive = false;
   let tempHandle: Awaited<ReturnType<typeof fsp.open>> | undefined;
   let tempStat: Awaited<ReturnType<typeof fsp.lstat>> | undefined;
   try {
     tempHandle = await reserveTempFile(tmpPath);
     tempLive = true;
-    const encoded = await writeEncodedTextTemp({
-      targetPath: target,
+    const written = await writeBufferToTemp({
       tmpPath,
-      content: input.content,
-      meta: input.meta,
+      buf: input.buf,
       handle: tempHandle,
     });
-    tempStat = encoded.stat;
+    tempStat = written.stat;
     const targetState = await assertAtomicTargetPrecondition({
       target,
       mode: input.mode,
       expectedHash: input.expectedHash,
     });
-    await chmodHandleBestEffort(tempHandle, targetState.mode ?? 0o600);
+    // Existing targets preserve their on-disk mode; NEW targets get the
+    // caller's policy bits (umask-following `0o666 & ~umask` under the
+    // `system` policy) or the owner-only `0o600` default.
+    await chmodHandleBestEffort(
+      tempHandle,
+      targetState.mode ?? input.newFileModeBits ?? OWNER_ONLY_NEW_FILE_MODE,
+    );
     await assertTempPathMatchesStat(tmpPath, tempStat);
     await tempHandle.close();
     tempHandle = undefined;
@@ -1759,7 +2562,7 @@ async function atomicWriteTextResolvedFile(
     }
     tempLive = false;
     await fsyncParentDirBestEffort(parent);
-    return encoded;
+    return written;
   } catch (err) {
     await tempHandle?.close().catch(() => undefined);
     if (tempLive) {
@@ -1779,20 +2582,17 @@ async function reserveTempFile(
   return fsp.open(tmpPath, 'wx', 0o600);
 }
 
-async function writeEncodedTextTemp(input: {
-  targetPath: string;
+/**
+ * Write an already-validated buffer to the reserved temp handle and verify
+ * the handle still names the same regular file. Shared by the text and
+ * binary publishers; size policy is enforced by the caller, not here.
+ */
+async function writeBufferToTemp(input: {
   tmpPath: string;
-  content: string;
-  meta: ReadMeta;
+  buf: Buffer;
   handle: Awaited<ReturnType<typeof fsp.open>>;
 }): Promise<AtomicWriteTextOutcome> {
-  const buf = await encodeTextFileContentAsync(
-    input.targetPath,
-    input.content,
-    buildWriteMeta(input.meta),
-  );
-  enforceWriteSize(buf.length);
-  await input.handle.writeFile(buf);
+  await input.handle.writeFile(input.buf);
   await syncHandleBestEffort(input.handle);
   const st = await fsp.lstat(input.tmpPath);
   const opened = await input.handle.stat();
@@ -1810,7 +2610,7 @@ async function writeEncodedTextTemp(input: {
       `temporary path is not a regular file: ${input.tmpPath}`,
     );
   }
-  return { sizeBytes: buf.length, hash: hashBuffer(buf), stat: st };
+  return { sizeBytes: input.buf.length, hash: hashBuffer(input.buf), stat: st };
 }
 
 async function assertCreateTargetAbsent(target: string): Promise<void> {

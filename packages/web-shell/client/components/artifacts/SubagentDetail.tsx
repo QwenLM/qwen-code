@@ -1,15 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
   useWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
-import { useMessages } from '../../hooks/useMessages';
+import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
+import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFrameTranscriptBlocks';
+import { useMessagesFromBlocks } from '../../hooks/useMessages';
+import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
+import type { TurnOutputOpenRequest } from './TurnOutputs';
+import {
+  getArtifactsByTurn,
+  getFileChangesByTurn,
+} from './turnOutputSelectors';
 import styles from './SubagentDetail.module.css';
 
 interface SubagentResolution {
@@ -86,17 +96,6 @@ export function findSubagentRootTool(
   return undefined;
 }
 
-export function getSubagentPrompt(
-  messages: readonly Message[],
-  rootTool: ACPToolCall,
-): string {
-  const firstUserMessage = messages.find((message) => message.role === 'user');
-  return (
-    (firstUserMessage?.role === 'user' ? firstUserMessage.content : '') ||
-    (typeof rootTool.args?.prompt === 'string' ? rootTool.args.prompt : '')
-  );
-}
-
 function statusLabel(status: string, t: ReturnType<typeof useI18n>['t']) {
   switch (status) {
     case 'completed':
@@ -119,16 +118,42 @@ function SubagentDetailContent({
   rootTool,
   resolution,
   onStop,
+  onRightPanelOpen,
+  onArtifactsChange,
+  onOpenSubagent,
+  onError,
 }: {
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
   onStop: () => Promise<{ cancelled: boolean }>;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+  ) => void;
+  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const connection = useConnection();
-  const messages = useMessages(t);
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const { artifacts } = useSessionArtifacts();
+  const artifactsByTurn = useMemo(
+    () =>
+      getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
+    [artifacts, connection.workspaceCwd, messages],
+  );
+  const fileChangesByTurn = useMemo(
+    () =>
+      getFileChangesByTurn(
+        messages,
+        artifactsByTurn,
+        connection.workspaceCwd || '',
+      ),
+    [artifactsByTurn, connection.workspaceCwd, messages],
+  );
   const description = getAgentDescription(rootTool);
-  const prompt = getSubagentPrompt(messages, rootTool);
   const metrics = useMemo(
     () => getSubagentMetrics(rootTool, resolution),
     [resolution, rootTool],
@@ -137,6 +162,25 @@ function SubagentDetailContent({
     metrics.status === 'running' || metrics.status === 'in_progress';
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState('');
+
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId) return;
+    onArtifactsChange?.(sessionId, artifacts);
+    return () => {
+      onArtifactsChange?.(sessionId, []);
+    };
+  }, [artifacts, connection.sessionId, onArtifactsChange]);
+
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      onRightPanelOpen?.({
+        ...request,
+        sourceSessionId: connection.sessionId,
+      });
+    },
+    [connection.sessionId, onRightPanelOpen],
+  );
 
   useEffect(() => {
     if (isRunning) return;
@@ -158,6 +202,25 @@ function SubagentDetailContent({
       setStopError(t('tasks.cancelFailed'));
     }
   };
+
+  const transcript = (
+    <MessageList
+      messages={messages}
+      pendingApproval={null}
+      loadingTranscript={connection.loadingTranscript}
+      catchingUp={connection.catchingUp}
+      isResponding={isRunning}
+      activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
+      workspaceCwd={connection.workspaceCwd || ''}
+      hideSessionTimeline
+      firstTurnMetrics={metrics}
+      includeSubagentToolUsageInMetrics={false}
+      turnFileChanges={fileChangesByTurn}
+      turnArtifacts={artifactsByTurn}
+      onTurnOutputOpen={handleRightPanelOpen}
+      onError={onError}
+    />
+  );
 
   return (
     <div className={styles.detail}>
@@ -187,20 +250,15 @@ function SubagentDetailContent({
           </div>
         </div>
         {stopError && <div className={styles.stopError}>{stopError}</div>}
-        {prompt && <pre className={styles.prompt}>{prompt}</pre>}
       </div>
       <div className={styles.transcript}>
-        <MessageList
-          messages={messages}
-          pendingApproval={null}
-          loadingTranscript={connection.loadingTranscript}
-          isResponding={isRunning}
-          workspaceCwd={connection.workspaceCwd || ''}
-          hideSessionTimeline
-          hideFirstUserMessage
-          firstTurnMetrics={metrics}
-          includeSubagentToolUsageInMetrics={false}
-        />
+        {onOpenSubagent ? (
+          <SubagentDetailsProvider onOpen={onOpenSubagent}>
+            {transcript}
+          </SubagentDetailsProvider>
+        ) : (
+          transcript
+        )}
       </div>
     </div>
   );
@@ -211,16 +269,37 @@ export function SubagentDetail({
   rootToolCallId,
   initialRootTool,
   workspaceCwd,
+  onRightPanelOpen,
+  onArtifactsChange,
+  onOpenSubagent,
+  onError,
 }: {
   sessionId: string;
   rootToolCallId: string;
   initialRootTool: ACPToolCall;
   workspaceCwd?: string;
+  onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
+  onArtifactsChange?: (
+    sessionId: string,
+    artifacts: readonly DaemonSessionArtifact[],
+  ) => void;
+  onOpenSubagent?: (
+    tool: ACPToolCall,
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
   const parentConnection = useConnection();
-  const parentMessages = useMessages(t);
+  const { blocks: parentBlocks, blockChangeSummary: parentBlockChangeSummary } =
+    useAnimationFrameTranscriptSnapshot();
+  const parentMessages = useMessagesFromBlocks(
+    t,
+    parentBlocks,
+    parentBlockChangeSummary,
+  );
   const rootTool =
     (parentConnection.sessionId === sessionId
       ? findSubagentRootTool(parentMessages, rootToolCallId)
@@ -236,6 +315,7 @@ export function SubagentDetail({
     let cancelled = false;
     let hasResolved = false;
     let retryCount = 0;
+    let lastResolvedRunning = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     setResolution(undefined);
     setLoadError(false);
@@ -247,19 +327,21 @@ export function SubagentDetail({
         );
         if (cancelled) return;
         hasResolved = true;
+        retryCount = 0;
+        lastResolvedRunning = resolved.status === 'running';
         setResolution(resolved);
         if (resolved.status === 'running') {
           refreshTimer = setTimeout(() => void refresh(), 3_000);
         }
       } catch {
         if (cancelled) return;
-        if (!hasResolved && retryCount < 3) {
+        if (retryCount < 3) {
           retryCount += 1;
           refreshTimer = setTimeout(() => void refresh(), 3_000);
         } else if (!hasResolved) {
           setLoadError(true);
-        } else {
-          refreshTimer = setTimeout(() => void refresh(), 3_000);
+        } else if (lastResolvedRunning) {
+          refreshTimer = setTimeout(() => void refresh(), 30_000);
         }
       }
     };
@@ -300,12 +382,21 @@ export function SubagentDetail({
       workspaceCwd={workspaceCwd}
       clientId={instance.clientId}
       maxQueued={256}
+      maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       subagentTranscriptMode="full"
       suppressOwnUserEcho
     >
       <SubagentDetailContent
         rootTool={rootTool}
         resolution={resolution}
+        onRightPanelOpen={onRightPanelOpen}
+        onArtifactsChange={onArtifactsChange}
+        onOpenSubagent={
+          onOpenSubagent
+            ? (tool) => onOpenSubagent(tool, sessionId, workspaceCwd)
+            : undefined
+        }
+        onError={onError}
         onStop={() =>
           workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
         }

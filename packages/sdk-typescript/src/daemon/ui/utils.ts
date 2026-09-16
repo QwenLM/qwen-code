@@ -42,6 +42,28 @@ export function stringifyRedactedJson(value: unknown): string {
   return stringifyJson(redactSensitiveFields(value));
 }
 
+const MAX_DETAILS_LENGTH = 4096;
+
+/**
+ * Returns a copy of `value` that does not reference the input's backing
+ * storage. Engines such as V8 represent slices of large strings as views
+ * (SlicedString) that keep the parent alive, so a capped string retained on a
+ * transcript block would otherwise pin the entire uncapped payload and defeat
+ * the cap. The UTF-8 round-trip forces an independent string.
+ */
+export function detachString(value: string): string {
+  return new TextDecoder('utf-8').decode(new TextEncoder().encode(value));
+}
+
+/**
+ * Caps a rendered details string so a single unbounded payload cannot grow a
+ * transcript block without limit.
+ */
+export function capDetails(details: string): string {
+  if (details.length <= MAX_DETAILS_LENGTH) return details;
+  return `${detachString(details.slice(0, MAX_DETAILS_LENGTH))}... [truncated]`;
+}
+
 export function redactSensitiveFields(value: unknown, depth = 0): unknown {
   if (depth > 16) return '[truncated]';
   if (Array.isArray(value)) {

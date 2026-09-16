@@ -13,6 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderExternalContext } from './context.js';
 import {
+  createMemoryWriter,
   GenericHttpSearchV1Adapter,
   Mem0PlatformV3Adapter,
 } from './providers.js';
@@ -287,6 +288,27 @@ describe('GenericHttpSearchV1Adapter', () => {
 });
 
 describe('Mem0PlatformV3Adapter', () => {
+  const eventId = '123e4567-e89b-12d3-a456-426614174000';
+
+  it('creates a writer only for the Mem0 provider', () => {
+    expect(
+      createMemoryWriter({
+        type: 'mem0-platform-v3',
+        apiKeyEnv: 'MEM0_API_KEY',
+        apiKey: 'project-key',
+        appId: 'fixed-repository',
+      }),
+    ).toBeInstanceOf(Mem0PlatformV3Adapter);
+    expect(
+      createMemoryWriter({
+        type: 'generic-http-search-v1',
+        baseUrl: 'https://context.example.com',
+        tokenEnv: 'TOKEN',
+        token: 'credential',
+      }),
+    ).toBeUndefined();
+  });
+
   it('validates an injected test origin before sending a project key', () => {
     const config = {
       type: 'mem0-platform-v3' as const,
@@ -351,6 +373,171 @@ describe('Mem0PlatformV3Adapter', () => {
     expect(items).toEqual([
       { id: 'memory-1', content: 'repository policy', score: 0.9 },
     ]);
+  });
+
+  it('sends one exact direct-import write with fixed provider binding', async () => {
+    const content = '  Keep 🙂 this\nexactly.  ';
+    let requestCount = 0;
+    let requestBody: unknown;
+    let requestPath: string | undefined;
+    let authorization: string | undefined;
+    const baseUrl = await startServer(async (request, response) => {
+      requestCount += 1;
+      requestPath = request.url;
+      authorization = request.headers.authorization;
+      requestBody = JSON.parse(await readBody(request));
+      json(response, { status: 'PENDING', event_id: eventId });
+    });
+
+    await expect(
+      mem0Adapter(baseUrl).remember({
+        content,
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({
+      status: 'accepted',
+      providerOperationId: eventId,
+    });
+    expect(requestCount).toBe(1);
+    expect(requestPath).toBe('/v3/memories/add/');
+    expect(authorization).toBe('Token project-key');
+    expect(requestBody).toEqual({
+      messages: [{ role: 'user', content }],
+      app_id: 'fixed-repository',
+      infer: false,
+    });
+  });
+
+  it('does not deduplicate repeated approved content', async () => {
+    let requestCount = 0;
+    const baseUrl = await startServer((_request, response) => {
+      requestCount += 1;
+      json(response, { status: 'PENDING', event_id: eventId });
+    });
+    const adapter = mem0Adapter(baseUrl);
+    const remember = () =>
+      adapter.remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      });
+
+    await expect(remember()).resolves.toMatchObject({
+      status: 'accepted',
+    });
+    await expect(remember()).resolves.toMatchObject({
+      status: 'accepted',
+    });
+    expect(requestCount).toBe(2);
+  });
+
+  it.each([
+    [{ status: 'SUCCEEDED' }, { status: 'stored' }],
+    [
+      { status: 'SUCCEEDED', event_id: eventId },
+      { status: 'stored', providerOperationId: eventId },
+    ],
+    [{ status: 'PENDING' }, { status: 'unknown' }],
+    [{ status: 'PENDING', event_id: 'not-a-uuid' }, { status: 'unknown' }],
+    [{ status: 'SUCCEEDED', event_id: 'not-a-uuid' }, { status: 'unknown' }],
+    [{ status: 'UNKNOWN', event_id: eventId }, { status: 'unknown' }],
+    [{}, { status: 'unknown' }],
+    [[], { status: 'unknown' }],
+  ])('maps Mem0 write response %#', async (responseBody, expected) => {
+    const baseUrl = await startServer((_request, response) => {
+      json(response, responseBody);
+    });
+
+    await expect(
+      mem0Adapter(baseUrl).remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual(expected);
+  });
+
+  it('maps an explicit Mem0 failure to a stable failed result', async () => {
+    const baseUrl = await startServer((_request, response) => {
+      json(response, {
+        status: 'FAILED',
+        message: 'provider details must stay private',
+      });
+    });
+
+    await expect(
+      mem0Adapter(baseUrl).remember({
+        content: 'repository policy',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'failed' });
+  });
+
+  it.each([400, 401, 403, 404])(
+    'returns failed for definitive HTTP %s rejections',
+    async (status) => {
+      let requestCount = 0;
+      const baseUrl = await startServer((_request, response) => {
+        requestCount += 1;
+        response.writeHead(status);
+        response.end('private upstream detail');
+      });
+
+      await expect(
+        mem0Adapter(baseUrl).remember({
+          content: 'repository policy',
+          signal: AbortSignal.timeout(1000),
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(requestCount).toBe(1);
+    },
+  );
+
+  it.each([302, 408, 429, 500])(
+    'returns unknown for HTTP %s without retrying',
+    async (status) => {
+      let requestCount = 0;
+      const baseUrl = await startServer((_request, response) => {
+        requestCount += 1;
+        response.writeHead(status, {
+          location: 'https://other.example.com',
+        });
+        response.end('private upstream detail');
+      });
+
+      await expect(
+        mem0Adapter(baseUrl).remember({
+          content: 'repository policy',
+          signal: AbortSignal.timeout(1000),
+        }),
+      ).resolves.toEqual({ status: 'unknown' });
+      expect(requestCount).toBe(1);
+    },
+  );
+
+  it('returns unknown for malformed, oversized, interrupted, and timed-out responses', async () => {
+    const handlers: Array<Parameters<typeof startServer>[0]> = [
+      (_request, response) => response.end('{'),
+      (_request, response) => {
+        response.setHeader('content-length', String(1024 * 1024 + 1));
+        response.end('{}');
+      },
+      (_request, response) => response.destroy(),
+      async (_request, response) => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        json(response, { status: 'SUCCEEDED' });
+      },
+    ];
+
+    for (const [index, handler] of handlers.entries()) {
+      const baseUrl = await startServer(handler);
+      await expect(
+        mem0Adapter(baseUrl).remember({
+          content: 'repository policy',
+          signal: AbortSignal.timeout(
+            index === handlers.length - 1 ? 10 : 1000,
+          ),
+        }),
+      ).resolves.toEqual({ status: 'unknown' });
+    }
   });
 
   it('rejects an undocumented top-level array response', async () => {

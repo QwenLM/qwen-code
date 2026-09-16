@@ -28,11 +28,13 @@ import {
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockRunExitCleanup } = vi.hoisted(() => ({
+const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
+  mockRegisterCleanup: vi.fn(),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+  registerCleanup: mockRegisterCleanup,
 }));
 
 const { mockConnectionState } = vi.hoisted(() => {
@@ -49,7 +51,8 @@ const { mockConnectionState } = vi.hoisted(() => {
   return { mockConnectionState: state };
 });
 
-vi.mock('@agentclientprotocol/sdk', () => ({
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@agentclientprotocol/sdk')>()),
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
       return mockConnectionState.promise;
@@ -74,6 +77,13 @@ vi.mock('@agentclientprotocol/sdk', () => ({
   PROTOCOL_VERSION: '1.0.0',
 }));
 
+vi.mock('./acp-output.js', () => ({
+  createAcpOutput: () => ({
+    stream: new WritableStream<Uint8Array>(),
+    close: () => Promise.resolve(),
+  }),
+}));
+
 vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
   ndJsonStream: vi.fn().mockReturnValue({}),
 }));
@@ -88,19 +98,38 @@ vi.mock('node:stream', async (importOriginal) => {
 });
 
 // Core mock — includes restoreWorktreeContext controllable per-test.
-const { mockRestoreWorktreeContext } = vi.hoisted(() => ({
-  mockRestoreWorktreeContext: vi
-    .fn()
-    .mockResolvedValue({ contextMessage: null, session: null }),
-}));
+const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
+  const daemonSpan = { setAttribute: vi.fn() };
+  return {
+    mockRestoreWorktreeContext: vi
+      .fn()
+      .mockResolvedValue({ contextMessage: null, session: null }),
+    mockWithDaemonSpan: vi.fn(
+      async (
+        _name: string,
+        _attributes: Record<string, unknown>,
+        fn: (span: typeof daemonSpan | undefined) => Promise<unknown>,
+      ) => await fn(daemonSpan),
+    ),
+  };
+});
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+// The agent imports the peer-messaging transport statically; its own core
+// imports would reach past this suite's exhaustive core mock. Messaging is
+// on by default, so the session settings below turn it off.
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: { start: vi.fn() },
+}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  registerSession: vi.fn(),
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
     warn: vi.fn(),
     info: vi.fn(),
   }),
+  extractDaemonTraceContext: vi.fn(),
+  withDaemonSpan: mockWithDaemonSpan,
   registerAcpEventLoopLagGauge: vi.fn(),
   startEventLoopLagMonitor: vi.fn(() => ({
     snapshot: vi.fn(() => ({
@@ -113,6 +142,34 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
+  applyReasoningEffort: (
+    config: {
+      setReasoningEffort(effort: string | undefined): void;
+      getReasoningEffort(): string | undefined;
+    },
+    effort: string | undefined,
+  ) => {
+    config.setReasoningEffort(effort);
+    return config.getReasoningEffort() === effort;
+  },
+  REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+  clampReasoningEffort: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).clampReasoningEffort,
+  getGptReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isReasoningEffortPlaceholder,
+  isOpenRouterHostname: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isOpenRouterHostname,
+  // The real parser: `model-configuration` gates every reasoning control on it,
+  // and a stand-in would decide capability validity differently from the wire.
+  parseModelReasoningCapabilities: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).parseModelReasoningCapabilities,
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
   DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
@@ -121,12 +178,24 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
+  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP: 900,
+  GOAL_MAX_TURNS_CAP: 10_000,
+  GOAL_MAX_ACTIVE_MINUTES_CAP: 10_080,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS: 120_000,
+  MAX_WEB_SEARCH_TIMEOUT_MS: 600_000,
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION: 200,
+  MAX_WEB_SEARCH_MAX_PER_SESSION: 10_000,
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   ApprovalMode: {
     DEFAULT: 'default',
     AUTO_EDIT: 'auto-edit',
     YOLO: 'yolo',
     PLAN: 'plan',
+  },
+  OutputFormat: {
+    TEXT: 'text',
+    JSON: 'json',
+    STREAM_JSON: 'stream-json',
   },
   Kind: {
     Read: 'read',
@@ -149,6 +218,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  SessionIdCaseConflictError: class SessionIdCaseConflictError extends Error {
+    override readonly name = 'SessionIdCaseConflictError';
+  },
   Storage: {
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
   },
@@ -183,6 +255,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     snapshot: vi.fn(() => ({})),
   })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  listWorkflowSnapshots: vi.fn().mockResolvedValue([]),
   HookEventName: {
     PreToolUse: 'PreToolUse',
     PostToolUse: 'PostToolUse',
@@ -204,6 +277,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
   },
+  // Real pass-through: newSessionConfig binds the session's debug-log context
+  // via sessionIdContext.run, so the mock must expose the actual store.
+  sessionIdContext: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sessionIdContext,
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -236,6 +314,7 @@ vi.mock('./service/filesystem.js', () => ({
 vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
+  reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
 // Passthrough: the real cache would serve the first mockReturnValue to every
 // later same-cwd call, breaking tests that re-point loadSettings per call.
@@ -248,8 +327,15 @@ vi.mock('../config/settings-cache.js', async () => {
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  buildEnabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  // newSessionConfig's catch narrows on this class; without the export an
+  // unrelated error in the try block surfaces as a confusing mock error.
+  SessionIdConflictError: class SessionIdConflictError extends Error {},
 }));
-vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
+vi.mock('./session/Session.js', () => ({
+  Session: vi.fn(),
+  registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
+}));
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -301,6 +387,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   function makeInnerConfig() {
     const mockSessionService = {
       sessionExists: vi.fn().mockResolvedValue(true),
+      findSessionIdIgnoringCase: vi.fn().mockResolvedValue(SESSION_ID),
       getWorktreeSessionPath: vi.fn().mockReturnValue(SIDECAR_PATH),
     };
     vi.mocked(SessionService).mockImplementation(
@@ -309,6 +396,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     );
 
     return {
+      setArtifactSnapshotsEnabled: vi.fn(),
       initialize: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
@@ -319,9 +407,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      getTargetDir: vi.fn().mockReturnValue('/fake/project'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getGeminiClient: vi.fn().mockReturnValue({
+      setImageModel: vi.fn().mockResolvedValue(undefined),
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -347,7 +437,10 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
 
   function makeSessionSettings() {
     return {
-      merged: { mcpServers: {} },
+      // Messaging is on by default, and on it registers every loaded
+      // session through a config this suite does not stage. The suite is
+      // about worktree restore, so it turns the switch off.
+      merged: { mcpServers: {}, agents: { crossSessionMessaging: false } },
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -421,11 +514,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     vi.mocked(Session).mockImplementation(() => {
       const mock = {
         getId: vi.fn().mockReturnValue(SESSION_ID),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
-        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,

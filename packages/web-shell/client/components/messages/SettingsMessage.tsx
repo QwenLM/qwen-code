@@ -20,7 +20,7 @@ import type {
   DaemonSettingDescriptor,
   DaemonSettingUpdateResult,
   DaemonWorkspaceSettingsStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   WEB_SHELL_LANGUAGES,
   languageLabel,
@@ -28,6 +28,9 @@ import {
   useI18n,
   type WebShellLanguage,
 } from '../../i18n';
+import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
+import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
+import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 import {
   WEB_SHELL_THEMES,
   WebShellThemeId,
@@ -42,6 +45,7 @@ import {
   ModelManagementSection,
   type ModelManagementProps,
 } from './ModelManagementSection';
+import { LocalControlSettingsCard } from './LocalControlSettingsCard';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -86,6 +90,8 @@ interface SettingsMessageProps {
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagement?: ModelManagementProps;
   embedded?: boolean;
+  /** Category to select on open (deep link, e.g. 'Daemon'). */
+  initialCategory?: string;
 }
 
 export interface SettingsMessageSettingsState {
@@ -99,9 +105,12 @@ export interface SettingsMessageSettingsState {
     key: string,
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
+  liveSetup?: UseLiveVoiceSetupResult;
 }
 
 const SUB_DIALOG_KEYS = new Set([
+  'advisorModel',
+  'imageModel',
   'fastModel',
   'visionModel',
   'voiceModel',
@@ -110,9 +119,15 @@ const SUB_DIALOG_KEYS = new Set([
 const HIDDEN_SETTING_KEYS = new Set([
   'ui.hideTips',
   'ui.enableUserFeedback',
+  // Compact behavior is fixed on in the web shell; the daemon schema still
+  // carries the retired setting, so keep it hidden from the panel.
   'ui.compactMode',
-  'ui.compactInline',
   'mcpServers',
+  'model.reasoningEffort',
+]);
+const LIVE_SETTING_KEYS = new Set([
+  'experimental.liveVoice.enabled',
+  'experimental.liveVoice.shortcut',
 ]);
 
 type Scope = 'user' | 'workspace';
@@ -178,6 +193,10 @@ function formatValue(
 ): string {
   const effective = resolveValue(setting, scope);
   if (effective === undefined || effective === null) return '';
+  if (setting.key === 'advisorModel' && effective === '')
+    return t('model.useMain');
+  if (setting.key === 'imageModel' && effective === '')
+    return t('model.disabled');
   if (setting.key === THEME_SETTING_KEY) {
     const theme = themeSettingToWebShellTheme(effective, WebShellThemeId.Dark);
     return t(`theme.${theme}`);
@@ -196,7 +215,7 @@ function formatValue(
       ? formatSettingOption(setting, opt.value, opt.label, t)
       : String(effective);
   }
-  const s = String(effective);
+  const s = String(effective).replaceAll('\0', ' · ');
   return s.length > 24 ? `${s.slice(0, 21)}…` : s;
 }
 
@@ -238,7 +257,9 @@ interface CategoryGroup {
 
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
+  | { type: 'local-control' }
+  | { type: 'live' };
 
 interface SettingsPageCategory {
   id: string;
@@ -380,7 +401,7 @@ function SettingInput({
 export type FlatRow =
   | { type: 'header'; category: string }
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' };
 
 /* Wraps around at both ends (matching the native CLI) while skipping
    category-header rows. Exported for tests. */
@@ -408,20 +429,30 @@ export function SettingsMessage({
   onChatWidthModeChange,
   modelManagement,
   embedded = false,
+  initialCategory,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
-  const { status, settings, loading, error, reload, setValue } = settingsState;
+  const notifications = useBrowserNotificationSettings();
+  const refreshNotificationPermission = notifications?.refreshPermission;
+  useEffect(() => {
+    refreshNotificationPermission?.();
+  }, [refreshNotificationPermission]);
+  const { status, settings, loading, error, reload, setValue, liveSetup } =
+    settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
 
+  const hasNotifications = notifications !== undefined;
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
     const visibleSettings = settings.filter(
-      (setting) => !HIDDEN_SETTING_KEYS.has(setting.key),
+      (setting) =>
+        !HIDDEN_SETTING_KEYS.has(setting.key) &&
+        !LIVE_SETTING_KEYS.has(setting.key),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -456,15 +487,50 @@ export function SettingsMessage({
         items: [localItem],
       });
     }
+    if (hasNotifications) {
+      const group = groups.find((item) => item.items.includes(localItem));
+      group?.items.push({ type: 'local', localKey: 'browserNotifications' });
+    }
+    if (liveSetup?.supported) {
+      const experimental = groups.find((group) => group.id === 'Experimental');
+      if (experimental) {
+        experimental.items.unshift({ type: 'live' });
+      } else {
+        groups.push({
+          id: 'Experimental',
+          label: formatSettingCategory('Experimental', t),
+          items: [{ type: 'live' }],
+        });
+      }
+    }
+    const daemon = groups.find((group) => group.id === 'Daemon');
+    if (daemon) {
+      daemon.items.unshift({ type: 'local-control' });
+    } else {
+      groups.push({
+        id: 'Daemon',
+        label: formatSettingCategory('Daemon', t),
+        items: [{ type: 'local-control' }],
+      });
+    }
     return groups;
-  }, [settings, t]);
+  }, [liveSetup, settings, t, hasNotifications]);
 
   useEffect(() => {
     if (categories.length === 0) return;
     if (!categories.some((category) => category.id === activeCategory)) {
-      setActiveCategory(categories[0]!.id);
+      // A deep link (initialCategory) only matters while no valid category
+      // is selected, so it wins on mount but never overrides a later manual
+      // switch. Keeping this in one effect avoids two effects racing to set
+      // the initial category under StrictMode double-invocation.
+      const preferred =
+        initialCategory &&
+        categories.some((category) => category.id === initialCategory)
+          ? initialCategory
+          : categories[0]!.id;
+      setActiveCategory(preferred);
     }
-  }, [activeCategory, categories]);
+  }, [activeCategory, categories, initialCategory]);
 
   useEffect(() => {
     if (error) setMessage(error.message);
@@ -632,7 +698,11 @@ export function SettingsMessage({
       <SettingInput
         name={setting.key}
         label={formatSettingLabel(setting, t)}
-        type={setting.type === 'number' ? 'number' : 'text'}
+        type={
+          setting.type === 'number' || setting.type === 'integer'
+            ? 'number'
+            : 'text'
+        }
         value={value}
         disabled={disabled}
         onCommit={(next) => handleSetValue(setting.key, next)}
@@ -750,6 +820,73 @@ export function SettingsMessage({
                         const separator = index > 0 && (
                           <Separator className="mx-5 w-auto max-md:mx-4" />
                         );
+                        if (
+                          item.type === 'local' &&
+                          item.localKey === 'browserNotifications' &&
+                          notifications
+                        ) {
+                          const unavailable =
+                            notifications.permission === 'unavailable';
+                          const status = unavailable
+                            ? 'unavailable'
+                            : notifications.pending
+                              ? 'requesting'
+                              : notifications.permission === 'denied'
+                                ? 'denied'
+                                : notifications.error
+                                  ? 'error'
+                                  : notifications.enabled
+                                    ? notifications.permission === 'granted'
+                                      ? 'enabled'
+                                      : 'waiting'
+                                    : 'disabled';
+                          return (
+                            <div key={item.localKey}>
+                              {separator}
+                              <SettingsRow
+                                title={t('browserNotifications.label')}
+                                description={[
+                                  t('browserNotifications.description'),
+                                  t(`browserNotifications.${status}`),
+                                  ...(!notifications.persistent
+                                    ? [t('browserNotifications.temporary')]
+                                    : []),
+                                ].join(' ')}
+                                control={
+                                  <div className="flex items-center gap-2">
+                                    {notifications.enabled &&
+                                      notifications.permission ===
+                                        'default' && (
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          disabled={notifications.pending}
+                                          onClick={() =>
+                                            void notifications.setEnabled(true)
+                                          }
+                                        >
+                                          {t('browserNotifications.allow')}
+                                        </Button>
+                                      )}
+                                    <Switch
+                                      aria-label={t(
+                                        'browserNotifications.label',
+                                      )}
+                                      checked={notifications.enabled}
+                                      disabled={
+                                        notifications.pending ||
+                                        (unavailable && !notifications.enabled)
+                                      }
+                                      onCheckedChange={(enabled) =>
+                                        void notifications.setEnabled(enabled)
+                                      }
+                                    />
+                                  </div>
+                                }
+                              />
+                            </div>
+                          );
+                        }
                         if (item.type === 'local') {
                           return (
                             <div key={item.localKey}>
@@ -783,6 +920,22 @@ export function SettingsMessage({
                                   false,
                                 )}
                               />
+                            </div>
+                          );
+                        }
+                        if (item.type === 'live') {
+                          return liveSetup ? (
+                            <div key="live-voice-setup">
+                              {separator}
+                              <LiveVoiceSettingsCard setup={liveSetup} />
+                            </div>
+                          ) : null;
+                        }
+                        if (item.type === 'local-control') {
+                          return (
+                            <div key="local-control">
+                              {separator}
+                              <LocalControlSettingsCard />
                             </div>
                           );
                         }

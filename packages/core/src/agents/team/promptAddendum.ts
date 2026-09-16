@@ -12,6 +12,12 @@
  * instructions — they infer from tool availability.
  */
 
+const FINAL_ANSWER_FORWARDING_NOTE = [
+  '   When your turn ends, the runtime forwards the last text you emitted to',
+  '   the leader automatically, so end your turn with your report. Calling',
+  '   send_message(to: "leader") earlier additionally delivers it sooner.',
+];
+
 /**
  * Build the system prompt addendum for a teammate.
  *
@@ -23,8 +29,33 @@ export function buildTeammatePromptAddendum(
   teammateName: string,
   teamName: string,
   leaderName: string,
-  options: { planModeRequired?: boolean } = {},
+  options: { planModeRequired?: boolean; readOnly?: boolean } = {},
 ): string {
+  if (options.readOnly) {
+    return [
+      `You are read-only agent "${teammateName}" in team "${teamName}".`,
+      `The team leader is "${leaderName}".`,
+      '',
+      'CRITICAL RULES — you MUST follow these:',
+      '',
+      '1. CHECK TASKS FIRST: Call task_list to find pending tasks.',
+      '   Claim a task by calling task_update(taskId, status: "in_progress").',
+      '',
+      '2. INVESTIGATE ONLY: Inspect the checkout with the available read-only',
+      '   tools. You cannot run shell commands, edit files, persist memory,',
+      '   schedule work, or spawn agents.',
+      '',
+      '3. COLLABORATE: Use send_message for questions, conflicting evidence,',
+      '   and useful findings. Include the task id and concrete evidence.',
+      '',
+      '4. MARK COMPLETE: Call task_update(taskId, status: "completed").',
+      '',
+      '5. REPORT RESULTS: Return a concise final answer with findings,',
+      '   evidence, uncertainty, and recommended next action. The runtime',
+      '   forwards it to the leader automatically. This ends your turn.',
+    ].join('\n');
+  }
+
   if (options.planModeRequired) {
     return [
       `You are agent "${teammateName}" in team "${teamName}".`,
@@ -49,6 +80,7 @@ export function buildTeammatePromptAddendum(
       '',
       '5. AFTER APPROVAL: Only after the leader approves may you make changes.',
       '   When done, call send_message(to: "leader", message: "<your findings>").',
+      ...FINAL_ANSWER_FORWARDING_NOTE,
       '',
       '6. MARK COMPLETE: Call task_update(taskId, status: "completed").',
       '',
@@ -71,9 +103,9 @@ export function buildTeammatePromptAddendum(
     '2. DO THE WORK: Use read_file, grep_search, glob, etc.',
     '',
     '3. REPORT RESULTS: When done, call send_message(to: "leader",',
-    '   message: "<your findings>"). This is the ONLY way the',
-    '   leader can see your output — text output is NOT visible',
-    '   to other agents.',
+    '   message: "<your findings>").',
+    ...FINAL_ANSWER_FORWARDING_NOTE,
+    '   Your text output is NOT visible to peer teammates.',
     '',
     '4. MARK COMPLETE: Call task_update(taskId, status: "completed").',
     '',

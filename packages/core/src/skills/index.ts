@@ -29,7 +29,13 @@ export type {
   SkillErrorCode,
 } from './types.js';
 
-export { SkillError } from './types.js';
+export {
+  SkillError,
+  validateSkillName,
+  qualifySkillName,
+  skillRestrictionNames,
+  authoredSkillName,
+} from './types.js';
 
 // Main management class
 export { SkillManager } from './skill-manager.js';
@@ -42,3 +48,23 @@ export {
   SkillActivationRegistry,
   splitConditionalSkills,
 } from './skill-activation.js';
+
+// Project auto-skill lifecycle maintenance
+export * from './skill-curator.js';
+
+// The bundled authoring reference for the Workflow tool, and the decision of
+// how it reaches the model: pointed at, inlined in the tool description, or
+// withheld because the user turned it off.
+export {
+  isToolHiddenBehindToolSearch,
+  readWorkflowAuthoringReference,
+  resolveWorkflowAuthoringRoute,
+  resolveWorkflowAuthoringSurface,
+  toolSearchRevealSentence,
+  WORKFLOW_AUTHORING_SKILL_NAME,
+} from './workflow-authoring-skill.js';
+export type {
+  WorkflowAuthoringReference,
+  WorkflowAuthoringRoute,
+  WorkflowAuthoringSurface,
+} from './workflow-authoring-skill.js';

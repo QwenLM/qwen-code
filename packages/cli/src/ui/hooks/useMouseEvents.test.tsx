@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import type React from 'react';
 import { EventEmitter } from 'node:events';
@@ -256,6 +257,41 @@ describe('useMouseEvents', () => {
         { wrapper: vpWrapper(false) },
       );
       expect(stdout.write).not.toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+  });
+
+  describe('mouseTracking setting', () => {
+    const mouseTrackingWrapper = (mouseTracking: boolean) => {
+      const Wrapper = ({ children }: { children: React.ReactNode }) => (
+        <SettingsContext.Provider
+          value={
+            {
+              merged: { ui: { useTerminalBuffer: true, mouseTracking } },
+            } as unknown as LoadedSettings
+          }
+        >
+          <KeypressProvider kittyProtocolEnabled={false}>
+            {children}
+          </KeypressProvider>
+        </SettingsContext.Provider>
+      );
+      return Wrapper;
+    };
+
+    it('ui.mouseTracking: false keeps mouse mode disabled', () => {
+      renderHook(
+        () => useMouseEvents(() => {}, { isActive: true, bypassVpGate: true }),
+        { wrapper: mouseTrackingWrapper(false) },
+      );
+      expect(stdout.write).not.toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+
+    it('ui.mouseTracking: true enables mouse mode', () => {
+      renderHook(
+        () => useMouseEvents(() => {}, { isActive: true, bypassVpGate: true }),
+        { wrapper: mouseTrackingWrapper(true) },
+      );
+      expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
     });
   });
 });

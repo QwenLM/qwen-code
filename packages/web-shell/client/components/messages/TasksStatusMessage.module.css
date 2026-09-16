@@ -48,6 +48,11 @@
   cursor: pointer;
 }
 
+.row:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
 .selected {
   color: var(--agent-blue-500);
 }
@@ -293,6 +298,28 @@
   gap: 6px;
 }
 
+.shellFields {
+  display: grid;
+  gap: 14px;
+}
+
+.shellFieldValue {
+  background: var(--muted);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.shellError {
+  background: color-mix(in srgb, var(--error-color) 7%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
 .monitorCommand {
   background: var(--muted);
   border: 1px solid var(--border);
@@ -362,6 +389,13 @@
   margin: 5px 0;
   min-width: 0;
   overflow: hidden;
+}
+
+.embeddedPanel .inlineDetail[data-kind='workflow'] {
+  margin: 4px 0 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .embeddedPanel .detail {
@@ -466,6 +500,12 @@
 .actionButton:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.primaryActionButton {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .dangerButton {

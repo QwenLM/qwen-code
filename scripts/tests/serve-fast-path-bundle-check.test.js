@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   checkAcpImportBoundary,
+  checkEntryBootstrapIntact,
   checkSdkImplProtocolBoundary,
   checkServeFastPathBundle,
   findAcpImportBoundaryOffenders,
@@ -28,6 +29,8 @@ const checkScriptPath = fileURLToPath(
 function makeMetafile(outputs) {
   return {
     outputs: {
+      // A healthy bundle compiles the entry module into the entry output.
+      'dist/cli.js': output({ inputs: ['packages/cli/src/cli.ts'] }),
       'dist/chunks/fast-path.js': output({
         inputs: ['packages/cli/src/serve/fast-path.ts'],
       }),
@@ -130,7 +133,7 @@ describe('serve fast-path bundle check', () => {
       'dist/chunks/run-qwen-serve.js': output({
         inputs: [
           'packages/cli/src/serve/run-qwen-serve.ts',
-          'packages/cli/src/gemini.tsx',
+          'packages/cli/src/llm.tsx',
           'packages/cli/src/acp-integration/acpAgent.ts',
         ],
       }),
@@ -181,6 +184,28 @@ describe('serve fast-path bundle check', () => {
         label: 'Core shell tool runtime',
         matchedInput: 'packages/core/dist/src/tools/shell.js',
         importPath: ['dist/chunks/fast-path.js', 'dist/chunks/core-runtime.js'],
+      }),
+    ]);
+  });
+
+  it.each([
+    'packages/acp-bridge/src/session-control-plane.ts',
+    'packages/acp-bridge/dist/session-control-plane.js',
+    'packages/acp-bridge/src/channel-harness.ts',
+    'packages/acp-bridge/dist/channel-harness.js',
+  ])('keeps extracted runtime %s out of the pre-listen closure', (input) => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({ inputs: [input] }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: input,
       }),
     ]);
   });
@@ -250,6 +275,20 @@ describe('serve fast-path bundle check', () => {
       'dist/chunks/run-qwen-serve.js',
       'dist/chunks/core-runtime.js',
     ]);
+  });
+
+  it('keeps leaf core imports from pulling the core barrel into serve', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/no-follow-open.js')],
+      }),
+      'dist/chunks/no-follow-open.js': output({
+        inputs: ['packages/core/src/utils/no-follow-open.ts'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
   });
 
   it('matches normalized source suffixes without accepting partial names', () => {
@@ -749,6 +788,84 @@ describe('telemetry sdk-impl protocol boundary check', () => {
       ).toThrow(
         /Telemetry sdk-impl static closure includes OTLP protocol chain modules/,
       );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('bundled entry bootstrap check', () => {
+  it('accepts an entry output that still contains the entry module', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(tempDir, makeMetafile({}));
+      expect(checkEntryBootstrapIntact({ metafilePath }).ok).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an entry hoisted into a shared chunk by code splitting', () => {
+    // What a static `import ... from './cli.js'` inside a lazily-loaded module
+    // does to the bundle: dist/cli.js keeps no inputs of its own and becomes a
+    // re-export stub, so cli.ts's main-module bootstrap guard never fires.
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/cli.js': output({
+            imports: [staticImport('dist/chunks/cli-entry.js')],
+          }),
+          'dist/chunks/cli-entry.js': output({
+            inputs: ['packages/cli/src/cli.ts'],
+          }),
+        }),
+      );
+
+      expect(checkEntryBootstrapIntact({ metafilePath }).ok).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the entry output is absent from the metafile', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafile = makeMetafile({});
+      delete metafile.outputs['dist/cli.js'];
+      const metafilePath = writeMetafile(tempDir, metafile);
+
+      expect(() => checkEntryBootstrapIntact({ metafilePath })).toThrow(
+        /Missing dist\/cli\.js in the esbuild metafile/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero with CLI diagnostics for a hoisted entry', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/cli.js': output({
+            imports: [staticImport('dist/chunks/cli-entry.js')],
+          }),
+          'dist/chunks/cli-entry.js': output({
+            inputs: ['packages/cli/src/cli.ts'],
+          }),
+        }),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(/no longer contains packages\/cli\/src\/cli\.ts/);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

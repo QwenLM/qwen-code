@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AnyToolInvocation } from '../index.js';
+import type { AnyDeclarativeTool, AnyToolInvocation } from '../tools/tools.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
 import path from 'node:path';
 import { parse, quote } from 'shell-quote';
-import { doesToolInvocationMatch } from './tool-utils.js';
+import { isTool } from './is-tool.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   execFile,
@@ -19,6 +19,72 @@ import {
 import { accessSync, constants as fsConstants } from 'node:fs';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
+
+/**
+ * Checks if a tool invocation matches any of a list of patterns.
+ *
+ * @param toolOrToolName The tool object or the name of the tool being invoked.
+ * @param invocation The invocation object for the tool.
+ * @param patterns A list of patterns to match against.
+ *   Patterns can be:
+ *   - A tool name (e.g., "ReadFileTool") to match any invocation of that tool.
+ *   - A tool name with a prefix (e.g., "ShellTool(git status)") to match
+ *     invocations where the arguments start with that prefix.
+ * @returns True if the invocation matches any pattern, false otherwise.
+ */
+export function doesToolInvocationMatch(
+  toolOrToolName: AnyDeclarativeTool | string,
+  invocation: AnyToolInvocation,
+  patterns: string[],
+): boolean {
+  let toolNames: string[];
+  if (isTool(toolOrToolName)) {
+    toolNames = [toolOrToolName.name, toolOrToolName.constructor.name];
+  } else {
+    toolNames = [toolOrToolName as string];
+  }
+
+  if (toolNames.some((name) => SHELL_TOOL_NAMES.includes(name))) {
+    toolNames = [...new Set([...toolNames, ...SHELL_TOOL_NAMES])];
+  }
+
+  for (const pattern of patterns) {
+    const openParen = pattern.indexOf('(');
+
+    if (openParen === -1) {
+      // No arguments, just a tool name
+      if (toolNames.includes(pattern)) {
+        return true;
+      }
+      continue;
+    }
+
+    const patternToolName = pattern.substring(0, openParen);
+    if (!toolNames.includes(patternToolName)) {
+      continue;
+    }
+
+    if (!pattern.endsWith(')')) {
+      continue;
+    }
+
+    const argPattern = pattern.substring(openParen + 1, pattern.length - 1);
+
+    if (
+      'command' in invocation.params &&
+      toolNames.includes('run_shell_command')
+    ) {
+      const argValue = String(
+        (invocation.params as { command: string }).command,
+      );
+      if (argValue === argPattern || argValue.startsWith(argPattern + ' ')) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 
 /**
  * An identifier for the shell type.
@@ -1824,6 +1890,23 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
+      if (nextChar === '\n' && command[i - 1] === '$') {
+        let dollarStart = i - 1;
+        while (dollarStart > 0 && command[dollarStart - 1] === '$') {
+          dollarStart--;
+        }
+        let escapeStart = dollarStart;
+        while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
+          escapeStart--;
+        }
+        if (
+          (i - dollarStart) % 2 === 1 &&
+          (dollarStart - escapeStart) % 2 === 0 &&
+          command[i + 2] === '('
+        ) {
+          return true;
+        }
+      }
       i += 2; // Skip the escaped character
       continue;
     }
@@ -1862,6 +1945,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(i))
+      ) {
+        return true;
+      }
+
       // <(...) process substitution - works unquoted only (not in double quotes)
       if (char === '<' && nextChar === '(' && !inDoubleQuotes && !inBackticks) {
         return true;
@@ -1889,12 +1980,13 @@ export function detectCommandSubstitution(command: string): boolean {
 
 /**
  * User-facing warning emitted when a shell-tool invocation contains
- * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
+ * `${parameter@P}`).
  * Shared across the shell-tool and monitor-tool confirmation paths so
  * the wording can't drift between sites — see #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
-  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+  'Contains command substitution ($(...), backticks, <(...), >(...), or ${parameter@P}).';
 
 /**
  * Single dual-check predicate: does the command contain shell command
@@ -1985,7 +2077,7 @@ export async function checkCommandPermissions(
       allAllowed: false,
       disallowedCommands: [command],
       blockReason:
-        'Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons',
+        'Command substitution using $(), `` ` ``, <(), >(), or ${parameter@P} is not allowed for security reasons',
       isHardDenial: true,
     };
   }

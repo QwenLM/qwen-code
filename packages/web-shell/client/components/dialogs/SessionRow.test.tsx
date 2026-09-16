@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonSessionSummary } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionSummary } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { dp } from './dialogStyles';
 import { SessionRow } from './SessionRow';
@@ -55,6 +55,48 @@ describe('SessionRow', () => {
     expect(row().textContent).toContain('My Session');
     // clientCount surfaces in the meta line.
     expect(row().textContent).toContain('2');
+  });
+
+  it('renders the bound PR badge (latest + overflow) without triggering row selection', () => {
+    const onClick = vi.fn();
+    const withPrs = {
+      ...session,
+      prs: [
+        { number: 9500, url: 'https://github.com/o/r/pull/9500' },
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      ],
+    } as unknown as DaemonSessionSummary;
+    mount(
+      <SessionRow
+        session={withPrs}
+        active={false}
+        current={false}
+        onClick={onClick}
+        onActivate={vi.fn()}
+      />,
+    );
+    const badge = row().querySelector<HTMLAnchorElement>(
+      'a[href="https://github.com/o/r/pull/9517"]',
+    );
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toBe('#9517 +1');
+    act(() => {
+      badge!.click();
+    });
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it('renders no badge when the session has no bound PR', () => {
+    mount(
+      <SessionRow
+        session={session}
+        active={false}
+        current={false}
+        onClick={vi.fn()}
+        onActivate={vi.fn()}
+      />,
+    );
+    expect(row().querySelector('a')).toBeNull();
   });
 
   it('defaults aria-selected to `current` (not the roving highlight), explicit value wins', () => {

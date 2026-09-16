@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import type React from 'react';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -208,6 +209,96 @@ describe('KeypressContext - Kitty Protocol', () => {
             name: '',
             meta: false,
             sequence: '†',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('rewrites macOS composed Option+v glyph "√" to Alt+v', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '√',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'v',
+            meta: true,
+            sequence: '√',
+          }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('leaves "√" untouched on non-macOS platforms', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+        writable: true,
+      });
+      try {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper,
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        act(() => {
+          stdin.pressKey({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '√',
+          });
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: '',
+            meta: false,
+            sequence: '√',
           }),
         );
       } finally {

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { tokenPlanProvider, type Config } from '@qwen-code/qwen-code-core';
 import { type CommandContext } from './types.js';
 import { effortCommand } from './effort-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
@@ -35,6 +35,7 @@ describe('effortCommand', () => {
         config: {
           getReasoningEffort,
           setReasoningEffort,
+          getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
         } as unknown as Config,
         settings: {
           setValue,
@@ -52,6 +53,45 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
+  it('does not open an empty picker for a toggle-only model', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'toggle-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'enable_thinking',
+          },
+        },
+      }),
+    });
+    const res = await effortCommand.action!(context, '');
+    expect(res).toMatchObject({ type: 'message', messageType: 'info' });
+  });
+
+  it('does not answer an explicit tier with an empty choice list', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'toggle-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'enable_thinking',
+          },
+        },
+      }),
+    });
+    const res = await effortCommand.action!(context, 'medium');
+    expect(res).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(res).not.toMatchObject({ messageType: 'error' });
+    expect(JSON.stringify(res)).not.toContain('Choose one of:');
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
   it('lists tiers when called with no args non-interactively', async () => {
     const nonInteractive = { ...context, executionMode: 'non_interactive' };
     const res = await effortCommand.action!(
@@ -63,6 +103,32 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
+  it.each(['high', 'max', 'low'] as const)(
+    'reports the effective state for saved %s without changing settings',
+    async (effort) => {
+      const spec = tokenPlanProvider.models!.find(
+        (m) => m.id === 'qwen3.8-max',
+      )!;
+      Object.assign(context.services.config!, {
+        getModel: () => spec.id,
+        getAuthType: () => 'openai',
+        getResolvedModelConfig: () => spec,
+      });
+      getReasoningEffort.mockReturnValue(effort);
+      const res = await effortCommand.action!(
+        { ...context, executionMode: 'non_interactive' },
+        '',
+      );
+      expect((res as { content: string }).content).toContain(
+        effort === 'low'
+          ? 'Current reasoning effort:'
+          : 'using the model/provider default',
+      );
+      expect(setValue).not.toHaveBeenCalled();
+      expect(setReasoningEffort).not.toHaveBeenCalled();
+    },
+  );
+
   it('sets and persists a valid tier', async () => {
     const res = await effortCommand.action!(context, 'high');
     expect(setReasoningEffort).toHaveBeenCalledWith('high');
@@ -71,6 +137,25 @@ describe('effortCommand', () => {
       'model.reasoningEffort',
       'high',
     );
+    expect(res).toMatchObject({ messageType: 'info' });
+  });
+
+  it('keeps a valid tier session-local when persistence is disabled', async () => {
+    const res = await effortCommand.action!(
+      {
+        ...context,
+        executionPolicy: {
+          allowSessionReset: false,
+          allowWorkspaceSettingsWrite: false,
+          persistModelSelection: false,
+          blockedBuiltinCommandNames: [],
+        },
+      },
+      'high',
+    );
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(setValue).not.toHaveBeenCalled();
     expect(res).toMatchObject({ messageType: 'info' });
   });
 
@@ -94,6 +179,51 @@ describe('effortCommand', () => {
     );
   });
 
+  it('reports a static override while thinking is disabled', async () => {
+    setReasoningEffort.mockImplementation(() => {});
+    getReasoningEffort.mockReturnValue(undefined);
+    const getReasoningEffortOverride = vi.fn().mockReturnValue({
+      source: 'extra_body',
+      field: 'thinking_budget',
+    });
+    (context.services.config as unknown as Record<string, unknown>)[
+      'getReasoningEffortOverride'
+    ] = getReasoningEffortOverride;
+
+    const res = await effortCommand.action!(context, 'high');
+
+    expect((res as { content: string }).content).toContain(
+      'thinking is currently disabled',
+    );
+    expect((res as { content: string }).content).toContain(
+      'will still have higher priority',
+    );
+  });
+
+  it('reports a higher-priority static thinking knob', async () => {
+    const getReasoningEffortOverride = vi.fn().mockReturnValue({
+      source: 'extra_body',
+      field: 'thinking_budget',
+    });
+    (context.services.config as unknown as Record<string, unknown>)[
+      'getReasoningEffortOverride'
+    ] = getReasoningEffortOverride;
+
+    const res = await effortCommand.action!(context, 'max');
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('max');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      'max',
+    );
+    expect(res).toMatchObject({ messageType: 'info' });
+    expect((res as { content: string }).content).toContain('higher priority');
+    expect((res as { content: string }).content).toContain(
+      'will remain effective',
+    );
+  });
+
   it('normalizes aliases such as x-high', async () => {
     await effortCommand.action!(context, 'x-high');
     expect(setReasoningEffort).toHaveBeenCalledWith('xhigh');
@@ -104,6 +234,26 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
     expect(res).toMatchObject({ messageType: 'error' });
+  });
+
+  it('rejects a tier outside the resolved model capability', async () => {
+    Object.assign(context.services.config!, {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high', 'max'],
+            defaultEffort: 'high',
+            disableField: 'thinking',
+          },
+        },
+      }),
+    });
+    const res = await effortCommand.action!(context, 'low');
+    expect(res).toMatchObject({ messageType: 'error' });
+    expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
   it('does not offer tier autocompletion (tiers are hinted via argumentHint)', () => {

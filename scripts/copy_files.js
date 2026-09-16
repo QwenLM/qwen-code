@@ -22,11 +22,19 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-
-const sourceDir = path.join('src');
-const targetDir = path.join('dist', 'src');
+import { fileURLToPath } from 'node:url';
 
 const extensionsToCopy = ['.md', '.json', '.sb'];
+
+function isBundledSkillDesignDoc(normalizedPath) {
+  // DESIGN.md files are maintainer design narratives, not runtime inputs
+  // (see copy_bundle_assets.js); the transpiled build loads bundled skills
+  // from dist/src/, so they must stay out of it too.
+  return (
+    normalizedPath.startsWith('skills/bundled/') &&
+    path.basename(normalizedPath) === 'DESIGN.md'
+  );
+}
 
 function copyFilesRecursive(source, target, rootSourceDir) {
   if (!fs.existsSync(target)) {
@@ -49,38 +57,56 @@ function copyFilesRecursive(source, target, rootSourceDir) {
       const normalizedPath = relativePath.replace(/\\/g, '/');
       const isLocaleJs =
         ext === '.js' && normalizedPath.startsWith('i18n/locales/');
-      if (extensionsToCopy.includes(ext) || isLocaleJs) {
+      if (
+        (extensionsToCopy.includes(ext) || isLocaleJs) &&
+        !isBundledSkillDesignDoc(normalizedPath)
+      ) {
         fs.copyFileSync(sourcePath, targetPath);
       }
     }
   }
 }
 
-if (!fs.existsSync(sourceDir)) {
-  console.error(`Source directory ${sourceDir} not found.`);
-  process.exit(1);
-}
+export function copyFiles({ root = process.cwd() } = {}) {
+  const sourceDir = path.join(root, 'src');
+  const targetDir = path.join(root, 'dist', 'src');
 
-copyFilesRecursive(sourceDir, targetDir, sourceDir);
-
-// Copy example extensions into the bundle.
-const packageName = path.basename(process.cwd());
-if (packageName === 'cli') {
-  const examplesSource = path.join(
-    sourceDir,
-    'commands',
-    'extensions',
-    'examples',
-  );
-  const examplesTarget = path.join(
-    targetDir,
-    'commands',
-    'extensions',
-    'examples',
-  );
-  if (fs.existsSync(examplesSource)) {
-    fs.cpSync(examplesSource, examplesTarget, { recursive: true });
+  if (!fs.existsSync(sourceDir)) {
+    console.error(`Source directory ${sourceDir} not found.`);
+    process.exit(1);
   }
+
+  copyFilesRecursive(sourceDir, targetDir, sourceDir);
+
+  // Copy example extensions into the bundle.
+  const packageName = path.basename(root);
+  if (packageName === 'cli') {
+    const examplesSource = path.join(
+      sourceDir,
+      'commands',
+      'extensions',
+      'examples',
+    );
+    const examplesTarget = path.join(
+      targetDir,
+      'commands',
+      'extensions',
+      'examples',
+    );
+    if (fs.existsSync(examplesSource)) {
+      fs.cpSync(examplesSource, examplesTarget, { recursive: true });
+    }
+  }
+
+  console.log('Successfully copied files.');
 }
 
-console.log('Successfully copied files.');
+if (isDirectRun()) {
+  copyFiles();
+}
+
+function isDirectRun() {
+  return process.argv[1]
+    ? fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+    : false;
+}

@@ -1,6 +1,23 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { GroupGate } from './GroupGate.js';
+import { PairingStore } from './PairingStore.js';
 import type { Envelope } from './types.js';
+
+function withQwenHome<T>(fn: () => T): T {
+  const previous = process.env['QWEN_HOME'];
+  const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-gate-'));
+  process.env['QWEN_HOME'] = qwenHome;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = previous;
+    rmSync(qwenHome, { recursive: true, force: true });
+  }
+}
 
 function envelope(overrides: Partial<Envelope> = {}): Envelope {
   return {
@@ -19,7 +36,12 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
 describe('GroupGate', () => {
   describe('non-group messages', () => {
     it('always allows DM messages regardless of policy', () => {
-      for (const policy of ['disabled', 'allowlist', 'open'] as const) {
+      for (const policy of [
+        'disabled',
+        'allowlist',
+        'open',
+        'pairing',
+      ] as const) {
         const gate = new GroupGate(policy);
         expect(gate.check(envelope()).allowed).toBe(true);
       }
@@ -102,6 +124,68 @@ describe('GroupGate', () => {
       });
       const result = gate.check(envelope({ isGroup: true }));
       expect(result).toEqual({ allowed: false, reason: 'mention_required' });
+    });
+  });
+
+  describe('pairing policy', () => {
+    it('does not create a pairing request for ambient group messages', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true }));
+      expect(result).toEqual({
+        allowed: false,
+        reason: 'pairing_trigger_required',
+      });
+    });
+
+    it('requests pairing after an explicit mention', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true, isMentioned: true }));
+      expect(result).toEqual({
+        allowed: false,
+        reason: 'pairing_required',
+        pairing: { rejected: 'cap_reached' },
+      });
+    });
+
+    it('returns a cap_reached rejection when constructed without a store', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true, isMentioned: true }));
+      expect(result.pairing).toEqual({ rejected: 'cap_reached' });
+    });
+
+    it('requests pairing after a reply to the bot', () => {
+      withQwenHome(() => {
+        const store = new PairingStore('test-chan', '/tmp');
+        const gate = new GroupGate('pairing', {}, store);
+
+        const result = gate.check(
+          envelope({ isGroup: true, isReplyToBot: true }),
+        );
+
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toBe('pairing_required');
+        expect(result.pairing).toEqual({ code: expect.any(String) });
+        expect(store.listPending()).toHaveLength(1);
+      });
+    });
+
+    it('does not create requests for ambient messages even with requireMention=false', () => {
+      withQwenHome(() => {
+        const store = new PairingStore('test-chan', '/tmp');
+        const gate = new GroupGate(
+          'pairing',
+          { '*': { requireMention: false } },
+          store,
+        );
+
+        const result = gate.check(envelope({ isGroup: true }));
+
+        expect(result).toEqual({
+          allowed: false,
+          reason: 'pairing_trigger_required',
+        });
+        expect(store.listPending()).toEqual([]);
+      });
     });
   });
 

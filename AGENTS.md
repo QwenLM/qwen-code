@@ -1,8 +1,5 @@
 # AGENTS.md
 
-This file provides guidance to Qwen Code when working with code in this
-repository.
-
 ## Working Principles
 
 ### Simplicity First
@@ -18,8 +15,6 @@ repository.
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
 simplify.
-
-_Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
 
 ### Core Infrastructure Is Maintainer-Only (triage gate, two-tier rule)
 
@@ -64,10 +59,6 @@ npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
                    # (requires build first)
 ```
 
-`npm run build` compiles TS into each package's `dist/`. `npm run bundle`
-takes that output and produces a single `dist/cli.js` via esbuild. Bundle
-requires build to have run first.
-
 ### Development
 
 ```bash
@@ -81,6 +72,33 @@ Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
 
 Tests must be run from within the specific package directory, not the project
 root.
+
+**Fresh clone or new worktree:** `packages/cli` unit tests import workspace
+packages (`@qwen-code/acp-bridge`, `@qwen-code/web-templates`,
+`packages/channels/*`, ...) through their built `dist/` output, and
+`packages/core` tests import the package's own entry
+(`@qwen-code/qwen-code-core`), which also resolves into `dist/`. A plain
+`npm ci` already builds them via the `prepare` script, but a worktree that
+shares the main checkout's `node_modules` (or a deep-cleaned copy) does not
+have them. If any prerequisite is missing, a vitest `globalSetup` guard stops
+the run and names the fix; build once from the repository root:
+
+```bash
+npm run build
+```
+
+**pnpm worktree bootstrap (opt-in):** an additional Git worktree can install
+dependencies with `node scripts/setup-worktree.js`, which runs the pinned
+pnpm with `--frozen-lockfile` (warm store ≈ 99 MiB on copy-on-write
+filesystems such as APFS, btrfs, and XFS with reflink; without reflink, as on
+ext4, it is ≈ 1.2 GiB, close to a plain npm install). The bootstrap skips the
+`prepare` build, so run `npm run build` before package tests. npm remains the
+authoritative path for build, CI, packaging, and release; the pnpm layout is
+install-only for now. When dependencies change, update `package-lock.json`
+with npm first, then regenerate the pnpm lockfile from it with
+`corepack pnpm import` and commit both lockfiles together;
+`npm run check:lockfile` fails when pnpm resolves a version npm has not
+locked.
 
 **Run individual test files** (always preferred):
 
@@ -148,6 +166,7 @@ npm run preflight  # Full check: clean → install → format → lint → build
   2-space indent, 80-char width
 - **Linting**: No `any` types, consistent type imports, no relative imports
   between packages
+- **Core imports in cli**: production code in `packages/cli/src` imports core values from the module that defines them (`@qwen-code/qwen-code-core/utils/debugLogger.js`), not the package root, which evaluates all of core in every test that reaches the file. Type-only imports are exempt. Files that predate the rule are allowlisted in `eslint.legacy-core-barrel-imports.mjs`; drop an entry when you move its file off the root, never add one.
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
 - **File naming**: `PascalCase.tsx` for React components, `kebab-case.ts` for
@@ -189,7 +208,11 @@ npm run preflight  # Full check: clean → install → format → lint → build
 
 1. **Design doc for non-trivial work** — write one in `docs/design/` if the
    change touches multiple files or involves design decisions. Skip for small
-   bugfixes.
+   bugfixes. Provide both an English `<name>.md` and a Chinese
+   `<name>.zh-CN.md` version in the same directory, following the
+   [design documentation requirements](docs/design/README.md). Add reciprocal
+   language links and keep both versions complete and synchronized in the same
+   change, including when updating an existing design.
 2. **Test plan for behavioral changes** — write an E2E test plan in
    `.qwen/e2e-tests/` when the change affects user-observable behavior. Dry-run
    against the global `qwen` CLI first to confirm the baseline.
@@ -206,11 +229,6 @@ npm run preflight  # Full check: clean → install → format → lint → build
    exit on a pass that found something. If five passes bring no convergence,
    say so instead of declaring done. Scale to the diff: one clean, careful
    pass suffices for a trivial change.
-5. **Code review** — run `/review` when available. Triage each comment:
-   valid / false positive / overthinking. Fixes go back through steps 3-4.
-   Here, `/review` means the Codex code-review workflow, not Qwen Review or
-   the `qwen-review` plugin. Do not invoke Qwen Review unless the user
-   explicitly requests it by name.
 
 ### Feature development
 
@@ -260,6 +278,10 @@ things a reviewer of _this_ codebase must check — not general advice.
   longer applies.
 - **A missing test for changed behavior is a Suggestion, not a Critical**, unless
   the untested path is itself the defect.
+- **Check design documentation in both languages.** New or updated designs
+  must include linked English and Chinese versions with matching structure,
+  decisions, constraints, and acceptance criteria. A translation gap alone is
+  a Suggestion, not a Critical.
 
 ## GitHub Operations
 

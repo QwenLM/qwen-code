@@ -55,6 +55,8 @@ const fsFailure = vi.hoisted(() => ({
 const lockObservation = vi.hoisted(() => ({
   path: undefined as string | undefined,
   attempted: undefined as (() => void) | undefined,
+  options: undefined as lockfile.LockOptions | undefined,
+  simulateCompromise: false,
 }));
 
 vi.mock('proper-lockfile', async (importOriginal) => {
@@ -65,7 +67,17 @@ vi.mock('proper-lockfile', async (importOriginal) => {
       ...actual,
       async lock(...args: Parameters<typeof actual.lock>) {
         if (String(args[0]) === lockObservation.path) {
+          lockObservation.options = args[1];
           lockObservation.attempted?.();
+          const release = await actual.lock(...args);
+          if (lockObservation.simulateCompromise) {
+            // A real compromise marks the lock released in the registry
+            // before invoking onCompromised, so release() later rejects
+            // with ERELEASED. Reproduce that state exactly.
+            lockObservation.options?.onCompromised?.(new Error('lock lost'));
+            await release();
+          }
+          return release;
         }
         return actual.lock(...args);
       },
@@ -164,6 +176,8 @@ describe('channel memory', () => {
     fsFailure.legacyAppendAfterRename = undefined;
     lockObservation.path = undefined;
     lockObservation.attempted = undefined;
+    lockObservation.options = undefined;
+    lockObservation.simulateCompromise = false;
     vi.restoreAllMocks();
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -435,6 +449,22 @@ describe('channel memory', () => {
     } finally {
       await releaseOldWorker();
     }
+  });
+
+  it('completes mutations when the channel memory lock is compromised', async () => {
+    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [] }));
+    lockObservation.path = path.join(
+      path.dirname(getChannelMemoryFilePath(target)),
+      '.channel-memory.lock',
+    );
+    lockObservation.simulateCompromise = true;
+
+    await expect(
+      addChannelMemoryEntries(target, ['Run tests']),
+    ).resolves.toMatchObject({ changed: true });
+
+    expect(lockObservation.options?.onCompromised).toBeTypeOf('function');
+    await expect(readChannelMemory(target)).resolves.toBe('Run tests\n');
   });
 
   it('does not delete legacy bytes changed after canonical commit', async () => {

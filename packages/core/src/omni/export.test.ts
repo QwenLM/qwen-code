@@ -51,7 +51,7 @@ describe('exportOmniTrajectory', () => {
   }
 
   /** Seed memory with one user file and one policy execution over it. */
-  async function seedMemory(): Promise<void> {
+  async function seedMemory(invocationId = 'call-42'): Promise<void> {
     const memory = new MediaMemoryService(omniRootDir);
     const source = (await memory.recordFileRecognized({
       fileRef: '/movies/film.mkv',
@@ -69,7 +69,7 @@ describe('exportOmniTrajectory', () => {
       },
     }))!;
     await memory.commitPolicySucceeded({
-      invocationId: 'call-42',
+      invocationId,
       source,
       executionOrigin: { kind: 'model' },
       toolName: 'omni_extract_keyframes',
@@ -615,6 +615,91 @@ describe('exportOmniTrajectory', () => {
     ]);
     // Tool output prose is not request text.
     expect(turn.request.text).toBe('grab the poster');
+  });
+
+  it('joins code-mode tool results and harvests nested media annotations on the active branch', async () => {
+    await seedMemory('exec-1:code:1');
+    await seedUnrelatedMemory();
+    await writeTranscript([
+      transcriptLine({
+        uuid: 'u',
+        type: 'user',
+        message: { parts: [{ text: 'process the clip' }] },
+      }),
+      transcriptLine({
+        uuid: 'a',
+        parentUuid: 'u',
+        type: 'assistant',
+        message: {
+          parts: [
+            {
+              functionCall: {
+                id: 'exec-1',
+                name: 'exec',
+                args: { source: 'await tools.omni_extract_keyframes({});' },
+              },
+            },
+          ],
+        },
+      }),
+      transcriptLine({
+        uuid: 't',
+        parentUuid: 'a',
+        type: 'tool_result',
+        message: {
+          parts: [
+            {
+              functionResponse: {
+                id: 'exec-1:code:1',
+                name: 'omni_extract_keyframes',
+                response: { output: 'processed' },
+                parts: [
+                  {
+                    text: formatResourceHandleText('preview.png', 'media-2-cd'),
+                  },
+                  {
+                    text: formatDisclosureText('preview.png', 'sampled frames'),
+                  },
+                  {
+                    fileData: {
+                      mimeType: 'image/png',
+                      fileUri: 'oss://preview',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    ]);
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records[0] as OmniTrajectoryTurnRecord;
+    expect(turn.response.toolCalls.map((call) => call.callId)).toEqual([
+      'exec-1',
+    ]);
+    expect(turn.request.media[0]).toMatchObject({
+      name: 'preview.png',
+      resourceId: 'media-2-cd',
+      disclosures: ['sampled frames'],
+    });
+    expect(
+      records.filter((record) => record.kind === 'execution'),
+    ).toHaveLength(1);
+    expect(records.filter((record) => record.kind === 'file')).toHaveLength(2);
+    // Rewind away from the child result: its execution cannot seed this export.
+    await fs.appendFile(
+      transcriptPath,
+      transcriptLine({
+        uuid: 'rewound',
+        parentUuid: 'a',
+        type: 'assistant',
+        message: { parts: [{ text: 'cancelled' }] },
+      }) + '\n',
+    );
+    const rewound = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    expect(rewound.filter((record) => record.kind === 'execution')).toEqual([]);
+    expect(rewound.filter((record) => record.kind === 'file')).toEqual([]);
   });
 
   it('splits multiple user records into distinct turns with isolated state', async () => {

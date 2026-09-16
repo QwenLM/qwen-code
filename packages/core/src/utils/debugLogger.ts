@@ -14,6 +14,7 @@ import {
   getTraceContext,
   type TraceContext,
 } from '../telemetry/trace-context.js';
+import { sessionIdContext } from './sessionIdContext.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -33,6 +34,10 @@ let ensureDebugDirPromise: Promise<void> | null = null;
 let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
+let lastAliasedKey: string | null = null;
+let aliasGeneration = 0;
+let aliasFailureStreak = 0;
+let aliasChain: Promise<void> = Promise.resolve();
 const sessionContext = new AsyncLocalStorage<DebugLogSession | false>();
 
 export function isDebugLogFileEnabled(): boolean {
@@ -45,7 +50,19 @@ export function isDebugLogFileEnabled(): boolean {
 function getActiveSession(): DebugLogSession | null {
   const contextSession = sessionContext.getStore();
   if (contextSession === false) return null;
-  return contextSession ?? globalSession;
+  if (contextSession) return contextSession;
+
+  // In daemon/ACP mode one process hosts many concurrent sessions. The async
+  // context already carries the owning session ID via sessionIdContext, so
+  // prefer it over the process-wide session set by Config creation. Without
+  // this, creating a Config for session B would redirect logs belonging to
+  // session A's in-flight work into session B's debug log file.
+  const sessionId = sessionIdContext.getStore();
+  if (sessionId) {
+    return { getSessionId: () => sessionId };
+  }
+
+  return globalSession;
 }
 
 function ensureDebugDirExists(): Promise<void> {
@@ -112,6 +129,11 @@ function writeLog(
   const traceCtx = getTraceContext();
   const line = buildLogLine(level, message, tag, traceCtx);
 
+  // In a multi-session daemon the active session can change between writes.
+  // Keep the `latest` alias pointed at the file that is actually receiving
+  // logs right now, not just the last Config that was constructed.
+  updateLatestDebugLogAlias(sessionId);
+
   void ensureDebugDirExists()
     // Debug logs are best-effort diagnostic output: 1050+ call sites,
     // default-enabled, fire-and-forget. Per-line fsync would force
@@ -143,11 +165,36 @@ export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
+  lastAliasedKey = null;
+  aliasGeneration += 1;
+  aliasFailureStreak = 0;
+  aliasChain = Promise.resolve();
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// After this many consecutive alias-update failures the dedup marker stays
+// sticky (one attempt per session change, the pre-retry behavior) instead of
+// retrying on every write — bounds the cost on hosts where symlinks always
+// fail. A single success resets the streak.
+const MAX_CONSECUTIVE_ALIAS_FAILURES = 3;
+
+async function doUpdateLatestDebugLogAlias(
+  sessionId: string,
+): Promise<boolean> {
+  const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
+  const targetPath = Storage.getDebugLogPath(sessionId);
+
+  await ensureDebugDirExists();
+  await updateSymlink(aliasPath, targetPath, { fallbackCopy: false });
+  try {
+    const actualTarget = await fs.readlink(aliasPath);
+    return actualTarget === path.relative(path.dirname(aliasPath), targetPath);
+  } catch {
+    return false;
+  }
+}
 
 function updateLatestDebugLogAlias(sessionId: string): void {
   if (!isDebugLogFileEnabled()) {
@@ -157,21 +204,47 @@ function updateLatestDebugLogAlias(sessionId: string): void {
     return;
   }
 
-  const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
-  const targetPath = Storage.getDebugLogPath(sessionId);
+  // Key by directory + id so runtime base dir changes still get their own
+  // alias; skip when the alias already points at the same file.
+  const key = path.join(Storage.getGlobalDebugDir(), sessionId);
+  if (key === lastAliasedKey) {
+    return;
+  }
+  lastAliasedKey = key;
+  const generation = ++aliasGeneration;
 
-  void ensureDebugDirExists()
-    .then(() => updateSymlink(aliasPath, targetPath, { fallbackCopy: false }))
-    .catch(() => {
+  // Serialize alias updates so interleaved writes from different sessions
+  // don't race unlink/symlink into an inconsistent state.
+  aliasChain = aliasChain.then(async () => {
+    let updated = false;
+    try {
+      updated = await doUpdateLatestDebugLogAlias(sessionId);
+    } catch {
       // Best-effort; don't degrade overall logging
-    });
+    }
+    if (updated) {
+      aliasFailureStreak = 0;
+      return;
+    }
+    // Clearing the marker lets the session's next write retry a transient
+    // failure — but only below the streak cap: where symlinks never work
+    // (e.g. Windows without symlink privilege) the marker must stay sticky,
+    // or every debug line would re-run a doomed unlink/symlink cycle.
+    aliasFailureStreak += 1;
+    if (
+      aliasFailureStreak < MAX_CONSECUTIVE_ALIAS_FAILURES &&
+      aliasGeneration === generation
+    ) {
+      lastAliasedKey = null;
+    }
+  });
 }
 
 /**
  * Sets the process-wide debug log session used by createDebugLogger().
  *
- * This is the default session used when there is no async-local session bound
- * via runWithDebugLogSession().
+ * This is the fallback used when neither runWithDebugLogSession() nor
+ * sessionIdContext has bound an async-local session.
  */
 export function setDebugLogSession(
   session: DebugLogSession | null | undefined,
@@ -185,8 +258,8 @@ export function setDebugLogSession(
 /**
  * Runs a function with a session bound to the current async context.
  *
- * This is optional; createDebugLogger() falls back to the process-wide session
- * set via setDebugLogSession().
+ * This overrides both sessionIdContext and the process-wide session set via
+ * setDebugLogSession().
  */
 export function runWithDebugLogSession<T>(
   session: DebugLogSession,
@@ -203,8 +276,9 @@ export function runWithoutDebugLogSession<T>(fn: () => T): T {
  * Creates a debug logger that writes to the current debug log session.
  *
  * Session resolution order:
- * 1) async-local suppression or session
- * 2) process-wide session (setDebugLogSession)
+ * 1) async-local suppression or session (runWithoutDebugLogSession / runWithDebugLogSession)
+ * 2) async-local session ID from the daemon context (sessionIdContext)
+ * 3) process-wide session (setDebugLogSession)
  */
 export function createDebugLogger(tag?: string): DebugLogger {
   return {

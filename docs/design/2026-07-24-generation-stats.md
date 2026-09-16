@@ -1,5 +1,11 @@
 # Generation timing metrics in `/stats`
 
+> A later GenAI alignment adds the independent
+> `gen_ai.response.time_to_first_chunk` Span attribute alongside the existing
+> private `ttft_ms`. This document's `ApiResponseEvent.ttft_ms` data flow and
+> first-user-visible-output semantics remain unchanged; `/stats` does not
+> consume the standard first-chunk attribute.
+
 ## Context
 
 Issue #4252 asks `/stats` to show generation timing separately from session

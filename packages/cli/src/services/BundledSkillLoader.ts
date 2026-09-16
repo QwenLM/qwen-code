@@ -9,7 +9,7 @@ import {
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
-  applySkillAllowedTools,
+  applySkillSideEffects,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -98,15 +98,27 @@ export class BundledSkillLoader implements ICommandLoader {
           level: skill.level,
         },
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
-          // Auto-approve the skill's declared allowedTools before its body is submitted.
-          applySkillAllowedTools(
-            this.config?.getPermissionManager(),
-            skill.allowedTools,
-          );
+          // Re-check enabledness here, not just in the load-time filter above:
+          // `skills.disabled` can change after the command registry was built,
+          // and a stale command must not install a disabled skill's side
+          // effects. `SkillCommandLoader` refuses the same way.
+          if (this.config && !this.config.isSkillEnabled(skill)) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: `Skill "${skill.name}" is disabled.`,
+            };
+          }
+          // Apply the skill's declared side effects — allowedTools and
+          // frontmatter hooks — before its body is submitted, matching the
+          // Skill tool's model-invocation path (#11067).
+          await applySkillSideEffects(this.config, skill);
 
           // Resolve template variables in skill body
           let body = skill.body;
           const modelId = this.config?.getModel()?.trim() || '';
+          const cliVersion = this.config?.getCliVersion()?.trim() || 'unknown';
+          body = body.replaceAll('{{cliVersion}}', cliVersion);
           if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
             body = body.replaceAll('{{model}}', modelId);
             body = body.replaceAll('YOUR_MODEL_ID', modelId);

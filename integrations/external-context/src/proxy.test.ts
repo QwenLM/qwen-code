@@ -22,11 +22,11 @@ describe('installEnvironmentProxy', () => {
   it('installs an environment-aware HTTP dispatcher', async () => {
     const { installEnvironmentProxy } = await import('./proxy.js');
 
-    installEnvironmentProxy();
+    const dispatcher = installEnvironmentProxy();
 
-    expect(setGlobalDispatcher).toHaveBeenCalledWith(
-      expect.any(EnvHttpProxyAgent),
-    );
+    expect(dispatcher).toBeInstanceOf(EnvHttpProxyAgent);
+    expect(setGlobalDispatcher).toHaveBeenCalledWith(dispatcher);
+    await dispatcher.destroy();
   });
 
   it('converts dispatcher failures to a sanitized configuration error', async () => {

@@ -2,8 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonMetricsSeriesBucket } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonMetricsSeriesBucket } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import { getDaemonToken, persistDaemonToken } from '../../config/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -195,8 +196,13 @@ let fullState: HookState = {
   error: undefined,
 };
 const seenDetails: Array<string | undefined> = [];
+const workspaceState = {
+  baseUrl: 'http://localhost:4170',
+  status: 'connected' as const,
+};
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useWorkspace: () => workspaceState,
   useStatusReport: (options: { detail?: string } = {}) => {
     seenDetails.push(options.detail);
     if (options.detail === 'full') {
@@ -211,19 +217,26 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
+const { StandaloneContext } = await import('../../config/standalone');
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-function mount(language: 'en' | 'zh-CN' = 'en') {
+function mount(
+  language: 'en' | 'zh-CN' = 'en',
+  onChangeTarget?: (daemonOrigin: string, token?: string) => void,
+  standalone = true,
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <I18nProvider language={language}>
-        <DaemonStatusDialog />
-      </I18nProvider>,
+      <StandaloneContext.Provider value={standalone}>
+        <I18nProvider language={language}>
+          <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+        </I18nProvider>
+      </StandaloneContext.Provider>,
     );
   });
 }
@@ -270,6 +283,422 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it('shows and switches the daemon connection target', () => {
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+    expect(container!.textContent).toContain('http://localhost:4170');
+    expect(container!.textContent).toContain('Connected');
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, 'remote-token');
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      'remote-token',
+    );
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://another.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(token.value).toBe('');
+  });
+
+  it('shows the target but no switch form outside the standalone shell', () => {
+    mount('en', vi.fn(), false);
+    expect(container!.textContent).toContain('http://localhost:4170');
+    expect(container!.querySelector('#daemon-connection-address')).toBeNull();
+  });
+
+  // An expired token or a stopped target leaves no report to render, and that
+  // is exactly when the operator needs the form to re-enter a token.
+  it('keeps the connection form when the status report fails to load', () => {
+    summaryState = {
+      report: undefined,
+      loading: false,
+      error: new Error('Unauthorized'),
+    };
+    fullState = {
+      report: undefined,
+      loading: false,
+      error: new Error('Unauthorized'),
+    };
+    mount('en', vi.fn());
+    expect(container!.textContent).toContain('Unauthorized');
+    expect(
+      container!.querySelector('#daemon-connection-address'),
+    ).not.toBeNull();
+    const stateLabel = Array.from(container!.querySelectorAll('span')).find(
+      (span) => span.textContent === 'Connection state',
+    );
+    expect(stateLabel?.nextElementSibling?.textContent).toBe('Error');
+  });
+
+  it('keeps an invalid daemon address on the form', () => {
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'file:///tmp/daemon');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    const alert = container!.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toContain('valid HTTP or HTTPS');
+    expect(onChangeTarget).not.toHaveBeenCalled();
+    // The rejected string stays in the field so it can be corrected in place.
+    expect(address.value).toBe('file:///tmp/daemon');
+    // Native constraint validation must not preempt the localized copy.
+    expect(address.closest('form')!.noValidate).toBe(true);
+    // The alert describes the address field, not the token field below it.
+    const formChildren = Array.from(address.closest('form')!.children);
+    expect(alert.id).toBe('daemon-connection-address-error');
+    expect(address.getAttribute('aria-invalid')).toBe('true');
+    expect(address.getAttribute('aria-describedby')).toBe(alert.id);
+    expect(formChildren.indexOf(alert)).toBeLessThan(
+      formChildren.indexOf(
+        container!.querySelector('#daemon-connection-token')!,
+      ),
+    );
+  });
+
+  function typeToken(value: string): HTMLInputElement {
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, value);
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    return token;
+  }
+
+  async function submitConnect(token: HTMLInputElement): Promise<void> {
+    await act(async () => {
+      token
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+  }
+
+  // The address field is pre-filled with the current target, so submitting a
+  // typed token there must probe it before the stored credential is replaced:
+  // a failed probe keeps the old token instead of navigating.
+  it.each([
+    [401, 'rejected'],
+    [503, 'did not accept'],
+  ])(
+    'keeps the stored credential when a same-target probe returns %i',
+    async (status, message) => {
+      const onChangeTarget = vi.fn();
+      const fetchMock = vi.fn().mockResolvedValue({ ok: false, status });
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        persistDaemonToken('working-token', 'http://localhost:4170');
+        mount('en', onChangeTarget);
+        const token = typeToken('bad-token');
+        await submitConnect(token);
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://localhost:4170/capabilities',
+          expect.objectContaining({
+            headers: { Authorization: 'Bearer bad-token' },
+          }),
+        );
+        expect(onChangeTarget).not.toHaveBeenCalled();
+        expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
+        expect(
+          container!.querySelector('[role="alert"]')!.textContent,
+        ).toContain(message);
+      } finally {
+        persistDaemonToken('', 'http://localhost:4170');
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  // A rejection means no answer arrived — including the abort this handler
+  // arms for itself — so it is conclusive, not an inconclusive probe that may
+  // fall back to write-then-navigate.
+  it('keeps the stored credential when a same-target probe gets no answer', async () => {
+    const onChangeTarget = vi.fn();
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      persistDaemonToken('working-token', 'http://localhost:4170');
+      mount('en', onChangeTarget);
+      const token = typeToken('typed-unvalidated');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'did not accept',
+      );
+    } finally {
+      persistDaemonToken('', 'http://localhost:4170');
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports its own 10s probe timeout instead of switching anyway', async () => {
+    vi.useFakeTimers();
+    const onChangeTarget = vi.fn();
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new Error('The user aborted a request.')),
+          );
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      persistDaemonToken('working-token', 'http://localhost:4170');
+      mount('en', onChangeTarget);
+      const token = typeToken('typed-unvalidated');
+      await act(async () => {
+        token
+          .closest('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'did not accept',
+      );
+    } finally {
+      persistDaemonToken('', 'http://localhost:4170');
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('switches the current target once the typed token probes green', async () => {
+    const onChangeTarget = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(onChangeTarget).toHaveBeenCalledWith(
+        'http://localhost:4170',
+        'good-token',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports when a validated token cannot be applied to the current target', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=http%3A%2F%2Flocalhost%3A4170',
+    );
+    const originalStorage = window.sessionStorage;
+    Object.defineProperty(window, 'sessionStorage', {
+      get() {
+        throw new Error('storage disabled');
+      },
+      configurable: true,
+    });
+    try {
+      mount('en');
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'new token could not be applied',
+      );
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', {
+        value: originalStorage,
+        writable: true,
+        configurable: true,
+      });
+      persistDaemonToken('', 'http://localhost:4170');
+      window.history.replaceState(null, '', '/');
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // A same-target probe that answers green calls onChangeTarget, which persists
+  // the credential and reloads the page. Both cases below abandon the submit
+  // before that answer arrives, so nothing may be written or reloaded: the
+  // first destroys a freshly typed address, the second reloads a session the
+  // operator already returned to when they closed the panel.
+  //
+  // Two stub shapes, because the fix has two mechanisms and each needs its own
+  // mutation pin:
+  // - signal-respecting: `abort()` rejects the fetch, so `wasAborted()` proves
+  //   the request was actually torn down rather than merely ignored. Deleting
+  //   the abort turns that assertion red.
+  // - deferred (ignores `init.signal`): the response still lands after the probe
+  //   was retired, which is exactly what the ownership guard is for. Defeating
+  //   the guard turns that assertion red. A stub that ignores the signal is also
+  //   how this bug survived so long — the green-path stub above resolves
+  //   immediately and never observes a late landing.
+  function mountPendingProbe(signalRespecting: boolean) {
+    let pending:
+      | ((response: { ok: boolean; status: number }) => void)
+      | undefined;
+    let aborted = false;
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<{ ok: boolean; status: number }>((resolve, reject) => {
+          pending = resolve;
+          if (signalRespecting) {
+            init?.signal?.addEventListener('abort', () => {
+              aborted = true;
+              reject(new Error('The user aborted a request.'));
+            });
+          }
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return {
+      fetchMock,
+      wasAborted: () => aborted,
+      // Resolved lazily: the executor only runs once the submit calls fetch.
+      resolveProbe: (response: { ok: boolean; status: number }): void => {
+        if (!pending) throw new Error('the probe never started');
+        pending(response);
+      },
+    };
+  }
+
+  it('drops a same-target probe the operator typed over', async () => {
+    const onChangeTarget = vi.fn();
+    // Deferred on purpose: the answer arrives even though the probe was
+    // retired, so what stops the switch is the ownership guard in `.then`. A
+    // signal-respecting stub cannot reach that guard, because the retirement's
+    // abort rejects the promise first and `.then` never runs.
+    const { fetchMock, resolveProbe } = mountPendingProbe(false);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'https://other-daemon.example:4170');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        resolveProbe({ ok: true, status: 200 });
+      });
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      expect(address.value).toBe('https://other-daemon.example:4170');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports no stale error for a probe the operator typed over', async () => {
+    const onChangeTarget = vi.fn();
+    // Signal-respecting, and the dialog stays mounted: the retirement's abort
+    // rejects the fetch, so the `.catch` continuation runs against a live tree.
+    // Without the ownership check there it paints "the daemon did not accept
+    // the connection" over an address the operator has already typed over —
+    // exactly the stale error the alert assertion below forbids. The unmount
+    // case cannot pin this, because `setConnectionError` on a dead tree is a
+    // no-op either way.
+    const { fetchMock, wasAborted } = mountPendingProbe(true);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'https://other-daemon.example:4170');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(wasAborted()).toBe(true);
+      expect(onChangeTarget).not.toHaveBeenCalled();
+      expect(container!.querySelector('[role="alert"]')).toBeNull();
+      expect(address.value).toBe('https://other-daemon.example:4170');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('aborts a same-target probe when the panel closes', async () => {
+    const onChangeTarget = vi.fn();
+    const { fetchMock, wasAborted, resolveProbe } = mountPendingProbe(true);
+    try {
+      mount('en', onChangeTarget);
+      const token = typeToken('good-token');
+      await submitConnect(token);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(wasAborted()).toBe(false);
+      // The parent mounts the dialog only while the panel is open, so closing
+      // it unmounts this component with the fetch still in flight.
+      act(() => root!.unmount());
+      expect(wasAborted()).toBe(true);
+      // And if an answer slips through anyway, it still must not switch.
+      await act(async () => {
+        resolveProbe({ ok: true, status: 200 });
+      });
+      expect(onChangeTarget).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('renders live summary counters with the full-detail rollup badge', () => {
     mount();
     const text = container!.textContent ?? '';
@@ -817,7 +1246,7 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('No active sessions');
   });
 
-  it('shows the toolbar failure banner when a poll fails but data is present', () => {
+  it('shows the connection error when a poll fails but data is present', () => {
     // Distinct from the no-data early return: the summary has stale data plus
     // an error, so the cards render and the toolbar banner appears.
     summaryState = {
@@ -829,6 +1258,7 @@ describe('DaemonStatusDialog', () => {
     const text = container!.textContent ?? '';
     expect(text).toContain('4242'); // stale cards still render
     expect(text).toContain('Failed to load daemon status'); // toolbar banner
+    expect(text).toContain('Connection stateError');
   });
 
   it('shows the pure loading state before any report arrives', () => {

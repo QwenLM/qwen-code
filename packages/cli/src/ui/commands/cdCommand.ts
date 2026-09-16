@@ -179,6 +179,15 @@ export const cdCommand: SlashCommand = {
           }`,
         );
       }
+      if (relocation.mcpRefreshError) {
+        warnings.push(
+          `MCP refresh failed: ${
+            relocation.mcpRefreshError instanceof Error
+              ? relocation.mcpRefreshError.message
+              : String(relocation.mcpRefreshError)
+          }`,
+        );
+      }
     } catch (error) {
       return {
         type: 'message' as const,
@@ -203,7 +212,7 @@ export const cdCommand: SlashCommand = {
 
     try {
       await config
-        .getGeminiClient()
+        .getLlmClient()
         ?.addWorkingDirectoryChangedContext(realOldDir, realTargetPath);
     } catch (error) {
       warnings.push(

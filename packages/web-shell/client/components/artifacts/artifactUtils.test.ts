@@ -3,8 +3,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  artifactKindLabel,
+  artifactPreviewDocument,
+  downloadWorkspaceFile,
+  getArtifactFreshnessKey,
   getArtifactImageMimeType,
   getArtifactTypeLabel,
+  getReviewDownloadMimeType,
+  isDownloadOnlyWorkspaceArtifact,
+  isOfficeDocumentPath,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -13,6 +20,134 @@ import {
 describe('artifactUtils', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('builds a preview freshness key from status, updatedAt, and content hash', () => {
+    expect(
+      getArtifactFreshnessKey({
+        status: 'changed',
+        updatedAt: '2026-08-24T00:00:00.000Z',
+        metadata: { 'qwen.workspace.sha256': 'abc' },
+      }),
+    ).toBe('changed:2026-08-24T00:00:00.000Z:abc');
+    expect(
+      getArtifactFreshnessKey({
+        status: 'available',
+        updatedAt: '2026-08-24T00:00:01.000Z',
+      }),
+    ).toBe('available:2026-08-24T00:00:01.000Z:');
+  });
+
+  it('labels office documents from path or kind', () => {
+    expect(artifactKindLabel('file', 'data/table.xlsx')).toBe('Excel');
+    expect(artifactKindLabel('document', 'brief.docx')).toBe('Word');
+    expect(artifactKindLabel('document', 'deck.pptx')).toBe('PowerPoint');
+    expect(artifactKindLabel('document')).toBe('Document');
+    expect(isOfficeDocumentPath('reports/a.XLSX')).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'file',
+        workspacePath: 'a.xlsx',
+      }),
+    ).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'pdf',
+        workspacePath: 'paper.pdf',
+      }),
+    ).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'image',
+        workspacePath: 'photo.png',
+      }),
+    ).toBe(false);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'file',
+        workspacePath: 'notes.md',
+      }),
+    ).toBe(false);
+  });
+
+  it('prefers recognized file types before the artifact kind', () => {
+    expect(artifactKindLabel('file', 'todolist.md')).toBe('Markdown');
+    expect(artifactKindLabel('file', 'preview.html')).toBe('HTML');
+    expect(artifactKindLabel('file', 'photo.png')).toBe('Image');
+    expect(artifactKindLabel('link', 'report.pdf?download=1')).toBe('PDF');
+    expect(artifactKindLabel('file', 'unknown.custom')).toBe('file');
+  });
+
+  it.each([
+    { workspacePath: 'notes.md' },
+    { workspacePath: 'notes.markdown' },
+    { workspacePath: 'notes', mimeType: 'text/markdown' },
+    { workspacePath: 'notes', mimeType: 'text/markdown; charset=utf-8' },
+    { workspacePath: 'report.html' },
+    { workspacePath: 'report.htm' },
+    { workspacePath: 'report', mimeType: 'text/html' },
+    { workspacePath: 'report', mimeType: 'text/html; charset=utf-8' },
+  ])('previews document-classified text artifacts', (artifact) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind: 'document', ...artifact }),
+    ).toBe(false);
+  });
+
+  it.each([
+    { workspacePath: 'photo.png' },
+    { workspacePath: 'photo', mimeType: 'image/png' },
+  ])('previews document-classified raster image artifacts', (artifact) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind: 'document', ...artifact }),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['document', 'graphic.svg', 'image/svg+xml'],
+    ['image', 'graphic.svg', 'image/svg+xml'],
+    ['file', 'graphic.svg', 'image/svg+xml'],
+    ['image', 'graphic.svg', 'image/png'],
+    ['image', 'graphic.svg', 'text/html'],
+    ['file', 'graphic', 'image/svg+xml'],
+  ])('keeps SVG artifacts download-only', (kind, workspacePath, mimeType) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind, workspacePath, mimeType }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['report.docx', 'text/html'],
+    ['report.xlsx', 'image/png'],
+    ['report.pdf', 'text/markdown'],
+    ['clip.mp4', 'image/png'],
+  ])(
+    'does not let previewable MIME types override download-only paths',
+    (workspacePath, mimeType) => {
+      expect(isDownloadOnlyWorkspaceArtifact({ workspacePath, mimeType })).toBe(
+        true,
+      );
+    },
+  );
+
+  it('rejects directory stats before reading bytes', async () => {
+    const readFileBytes = vi.fn();
+    const statFile = vi.fn().mockResolvedValue({
+      sizeBytes: 0,
+      modifiedMs: 1,
+      type: 'directory',
+    });
+
+    await expect(
+      readWorkspaceFileAsBlob(
+        readFileBytes,
+        'exports',
+        'application/octet-stream',
+        {
+          statFile,
+        },
+      ),
+    ).rejects.toThrow('Directories cannot be opened');
+    expect(readFileBytes).not.toHaveBeenCalled();
   });
 
   it('resolves parent path segments', () => {
@@ -60,6 +195,14 @@ describe('artifactUtils', () => {
         mimeType: 'image/jpg',
       } as DaemonSessionArtifact),
     ).toBe('image/jpeg');
+  });
+
+  it('maps review downloads to HTML or Markdown by extension', () => {
+    expect(getReviewDownloadMimeType('report.html')).toBe('text/html');
+    expect(getReviewDownloadMimeType('report.htm')).toBe('text/html');
+    expect(getReviewDownloadMimeType('REPORT.HTML')).toBe('text/html');
+    expect(getReviewDownloadMimeType('notes.md')).toBe('text/markdown');
+    expect(getReviewDownloadMimeType('notes.markdown')).toBe('text/markdown');
   });
 
   it('stops at the file size even when byte windows stay truncated', async () => {
@@ -149,6 +292,19 @@ describe('artifactUtils', () => {
     expect(readFileBytes).not.toHaveBeenCalled();
   });
 
+  it('rejects downloads larger than the default Blob limit', async () => {
+    const readFileBytes = vi.fn();
+    const stat = vi.fn().mockResolvedValue({
+      sizeBytes: 100 * 1024 * 1024 + 1,
+      modifiedMs: 1,
+    });
+
+    await expect(
+      downloadWorkspaceFile({ readFileBytes, stat }, 'video.mp4'),
+    ).rejects.toThrow('too large');
+    expect(readFileBytes).not.toHaveBeenCalled();
+  });
+
   it('rejects chunks read across different file versions', async () => {
     const statFile = vi
       .fn()
@@ -167,6 +323,22 @@ describe('artifactUtils', () => {
       }),
     ).rejects.toThrow('changed while loading');
     expect(statFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps user HTML inside an opaque child with a restrictive parent policy', () => {
+    const title = 'Page "quoted" <title>';
+    const output = artifactPreviewDocument(
+      '<p>Hello</p><script>let n=0</script>',
+      title,
+    );
+    const parent = new DOMParser().parseFromString(output, 'text/html');
+    const child = parent.querySelector('iframe')!;
+    expect(parent.querySelector('script')).toBeNull();
+    expect(parent.querySelector('meta')?.content).toContain("frame-src 'none'");
+    expect(child.title).toBe(title);
+    expect(child.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(child.srcdoc).toContain('<p>Hello</p><script>let n=0</script>');
+    expect(child.srcdoc).toContain("default-src 'none'");
   });
 
   it('injects preview CSP and strips unsafe metadata', () => {

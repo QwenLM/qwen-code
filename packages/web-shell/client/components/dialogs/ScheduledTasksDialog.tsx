@@ -14,21 +14,35 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  Clock3Icon,
+  FolderIcon,
+  HourglassIcon,
+  MessageSquarePlusIcon,
+  MessagesSquareIcon,
+  PencilIcon,
+  PlayIcon,
+  Trash2Icon,
+} from 'lucide-react';
+import {
   useWorkspaceActions,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonExtensionEntry,
   DaemonWorkspaceCapability,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
+  DaemonSessionSummary,
+  DaemonSessionGroup,
+  DaemonSessionGroupPresetColor,
 } from '@qwen-code/sdk/daemon';
 import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
 import { useWebShellPortalRoot } from '../../portalRoot';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
+import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
@@ -67,7 +81,16 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   const withheld = run.withheld
     ? ` · ${t('scheduledTasks.runKind.withheld')}`
     : '';
-  return `${safeLocaleString(run.at)}${kind}${withheld}`;
+  // A per-run fire whose fresh session could not be created: with a sessionId
+  // it fell back to the task session and ran there; without one nothing ran.
+  const dispatchFailed = run.sessionDispatchFailed
+    ? ` · ${t(
+        run.sessionId
+          ? 'scheduledTasks.runKind.sessionDispatchFallback'
+          : 'scheduledTasks.runKind.sessionDispatchFailed',
+      )}`
+    : '';
+  return `${safeLocaleString(run.at)}${kind}${withheld}${dispatchFailed}`;
 }
 
 interface ScheduledTasksDialogProps {
@@ -91,6 +114,8 @@ interface ScheduledTasksDialogProps {
   workspaces?: DaemonWorkspaceCapability[];
   /** Forces all task operations through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
+  currentSession?: DaemonSessionSummary;
+  currentSessionSchedulingAvailable?: boolean;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -124,6 +149,7 @@ const MAX_SET_TIMEOUT_MS = 2_147_483_647;
 const PAST_DUE_FAST_RELOADS = 3;
 const OVERDUE_RELOAD_INTERVAL_MS = 30_000;
 const MAX_PROMPT_LENGTH = 100_000;
+const CREATE_GROUP_VALUE = '__create_group__';
 const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_.-]/gu;
 const PROMPT_REFERENCE_TOKEN =
   /(^|[\s])(@(?:ext|mcp):(?:\\.[^\s\\]*|[^\s\\])+|\/(?:\\.[^\s\\/]*|[^\s\\/])+)(?=$|\s)/gu;
@@ -529,6 +555,8 @@ export function ScheduledTasksDialog({
   onOpenSession,
   workspaces,
   lockedWorkspace,
+  currentSession,
+  currentSessionSchedulingAvailable,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -585,7 +613,42 @@ export function ScheduledTasksDialog({
   );
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [runDestination, setRunDestination] = useState<
+    'per_run' | 'dedicated' | 'current'
+  >('per_run');
+  const [modelServiceId, setModelServiceId] = useState('');
+  const [groupChoice, setGroupChoice] = useState('');
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupColor, setNewGroupColor] =
+    useState<DaemonSessionGroupPresetColor>('blue');
+  const [sessionGroups, setSessionGroups] = useState<DaemonSessionGroup[]>([]);
+  const [groupColors, setGroupColors] = useState<
+    DaemonSessionGroupPresetColor[]
+  >([]);
+  const [modelOptions, setModelOptions] = useState<
+    Array<{ id: string; label: string }>
+  >([]);
+  const [routingOptionsLoading, setRoutingOptionsLoading] = useState(false);
+  const [routingOptionsError, setRoutingOptionsError] = useState<string | null>(
+    null,
+  );
+  const formWorkspace =
+    lockedWorkspace ??
+    operableWorkspaces.find(
+      (workspace) => workspaceActionId(workspace) === formWorkspaceId,
+    );
+  const formWorkspaceMissing =
+    formWorkspaceId !== undefined &&
+    (!formWorkspace || (!formWorkspace.primary && !formWorkspace.trusted));
+  const formWorkspaceCwd = formWorkspace?.cwd;
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
+  useEffect(() => {
+    if (!currentSessionSchedulingAvailable) {
+      setRunDestination((current) =>
+        current === 'current' ? 'per_run' : current,
+      );
+    }
+  }, [currentSessionSchedulingAvailable]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [referenceKind, setReferenceKind] = useState<PromptTagKind | null>(
@@ -619,12 +682,84 @@ export function ScheduledTasksDialog({
   // stale data. Only the latest reload is allowed to apply its result.
   const reloadSeqRef = useRef(0);
   const referenceLoadSeqRef = useRef(0);
+  const routingOptionsLoadSeqRef = useRef(0);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    const seq = ++routingOptionsLoadSeqRef.current;
+    if (!showForm || runDestination !== 'per_run') return;
+    setRoutingOptionsError(null);
+    setSessionGroups([]);
+    setGroupColors([]);
+    setModelOptions([]);
+    if (formWorkspaceMissing) {
+      setRoutingOptionsLoading(false);
+      return;
+    }
+    setRoutingOptionsLoading(true);
+    void Promise.allSettled([
+      actions.listSessionGroups(formWorkspaceCwd),
+      actions.loadProviders(formWorkspaceCwd),
+    ])
+      .then(([catalogResult, providersResult]) => {
+        if (!mountedRef.current || seq !== routingOptionsLoadSeqRef.current)
+          return;
+        const errors: string[] = [];
+        if (catalogResult.status === 'fulfilled') {
+          const catalog = catalogResult.value;
+          setSessionGroups(catalog.groups);
+          setGroupColors(catalog.colorOptions);
+          setNewGroupColor(catalog.colorOptions[0] ?? 'blue');
+        } else {
+          errors.push(
+            catalogResult.reason instanceof Error
+              ? catalogResult.reason.message
+              : String(catalogResult.reason),
+          );
+        }
+        if (providersResult.status === 'fulfilled') {
+          const providers = providersResult.value;
+          const seen = new Set<string>();
+          setModelOptions(
+            providers.providers.flatMap((provider) =>
+              provider.models.flatMap((model) => {
+                if (seen.has(model.modelId)) return [];
+                seen.add(model.modelId);
+                return [
+                  {
+                    id: model.modelId,
+                    label: getModelDisplayName(model.name || model.baseModelId),
+                  },
+                ];
+              }),
+            ),
+          );
+        } else {
+          errors.push(
+            providersResult.reason instanceof Error
+              ? providersResult.reason.message
+              : String(providersResult.reason),
+          );
+        }
+        if (errors.length > 0) setRoutingOptionsError(errors.join('; '));
+      })
+      .finally(() => {
+        if (mountedRef.current && seq === routingOptionsLoadSeqRef.current) {
+          setRoutingOptionsLoading(false);
+        }
+      });
+  }, [
+    actions,
+    formWorkspaceCwd,
+    formWorkspaceMissing,
+    runDestination,
+    showForm,
+  ]);
 
   const reload = useCallback(async () => {
     const seq = ++reloadSeqRef.current;
@@ -735,6 +870,38 @@ export function ScheduledTasksDialog({
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
+  const currentSessionDisabledReason = (() => {
+    if (!currentSessionSchedulingAvailable) {
+      return t('scheduledTasks.session.currentUnsupported');
+    }
+    if (!currentSession?.sessionId) {
+      return t('scheduledTasks.session.currentUnavailable');
+    }
+    if (
+      currentSession.hasActivePrompt ||
+      (currentSession.pendingInteractionCount ?? 0) > 0
+    ) {
+      return t('scheduledTasks.session.currentBusy');
+    }
+    if (
+      currentSession.parentSessionId !== undefined ||
+      currentSession.sourceId !== undefined ||
+      (currentSession.sourceType !== undefined &&
+        currentSession.sourceType !== 'default')
+    ) {
+      return t('scheduledTasks.session.currentIneligible');
+    }
+    if (
+      formWorkspace?.cwd !== undefined &&
+      currentSession.workspaceCwd !== formWorkspace.cwd
+    ) {
+      return t('scheduledTasks.session.currentWorkspaceMismatch');
+    }
+    if (tasks?.some((task) => task.sessionId === currentSession.sessionId)) {
+      return t('scheduledTasks.session.currentAlreadyBound');
+    }
+    return null;
+  })();
 
   const updateReferencePickerPosition = useCallback(() => {
     const anchor = referencePopoverRef.current;
@@ -891,6 +1058,10 @@ export function ScheduledTasksDialog({
   const resetForm = useCallback(() => {
     setName('');
     setPrompt('');
+    setRunDestination('per_run');
+    setModelServiceId('');
+    setGroupChoice('');
+    setNewGroupName('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     setShowForm(false);
@@ -906,6 +1077,10 @@ export function ScheduledTasksDialog({
     setFormWorkspaceId(lockedWorkspaceId);
     setName('');
     setPrompt('');
+    setRunDestination('per_run');
+    setModelServiceId('');
+    setGroupChoice('');
+    setNewGroupName('');
     setBuilder(DEFAULT_BUILDER);
     setFormError(null);
     resetReferenceState();
@@ -920,6 +1095,12 @@ export function ScheduledTasksDialog({
       setFormWorkspaceId(task.workspaceId);
       setName(task.name ?? '');
       setPrompt(task.prompt);
+      setRunDestination(
+        task.sessionMode === 'per_run' ? 'per_run' : 'dedicated',
+      );
+      setModelServiceId(task.modelServiceId ?? '');
+      setGroupChoice(task.groupId ?? '');
+      setNewGroupName('');
       // Reverse the cron back onto the pickers; an expression the pickers can't
       // represent lands in the `custom` field, never silently rewritten.
       setBuilder(parseCronToBuilder(task.cron));
@@ -931,6 +1112,10 @@ export function ScheduledTasksDialog({
   );
 
   const handleSubmit = useCallback(async () => {
+    if (formWorkspaceMissing) {
+      setFormError(t('scheduledTasks.error.workspaceUnavailable'));
+      return;
+    }
     const cron = buildCron(builder);
     if (!cron) {
       setFormError(t('scheduledTasks.error.invalidSchedule'));
@@ -948,9 +1133,39 @@ export function ScheduledTasksDialog({
       );
       return;
     }
+    if (!editingId && runDestination === 'current') {
+      if (currentSessionDisabledReason || !currentSession?.sessionId) {
+        setFormError(
+          currentSessionDisabledReason ??
+            t('scheduledTasks.session.currentUnavailable'),
+        );
+        return;
+      }
+    }
+    if (
+      runDestination === 'per_run' &&
+      groupChoice === CREATE_GROUP_VALUE &&
+      newGroupName.trim().length === 0
+    ) {
+      setFormError(t('scheduledTasks.group.nameRequired'));
+      return;
+    }
     setSubmitting(true);
     setFormError(null);
     try {
+      let resolvedGroupId =
+        runDestination === 'per_run' && groupChoice !== CREATE_GROUP_VALUE
+          ? groupChoice
+          : '';
+      if (runDestination === 'per_run' && groupChoice === CREATE_GROUP_VALUE) {
+        const group = await actions.createSessionGroup(
+          { name: newGroupName.trim(), color: newGroupColor },
+          formWorkspaceCwd,
+        );
+        resolvedGroupId = group.id;
+        setSessionGroups((current) => [...current, group]);
+        setGroupChoice(group.id);
+      }
       if (editingId) {
         // Update only the editable fields; `recurring`/`enabled` are omitted so
         // the PATCH leaves them unchanged (recurring isn't in this form, and
@@ -961,6 +1176,12 @@ export function ScheduledTasksDialog({
             cron,
             prompt: prompt.trim(),
             name: name.trim() || null,
+            sessionMode:
+              runDestination === 'per_run' ? 'per_run' : 'persistent',
+            modelServiceId:
+              runDestination === 'per_run' ? modelServiceId || null : null,
+            groupId:
+              runDestination === 'per_run' ? resolvedGroupId || null : null,
           },
           formWorkspaceId,
         );
@@ -972,6 +1193,17 @@ export function ScheduledTasksDialog({
             name: name.trim() || null,
             recurring: true,
             enabled: true,
+            sessionMode:
+              runDestination === 'per_run' ? 'per_run' : 'persistent',
+            ...(runDestination === 'per_run' && modelServiceId
+              ? { modelServiceId }
+              : {}),
+            ...(runDestination === 'per_run' && resolvedGroupId
+              ? { groupId: resolvedGroupId }
+              : {}),
+            ...(runDestination === 'current' && currentSession?.sessionId
+              ? { sessionId: currentSession.sessionId }
+              : {}),
           },
           formWorkspaceId,
         );
@@ -988,12 +1220,21 @@ export function ScheduledTasksDialog({
   }, [
     actions,
     builder,
+    currentSession,
+    currentSessionDisabledReason,
     editingId,
+    formWorkspaceCwd,
     formWorkspaceId,
+    formWorkspaceMissing,
+    groupChoice,
+    modelServiceId,
     name,
+    newGroupColor,
+    newGroupName,
     prompt,
     reload,
     resetForm,
+    runDestination,
     t,
   ]);
 
@@ -1041,6 +1282,14 @@ export function ScheduledTasksDialog({
           );
           return;
         }
+        if (fresh.sessionMode === 'per_run') {
+          // The daemon owns fresh-session creation and records the actual child
+          // session on this run. The client must not also enqueue the prompt in
+          // the persistent controller session.
+          await actions.runScheduledTask(fresh.id, task.workspaceId);
+          await reload();
+          return;
+        }
         if (fresh.recurring) {
           // Recurring: enqueue FIRST (onRunPrompt resolves at admission, rejects
           // if the session can't be opened), record AFTER — so a failed enqueue
@@ -1057,9 +1306,9 @@ export function ScheduledTasksDialog({
           // One-shot: /run IS its single fire — it deletes the task. Consume it
           // BEFORE enqueuing so it can't ALSO fire at its own scheduled slot (a
           // silent double execution). The trade-off is that a failed delivery
-          // leaves the task gone AND un-run — and reload() has already dropped it
-          // from the list — so surface THAT explicitly rather than the generic
-          // "run failed", which would hide the deletion.
+          // leaves the task gone AND un-run — and reload() has already dropped
+          // it from the list — so surface THAT explicitly rather than the
+          // generic "run failed", which would hide the deletion.
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {
@@ -1205,6 +1454,7 @@ export function ScheduledTasksDialog({
           )}
           size="md"
           onClose={resetForm}
+          dismissible={!submitting}
         >
           <div className={styles.formFields}>
             {isMultiWorkspace && (
@@ -1218,10 +1468,15 @@ export function ScheduledTasksDialog({
                   // A task lives in one workspace's file; editing can't move it,
                   // so the picker is fixed while editing and when only one
                   // workspace is operable (nothing to choose).
-                  disabled={!!editingId || operableWorkspaces.length <= 1}
-                  onChange={(e) =>
-                    setFormWorkspaceId(e.target.value || undefined)
+                  disabled={
+                    submitting || !!editingId || operableWorkspaces.length <= 1
                   }
+                  onChange={(e) => {
+                    setFormWorkspaceId(e.target.value || undefined);
+                    setModelServiceId('');
+                    setGroupChoice('');
+                    setNewGroupName('');
+                  }}
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
@@ -1293,6 +1548,165 @@ export function ScheduledTasksDialog({
                 })}
               </div>
             </div>
+
+            <label className={styles.field}>
+              <span className={styles.fieldLabel}>
+                {t('scheduledTasks.runIn')}
+              </span>
+              <select
+                className={styles.select}
+                value={runDestination}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setRunDestination(
+                    value === 'current' || value === 'dedicated'
+                      ? value
+                      : 'per_run',
+                  );
+                }}
+              >
+                <option value="per_run">
+                  {t('scheduledTasks.sessionMode.perRun')}
+                </option>
+                <option value="dedicated">
+                  {t('scheduledTasks.sessionMode.persistent')}
+                </option>
+                {!editingId && currentSessionSchedulingAvailable && (
+                  <option
+                    value="current"
+                    disabled={currentSessionDisabledReason !== null}
+                  >
+                    {t('scheduledTasks.session.current')}
+                  </option>
+                )}
+              </select>
+              <span className={styles.fieldHint}>
+                {runDestination === 'current'
+                  ? (currentSessionDisabledReason ??
+                    t('scheduledTasks.session.currentHint'))
+                  : t(
+                      runDestination === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun.hint'
+                        : 'scheduledTasks.sessionMode.persistent.hint',
+                    )}
+              </span>
+            </label>
+
+            {runDestination === 'per_run' && (
+              <div className={styles.routingFields}>
+                <label className={styles.field}>
+                  <span className={styles.fieldLabel}>
+                    {t('scheduledTasks.model')}
+                  </span>
+                  <select
+                    className={styles.select}
+                    value={modelServiceId}
+                    disabled={routingOptionsLoading}
+                    onChange={(event) => setModelServiceId(event.target.value)}
+                  >
+                    <option value="">
+                      {t('scheduledTasks.model.workspaceDefault')}
+                    </option>
+                    {modelServiceId &&
+                      !modelOptions.some(
+                        (option) => option.id === modelServiceId,
+                      ) && (
+                        <option value={modelServiceId}>{modelServiceId}</option>
+                      )}
+                    {modelOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className={styles.fieldHint}>
+                    {t('scheduledTasks.model.hint')}
+                  </span>
+                </label>
+
+                <label className={styles.field}>
+                  <span className={styles.fieldLabel}>
+                    {t('scheduledTasks.group')}
+                  </span>
+                  <select
+                    className={styles.select}
+                    value={groupChoice}
+                    disabled={routingOptionsLoading}
+                    onChange={(event) => setGroupChoice(event.target.value)}
+                  >
+                    <option value="">{t('scheduledTasks.group.none')}</option>
+                    {groupChoice &&
+                      groupChoice !== CREATE_GROUP_VALUE &&
+                      !sessionGroups.some(
+                        (group) => group.id === groupChoice,
+                      ) && <option value={groupChoice}>{groupChoice}</option>}
+                    {sessionGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                    <option value={CREATE_GROUP_VALUE}>
+                      {t('scheduledTasks.group.create')}
+                    </option>
+                  </select>
+                  <span className={styles.fieldHint}>
+                    {t('scheduledTasks.group.hint')}
+                  </span>
+                </label>
+
+                {groupChoice === CREATE_GROUP_VALUE && (
+                  <div className={styles.newGroupFields}>
+                    <label className={styles.field}>
+                      <span className={styles.fieldLabel}>
+                        {t('scheduledTasks.group.name')}
+                      </span>
+                      <input
+                        className={styles.input}
+                        value={newGroupName}
+                        maxLength={64}
+                        onChange={(event) =>
+                          setNewGroupName(event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className={styles.field}>
+                      <span className={styles.fieldLabel}>
+                        {t('scheduledTasks.group.color')}
+                      </span>
+                      <select
+                        className={styles.select}
+                        value={newGroupColor}
+                        onChange={(event) =>
+                          setNewGroupColor(
+                            event.target.value as DaemonSessionGroupPresetColor,
+                          )
+                        }
+                      >
+                        {(groupColors.length > 0
+                          ? groupColors
+                          : (['blue'] as DaemonSessionGroupPresetColor[])
+                        ).map((color) => (
+                          <option key={color} value={color}>
+                            {t(`sidebar.groupColor.${color}`)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
+
+                {routingOptionsLoading && (
+                  <div className={styles.fieldHint}>
+                    {t('scheduledTasks.routing.loading')}
+                  </div>
+                )}
+                {routingOptionsError && (
+                  <div className={styles.inlineError}>
+                    {routingOptionsError}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className={styles.scheduleRow}>
               <label className={styles.field}>
@@ -1500,7 +1914,7 @@ export function ScheduledTasksDialog({
                     title={t('scheduledTasks.runNow')}
                     aria-label={t('scheduledTasks.runNow')}
                   >
-                    ▶
+                    <PlayIcon aria-hidden="true" />
                   </button>
                   <button
                     type="button"
@@ -1510,7 +1924,7 @@ export function ScheduledTasksDialog({
                     title={t('scheduledTasks.edit')}
                     aria-label={t('scheduledTasks.edit')}
                   >
-                    ✎
+                    <PencilIcon aria-hidden="true" />
                   </button>
                   <button
                     type="button"
@@ -1520,7 +1934,7 @@ export function ScheduledTasksDialog({
                     title={t('scheduledTasks.delete')}
                     aria-label={t('scheduledTasks.delete')}
                   >
-                    ✕
+                    <Trash2Icon aria-hidden="true" />
                   </button>
                 </div>
               </div>
@@ -1538,14 +1952,14 @@ export function ScheduledTasksDialog({
                     title={task.workspaceCwd}
                   >
                     <span className={styles.workspaceIcon} aria-hidden="true">
-                      ⌂
+                      <FolderIcon />
                     </span>
                     {workspaceLabelForCwd(task.workspaceCwd, workspaceList)}
                   </span>
                 )}
                 <span className={styles.schedulePill}>
                   <span className={styles.clockIcon} aria-hidden="true">
-                    ◷
+                    <Clock3Icon />
                   </span>
                   {describeCron(task.cron, t)}
                 </span>
@@ -1556,6 +1970,29 @@ export function ScheduledTasksDialog({
                       : 'scheduledTasks.runsOnce',
                   )}
                 </span>
+                {/* Unbound tool-created / legacy tasks have no session at all,
+                    so neither mode label applies to them. */}
+                {(task.sessionMode === 'per_run' || task.sessionId) && (
+                  <span
+                    className={styles.sessionModeTag}
+                    title={t(
+                      task.sessionMode === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun.hint'
+                        : 'scheduledTasks.sessionMode.persistent.hint',
+                    )}
+                  >
+                    {task.sessionMode === 'per_run' ? (
+                      <MessageSquarePlusIcon aria-hidden="true" />
+                    ) : (
+                      <MessagesSquareIcon aria-hidden="true" />
+                    )}
+                    {t(
+                      task.sessionMode === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun'
+                        : 'scheduledTasks.sessionMode.persistent',
+                    )}
+                  </span>
+                )}
                 {task.nextRunAt != null && (
                   <span
                     className={styles.countdown}
@@ -1565,7 +2002,7 @@ export function ScheduledTasksDialog({
                     })}
                   >
                     <span className={styles.hourglassIcon} aria-hidden="true">
-                      ⏳
+                      <HourglassIcon />
                     </span>
                     {formatCountdown(task.nextRunAt - now, t)}
                   </span>
@@ -1573,7 +2010,9 @@ export function ScheduledTasksDialog({
                 <span className={styles.lastFired}>
                   {describeLastRun(task, t)}
                 </span>
-                {task.sessionId && onOpenSession ? (
+                {task.sessionMode !== 'per_run' &&
+                task.sessionId &&
+                onOpenSession ? (
                   // The task's bound session IS its run history — open its
                   // transcript. Always shown (empty state included) so the
                   // history is discoverable even before the first run.
@@ -1590,8 +2029,9 @@ export function ScheduledTasksDialog({
                       : t('scheduledTasks.viewHistoryEmpty')}
                   </button>
                 ) : (
-                  // Unbound (tool-created / legacy) task: no session to open, so
-                  // fall back to the inline fire-timestamp list.
+                  // Per-run tasks link each child session from the inline list.
+                  // Unbound tool-created / legacy tasks use the same timestamp
+                  // fallback, without links.
                   task.runs.length > 0 && (
                     <button
                       type="button"
@@ -1616,7 +2056,18 @@ export function ScheduledTasksDialog({
                   {/* Newest first — the ring is stored oldest-first. */}
                   {[...task.runs].reverse().map((run, idx) => (
                     <li key={`${run.at}-${idx}`} className={styles.runsItem}>
-                      {describeRun(run, t)}
+                      {run.sessionId && onOpenSession ? (
+                        <button
+                          type="button"
+                          className={styles.runLink}
+                          onClick={() => onOpenSession(run.sessionId!)}
+                          title={t('scheduledTasks.openRunSession')}
+                        >
+                          {describeRun(run, t)}
+                        </button>
+                      ) : (
+                        describeRun(run, t)
+                      )}
                     </li>
                   ))}
                 </ul>

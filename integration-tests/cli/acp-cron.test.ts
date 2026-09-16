@@ -11,18 +11,24 @@
  * and stream results back to the client via sessionUpdate notifications,
  * even after the originating prompt has already returned.
  *
- * The two tests share one ACP session to stay within 2 minutes total:
- *   1. Fast smoke test — cron tools available (no cron fire needed)
- *   2. Combined test — create job, verify session responsive, wait for
- *      cron fire, check content + _meta.source, then clean up
+ * Uses fake-openai-server for deterministic model responses, eliminating
+ * model output variance as a failure source. The QWEN_CODE_TEST_CRON_FAST
+ * test seam auto-fires cron jobs after a short delay instead of waiting
+ * for the wall-clock minute boundary.
  */
 
-import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, it, expect } from 'vitest';
 import { TestRig } from '../test-helper.js';
+import {
+  startFakeOpenAIServer,
+  fakeToolCall,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 
@@ -68,10 +74,25 @@ type PermissionRequest = {
   }>;
 };
 
+const CRON_CREATE_INSTRUCTION = 'Call cron_create with cron expression';
+
+function isCronCreateRequest(body: Record<string, unknown>): boolean {
+  const messages = body['messages'];
+  const latestMessage = Array.isArray(messages) ? messages.at(-1) : undefined;
+  return (
+    typeof latestMessage === 'object' &&
+    latestMessage !== null &&
+    'role' in latestMessage &&
+    latestMessage.role === 'user' &&
+    JSON.stringify(latestMessage)?.includes(CRON_CREATE_INSTRUCTION) === true
+  );
+}
+
 /**
- * Sets up an ACP test environment with cron support enabled.
+ * Sets up an ACP test environment with cron support enabled, backed by
+ * a fake-openai-server for deterministic model responses.
  */
-function setupAcpCronTest(rig: TestRig) {
+function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
   const pending = new Map<number, PendingRequest>();
   let nextRequestId = 1;
   const sessionUpdates: (SessionUpdateNotification & {
@@ -79,17 +100,52 @@ function setupAcpCronTest(rig: TestRig) {
   })[] = [];
   const stderr: string[] = [];
 
+  // Keep the global config dir outside the agent's workspace cwd so workspace
+  // scans (memory discovery, file tooling) never see it.
+  const qwenHome = join(
+    dirname(rig.testDir!),
+    `${basename(rig.testDir!)}-home`,
+  );
+  rmSync(qwenHome, { recursive: true, force: true });
+  mkdirSync(qwenHome, { recursive: true });
+
   const agent = spawn(
     'node',
     [rig.bundlePath, '--acp', '--no-chat-recording'],
     {
       cwd: rig.testDir!,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Run the CLI in its own process group so cleanup can signal the
+      // whole tree. Grandchildren spawned by the CLI (MCP helpers, cron
+      // internals) otherwise survive `agent.kill()` and keep writing
+      // into QWEN_HOME while rmSync is deleting it (ENOTEMPTY flakes).
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
+        QWEN_HOME: qwenHome,
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        // Defends against an ambient proxy intercepting the local fake server.
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+        // Enable the CronScheduler test seam: newly created session-only
+        // jobs auto-fire after 5s instead of waiting for the wall-clock
+        // minute boundary (see cron-interactive.test.ts).
+        QWEN_CODE_TEST_CRON_FAST: '1',
+        QWEN_CODE_TEST_CRON_DELAY_MS: '5000',
       },
     },
   );
+
+  // The group kill in cleanup() only works if the CLI actually leads its
+  // own process group (detached above). Pin that precondition here: if it
+  // ever stops holding, fail fast instead of silently degrading to the
+  // pre-fix direct-child-only teardown and resurrecting the ENOTEMPTY flake.
+  if (process.platform !== 'win32') {
+    expect(() => process.kill(-agent.pid!, 0)).not.toThrow();
+  }
 
   agent.stderr?.on('data', (chunk: Buffer) => {
     stderr.push(chunk.toString());
@@ -259,10 +315,65 @@ function setupAcpCronTest(rig: TestRig) {
 
   const cleanup = async () => {
     rl.close();
-    agent.kill();
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
+    // Signal the entire process group, not just the direct child: the CLI
+    // spawns helpers that keep running after the parent dies and can drop
+    // fresh files into the fake HOME while the final rmSync walks it.
+    if (process.platform === 'win32') {
+      // No POSIX process groups: taskkill /T walks the child tree instead.
+      // Absolute System32 path per the #5873 hardening: a bare name resolves
+      // via the CreateProcess search order, where CWD (rig.testDir here)
+      // precedes System32. The sync form also means a launch failure cannot
+      // escape as an unhandled 'error' event; agent.kill() below stays as
+      // the fallback either way. taskkill /T /F terminates the root too.
+      try {
+        spawnSync(
+          join(
+            process.env['SystemRoot'] ?? 'C:\\Windows',
+            'System32',
+            'taskkill.exe',
+          ),
+          ['/t', '/f', '/pid', String(agent.pid)],
+          { windowsHide: true },
+        );
+      } catch {
+        // taskkill failed to launch — fall through to the direct kill below.
+      }
+      agent.kill();
+    } else {
+      try {
+        process.kill(-agent.pid!, 'SIGTERM');
+      } catch (e) {
+        // Only a vanished process group is benign; anything else must
+        // surface instead of silently degrading to a partial teardown.
+        if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
+      }
+      agent.kill('SIGTERM');
+    }
     await waitForExit();
+    // The cron job is recurring and, under QWEN_CODE_TEST_CRON_FAST, re-fires
+    // every ~5s. A second fire can race cleanup and drop a fresh file into the
+    // fake HOME after the recursive walk has drained it, making the final
+    // rmdir fail with ENOTEMPTY. rmSync's built-in retries only repeat the
+    // failing rmdir and never re-walk for entries created mid-walk, so each
+    // attempt below starts a fresh walk instead.
+    const RM_ATTEMPTS = 5;
+    const RM_RETRY_DELAY_MS = 200;
+    for (let attempt = 0; attempt < RM_ATTEMPTS; attempt++) {
+      try {
+        rmSync(qwenHome, { recursive: true, force: true });
+        return;
+      } catch (e) {
+        if (
+          (e as NodeJS.ErrnoException).code !== 'ENOTEMPTY' ||
+          attempt === RM_ATTEMPTS - 1
+        ) {
+          throw e;
+        }
+        await delay(RM_RETRY_DELAY_MS);
+      }
+    }
   };
 
   return {
@@ -301,88 +412,111 @@ async function initSession(
     'cron job fires and streams results via sessionUpdate after prompt returns',
     async () => {
       const rig = new TestRig();
-      rig.setup('acp-cron-e2e');
+      await rig.setup('acp-cron-e2e');
 
-      const {
-        sendRequest,
-        cleanup,
-        stderr,
-        // sessionUpdates available for debugging
-        waitForSessionUpdate,
-      } = setupAcpCronTest(rig);
+      const fakeServer = await startFakeOpenAIServer(({ body }) => {
+        if (isCronCreateRequest(body)) {
+          return {
+            toolCalls: [
+              fakeToolCall('cron_create', {
+                cron: '*/1 * * * *',
+                prompt: 'Say CRONFIRE7742 and nothing else',
+                recurring: true,
+              }),
+            ],
+          };
+        }
+        return { content: 'Done.' };
+      });
 
       try {
-        const sessionId = await initSession(sendRequest, rig.testDir!);
+        const { sendRequest, cleanup, stderr, waitForSessionUpdate } =
+          setupAcpCronTest(rig, fakeServer);
 
-        // --- Part 1: Create a cron job that fires every minute ---
-        const createResult = (await sendRequest('session/prompt', {
-          sessionId,
-          prompt: [
-            {
-              type: 'text',
-              text: 'Call cron_create with cron expression "*/1 * * * *" and prompt "Say CRONFIRE7742 and nothing else" and recurring true. Confirm briefly.',
-            },
-          ],
-        })) as { stopReason: string };
-        expect(createResult.stopReason).toBe('end_turn');
+        try {
+          const sessionId = await initSession(sendRequest, rig.testDir!);
 
-        const promptDoneAt = Date.now();
+          // --- Part 1: Create a cron job that fires every minute ---
+          const createResult = (await sendRequest('session/prompt', {
+            sessionId,
+            prompt: [
+              {
+                type: 'text',
+                text: 'Call cron_create with cron expression "*/1 * * * *" and prompt "Say CRONFIRE7742 and nothing else" and recurring true. Confirm briefly.',
+              },
+            ],
+          })) as { stopReason: string };
+          expect(createResult.stopReason).toBe('end_turn');
 
-        // --- Part 2: Session stays responsive while cron is pending ---
-        const interactiveResult = (await sendRequest('session/prompt', {
-          sessionId,
-          prompt: [
-            {
-              type: 'text',
-              text: 'Say INTERACTIVE8899 and nothing else.',
-            },
-          ],
-        })) as { stopReason: string };
-        expect(interactiveResult.stopReason).toBe('end_turn');
+          // Fail fast instead of surfacing a missing tool call as an opaque
+          // 75s timeout in Part 3a.
+          expect(
+            fakeServer.requests.some(({ body }) => isCronCreateRequest(body)),
+            'fake server did not receive the cron_create prompt',
+          ).toBe(true);
 
-        // --- Part 3: Wait for cron-fired notification (up to 75s) ---
-        // The cron fires at the next minute boundary. The model response
-        // should stream back as sessionUpdate notifications after the
-        // originating prompt has already returned.
+          // --- Part 2: Session stays responsive while cron is pending ---
+          const interactiveResult = (await sendRequest('session/prompt', {
+            sessionId,
+            prompt: [
+              {
+                type: 'text',
+                text: 'Say INTERACTIVE8899 and nothing else.',
+              },
+            ],
+          })) as { stopReason: string };
+          expect(interactiveResult.stopReason).toBe('end_turn');
 
-        // 3a: Check for user_message_chunk echoing the cron prompt with _meta.source
-        const cronUserMsg = await waitForSessionUpdate(
-          (u) =>
-            u.update?.sessionUpdate === 'user_message_chunk' &&
-            (u.update?.content?.text ?? '').includes('CRONFIRE7742') &&
-            u.receivedAt > promptDoneAt,
-          'cron-fired user_message_chunk with CRONFIRE7742',
-          75_000,
-        );
-        expect(cronUserMsg.update?._meta).toBeDefined();
-        expect(cronUserMsg.update?._meta?.source).toBe('cron');
+          // --- Part 3: Wait for cron-fired notification ---
+          // With QWEN_CODE_TEST_CRON_FAST the job auto-fires ~5s after
+          // creation. The model response should stream back as
+          // sessionUpdate notifications after the originating prompt has
+          // already returned.
 
-        // 3b: Check for agent_message_chunk after the cron user message
-        // (the model's response to the cron prompt)
-        const cronAgentMsg = await waitForSessionUpdate(
-          (u) =>
-            u.update?.sessionUpdate === 'agent_message_chunk' &&
-            u.receivedAt > cronUserMsg.receivedAt,
-          'agent_message_chunk after cron fire',
-          15_000, // should already be here by now
-        );
-        expect(cronAgentMsg.receivedAt).toBeGreaterThan(promptDoneAt);
+          // 3a: Check for the user_message_chunk echoing the cron prompt.
+          // Select it by _meta.source === 'cron' rather than a wall-clock
+          // comparison: the Part 1 prompt text also contains CRONFIRE7742,
+          // and the cron notification races the Part 1 RPC response over the
+          // same stdout pipe, so a timestamp guard can non-deterministically
+          // exclude the one fast fire. The cron-sourced echo is the only
+          // user_message_chunk carrying _meta.source === 'cron'
+          // (see Session.#executeCronPromptInner).
+          const cronUserMsg = await waitForSessionUpdate(
+            (u) =>
+              u.update?.sessionUpdate === 'user_message_chunk' &&
+              u.update?._meta?.source === 'cron',
+            "cron-sourced user_message_chunk (_meta.source === 'cron')",
+            75_000,
+          );
+          expect(cronUserMsg.update?.content?.text).toContain('CRONFIRE7742');
 
-        // --- Part 4: Clean up the cron job ---
-        await sendRequest('session/prompt', {
-          sessionId,
-          prompt: [
-            {
-              type: 'text',
-              text: 'Delete all cron jobs using cron_delete.',
-            },
-          ],
-        });
-      } catch (e) {
-        if (stderr.length) console.error('Agent stderr:', stderr.join(''));
-        throw e;
+          // 3b: Check for agent_message_chunk after the cron user message
+          // (the model's response to the cron prompt). The predicate matches
+          // any agent_message_chunk after cronUserMsg; ordering is safe
+          // because the fast fire lands ~5s in, well after Part 2 completes.
+          await waitForSessionUpdate(
+            (u) =>
+              u.update?.sessionUpdate === 'agent_message_chunk' &&
+              u.receivedAt > cronUserMsg.receivedAt,
+            'agent_message_chunk after cron fire',
+            15_000, // should already be here by now
+          );
+        } catch (e) {
+          if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+          console.error(
+            'Fake server requests:',
+            fakeServer.requests.map((r, i) => ({
+              index: i,
+              model: r.body['model'],
+              messages: JSON.stringify(r.body['messages']).slice(0, 300),
+            })),
+          );
+          throw e;
+        } finally {
+          await cleanup();
+        }
       } finally {
-        await cleanup();
+        await fakeServer.close();
       }
     },
     { timeout: 120_000, retry: 0 },

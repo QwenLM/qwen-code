@@ -19,6 +19,7 @@ import type { Config } from '../config/config.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  PromptCacheSharingParameters,
 } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
@@ -81,17 +82,15 @@ export interface GenerateTextOptions {
   model: string;
   /**
    * Task-specific system instructions. Passed through to the underlying
-   * content generator without the geminiClient main-prompt fallback or
+   * content generator without the llmClient main-prompt fallback or
    * user-memory wrapping that `getCustomSystemPrompt` applies.
    */
-  systemInstruction?: string | Part | Part[] | Content;
+  systemInstruction?: GenerateContentConfig['systemInstruction'];
   /**
-   * Overrides for generation configuration (e.g., temperature, thinkingConfig).
+   * Overrides for generation configuration (e.g., temperature, thinkingConfig,
+   * or cache-prefix-preserving tool declarations).
    */
-  config?: Omit<
-    GenerateContentConfig,
-    'systemInstruction' | 'tools' | 'abortSignal'
-  >;
+  config?: Omit<GenerateContentConfig, 'systemInstruction' | 'abortSignal'>;
   /** Signal for cancellation. */
   abortSignal: AbortSignal;
   /**
@@ -111,6 +110,12 @@ export interface GenerateTextOptions {
    */
   stream?: boolean;
   /**
+   * Let the OpenAI adapter mark the unchanged history prefix for cache reuse.
+   * This is only for requests ending in a non-reusable trailing directive;
+   * the adapter deliberately excludes the final message from cache marking.
+   */
+  promptCacheSharing?: boolean;
+  /**
    * When true, throw instead of silently falling back to the main generator if
    * a distinct generator for `model` can't be created (model not registered, or
    * generator creation fails — e.g. a missing cross-provider credential). The
@@ -127,6 +132,8 @@ export interface GenerateTextOptions {
 export interface GenerateTextResult {
   text: string;
   usage: GenerateContentResponseUsageMetadata | undefined;
+  /** Whether the response contained a function call. No call is executed here. */
+  hadToolCall?: boolean;
 }
 
 /**
@@ -358,7 +365,7 @@ export class BaseLlmClient {
   /**
    * Free-form text generation primitive used by `runSideQuery` text mode.
    *
-   * Distinct from `GeminiClient.generateContent`: this calls the underlying
+   * Distinct from `LlmClient.generateContent`: this calls the underlying
    * `ContentGenerator` directly, so the caller's `systemInstruction` is sent
    * through verbatim — no `getCustomSystemPrompt` wrapping (which would append
    * user memory) and no main-session-prompt fallback when omitted. Side queries
@@ -396,10 +403,11 @@ export class BaseLlmClient {
     ).slimmedHistory;
 
     try {
-      const request = {
+      const request: PromptCacheSharingParameters = {
         model: requestModel,
         config: requestConfig,
         contents: requestContents,
+        ...(options.promptCacheSharing && { promptCacheSharing: true }),
       };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single
@@ -418,13 +426,15 @@ export class BaseLlmClient {
             // the final chunk (last one wins), matching the non-streaming read.
             let text = '';
             let usage: GenerateContentResponseUsageMetadata | undefined;
+            let hadToolCall = false;
             for await (const chunk of responseStream) {
               text += getResponseText(chunk) ?? '';
+              hadToolCall ||= (getFunctionCalls(chunk)?.length ?? 0) > 0;
               if (chunk.usageMetadata) {
                 usage = chunk.usageMetadata;
               }
             }
-            return { text, usage };
+            return { text, usage, hadToolCall };
           }
         : async () => {
             const result = await contentGenerator.generateContent(
@@ -434,6 +444,7 @@ export class BaseLlmClient {
             return {
               text: getResponseText(result) ?? '',
               usage: result.usageMetadata,
+              hadToolCall: (getFunctionCalls(result)?.length ?? 0) > 0,
             };
           };
 
@@ -467,6 +478,7 @@ export class BaseLlmClient {
       return {
         text: result.text.trim(),
         usage: result.usage,
+        hadToolCall: result.hadToolCall,
       };
     } catch (error) {
       if (abortSignal.aborted) {

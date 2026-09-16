@@ -171,7 +171,12 @@ export class FileCommandLoader implements ICommandLoader {
     if (this.config) {
       const activeExtensions = this.config
         .getExtensions()
-        .filter((ext) => ext.isActive)
+        .filter(
+          (ext) =>
+            ext.isActive &&
+            ext.format !== 'agent-plugins-v1' &&
+            ext.installMetadata?.originSource !== 'AgentPlugins',
+        )
         .sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically for deterministic loading
 
       // Collect command directories from each extension

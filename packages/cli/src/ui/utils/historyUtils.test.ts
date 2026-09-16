@@ -84,6 +84,21 @@ describe('isSyntheticHistoryItem', () => {
       ),
     ).toBe(true);
   });
+
+  it('treats v2 goal lifecycle cards as meaningful history', () => {
+    expect(
+      isSyntheticHistoryItem(
+        mk({
+          type: 'goal_state',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('itemsAfterAreOnlySynthetic', () => {

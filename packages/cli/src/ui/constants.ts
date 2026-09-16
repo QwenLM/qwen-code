@@ -44,6 +44,26 @@ export const ICON = {
   THEREFORE: `∴${_VS15}`,
   BECAUSE: `∵${_VS15}`,
   STAR: `★${_VS15}`,
+  SPARKLE: `✳${_VS15}`,
   RADIO_FILLED: `◉${_VS15}`,
   CIRCLE_LEFT_HALF: `◐${_VS15}`,
+  CHECK: `✓${_VS15}`,
+  CROSS: `✖${_VS15}`,
 } as const;
+
+// cli-spinners' `dots`, the frames ink's responding spinner animates. Shared so
+// a frame or rate change cannot land in one renderer only.
+export const SPINNER_FRAMES = [
+  '⠋',
+  '⠙',
+  '⠹',
+  '⠸',
+  '⠼',
+  '⠴',
+  '⠦',
+  '⠧',
+  '⠇',
+  '⠏',
+];
+
+export const SPINNER_INTERVAL_MS = 80;

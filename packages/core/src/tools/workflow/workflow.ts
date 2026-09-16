@@ -11,56 +11,119 @@
  */
 
 import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../../agents/workflow-correlation.js';
+import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
+  type ToolCallConfirmationDetails,
+  type ToolConfirmationOutcome,
+  type ToolConfirmationPayload,
+  type ToolInfoConfirmationDetails,
   type ToolInvocation,
   type ToolResult,
   type ToolResultDisplay,
   type ToolLocation,
 } from '../tools.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
+import { isWithinRoot } from '../../utils/fileUtils.js';
+import {
+  extractAndStripMeta,
+  type WorkflowMeta,
+} from '../../agents/runtime/workflow-sandbox.js';
+import {
+  getRuleDisplayName,
+  resolveToolName,
+} from '../../permissions/rule-parser.js';
 import type { ShellExecutionConfig } from '../../services/shellExecutionService.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 // FIX-10 (REUSE-I1): import ToolErrorType to use the standard machine-readable
 // error code rather than an ad-hoc bare `{ message }` object.
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
+import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
 import {
-  WorkflowOrchestrator,
-  WorkflowExecutionError,
-  createProductionDispatch,
-  type WorkflowAgentDispatch,
-  type WorkflowOrchestratorEmitter,
+  DEFAULT_MAX_AGENTS_PER_RUN,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+  MAX_WORKFLOW_AGENTS_ENV,
+  MAX_WORKFLOW_CONCURRENCY_ENV,
+  WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+  WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import {
-  WorkflowBudgetImpl,
   MAX_TOKENS_PER_WORKFLOW_ENV,
+  WorkflowBudgetImpl,
+  type WorkflowBudgetSource,
 } from '../../agents/runtime/workflow-budget.js';
-import { resolveSavedWorkflowScript } from '../../agents/runtime/workflow-saved.js';
-import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
-import type { JournalReplay } from '../../agents/runtime/workflow-journal.js';
-import { writeWorkflowSnapshot } from '../../agents/workflow-snapshot.js';
-import { logWorkflowRun } from '../../telemetry/loggers.js';
-import { WorkflowRunEvent } from '../../telemetry/types.js';
-import { createChildAbortController } from '../../utils/abortController.js';
-import { randomBytes } from 'node:crypto';
+import {
+  WorkflowRunner,
+  WorkflowScriptNotLaunchedError,
+  WorkflowStartCancelledError,
+  type WorkflowRunHandle,
+} from '../../agents/runtime/workflow-runner.js';
+import {
+  computeWorkflowScriptDigest,
+  findActiveExtensionWorkflowByPath,
+  findActiveExtensionWorkflowByPathCanonical,
+  getActiveExtensionWorkflows,
+  isSymlinkedRoot,
+  parseExtensionWorkflowName,
+  resolveSavedWorkflowScript,
+  type ResolvedSavedWorkflow,
+} from '../../agents/runtime/workflow-saved.js';
+import type { ExtensionWorkflowDefinition } from '../../agents/runtime/workflow-extension.js';
+import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
+import type {
+  WorkflowDispatchTraceStatus,
+  WorkflowTask,
+} from '../../agents/workflow-run-registry.js';
+import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
+import {
+  buildWorkflowSizeGuidelineParagraph,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuidelineSetting,
+} from '../../agents/runtime/workflow-size.js';
+import { scanWorkflowScriptShape } from '../../agents/runtime/workflow-script-shape.js';
+import {
+  readWorkflowAuthoringReference,
+  resolveWorkflowAuthoringSurface,
+  toolSearchRevealSentence,
+  WORKFLOW_AUTHORING_SKILL_NAME,
+  type WorkflowAuthoringReference,
+  type WorkflowAuthoringSurface,
+} from '../../skills/workflow-authoring-skill.js';
+import {
+  buildResumeCall,
+  hasUninlinableResumeArgs,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from '../../agents/workflow-resume-call.js';
 
 export interface WorkflowParams {
+  sourceRef?: WorkflowSourceRef;
   /**
    * Inline JavaScript source for the workflow. Provide exactly one of
-   * `script` or `scriptPath`.
+   * `script`, `scriptPath` or `name`.
    */
   script?: string;
   /**
-   * P7b: absolute path to a saved workflow `.js` file to load and run
-   * instead of inline `script`. Set by the `/<name>` saved-workflow slash
-   * command (`SavedWorkflowLoader`). Read at execution time so edits to the
-   * saved file take effect on the next run; the resolved path is recorded on
-   * the registry entry as run provenance.
+   * P7b: absolute path to a workflow `.js` file to load and run instead of
+   * inline `script` — a saved workflow, set by the `/<name>` slash command
+   * (`SavedWorkflowLoader`), or a one-run script a tool generated under the
+   * generated-scripts root. Read once per call, before approval, and that
+   * content is what runs, so edits to the file take effect on the next call;
+   * the resolved path is recorded on the registry entry as run provenance.
    */
   scriptPath?: string;
+  /**
+   * Name of a saved workflow to run: `<name>` from the project or user
+   * workflow directory, or `<extension>:<name>` from an active extension.
+   * Resolved like `scriptPath`: once per call, before approval.
+   */
+  name?: string;
   /** Optional structured value bound to the `args` global inside the script. */
   args?: unknown;
   /**
@@ -71,6 +134,8 @@ export interface WorkflowParams {
    * runs live and the run goes live for the remainder.
    */
   resumeFromRunId?: string;
+  /** Return after registration and continue the run under session ownership. */
+  run_in_background?: boolean;
 }
 
 export interface WorkflowToolOptions {
@@ -81,65 +146,77 @@ export interface WorkflowToolOptions {
   dispatch?: WorkflowAgentDispatch;
 }
 
+export interface WorkflowToolResult extends ToolResult {
+  sourceRef?: WorkflowSourceRef;
+  /** Exact run started by a successfully admitted background invocation. */
+  workflowRunId?: string;
+  /**
+   * Where the script that ran lives on disk — the file a `{scriptPath}` call
+   * loaded, or the persisted copy of an inline `{script}`. Absent when an
+   * inline script could not be persisted.
+   */
+  scriptPath?: string;
+  /** This run's resume journal, when the config has a `storage` to hold one. */
+  journalPath?: string;
+}
+
 const WORKFLOW_PARAM_SCHEMA = {
   type: 'object',
   properties: {
+    sourceRef: {
+      type: 'object',
+      description:
+        'Optional caller-supplied definition id and revision for run correlation. Requires a writable journal; omit for ordinary workflows.',
+      properties: {
+        id: { type: 'string', minLength: 1, maxLength: 256 },
+        revision: { type: 'string', minLength: 1, maxLength: 256 },
+      },
+      required: ['id', 'revision'],
+      additionalProperties: false,
+    },
     script: {
       type: 'string',
       description:
-        'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
-        'May call the injected globals `phase(title)`, `log(msg)`, ' +
-        '`agent(prompt, opts?)`, and read `args`. ' +
-        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation? }`. ' +
-        '`schema` (JSON Schema object): the subagent must deliver its result ' +
-        'by calling `structured_output` with arguments matching the schema; ' +
-        'agent() resolves to the validated object. Two failed attempts produce ' +
-        'a terminal error "subagent completed without calling StructuredOutput ' +
-        '(after 2 in-conversation nudges)". ' +
-        '`agentType` (string): resolves against the declarative-agents registry ' +
-        '(`.qwen/agents/<name>.md`, project then user then built-in). Unresolved ' +
-        'names throw "agent({agentType}): agent type ' +
-        "'X'" +
-        ' not found". ' +
-        '`model` (string): per-call model override; routes provider correctly ' +
-        'via the subagent runtime view. ' +
-        '`isolation`: `' +
-        "'worktree'" +
-        '` provisions a fresh git worktree under ' +
-        '`<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed ' +
-        'if no changes, otherwise the path and branch are returned alongside the ' +
-        "result. `'remote'` throws \"agent({isolation:'remote'}) is not available " +
-        'in this build" (parity with upstream). isolation=worktree refuses to ' +
-        'run when the parent working tree has uncommitted changes (the subagent ' +
-        'would see a stale HEAD). ' +
-        'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
-        'in their disallowed-tool floor regardless of agentType. ' +
-        'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
-        'through a shared per-run window (default ' +
-        '`max(1, min(16, cpus-2))` agents in flight; override via ' +
-        '`QWEN_CODE_MAX_WORKFLOW_CONCURRENCY`) and resolves to a ' +
-        'position-aligned array — a thunk that throws, or resolves to a ' +
-        'non-JSON-serializable value, becomes `null` at its index ' +
-        '(errors-as-data); parallel() itself rejects only on invalid ' +
-        'arguments or abort. `pipeline(items, ...stages)` runs each item ' +
-        'through the stages (staggered, no inter-stage barrier); a stage ' +
-        'that throws, returns `null`, or returns a non-JSON-serializable ' +
-        'value drops that item to `null`. Pass ' +
-        'THUNKS to parallel, not eager calls: `parallel([() => agent(...)])`, ' +
-        'not `parallel([agent(...)])`. At most 1000 agent() calls per run ' +
-        '(override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`). ' +
-        '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
-        'must be deterministic for resume. ' +
-        '`export const meta = {...}` declarations are stripped before execution.',
+        'JavaScript source of the workflow, wrapped as an async IIFE: ' +
+        'top-level `await` and `return` are both legal, and a trailing ' +
+        'expression is NOT a return value. Uses the injected globals ' +
+        '`phase()`, `log()`, `agent()`, `parallel()`, `pipeline()`, ' +
+        '`workflow()`, `args` and `budget`, and cannot import anything. ' +
+        'May start with a literal `export const meta = {...}` ' +
+        '(stripped before execution). ' +
+        '`Math.random()` and all of `Date` (`new Date()`, `Date.now()` ' +
+        'included) throw — a script must be deterministic for resume, so ' +
+        'pass timestamps in via `args` or stamp the result after the run ' +
+        'returns. Pass THUNKS to parallel(), not eager calls: ' +
+        '`parallel([() => agent(...)])`, not `parallel([agent(...)])`.',
     },
     scriptPath: {
       type: 'string',
       description:
-        'Optional. Absolute path to a saved workflow `.js` file to load and ' +
-        'run instead of inline `script`. Primarily set by the `/<name>` ' +
-        'saved-workflow slash command. Provide exactly ONE of `script` or ' +
-        '`scriptPath`. The file is read at execution time, so edits to a ' +
-        'saved workflow take effect on the next run.',
+        'Optional. Absolute path to a workflow `.js` file to load and run ' +
+        'instead of inline `script`. Primarily set by the `/<name>` ' +
+        'saved-workflow slash command; a tool that generated a script for ' +
+        'this run hands you its path the same way. The file must resolve ' +
+        'inside a saved-workflow directory (`.qwen/workflows`, ' +
+        '`~/.qwen/workflows`), be a workflow file an active extension ' +
+        'ships, or sit under the generated-scripts root ' +
+        '(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project ' +
+        'runtime dir, not the project tree) — any other path is refused. ' +
+        'Provide exactly ONE of `script`, `scriptPath` or `name`. The file ' +
+        'is read once per call, before approval, so edits to a saved ' +
+        'workflow take effect on the next call. An inline `script` is ' +
+        'persisted to ' +
+        '`<generated root>/inline/<runId>.js` and that path comes back in the ' +
+        'result, so a resume passes the path instead of the source.',
+    },
+    name: {
+      type: 'string',
+      description:
+        'Optional. Name of a saved workflow to run instead of inline ' +
+        '`script`: `<name>` for one in `.qwen/workflows` or ' +
+        '`~/.qwen/workflows`, or `<extension>:<name>` for one an active ' +
+        'extension ships. Provide exactly ONE of `script`, `scriptPath` or ' +
+        '`name`.',
     },
     args: {
       description:
@@ -149,33 +226,143 @@ const WORKFLOW_PARAM_SCHEMA = {
       type: 'string',
       description:
         'Optional. Resume a prior workflow run by id (e.g. wf_abc123…). ' +
-        'Re-runs the SAME script; agent() calls whose rolling prefix-hash ' +
+        'Re-runs the supplied script or returned script path; agent() calls ' +
+        'whose rolling prefix-hash ' +
         '(prompt + opts, chained in call order) matches a journaled result ' +
         'are served from cache for the longest unchanged prefix, and the ' +
-        'first changed/missing call onward runs live. Pass the same script ' +
-        'and args as the original run for the cache to apply.',
+        'first changed/missing call onward runs live. Pass the `scriptPath` ' +
+        'the original run returned and the same `args`. Editing a saved ' +
+        'workflow changes future runs too, so copy it for run-specific edits. ' +
+        'Replay requires a journal; without one, every agent() call runs live. ' +
+        'The journal keys hash each agent() ' +
+        "call's prompt and opts, not the script text, so post-processing can " +
+        'change without losing the cache.',
+    },
+    run_in_background: {
+      type: 'boolean',
+      default: false,
+      description:
+        'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
     },
   },
-  // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
-  // expressed as a plain `required` list, so it's enforced in
-  // `validateToolParamValues`. Inline authoring (the LLM path) should always
-  // pass `script`; the `scriptPath` property description states the XOR.
+  // Exactly one of `script`, `scriptPath` and `name`; that can't be expressed
+  // as a plain `required` list, so it's enforced in `validateToolParamValues`.
+  // Inline authoring (the LLM path) passes `script`; the `scriptPath` and
+  // `name` property descriptions state the rule.
 } as const;
 
 class WorkflowToolInvocation extends BaseToolInvocation<
   WorkflowParams,
-  ToolResult
+  WorkflowToolResult
 > {
+  private callId?: string;
+
+  /**
+   * The failure hint, when the failing script is one this call authored.
+   *
+   * A saved workflow is the user's file, and the resume advice already tells
+   * the model to copy it before making a run-specific change — "fix the script,
+   * and retry" would contradict that in the same message.
+   */
+  private authoredScriptHint(): string | null {
+    if (!this.authoringHint) return null;
+    return isScriptAuthoredByThisCall(
+      this.config,
+      this.workflowName ?? this.params.name,
+      this.params.scriptPath,
+    )
+      ? this.authoringHint
+      : null;
+  }
+
   constructor(
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions,
     params: WorkflowParams,
+    /** This session's failure hint, from the tool's recorded description shape. */
+    private readonly authoringHint: string | null,
+    private readonly workflowName?: string,
   ) {
     super(params);
   }
 
+  setCallId(callId: string): void {
+    this.callId = callId;
+  }
+
+  /**
+   * Cache so the transcript header and the approval dialog cannot disagree,
+   * and so an oversized script is scanned once per invocation rather than
+   * once per surface that asks.
+   */
+  private metaCache?: WorkflowMeta | null;
+
+  private resolveMeta(): WorkflowMeta | null {
+    if (this.metaCache === undefined) {
+      this.metaCache = this.params.script
+        ? readMetaForConfirmation(this.params.script)
+        : null;
+    }
+    return this.metaCache;
+  }
+
+  /**
+   * The file a `scriptPath` or `name` call runs, read once. The permission
+   * check, the approval dialog and the run all use this one read, so the
+   * script the user approved is the script that runs, even when the file
+   * changes while the dialog is open.
+   */
+  private scriptLoad?: Promise<WorkflowScriptLoad>;
+  /** {@link scriptLoad} once settled, for the synchronous rule-match hook. */
+  private settledScriptLoad?: WorkflowScriptLoad;
+
+  private loadReferencedScript(): Promise<WorkflowScriptLoad> | undefined {
+    if (this.params.script !== undefined) return undefined;
+    const { name, scriptPath } = this.params;
+    if (!name && !scriptPath) return undefined;
+    this.scriptLoad ??= (async (): Promise<WorkflowScriptLoad> => {
+      try {
+        const loaded = await resolveSavedWorkflowScript(
+          name ? name : { scriptPath: scriptPath! },
+          this.config,
+        );
+        return {
+          ok: true,
+          loaded,
+          digest: computeWorkflowScriptDigest(loaded.script),
+        };
+      } catch (error) {
+        return { ok: false, error };
+      }
+    })().then((load) => {
+      this.settledScriptLoad = load;
+      return load;
+    });
+    return this.scriptLoad;
+  }
+
   getDescription(): string {
+    const meta = this.resolveMeta();
+    if (meta) {
+      return `Run workflow: ${sanitizeLine(meta.name)}`;
+    }
+    if (this.params.name && this.params.script === undefined) {
+      const kind = parseExtensionWorkflowName(this.params.name)
+        ? 'extension'
+        : 'saved';
+      return `Run ${kind} workflow (${sanitizeLine(this.params.name)})`;
+    }
     if (this.params.scriptPath && this.params.script === undefined) {
+      if (isGeneratedWorkflowScriptPath(this.config, this.params.scriptPath)) {
+        return `Run generated workflow script (${path.basename(this.params.scriptPath)})`;
+      }
+      const extensionWorkflow = findActiveExtensionWorkflowByPath(
+        this.config,
+        this.params.scriptPath,
+      );
+      if (extensionWorkflow) {
+        return `Run extension workflow (${sanitizeLine(extensionWorkflow.name)})`;
+      }
       return `Run saved workflow (${path.basename(this.params.scriptPath)})`;
     }
     return `Run a workflow script (${this.params.script?.length ?? 0} chars)`;
@@ -185,171 +372,250 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     return [];
   }
 
-  override getDefaultPermission(): Promise<'ask'> {
-    return Promise.resolve('ask');
+  override async getDefaultPermission(): Promise<'allow' | 'ask'> {
+    const load = await this.loadReferencedScript();
+    // A saved workflow that cannot be loaded has nothing to run: the call
+    // fails with the load error, which lists the available names, without
+    // asking the user to approve a run that cannot start. The run reuses this
+    // failed load rather than reading again, so a file that appears after
+    // this check never runs unapproved. Deny and ask rules still apply.
+    return load && !load.ok ? 'allow' : 'ask';
+  }
+
+  /**
+   * An "always allow" for a saved or extension workflow is pinned to the
+   * script it approved: `Workflow(name:gcp:audit,sha256:…)`. The digest is
+   * computed from the file this call loaded. A `sha256` the model passed is
+   * overwritten, and a call that loaded nothing matches no digest.
+   */
+  getPermissionMatchParams(): Record<string, unknown> {
+    const load = this.settledScriptLoad;
+    return {
+      ...(this.params as Record<string, unknown>),
+      [WORKFLOW_RULE_DIGEST_KEY]: load?.ok ? load.digest : undefined,
+    };
+  }
+
+  /**
+   * Show what is about to run, and scope the grant that approves it.
+   *
+   * Without this override the base class renders `Confirm WorkflowTool` over
+   * `Run a workflow script (4127 chars)` — a character count standing in for
+   * arbitrary model-authored JavaScript that may fan out to
+   * `DEFAULT_MAX_AGENTS_PER_RUN` subagents, provision git worktrees and spend
+   * an uncapped token budget. The asymmetry is visible within one run: the
+   * subagent approvals this workflow bubbles up each get a full dialog.
+   *
+   * Two properties of the grant matter as much as the disclosure:
+   *
+   *   - An inline `script` can never be pre-approved. It is fresh
+   *     model-authored source every time, so a blanket "always allow" would
+   *     transfer consent from the script the user read to every script the
+   *     model writes afterwards. `hideAlwaysAllow` removes the option and the
+   *     empty `permissionRules` stops `injectPermissionRulesIfMissing` from
+   *     supplying the bare-tool-name rule, which `buildPermissionRules`
+   *     documents as matching *all* invocations.
+   *   - A `scriptPath` or `name` names a file on disk that the user chose,
+   *     so it can be pre-approved — scoped to that path or name, and pinned
+   *     to the digest of the content shown here, so a changed script asks
+   *     again. The rule is built with the same helpers the matcher uses so a
+   *     tool rename moves both sides.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const load = await this.loadReferencedScript();
+    const loaded = load?.ok ? load : undefined;
+    const meta = loaded
+      ? readMetaForConfirmation(loaded.loaded.script)
+      : this.resolveMeta();
+    // The consent surface classifies canonically (the loader's own
+    // normalization) so the label matches the content that actually loads.
+    const isGeneratedScriptPath =
+      this.params.scriptPath !== undefined &&
+      (await isGeneratedWorkflowScriptPathCanonical(
+        this.config,
+        this.params.scriptPath,
+      ));
+    const isGeneratedInlineScriptPath =
+      this.params.scriptPath !== undefined &&
+      (await isWorkflowScriptPathWithinCanonicalRoot(
+        this.params.scriptPath,
+        path.dirname(this.config.storage.getInlineWorkflowScriptPath('wf_0')),
+      ));
+    // An extension's file is third-party: name the extension workflow rather
+    // than presenting it as one the user saved.
+    const extensionWorkflow = isGeneratedScriptPath
+      ? undefined
+      : this.params.name
+        ? getActiveExtensionWorkflows(this.config).find(
+            (workflow) => workflow.name === this.params.name,
+          )
+        : this.params.scriptPath !== undefined
+          ? await findActiveExtensionWorkflowByPathCanonical(
+              this.config,
+              this.params.scriptPath,
+            )
+          : undefined;
+    const body = buildConfirmationPrompt(
+      this.params,
+      meta,
+      isGeneratedScriptPath
+        ? { kind: 'generated' }
+        : extensionWorkflow
+          ? { kind: 'extension', workflow: extensionWorkflow }
+          : { kind: 'saved' },
+      loaded
+        ? {
+            scriptPath: loaded.loaded.scriptPath,
+            script: loaded.loaded.script,
+            digest: loaded.digest,
+          }
+        : load
+          ? { error: describeLoadError(load) }
+          : undefined,
+    );
+
+    // The cost warning belongs before the spend, not after it. The registry
+    // latch flips on read, so surfacing it here means the post-hoc copy on
+    // the result path suppresses itself rather than repeating.
+    const banner = resolveUsageBanner(
+      this.config,
+      this.config.getWorkflowRunRegistry?.(),
+      WorkflowBudgetImpl.fromConfig(this.config),
+    );
+
+    const isInlineScript =
+      this.params.script !== undefined || isGeneratedInlineScriptPath;
+    // Nothing loaded means nothing to pin a grant to.
+    const grantRule =
+      isInlineScript || !loaded
+        ? undefined
+        : buildWorkflowGrantRule(this.params, loaded.digest);
+    const details: ToolInfoConfirmationDetails = {
+      type: 'info',
+      title: 'Run a dynamic workflow?',
+      prompt: banner ? `${banner}${body}` : body,
+      // The body is a script excerpt and a phase list: rendering it as
+      // Markdown would swallow the very characters the reader needs to see.
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: grantRule === undefined,
+      permissionRules: grantRule ? [grantRule] : [],
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules.
+      },
+    };
+    return details;
   }
 
   override async execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
-  ): Promise<ToolResult> {
-    // T40 (PR #4732 R4): child controller so dispatch sees caller aborts
-    // AND sandbox.ts wall-clock aborts (see setTimeout handler).
-    const dispatchController = createChildAbortController(signal);
-    // P5: per-run token tracker. Reads `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW`
-    // from the environment via the impl's `fromEnv` factory. When the env
-    // is unset (`budget.total === null`), the orchestrator's gate is a
-    // no-op and `budgetUpdated` events still fire so the registry can
-    // surface cumulative usage even on uncapped runs.
-    const budget = WorkflowBudgetImpl.fromEnv();
-    const dispatch =
-      this.toolOptions.dispatch ??
-      createProductionDispatch(
-        this.config,
-        dispatchController.signal,
-        // P5 T3: production-dispatch onTokens callback. Test-injected
-        // dispatches (`toolOptions.dispatch`) handle their own
-        // recording — they don't surface stats the same way.
-        (outputTokens) => budget.recordSpent(outputTokens),
-      );
-    const orchestrator = new WorkflowOrchestrator(dispatch);
-
-    // P7b: resolve the script source. A `/<name>` saved-workflow slash
-    // command dispatches `{scriptPath}` instead of inline `script`; read the
-    // file here (fresh, so edits to a saved workflow take effect on the next
-    // run). The resolved absolute path is recorded on the registry entry as
-    // run provenance — it is never re-read mid-run. `validateToolParamValues`
-    // has already guaranteed exactly one of `script` / `scriptPath` is set.
-    let resolvedScript = this.params.script ?? '';
-    let resolvedScriptPath = this.params.scriptPath;
-    if (this.params.scriptPath && this.params.script === undefined) {
-      const loaded = await resolveSavedWorkflowScript(
-        { scriptPath: this.params.scriptPath },
-        this.config,
-      );
-      resolvedScript = loaded.script;
-      resolvedScriptPath = loaded.scriptPath;
+  ): Promise<WorkflowToolResult> {
+    const runInBackground = this.params.run_in_background === true;
+    if (runInBackground && signal.aborted) {
+      return startCancelledResult();
     }
-
-    // P4b: pre-generate the runId so the registry record exists before
-    // the first sandbox event fires. Without this, `agentDispatched` /
-    // `phaseStarted` callbacks would have no entry to update.
-    // P6: a resume reuses the prior run's id so it appends to the same
-    // journal; a fresh run gets a new id.
-    const runId =
-      this.params.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
-    // P6: per-run resume journal. Always created (any run is resumable);
-    // the replay maps are loaded only when resuming. Production storage
-    // path is `<projectDir>/workflows/<runId>/journal.jsonl`; the tool's
-    // test-injected dispatch path leaves `config.storage` undefined, so
-    // guard and skip journaling there.
-    let journal: WorkflowJournal | undefined;
-    let resumeReplay: JournalReplay | undefined;
-    const storage = this.config.storage;
-    if (storage) {
-      journal = new WorkflowJournal(storage.getWorkflowRunJournalPath(runId));
-      if (this.params.resumeFromRunId) {
-        resumeReplay = await journal.load();
-      }
-    }
-    const registry = this.config.getWorkflowRunRegistry?.();
-    const registryEntry = registry?.register({
-      runId,
-      meta: null, // populated after meta parses; safe default until then
-      status: 'running',
-      startTime: Date.now(),
-      outputFile: '', // P4b reserves the field but doesn't materialize
-      abortController: dispatchController,
-      // P5: seed the cap so the dialog can render the `M / N` form
-      // immediately, before the first `budgetUpdated` fires. Stays
-      // `null` when no env override.
-      tokenBudgetTotal: budget.total,
-      // P7b: carry the script source so a completed run can be snapshotted
-      // to disk and saved to `.qwen/workflows/<name>.js` from the dialog.
-      // `scriptPath` is set when the run was launched from a saved file (run
-      // provenance for the snapshot).
-      script: resolvedScript,
-      scriptPath: resolvedScriptPath,
-    });
-    // The emitter forwards sandbox + dispatch events into the registry
-    // AND fires `updateOutput` so the tool's renderDisplay block (a
-    // phase-tree-shaped JSON) refreshes live in the TUI. Each method
-    // is fail-safe: registry mutation errors are swallowed by the
-    // registry itself; updateOutput errors are caught here.
-    const emitter: WorkflowOrchestratorEmitter = {
-      phaseStarted: (title) => {
-        registry?.onPhaseStarted(runId, title);
-        safeEmitUpdate(updateOutput, registryEntry);
-      },
-      agentDispatched: () => {
-        registry?.onAgentDispatched(runId);
-        safeEmitUpdate(updateOutput, registryEntry);
-      },
-      agentCompleted: () => {
-        registry?.onAgentCompleted(runId);
-        // P5 R2 (#12): defer the UI re-render to the `budgetUpdated`
-        // callback that the orchestrator fires immediately after this
-        // one. Without this skip, every dispatch completion produces
-        // TWO `safeEmitUpdate` calls (one here + one in budgetUpdated)
-        // — over a 1000-agent workflow that's 2000 TUI redraws when
-        // 1000 suffices. The budget snapshot lands AFTER the agent
-        // counter increment, so the deferred render shows both updates
-        // atomically. Production callers always wire a budget
-        // (`WorkflowBudgetImpl.fromEnv()` in `execute()` above), so the
-        // deferral is unconditional; test paths that omit budget go
-        // through the injected dispatch shape and don't exercise this
-        // emitter wiring.
-      },
-      logAppended: () => {
-        // P4b: skip per-line emit; the tool snapshots logs at terminal
-        // via `registry.setRecentLogs` so the registry record reflects
-        // the final tail without per-line churn driving rerenders.
-      },
-      budgetUpdated: (spent, total) => {
-        registry?.onBudgetUpdated(runId, spent, total);
-        safeEmitUpdate(updateOutput, registryEntry);
-      },
-    };
-
+    const load = this.loadReferencedScript();
+    let handle: WorkflowRunHandle;
     try {
-      const outcome = await orchestrator.run({
-        script: resolvedScript,
+      handle = await WorkflowRunner.start({
+        config: this.config,
+        signal,
+        toolUseId: this.callId,
+        ...(this.workflowName ? { workflowName: this.workflowName } : {}),
+        ...authoringHintOption(this.authoredScriptHint()),
+        script: this.params.script,
+        scriptPath: this.params.scriptPath,
+        ...(load ? { loadScript: () => unwrapScriptLoad(load) } : {}),
         args: this.params.args,
-        abortOnTimeout: dispatchController,
-        runId,
-        emitter,
-        budget,
-        // P-nested: resolve `workflow('<name>')` / `workflow({scriptPath})`
-        // against the saved-workflow scripts in `.qwen/workflows/`.
-        resolveSavedWorkflow: (ref) =>
-          resolveSavedWorkflowScript(ref, this.config),
-        // P6: resume journal (always wired) + replay maps (resume only).
-        journal,
-        resumeReplay,
+        sourceRef: this.params.sourceRef,
+        resumeFromRunId: this.params.resumeFromRunId,
+        dispatch: this.toolOptions.dispatch,
+        runInBackground,
+        onUpdate:
+          !runInBackground && updateOutput
+            ? (entry) => safeEmitUpdate(updateOutput, entry)
+            : undefined,
       });
-
-      // P4b: snapshot meta + logs onto the registry record so the dialog
-      // detail body reflects the final state once the run terminates.
-      if (registryEntry) {
-        registryEntry.meta = outcome.meta;
-        if (outcome.meta?.name && registryEntry.description === runId) {
-          registryEntry.description = outcome.meta.name;
-        }
+    } catch (error) {
+      // Two cancel sources reach a start before it registers: the caller's
+      // own signal (background only — a foreground start registers and
+      // settles `cancelled` instead), and a registry-side cancel
+      // (`cancelStarting`, `abortAll`) that aborts the run's controller
+      // while the caller's signal stays live, in either mode. The runner
+      // reports the latter with a typed error; both are the same outcome
+      // to the model.
+      if (
+        error instanceof WorkflowStartCancelledError ||
+        (runInBackground && signal.aborted)
+      ) {
+        return startCancelledResult();
       }
-      registry?.setRecentLogs(runId, outcome.logs);
-      registry?.complete(runId, outcome.result, Date.now());
-
+      // A script that never compiled has no run behind it, so reporting it as
+      // a failed workflow would be wrong twice: it invites the model to go
+      // looking for a runId that was never minted, and it reads as "the
+      // orchestration broke" when the actual problem is a typo the model can
+      // fix and re-send.
+      if (error instanceof WorkflowScriptNotLaunchedError) {
+        // The earliest and most common first-attempt failure, and the one a
+        // model is most likely to hit without having read the reference.
+        // Mirrored into `error.message` for the same reason the run-failure
+        // trailer is: the scheduler surfaces that string.
+        const hint = this.authoredScriptHint();
+        const text = hint ? `${error.message}\n${hint}` : error.message;
+        return {
+          llmContent: [{ text }],
+          returnDisplay: error.message,
+          error: {
+            message: text,
+            type: ToolErrorType.INVALID_TOOL_PARAMS,
+          },
+        };
+      }
+      throw error;
+    }
+    if (runInBackground) {
+      const status = handle.registry?.get(handle.runId)?.status ?? 'running';
       const usageBanner = resolveUsageBanner(
         this.config,
-        registry,
-        budget.total,
+        handle.registry,
+        handle.budget,
+      );
+      return {
+        workflowRunId: handle.runId,
+        ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
+        ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
+        llmContent: [
+          {
+            text: buildBackgroundStartText(handle, status),
+          },
+        ],
+        returnDisplay:
+          usageBanner +
+          `Workflow ${handle.runId} started in the background (status: ${status}). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
+      };
+    }
+    const settlement = await handle.completion;
+    if (settlement.ok) {
+      const { outcome } = settlement;
+      const usageBanner = resolveUsageBanner(
+        this.config,
+        handle.registry,
+        handle.budget,
       );
 
-      // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
-      // script's return value verbatim. The full metadata (runId, phases,
-      // logs) is preserved in returnDisplay for the UI but does not pad
-      // the LLM context with bookkeeping noise.
+      // FIX-7 (UP-C2): unwrap the script result so the run's own bookkeeping
+      // (phases, logs, the display payload below) does not wrap the script's
+      // return value. That full metadata stays in returnDisplay for the UI.
+      // The one exception is the run trailer appended after this value: a
+      // result the model cannot name, read back or resume is a result it
+      // cannot follow up on, so a short run handle is worth its few lines.
       //
       // T12 / T18 (PR #4732 R1): defensive serialization. A successful
       // workflow whose `return` value is a BigInt, a circular reference,
@@ -366,6 +632,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // keep the payload shape minimal.
       const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         ...(outcome.meta ? { meta: outcome.meta } : {}),
         phases: outcome.phases,
         logs: outcome.logs,
@@ -376,21 +643,44 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         // tokens whenever ANY usage is reported OR a cap is set, not
         // only when spend > 0. A capped-but-zero-spend run still wants
         // the cap visible so the user sees the gate engaged.
-        ...(budget.spent() > 0 || budget.total !== null
+        // Per run, like `/workflows`; a turn target adds the turn's figures
+        // beside them rather than in place of them.
+        ...(handle.budget.runSpent() > 0 || handle.budget.total !== null
           ? {
               tokens: {
-                spent: budget.spent(),
-                total: budget.total,
+                spent: handle.budget.runSpent(),
+                total: handle.budget.runCap(),
+                ...(handle.budget.source === 'directive'
+                  ? {
+                      turnSpent: handle.budget.spent(),
+                      turnTotal: handle.budget.total,
+                    }
+                  : {}),
               },
             }
           : {}),
       });
 
       return {
-        llmContent: [{ text: llmText }],
+        ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
+        ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
+        // Two parts: the script's return value is left exactly as it was,
+        // and the run handle follows as a separate part. Note what this does
+        // NOT mean — `convertToFunctionResponse` joins the text parts with a
+        // newline, so the model reads `<return value>\n--- workflow run ---…`
+        // as one string. Keeping them apart is still what makes the return
+        // value untouched at the tool boundary, keeps `returnDisplay` clean,
+        // and gives the per-tool head/tail truncator a distinct trailer part.
+        // The scheduler-wide persistence gate may still fold both parts into
+        // one head-only preview when their combined text crosses its limit.
+        llmContent: [
+          { text: llmText },
+          { text: buildRunTrailer(this.config, handle, this.params.args) },
+        ],
         returnDisplay: usageBanner + '```json\n' + displayJson + '\n```',
       };
-    } catch (err) {
+    } else {
       // FIX-H (Round 5 SEC Minor): surface only the message — never the
       // stack frame — to the LLM and the UI. Caller's stderr/debug log
       // can still see the full stack via standard logging mechanisms.
@@ -398,30 +688,31 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // Cross-realm `instanceof Error` is false for vm-realm Errors; use
       // duck-typed extraction so script-thrown errors aren't coerced to
       // their "Error: <msg>" toString() form.
-      const message = extractErrorMessage(err);
+      const { message, details } = settlement;
+      const { phases, logs, meta } = details ?? {};
+      const cancelled =
+        handle.registry?.get(handle.runId)?.status === 'cancelled';
+      const failureText = cancelled
+        ? 'Workflow cancelled.'
+        : `Workflow failed: ${clampForDisplay(
+            sanitizeBlock(message),
+            TRAILER_ERROR_CHARS,
+          )}`;
+      const trailer = buildRunTrailer(
+        this.config,
+        handle,
+        this.params.args,
+        logs,
+        !cancelled,
+        cancelled ? null : this.authoredScriptHint(),
+      );
       // T19 (PR #4732 R1): if the orchestrator preserved phases / logs
       // accumulated before the failure, include them in the display so
       // the user can see what ran before the error.
-      const phases =
-        err instanceof WorkflowExecutionError ? err.phases : undefined;
-      const logs = err instanceof WorkflowExecutionError ? err.logs : undefined;
       // P4: also surface the extracted meta on the failure path. The script
       // body may have thrown long after the meta declaration parsed
       // cleanly; keeping name/description/phases visible on failure helps
       // the user identify which workflow ran.
-      const meta = err instanceof WorkflowExecutionError ? err.meta : undefined;
-      // P4b: surface the failure / abort to the registry. A caller-aborted
-      // run (`signal.aborted === true`) becomes `cancelled` rather than
-      // `failed` so the dialog distinguishes user intent from script bugs.
-      if (registryEntry) {
-        if (meta && !registryEntry.meta) registryEntry.meta = meta;
-      }
-      if (logs) registry?.setRecentLogs(runId, logs);
-      if (signal.aborted) {
-        registry?.cancel(runId, Date.now());
-      } else {
-        registry?.fail(runId, message, Date.now());
-      }
       // P5 T7: banner is intentionally OMITTED on the failure path.
       // The scheduler's `createErrorResponse` (coreToolScheduler.ts:801)
       // hard-codes `resultDisplay: error.message` whenever a tool
@@ -434,55 +725,212 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // successful run. Mitigation: WorkflowTool's failure message
       // already names the error; the banner is meta-documentation
       // about a separate env knob, not run-specific guidance.
-      const display =
-        phases || logs || meta
-          ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
-              ...(meta ? { meta } : {}),
-              phases: phases ?? [],
-              logs: logs ?? [],
-            })}`
-          : `Workflow failed: ${message}`;
+      const display = `${cancelled ? 'Workflow cancelled.' : `Workflow failed: ${message}`}\n\n${safeStringifyDisplayPayload(
+        {
+          runId: handle.runId,
+          ...(meta ? { meta } : {}),
+          phases: phases ?? [],
+          logs: logs ?? [],
+        },
+      )}`;
       return {
-        llmContent: [{ text: `Workflow failed: ${message}` }],
+        ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
+        ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
+        // The failure message alone names what threw but not where to look:
+        // the logs the runtime already mirrored (`dispatch failed (result not
+        // consumed)` and friends) only reached `returnDisplay`, which the
+        // scheduler overwrites with `error.message` — so the model never saw
+        // them. Mirror the two content parts into the error message because
+        // that is the only text the non-timeout scheduler branch delivers.
+        llmContent: [{ text: failureText }, { text: trailer }],
         returnDisplay: display,
         // FIX-10 (REUSE-I1): use the standard ToolErrorType.EXECUTION_FAILED
         // code so error routing / dashboards can classify workflow failures
         // the same way as other execution-time tool errors.
-        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+        error: {
+          message: `${failureText}\n${trailer}`,
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
       };
-    } finally {
-      // T40: cancel any straggler subagent on natural completion.
-      dispatchController.abort();
-      // P7b: persist a snapshot of the terminal run so `/workflows` can show
-      // it after a CLI restart. Runs on every terminal path (success / fail /
-      // cancel) because the registry entry has already transitioned by here.
-      // Best-effort: the writer swallows its own errors. Skipped when there's
-      // no registry entry (test-injected configs) or the entry is somehow
-      // still running (defensive).
-      if (registryEntry && registryEntry.status !== 'running') {
-        await writeWorkflowSnapshot(this.config, registryEntry);
-        // P-telemetry: emit the terminal run event (no-op when telemetry is
-        // off). Best-effort: never let a logging failure mask the result.
-        try {
-          logWorkflowRun(
-            this.config,
-            new WorkflowRunEvent({
-              status: registryEntry.status,
-              agents_dispatched: registryEntry.agentsDispatched,
-              agents_completed: registryEntry.agentsCompleted,
-              phase_count: registryEntry.phases.length,
-              tokens_spent: registryEntry.tokensSpent,
-              duration_ms:
-                (registryEntry.endTime ?? registryEntry.startTime) -
-                registryEntry.startTime,
-            }),
-          );
-        } catch {
-          // swallow — telemetry must not affect tool output
-        }
-      }
     }
   }
+}
+
+/** Log lines carried back to the model on the failure path. */
+const TRAILER_LOG_LINES = 20;
+/** Per-line bound that keeps the recovery handle below the scheduler gate. */
+const TRAILER_LOG_LINE_CHARS = 400;
+/** Bound for the thrown message before the recovery handle is appended. */
+const TRAILER_ERROR_CHARS = 4000;
+
+/**
+ * The run handle, as plain text for the model: run id, the script on disk,
+ * the journal, what the fan-out cost, and the exact call that resumes it.
+ *
+ * Emitted as a second `llmContent` part that follows the script's return
+ * value rather than wrapping it: the first part keeps exactly the bytes it
+ * had before, and everything downstream that reads a workflow result at the
+ * tool boundary sees the same value it always did. Downstream of the
+ * scheduler the two parts are joined with a newline into one function
+ * response, so what the model reads is the return value with this block
+ * appended — which is the point. Without it the model was handed a result it
+ * could not follow up on: no run id to name to `/workflows`, no path to read
+ * the per-agent results from, and no way to resume short of re-sending the
+ * whole script.
+ *
+ * Every field is omitted when the run does not have it (a config without
+ * `storage` has no journal; an inline script that could not be persisted has
+ * no path), so the trailer never names a file that is not there.
+ */
+function buildRunTrailer(
+  config: Config,
+  handle: WorkflowRunHandle,
+  args: unknown,
+  logs?: string[],
+  includeResume = true,
+  authoringHint: string | null = null,
+): string {
+  const lines = [
+    '--- workflow run ---',
+    `runId: ${sanitizeLine(handle.runId)}`,
+  ];
+  if (handle.scriptPath) {
+    lines.push(`script: ${sanitizeLine(handle.scriptPath)}`);
+  }
+  if (handle.journalPath) {
+    lines.push(`journal: ${sanitizeLine(handle.journalPath)}`);
+  }
+  const entry = handle.registry?.get(handle.runId);
+  let failedCount = 0;
+  if (entry) {
+    const countByStatus = (status: WorkflowDispatchTraceStatus): number =>
+      entry.dispatches.reduce(
+        (n, dispatch) => (dispatch.status === status ? n + 1 : n),
+        0,
+      );
+    const respawned = entry.agentsRespawned ?? 0;
+    failedCount = countByStatus('failed');
+    lines.push(
+      `agents: ${entry.dispatches.length} dispatched` +
+        (respawned > 0 ? ` (${respawned} re-ran from a prior run)` : '') +
+        ` · ${countByStatus('completed')} completed · ${countByStatus('cached')} cached · ${failedCount} failed · ${countByStatus('cancelled')} cancelled`,
+    );
+  }
+  // What this run's agents spent, always; under a turn target, also where
+  // the whole turn stands against it — the number the next dispatch in this
+  // turn will be gated on.
+  const budget = handle.budget;
+  const runSpent = budget.runSpent();
+  lines.push(
+    budget.source === 'directive' && budget.total !== null
+      ? `tokens: ${runSpent} spent by this run · ${budget.spent()} / ${budget.total} this turn` +
+          (budget.directiveText
+            ? ` (${sanitizeLine(budget.directiveText)} directive)`
+            : '')
+      : budget.total === null
+        ? `tokens: ${runSpent} spent (no cap)`
+        : `tokens: ${runSpent} / ${budget.total} spent`,
+  );
+  // Which agents came back empty and why. A script that reads `null` for a
+  // failed agent may well return a perfectly well-formed result built from
+  // the survivors, so a run can look successful while a third of its fan-out
+  // is missing. The count on the agents line says how many; this says which.
+  const failures = entry ? buildFailureLines(entry) : [];
+  if (failures.length > 0 && entry) {
+    lines.push(
+      `failures (${failedCount}):`,
+      ...failures.map((line) =>
+        clampForDisplay(sanitizeLine(line), TRAILER_LOG_LINE_CHARS),
+      ),
+    );
+  }
+  // Built by the shared resume builder, the same one the background
+  // completion notification uses: this string is copied verbatim into the
+  // next tool call, and a second implementation would drift on `args` —
+  // silently, because a resume without them still runs and simply misses
+  // every journal key.
+  const resume = buildResumeCall({
+    runId: handle.runId,
+    scriptPath: handle.scriptPath,
+    args,
+  });
+  if (resume && includeResume) {
+    // An extension's file is third-party and an extension update replaces
+    // it, so the copy has to land somewhere the user owns.
+    // Same test as the registry's recovery advice: a qualified run name, or a
+    // path an active extension ships.
+    const isExtensionWorkflow =
+      (entry?.workflowName !== undefined &&
+        parseExtensionWorkflowName(entry.workflowName) !== null) ||
+      findActiveExtensionWorkflowByPath(config, handle.scriptPath!) !==
+        undefined;
+    const pathAdvice = isExtensionWorkflow
+      ? "this reads an extension's workflow file; copy it into .qwen/workflows before making a run-specific change"
+      : entry?.workflowName ||
+          !isGeneratedWorkflowScriptPath(config, handle.scriptPath!)
+        ? 'this reads the saved workflow; copy it before making a run-specific change'
+        : 'edit that generated copy first if the script needs to change';
+    const journalAdvice = handle.journalPath
+      ? 'the journal replays the longest unchanged prefix of agent() calls, and the first changed call onward runs live'
+      : 'no journal was written for this run, so every agent() call runs live';
+    lines.push(`resume: ${resume} — ${pathAdvice}; ${journalAdvice}.`);
+    if (hasUninlinableResumeArgs({ runId: handle.runId, args })) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  // A script that threw has to be rewritten, and the model may have written
+  // it without reading the reference — the description only points at it. The
+  // caller decides whether this run is one the model authored, and the wording
+  // comes from what this session's description actually holds. A name the
+  // runner resolved — from a resumed run too, which a caller re-running a
+  // saved workflow's inline source does not pass — wins: the resume advice
+  // above then says to copy the saved workflow, not to fix the script.
+  if (authoringHint && !entry?.workflowName) lines.push(authoringHint);
+  const tail = (logs ?? []).slice(-TRAILER_LOG_LINES);
+  if (tail.length > 0) {
+    lines.push(
+      `logs (last ${tail.length}):`,
+      ...tail.map((line) =>
+        clampForDisplay(sanitizeLine(line), TRAILER_LOG_LINE_CHARS),
+      ),
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Launch receipt for a backgrounded run. The run id alone was not enough to
+ * act on: the completion arrives in a later turn, and until it does the model
+ * has nothing to read. The script and journal paths are the two files that
+ * exist from the moment the run starts.
+ */
+function buildBackgroundStartText(
+  handle: WorkflowRunHandle,
+  status: string,
+): string {
+  const lines = [
+    'Workflow started in background.',
+    `Run ID: ${sanitizeLine(handle.runId)}`,
+    `Status: ${sanitizeLine(status)}`,
+  ];
+  if (handle.scriptPath) {
+    lines.push(`Script file: ${sanitizeLine(handle.scriptPath)}`);
+  }
+  if (handle.journalPath) {
+    lines.push(`Journal: ${sanitizeLine(handle.journalPath)}`);
+  }
+  lines.push(
+    `You will be notified when it settles. Use /workflows ${sanitizeLine(handle.runId)} for the live phase tree.`,
+  );
+  return lines.join('\n');
+}
+
+function startCancelledResult(): WorkflowToolResult {
+  return {
+    llmContent: 'Workflow was cancelled before it could start.',
+    returnDisplay: 'Workflow cancelled.',
+  };
 }
 
 /**
@@ -544,40 +992,379 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
 function resolveUsageBanner(
   config: Config,
   registry: { shouldShowUsageWarning(): boolean } | undefined,
-  budgetTotal: number | null,
+  budget: UsageBannerBudget,
 ): string {
   if (!registry) return '';
   if (config.getSkipWorkflowUsageWarning?.()) return '';
   if (!registry.shouldShowUsageWarning()) return '';
-  return buildUsageBanner(budgetTotal);
+  return buildUsageBanner(budget);
+}
+
+/** Characters of script source shown in the approval dialog. */
+const CONFIRM_SCRIPT_EXCERPT_CHARS = 1200;
+/** Characters of serialized `args` shown in the approval dialog. */
+const CONFIRM_ARGS_CHARS = 300;
+/** Phases listed individually before the remainder becomes a count. */
+const CONFIRM_MAX_PHASES = 12;
+
+/** Rows of the script's static structure shown in the approval dialog. */
+const CONFIRM_MAX_STRUCTURE_ROWS = 12;
+/** Says what a row's number is, so no reader takes it for an agent count. */
+const CONFIRM_STRUCTURE_HEADING =
+  'Structure (where the script calls agent(); a loop or a fan-out runs each call many times):';
+
+/**
+ * Sanitize a value that will be rendered on one line of the approval dialog.
+ *
+ * Everything shown in the dialog is model-authored, so it is attacker-shaped
+ * text reaching a terminal: without this an embedded escape sequence could
+ * repaint the dialog and misrepresent what the user is approving. Newlines are
+ * control characters and go too, which is what we want for a single-line field
+ * — a `meta.name` spanning three lines is itself a spoofing attempt.
+ */
+function sanitizeLine(text: string): string {
+  return stripAnsiAndControl(text);
 }
 
 /**
- * P5 T7: build the one-time usage-warning banner. Two shapes:
- * (a) `total === null` — explain the uncapped state and the env knob;
- * (b) `total !== null` — confirm the cap is in effect.
+ * Sanitize text whose line structure is meaningful (the script excerpt).
  *
- * Both shapes mention `skipWorkflowUsageWarning` so the user knows how
+ * `stripAnsiAndControl` removes C0 controls, and `\n` is one of them — running
+ * it over a script would collapse it to a single unreadable line. Sanitize each
+ * line separately so the structure survives while escape sequences do not.
+ * Tabs become spaces first, since they would otherwise be stripped and silently
+ * destroy indentation.
+ */
+function sanitizeBlock(text: string): string {
+  return text
+    .replace(/\t/g, '  ')
+    .split('\n')
+    .map((line) => stripAnsiAndControl(line))
+    .join('\n');
+}
+
+/** Clamp already-sanitized text, naming what was dropped rather than eliding it. */
+function clampForDisplay(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n… (${text.length - max} more characters)`;
+}
+
+/**
+ * Read `export const meta` for the approval dialog, degrading to `null` on any
+ * problem.
+ *
+ * `extractAndStripMeta` parses rather than evaluates, so reading meta here
+ * cannot run model-authored code — that property is what makes it safe to do
+ * before the user has approved anything. It still *throws* on malformed meta,
+ * and this is the approval path: a script with a broken meta literal must
+ * remain approvable-or-rejectable, never take the dialog down with it. The
+ * script is refused later, on its own terms, with a real error.
+ */
+function readMetaForConfirmation(script: string): WorkflowMeta | null {
+  try {
+    return extractAndStripMeta(script).meta;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a `scriptPath` points inside the generated-scripts root. Such a
+ * script is a throwaway artifact a tool emitted for this run, not a workflow
+ * the user saved — the transcript surface labels it accordingly. Normalizes
+ * `..` lexically only (no disk I/O, so it can back the synchronous
+ * `getDescription()`); where a spelling diverges from its realpath (a
+ * symlinked file, or a symlinked ancestor) it can disagree with the content
+ * the loader reads — the confirmation dialog therefore classifies with
+ * {@link isGeneratedWorkflowScriptPathCanonical} instead. This only picks a
+ * label; the security check is the realpath boundary in the loader.
+ */
+function isGeneratedWorkflowScriptPath(
+  config: Config,
+  scriptPath: string,
+): boolean {
+  return isWithinRoot(scriptPath, config.storage.getGeneratedWorkflowsDir());
+}
+
+/**
+ * Canonical provenance classification for the confirmation dialog: the same
+ * normalization the loader applies, so the label matches the content that
+ * actually loads. Both sides go through `fs.realpath` (resolving `..` AND
+ * symlinks), with a lexical fallback where a side does not exist yet — and a
+ * symlinked generated root counts as not-generated because the loader
+ * refuses it outright.
+ */
+async function isGeneratedWorkflowScriptPathCanonical(
+  config: Config,
+  scriptPath: string,
+): Promise<boolean> {
+  return isWorkflowScriptPathWithinCanonicalRoot(
+    scriptPath,
+    config.storage.getGeneratedWorkflowsDir(),
+  );
+}
+
+async function isWorkflowScriptPathWithinCanonicalRoot(
+  scriptPath: string,
+  root: string,
+): Promise<boolean> {
+  if (await isSymlinkedRoot(root)) return false;
+  let realScriptPath: string;
+  try {
+    realScriptPath = await fs.realpath(scriptPath);
+  } catch {
+    return isWithinRoot(scriptPath, root);
+  }
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(root);
+  } catch {
+    realRoot = path.resolve(root);
+  }
+  return isWithinRoot(realScriptPath, realRoot);
+}
+
+/**
+ * The body of the approval dialog: what this workflow says it will do.
+ *
+ * Everything here comes from `meta`, the call's own parameters, and the
+ * caller's provenance classification — never from executing the script.
+ * When `meta` is absent or unreadable the dialog still renders, just with
+ * less to say.
+ */
+/** Where a `scriptPath` call's file comes from, for the approval dialog. */
+type ScriptPathProvenance =
+  | { kind: 'generated' }
+  | { kind: 'saved' }
+  | { kind: 'extension'; workflow: ExtensionWorkflowDefinition };
+
+function buildConfirmationPrompt(
+  params: WorkflowParams,
+  meta: WorkflowMeta | null,
+  provenance: ScriptPathProvenance,
+  referenced?: ReferencedScript | { readonly error: string },
+): string {
+  const lines: string[] = [];
+  const loaded = referenced && 'script' in referenced ? referenced : undefined;
+  const loadError =
+    referenced && 'error' in referenced ? referenced.error : undefined;
+  const isReference =
+    params.script === undefined && Boolean(params.name || params.scriptPath);
+
+  if (!isReference) {
+    if (meta) {
+      lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
+      lines.push(sanitizeLine(meta.description));
+    } else {
+      lines.push('Workflow: (the script declares no meta block)');
+    }
+  } else if (provenance.kind === 'extension') {
+    lines.push(`Extension workflow: ${sanitizeLine(provenance.workflow.name)}`);
+    lines.push(sanitizeLine(provenance.workflow.description));
+    lines.push(
+      '',
+      `Loaded from: ${sanitizeLine(params.scriptPath ?? loaded?.scriptPath ?? provenance.workflow.scriptPath)}`,
+    );
+  } else {
+    const label =
+      provenance.kind === 'generated'
+        ? 'Generated workflow script'
+        : 'Saved workflow';
+    lines.push(
+      `${label}: ${sanitizeLine(params.name || params.scriptPath || '')}`,
+    );
+    if (meta) {
+      lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
+      lines.push(sanitizeLine(meta.description));
+    }
+    if (params.name && loaded) {
+      lines.push('', `Loaded from: ${sanitizeLine(loaded.scriptPath)}`);
+    }
+  }
+  if (loadError !== undefined) {
+    lines.push('', `Cannot load the script: ${sanitizeLine(loadError)}`);
+  }
+
+  if (meta?.phases?.length) {
+    const shown = meta.phases.slice(0, CONFIRM_MAX_PHASES);
+    lines.push('', `Phases (${meta.phases.length}):`);
+    shown.forEach((phase, i) => {
+      const detail = phase.detail ? ` — ${sanitizeLine(phase.detail)}` : '';
+      lines.push(`  ${i + 1}. ${sanitizeLine(phase.title)}${detail}`);
+    });
+    if (meta.phases.length > shown.length) {
+      lines.push(`  … and ${meta.phases.length - shown.length} more`);
+    }
+  }
+
+  const structureSource = params.script || loaded?.script;
+  if (structureSource) {
+    const structure = buildConfirmationStructure(structureSource);
+    if (structure.length > 0) {
+      lines.push('', CONFIRM_STRUCTURE_HEADING, ...structure);
+    }
+  }
+
+  if (params.resumeFromRunId) {
+    lines.push('', `Resuming run: ${sanitizeLine(params.resumeFromRunId)}`);
+  }
+
+  if (params.args !== undefined) {
+    let rendered: string;
+    try {
+      rendered = JSON.stringify(params.args) ?? String(params.args);
+    } catch {
+      rendered = '(args are not JSON-serializable)';
+    }
+    lines.push(
+      '',
+      `Args: ${clampForDisplay(sanitizeLine(rendered), CONFIRM_ARGS_CHARS)}`,
+    );
+  }
+
+  const scriptText = params.script || loaded?.script;
+  if (scriptText) {
+    lines.push(
+      '',
+      loaded
+        ? `Script (${WORKFLOW_RULE_DIGEST_KEY} ${loaded.digest}):`
+        : 'Script:',
+      clampForDisplay(sanitizeBlock(scriptText), CONFIRM_SCRIPT_EXCERPT_CHARS),
+    );
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Where the script's agents are, read statically: one row per run of step
+ * calls, per fan-out and per loop, with the first prompts of each. Declared
+ * phases say what the author meant; this says what the code does, and a reader
+ * approving a run that may dispatch hundreds of agents needs both. A row counts
+ * `agent()` call sites, never agents: a loop or a fan-out over `args` has no
+ * static count, so a number shaped like one would read as a promise.
+ */
+function buildConfirmationStructure(script: string): string[] {
+  const shape = scanWorkflowScriptShape(script);
+  const shown = shape.rows.slice(0, CONFIRM_MAX_STRUCTURE_ROWS);
+  const lines = shown.map((row) => {
+    const label =
+      row.kind === 'loop'
+        ? `loop ${sanitizeLine(row.condition ?? '')}`
+        : row.kind;
+    if (row.count === 0) {
+      return `  ${label} — runs functions built elsewhere in the script`;
+    }
+    const sites = row.count > 1 ? `, ${row.count} agent() call sites` : '';
+    const prompts = row.prompts
+      .map((prompt) => `"${sanitizeLine(prompt)}"`)
+      .join(', ');
+    return prompts ? `  ${label}${sites} — ${prompts}` : `  ${label}${sites}`;
+  });
+  if (shape.rows.length > shown.length) {
+    lines.push(`  … and ${shape.rows.length - shown.length} more`);
+  }
+  return lines;
+}
+
+/** The rule key an "always allow" pins a saved workflow's content under. */
+const WORKFLOW_RULE_DIGEST_KEY = 'sha256';
+
+/** A script a `scriptPath` or `name` call loaded, as the dialog shows it. */
+interface ReferencedScript {
+  readonly scriptPath: string;
+  readonly script: string;
+  readonly digest: string;
+}
+
+/** One read of the file a `scriptPath` or `name` call runs. */
+type WorkflowScriptLoad =
+  | {
+      readonly ok: true;
+      readonly loaded: ResolvedSavedWorkflow;
+      readonly digest: string;
+    }
+  | { readonly ok: false; readonly error: unknown };
+
+function describeLoadError(load: WorkflowScriptLoad): string {
+  if (load.ok) return '';
+  return load.error instanceof Error ? load.error.message : String(load.error);
+}
+
+/** Hands the runner the approved read, or its failure, without reading again. */
+async function unwrapScriptLoad(
+  load: Promise<WorkflowScriptLoad>,
+): Promise<ResolvedSavedWorkflow> {
+  const settled = await load;
+  if (settled.ok) return settled.loaded;
+  throw settled.error;
+}
+
+/**
+ * The "always allow" rule for a loaded saved or extension workflow, pinned to
+ * the content the user approved. `undefined` when the value would not survive
+ * the rule parser: a comma splits the specifier and `*` is a glob, so such a
+ * rule would match nothing, or more than was approved.
+ */
+function buildWorkflowGrantRule(
+  params: WorkflowParams,
+  digest: string,
+): string | undefined {
+  const [key, value] = params.name
+    ? ['name', params.name]
+    : ['scriptPath', params.scriptPath];
+  if (!value || /[,*]/.test(value) || value.trim() !== value) {
+    return undefined;
+  }
+  return `${getRuleDisplayName(resolveToolName(ToolNames.WORKFLOW))}(${key}:${value},${WORKFLOW_RULE_DIGEST_KEY}:${digest})`;
+}
+
+/** What the usage banner needs to know about the budget a run will get. */
+interface UsageBannerBudget {
+  readonly total: number | null;
+  readonly source?: WorkflowBudgetSource;
+  readonly directiveText?: string;
+}
+
+/**
+ * P5 T7: build the one-time usage-warning banner. Three shapes:
+ * (a) `total === null` — explain the uncapped state and both ways to cap it;
+ * (b) a turn directive — confirm the turn's target and what it stops;
+ * (c) an env cap — confirm the per-run cap is in effect.
+ *
+ * Every shape mentions `skipWorkflowUsageWarning` so the user knows how
  * to suppress further banners. The banner ends with two newlines so it
  * separates cleanly from the fenced JSON code block that follows in
  * `returnDisplay`.
  */
-function buildUsageBanner(total: number | null): string {
+function buildUsageBanner(budget: UsageBannerBudget): string {
   // Banner says "soft cap" rather than "hard ceiling" because the gate
   // is checked at dispatch ENTRY — concurrent fan-out can overshoot by
   // up to (concurrency_window - 1) × per_dispatch_tokens before the
   // first overshoot is caught. See workflow-budget.ts threat-model
   // doc for the precise overshoot bound.
-  if (total === null) {
+  if (budget.total === null) {
     return (
-      `> Workflows have no per-run token cap. Set ` +
-      `\`${MAX_TOKENS_PER_WORKFLOW_ENV}=<n>\` (env) for a soft cap. ` +
+      `> Workflows have no per-run token cap. Put a \`+500k\`-style target ` +
+      `in your message to cap a turn, or set ` +
+      `\`${MAX_TOKENS_PER_WORKFLOW_ENV}=<n>\` (env) for a per-run soft cap. ` +
+      `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
+      `in settings.\n\n`
+    );
+  }
+  if (budget.source === 'directive') {
+    return (
+      `> This turn's output-token target is ${budget.total}` +
+      (budget.directiveText
+        ? ` (set by \`${budget.directiveText}\` in your message)`
+        : '') +
+      `; workflow agent() calls stop once the turn's spend reaches it. ` +
       `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
       `in settings.\n\n`
     );
   }
   return (
-    `> Workflow token cap is ${total} (per ` +
+    `> Workflow token cap is ${budget.total} (per ` +
     `\`${MAX_TOKENS_PER_WORKFLOW_ENV}\`). ` +
     `Suppress this notice with \`skipWorkflowUsageWarning: true\` ` +
     `in settings.\n\n`
@@ -653,65 +1440,267 @@ function safeStringifyDisplayPayload(payload: unknown): string {
 }
 
 /**
- * Duck-typed extraction so vm-realm Errors (raised inside the sandbox)
- * don't coerce to "Error: <msg>" via toString(). See workflow-orchestrator.ts
- * for the matching helper on the orchestrator side.
+ * The half of the description that decides WHETHER to call this tool. Present
+ * in every shape: it is the opt-in rule, and nothing else may displace it from
+ * the front of the text.
  */
-function extractErrorMessage(err: unknown): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    const m = (err as { message: unknown }).message;
-    if (typeof m === 'string') return m;
-    return String(m);
+const WORKFLOW_TOOL_DECISION = `Execute a workflow script that orchestrates subagents deterministically.
+
+**Only on an explicit request**
+
+Do not call this tool unless the user has asked for multi-agent orchestration. A run can dispatch up to ${DEFAULT_MAX_AGENTS_PER_RUN} subagents and spend tokens accordingly, so that scale has to be requested rather than inferred. It counts as requested when any of these holds:
+
+- The user's message contains the word \`workflow\`; a system reminder confirms it when it does.
+- The user asked for orchestration in their own words — run a workflow, fan out agents, orchestrate this with subagents.
+- A skill or slash command that ran — invoked by the user, or by you through the Skill tool — instructs you to use this tool.
+- The user named a saved workflow to run, reached through \`name\`, \`workflow('<name>')\` or \`scriptPath\`.
+- The user asked to resume or continue an earlier run, which is \`resumeFromRunId\`.
+
+Otherwise do not call it, however well the task would parallelize. Do the work in the main loop, or spawn a single subagent for one self-contained piece. When a workflow would genuinely be the better tool, say in one sentence what it would fan out over and roughly how many agents that is, then let the user decide — and mention that including the word \`workflow\` next time skips the ask.
+
+**What a workflow is for**
+
+Reach for one to be comprehensive (cover every part of the work in parallel), to be confident (independent perspectives and adversarial checks before an answer is committed to), or to take on scale a single context cannot hold. Parallelism on its own is not a reason; work that is already one short sequence of edits belongs in the main loop.`;
+
+/**
+ * The runtime facts a model needs to plan a run and to read back a result it
+ * did not author. Carried by the pointer and withheld shapes; the inline shape
+ * leaves it out because the reference states all of it in full, and two
+ * copies of every number in one string is how they come to disagree.
+ *
+ * Every cap and env knob with an exported constant is interpolated from it.
+ * Two are literals on both sides: the wall-clock cap
+ * (`DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`) and the
+ * concurrency window formula, so edit those alongside the runtime.
+ */
+const WORKFLOW_TOOL_RUNTIME = `**Runtime**
+
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope), plus active extensions' \`<extension>:<name>\`; \`scriptPath\` additionally accepts an active extension's workflow file or a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree); any other path is refused. Default \`max(2, min(16, availableParallelism()-2))\` agents in flight per run, which follows CPU affinity and container CPU limits (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. \`budget.total\` is the turn's output-token target when the user's message sets one with a \`+500k\`-style directive, and \`budget.spent()\` then counts every output token this turn, the main loop included. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
+
+/**
+ * Replaces the authoring reference when the model can load it on its own.
+ * Names what is in there, so the model can tell whether this request needs it.
+ */
+const WORKFLOW_AUTHORING_POINTER = `**Writing the script**
+
+Before writing a script, load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill — the authoring reference: the sandbox contract, agent() options, \`pipeline()\` vs \`parallel()\`, verification and convergence patterns, resume, and a worked example.`;
+
+/** Appended to the pointer when a `tools.eager` allowlist defers the Skill tool. */
+const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
+
+/**
+ * Leads the inlined reference. The reference is written for sessions that can
+ * load skills, so it names another one (`workflow-creator`); say up front that
+ * such pointers do not apply here.
+ */
+const WORKFLOW_AUTHORING_INLINE_NOTE =
+  'Skills cannot be loaded in this session, even one named in a skill listing, so the authoring reference follows in full. Where it points at another skill, that skill is not available here either.';
+
+/**
+ * The tool description for a given shape.
+ *
+ * - `pointer` / `pointer-via-tool-search`: decision + runtime + a line naming
+ *   the skill. This is the point of moving the reference out: roughly four
+ *   times this text, needed only on the turn that writes a script.
+ * - `inline`: decision + the reference in full. No route to any skill, so a
+ *   pointer would leave the model writing scripts against nothing.
+ * - `withheld`: decision + runtime. The user turned the reference off; putting
+ *   it back into every request would raise exactly the cost they removed.
+ *
+ * An `inline` request without a readable reference falls back to the pointer:
+ * it is the only remaining text that names the reference at all.
+ */
+export function buildWorkflowToolDescription(
+  surface: WorkflowAuthoringSurface,
+  reference: WorkflowAuthoringReference | null = readWorkflowAuthoringReference(),
+  sizeGuideline: WorkflowSizeGuidelineSetting | null = null,
+): string {
+  // The size guideline is one more number the model plans a run around, so it
+  // sits with the runtime facts. The inline shape has no runtime section and
+  // carries it right after the decision instead.
+  const size = sizeGuideline
+    ? buildWorkflowSizeGuidelineParagraph(sizeGuideline)
+    : null;
+  const runtime = size
+    ? `${WORKFLOW_TOOL_RUNTIME}\n\n${size}`
+    : WORKFLOW_TOOL_RUNTIME;
+  const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${runtime}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+  switch (surface) {
+    case 'pointer':
+      return pointer;
+    case 'pointer-via-tool-search':
+      return `${pointer}${WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE}`;
+    case 'withheld':
+      return `${WORKFLOW_TOOL_DECISION}\n\n${runtime}`;
+    case 'inline':
+      return reference
+        ? `${WORKFLOW_TOOL_DECISION}\n\n${size ? `${size}\n\n` : ''}${WORKFLOW_AUTHORING_INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`
+        : pointer;
+    default: {
+      // Unreachable while every surface has a case above. Typed `never` so a
+      // new surface is a compile error here rather than a silent pointer.
+      const unhandled: never = surface;
+      return unhandled;
+    }
   }
-  return String(err);
+}
+
+/**
+ * The parameter schema for a given shape. Only `script` varies: its closing
+ * sentence has to name wherever the rest of the authoring contract actually is
+ * in this session, or the parameter the model is about to fill contradicts the
+ * description beside it.
+ */
+function buildWorkflowParamSchema(surface: WorkflowAuthoringSurface) {
+  const base = WORKFLOW_PARAM_SCHEMA.properties.script.description;
+  const where =
+    surface === 'pointer' || surface === 'pointer-via-tool-search'
+      ? ` agent() options and orchestration patterns are in the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill.`
+      : surface === 'inline'
+        ? " agent() options and orchestration patterns are in the authoring reference in this tool's description."
+        : '';
+  return {
+    ...WORKFLOW_PARAM_SCHEMA,
+    properties: {
+      ...WORKFLOW_PARAM_SCHEMA.properties,
+      script: { type: 'string', description: `${base}${where}` },
+    },
+  };
+}
+
+/**
+ * The failure hint for a given shape, or `null` when there is nowhere to send
+ * the model: a user who withheld the reference asked for it not to come back.
+ */
+function buildWorkflowAuthoringHint(
+  surface: WorkflowAuthoringSurface,
+): string | null {
+  const loadSkill = `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill for the script reference if you have not, fix the script, and retry.`;
+  switch (surface) {
+    case 'pointer':
+      return loadSkill;
+    case 'pointer-via-tool-search':
+      // The retry moment is exactly when the model reaches for the Skill tool,
+      // so the detour the description names has to be repeated here.
+      return `${loadSkill} ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
+    case 'inline':
+      return "hint: See the authoring reference in this tool's description, fix the script, and retry.";
+    case 'withheld':
+      return null;
+    default: {
+      const unhandled: never = surface;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * Whether the script this call runs is one the model wrote: an inline script,
+ * or a generated one-run copy. A saved workflow — named, or reached by a path
+ * outside the generated root — belongs to the user. A path that cannot be
+ * classified counts as not authored, the conservative reading for advice that
+ * says to edit it.
+ */
+function isScriptAuthoredByThisCall(
+  config: Config,
+  workflowName: string | undefined,
+  scriptPath: string | undefined,
+): boolean {
+  if (workflowName) return false;
+  if (!scriptPath) return true;
+  try {
+    return isGeneratedWorkflowScriptPath(config, scriptPath);
+  } catch {
+    return false;
+  }
+}
+
+/** Runner option carrying the hint, omitted when there is none. */
+function authoringHintOption(hint: string | null): { authoringHint?: string } {
+  return hint ? { authoringHint: hint } : {};
 }
 
 export class WorkflowTool extends BaseDeclarativeTool<
   WorkflowParams,
-  ToolResult
+  WorkflowToolResult
 > {
+  /**
+   * What this tool's description says about the authoring reference, decided
+   * once here. The failure hint and the keyword reminder read it instead of
+   * asking again, so a mid-session `/skills` toggle cannot make them disagree
+   * with the description the model is holding.
+   */
+  readonly authoringSurface: WorkflowAuthoringSurface;
+
   constructor(
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions = {},
   ) {
+    const surface = resolveWorkflowAuthoringSurface(config);
     super(
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
-      'Execute a workflow script that orchestrates subagents. ' +
-        'Supports `phase`, `log`, sequential `agent`, concurrent fan-out via ' +
-        '`parallel(thunks)` / `pipeline(items, ...stages)` (default ' +
-        '`max(1, min(16, cpus-2))` agents in flight per run, up to 1000 ' +
-        'agents total; both env-overridable), per-call `agent({ schema, ' +
-        "agentType, model, isolation: 'worktree' })` for structured-output " +
-        'contracts, declarative-agent selection, model override, and git-' +
-        'worktree-isolated subagents. Pass `resumeFromRunId` to resume a prior ' +
-        'run — agent() calls whose rolling prefix-hash matches the journal are ' +
-        'served from cache for the longest unchanged prefix. Runs are tracked ' +
-        'in the background-tasks view and the `/workflows` dialog (live phase ' +
-        'tree, token usage, cancel). Scripts run in a node:vm sandbox without ' +
-        'access to the filesystem or shell; all I/O happens through the ' +
-        'spawned agents.',
+      buildWorkflowToolDescription(
+        surface,
+        undefined,
+        config.getWorkflowSizeGuideline?.() ??
+          resolveWorkflowSizeGuidelineSetting(undefined),
+      ),
       Kind.Other,
-      WORKFLOW_PARAM_SCHEMA,
+      buildWorkflowParamSchema(surface),
       /* isOutputMarkdown */ true,
       /* canUpdateOutput */ true,
+    );
+    this.authoringSurface = surface;
+  }
+
+  buildSessionOwnedBackground(
+    params: Omit<WorkflowParams, 'run_in_background'>,
+    workflowName?: string,
+  ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
+    const validationError = this.validateToolParams(params);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+    if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
+      throw new Error(
+        'WorkflowTool: session-owned background runs require an active workflow completion channel.',
+      );
+    }
+    return new WorkflowToolInvocation(
+      this.config,
+      this.toolOptions,
+      { ...params, run_in_background: true },
+      buildWorkflowAuthoringHint(this.authoringSurface),
+      workflowName,
     );
   }
 
   protected override validateToolParamValues(
     params: WorkflowParams,
   ): string | null {
+    try {
+      readWorkflowSourceRef(params.sourceRef);
+    } catch (error) {
+      return error instanceof Error
+        ? error.message
+        : 'Invalid workflow sourceRef.';
+    }
     const hasScript =
       typeof params.script === 'string' && params.script.length > 0;
     const hasPath =
       typeof params.scriptPath === 'string' && params.scriptPath.length > 0;
-    // XOR: inline `script` (LLM authoring) or `scriptPath` (a saved-workflow
-    // slash command), never both, never neither.
-    if (!hasScript && !hasPath) {
-      return 'WorkflowTool: provide `script` (inline source) or `scriptPath` (a saved workflow file).';
+    const hasName = typeof params.name === 'string' && params.name.length > 0;
+    // Exactly one source: inline `script` (LLM authoring), `scriptPath` (a
+    // saved-workflow slash command or a generated script), or `name` (a saved
+    // or extension workflow). A second one would leave a grant scoped by one
+    // of them running the other.
+    const sources = [hasScript, hasPath, hasName].filter(Boolean).length;
+    if (sources === 0) {
+      return 'WorkflowTool: provide `script` (inline source), `scriptPath` (a workflow script file) or `name` (a saved workflow).';
     }
-    if (hasScript && hasPath) {
-      return 'WorkflowTool: provide exactly one of `script` or `scriptPath`, not both.';
+    if (sources > 1) {
+      return 'WorkflowTool: provide exactly one of `script`, `scriptPath` or `name`.';
     }
     // Security: `resumeFromRunId` becomes the `runId` and flows verbatim into
     // `getWorkflowRunJournalPath` / `getWorkflowRunSnapshotPath` (both
@@ -724,12 +1713,28 @@ export class WorkflowTool extends BaseDeclarativeTool<
     ) {
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }
+    if (params.run_in_background === true) {
+      if (
+        !this.config.isInteractive() ||
+        this.config.getExperimentalZedIntegration?.() === true
+      ) {
+        return 'WorkflowTool: `run_in_background` is available only in the interactive TUI.';
+      }
+      if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
+        return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
+      }
+    }
     return null;
   }
 
   protected createInvocation(
     params: WorkflowParams,
-  ): ToolInvocation<WorkflowParams, ToolResult> {
-    return new WorkflowToolInvocation(this.config, this.toolOptions, params);
+  ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
+    return new WorkflowToolInvocation(
+      this.config,
+      this.toolOptions,
+      params,
+      buildWorkflowAuthoringHint(this.authoringSurface),
+    );
   }
 }

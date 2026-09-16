@@ -137,12 +137,16 @@ beforeAll(async () => {
 function createMockConfig(
   overrides: {
     fileReadCache?: Partial<FileReadCache>;
-    geminiClient?: {
+    llmClient?: {
       isInitialized?: () => boolean;
       getChat?: () => {
         getHistoryShallow?: () => unknown[];
         getHistory?: () => unknown[];
-        setHistory?: (h: unknown[]) => void;
+        setHistory?: (
+          h: unknown[],
+          completedToolCallIds?: readonly string[],
+        ) => void;
+        getCompletedToolCallIds?: () => readonly string[] | undefined;
       };
     } | null;
     clearContextOnIdle?: {
@@ -153,16 +157,17 @@ function createMockConfig(
   } = {},
 ): Config {
   const client =
-    overrides.geminiClient === undefined
+    overrides.llmClient === undefined
       ? {
           isInitialized: () => true,
           getChat: () => ({
+            getCompletedToolCallIds: () => undefined,
             getHistoryShallow: () => [],
             getHistory: () => [],
             setHistory: vi.fn(),
           }),
         }
-      : overrides.geminiClient;
+      : overrides.llmClient;
   return {
     getProjectRoot: () => '/mock/project',
     getTargetDir: () => '/mock/project',
@@ -172,7 +177,7 @@ function createMockConfig(
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
-    getGeminiClient: () => client as never,
+    getLlmClient: () => client as never,
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
       toolResultsNumToKeep: 5,
@@ -1248,9 +1253,10 @@ describe('MemoryPressureMonitor', () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => false,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => [{ role: 'user' }],
               getHistory: () => [{ role: 'user' }],
               setHistory,
@@ -1272,9 +1278,10 @@ describe('MemoryPressureMonitor', () => {
       const originalHistory = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => originalHistory,
               getHistory: () => [...originalHistory],
               setHistory,
@@ -1296,9 +1303,10 @@ describe('MemoryPressureMonitor', () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => [],
               getHistory: () => [],
               setHistory,
@@ -1318,7 +1326,7 @@ describe('MemoryPressureMonitor', () => {
     it('handles exceptions during compaction gracefully', async () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => {
               throw new Error('chat unavailable');
@@ -1337,11 +1345,11 @@ describe('MemoryPressureMonitor', () => {
       expect(monitor.getConsecutiveFailures()).toBe(0);
     });
 
-    it('handles getGeminiClient returning null', async () => {
+    it('handles getLlmClient returning null', async () => {
       const setHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: null,
+          llmClient: null,
         }),
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
@@ -1390,11 +1398,30 @@ describe('MemoryPressureMonitor', () => {
           },
         );
       }
+      toolHistory.push(
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'goal-end', name: 'update_goal' } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'goal-end',
+                name: 'update_goal',
+                response: {},
+              },
+            },
+          ],
+        },
+      );
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => ['call_1', 'goal-end'],
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1418,6 +1445,10 @@ describe('MemoryPressureMonitor', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
       const compacted = setHistory.mock.calls[0][0] as Content[];
+      expect(setHistory.mock.calls[0][1]).toEqual(['call_1', 'goal-end']);
+      expect(compacted.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
+        'goal-end',
+      );
       // microcompactHistory blanks old tool responses with a cleared message
       // rather than removing entries — verify some were blanked.
       const blankedResponses = compacted.filter((entry) =>
@@ -1428,6 +1459,18 @@ describe('MemoryPressureMonitor', () => {
         ),
       );
       expect(blankedResponses.length).toBeGreaterThan(0);
+      for (const entry of blankedResponses) {
+        const index = compacted.indexOf(entry);
+        expect(entry).not.toBe(toolHistory[index]);
+        expect(entry.parts?.[0]?.functionResponse?.id).toBe(
+          toolHistory[index].parts?.[0]?.functionResponse?.id,
+        );
+      }
+      expect(
+        blankedResponses
+          .flatMap((entry) => entry.parts ?? [])
+          .map((part) => part.functionResponse?.id),
+      ).toContain('call_1');
       const memoryResult = compacted
         .flatMap((entry) => entry.parts ?? [])
         .find((part) => part.functionResponse?.id === 'call_0');
@@ -1469,9 +1512,10 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1529,9 +1573,10 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1589,9 +1634,10 @@ describe('MemoryPressureMonitor', () => {
       }
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
-          geminiClient: {
+          llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),

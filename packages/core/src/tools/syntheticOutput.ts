@@ -25,7 +25,7 @@ export type StructuredOutputParams = Record<string, unknown>;
  *   1. `ToolCallEvent` in `telemetry/types.ts` — keeps the payload out
  *      of OTLP exports / QwenLogger / ui-telemetry stream / chat-recording
  *      UI event mirror.
- *   2. `redactStructuredOutputArgsForRecording` in `core/geminiChat.ts`
+ *   2. `redactStructuredOutputArgsForRecording` in `core/llm-chat.ts`
  *      — keeps the payload out of the on-disk chat-recording JSONL
  *      (which gets re-fed into model context on `--continue` /
  *      `--resume`).

@@ -23,9 +23,9 @@ const mockObjectStoreCtor = vi.hoisted(() => vi.fn());
 vi.mock('openai');
 vi.mock('./converter.js', () => ({
   OpenAIContentConverter: {
-    convertGeminiRequestToOpenAI: vi.fn(),
+    convertLlmRequestToOpenAI: vi.fn(),
     convertOpenAIResponseToGemini: vi.fn(),
-    convertOpenAIChunkToGemini: vi.fn(),
+    convertOpenAIChunkToLlm: vi.fn(),
     convertGeminiToolsToOpenAI: vi.fn(),
   },
 }));
@@ -154,7 +154,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('invalidates each distinct oss:// URL when a non-streaming request fails with a media download error', async () => {
-    (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
       ossMediaMessages,
     );
     (mockClient.chat.completions.create as Mock).mockRejectedValue(
@@ -175,11 +175,11 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('invalidates when the stream fails mid-iteration with an oss-naming error', async () => {
-    (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
       ossMediaMessages,
     );
     const emptyResponse = new GenerateContentResponse();
-    (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+    (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
       emptyResponse,
     );
     const stream = {
@@ -209,7 +209,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('invalidates when the stream reports an error_finish chunk naming the oss media', async () => {
-    (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
       ossMediaMessages,
     );
     const stream = {
@@ -242,7 +242,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('does not invalidate on 429/RESOURCE_EXHAUSTED even with oss media present', async () => {
-    (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
       ossMediaMessages,
     );
     (mockClient.chat.completions.create as Mock).mockRejectedValue(
@@ -260,7 +260,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('does not invalidate when the error merely contains the letters "oss" without the scheme', async () => {
-    (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
       ossMediaMessages,
     );
     (mockClient.chat.completions.create as Mock).mockRejectedValue(
@@ -275,7 +275,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('does not invalidate when the request carries no oss:// URLs', async () => {
-    (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
       nonOssMediaMessages,
     );
     (mockClient.chat.completions.create as Mock).mockRejectedValue(
@@ -298,7 +298,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
       ...mockConfig,
       cliConfig: mockCliConfig,
     });
-    (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
       ossMediaMessages,
     );
     (mockClient.chat.completions.create as Mock).mockRejectedValue(

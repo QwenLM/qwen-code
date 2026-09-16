@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mem0 External Context bounded dialect v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dialectVersion", "id", "auth", "search", "response"],
+  "properties": {
+    "dialectVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$"
+    },
+    "auth": {
+      "enum": ["authorization-token", "authorization-bearer", "x-api-key"]
+    },
+    "search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path",
+        "queryLocation",
+        "userIdLocation",
+        "agentIdLocation",
+        "appIdLocation",
+        "limitField"
+      ],
+      "properties": {
+        "method": {
+          "enum": ["GET", "POST"]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^/"
+        },
+        "queryLocation": {
+          "enum": ["json", "query"]
+        },
+        "userIdLocation": {
+          "$ref": "#/definitions/scopeLocation"
+        },
+        "agentIdLocation": {
+          "$ref": "#/definitions/scopeLocation"
+        },
+        "appIdLocation": {
+          "$ref": "#/definitions/scopeLocation"
+        },
+        "limitField": {
+          "enum": ["top_k", "limit", "omit"]
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rerank": {
+          "type": "boolean"
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collection",
+        "idField",
+        "contentField",
+        "titleField",
+        "uriField",
+        "scoreField",
+        "updatedAtField"
+      ],
+      "properties": {
+        "collection": {
+          "enum": ["results", "root-array"]
+        },
+        "idField": {
+          "enum": ["id", "memory_id"]
+        },
+        "contentField": {
+          "enum": ["memory", "content", "text"]
+        },
+        "titleField": {
+          "enum": ["title", "omit"]
+        },
+        "uriField": {
+          "enum": ["uri", "omit"]
+        },
+        "scoreField": {
+          "enum": ["score", "omit"]
+        },
+        "updatedAtField": {
+          "enum": ["updated_at", "updatedAt", "omit"]
+        }
+      }
+    }
+  },
+  "definitions": {
+    "scopeLocation": {
+      "enum": ["json", "json.filters", "query", "omit"]
+    }
+  }
+}

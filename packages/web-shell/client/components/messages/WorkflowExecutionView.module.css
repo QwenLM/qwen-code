@@ -1,0 +1,894 @@
+/*
+ * Workflow execution graph — flat visual language.
+ *
+ * One surface (--background), one hairline (--border), status carried by a
+ * single accent colour per node/edge. No gradients, drop shadows, glows, or
+ * dot grids: depth is expressed only through borders and tint, so the graph
+ * reads the same in the light and dark themes.
+ */
+
+.root {
+  container-type: inline-size;
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* ---------- history strip ---------- */
+
+.historyBar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.historyLead {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.historyLead > span:not(.historyMark, .cachedBadge) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.cachedBadge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success-color) 12%, transparent);
+  color: var(--success-color);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.compareButton {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.compareButton:hover:not(:disabled) {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.compareButton:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.compareButton:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 1px;
+}
+
+/* ---------- saved-run ledger ---------- */
+
+.historyLedger {
+  display: grid;
+  max-height: 224px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.historyTools {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.historyTools label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.historyTools select {
+  min-width: 100px;
+  padding: 3px 22px 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 11px;
+}
+
+.historyTools select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.historyTools > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyEmpty {
+  padding: 14px 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.historyRun {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+}
+
+.historyRun:last-child {
+  border-bottom: 0;
+}
+
+.historyRun:hover,
+.historyRun[data-selected='true'] {
+  background: var(--secondary);
+}
+
+.historyRun[data-selected='true'] {
+  box-shadow: inset 2px 0 0 var(--agent-blue-500);
+}
+
+.historyRunSelect {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(150px, 1fr) 68px 48px 44px 56px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.historyRunSelect:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.historyDeleteButton,
+.confirmDeleteButton {
+  align-self: center;
+  margin-right: 8px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.historyDeleteButton:hover:not(:disabled) {
+  color: var(--error-color);
+}
+
+.confirmDeleteButton {
+  border-color: var(--error-color);
+  color: var(--error-color);
+}
+
+.confirmDeleteButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error-color) 10%, transparent);
+}
+
+.confirmDeleteButton:disabled,
+.historyDeleteButton:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.historyDeleteButton:focus-visible,
+.confirmDeleteButton:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--error-color) 52%, transparent);
+  outline-offset: 1px;
+}
+
+.historyRunIdentity {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.historyRunIdentity code {
+  overflow: hidden;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyRunIdentity small {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.historyRunStatus {
+  color: var(--foreground);
+}
+
+.historyRun[data-status='running'] .historyRunStatus {
+  color: var(--agent-blue-500);
+}
+
+.historyRun[data-status='completed'] .historyRunStatus {
+  color: var(--success-color);
+}
+
+.historyRun[data-status='failed'] .historyRunStatus {
+  color: var(--error-color);
+}
+
+.historyRun[data-status='paused'] .historyRunStatus,
+.historyRun[data-status='pausing'] .historyRunStatus,
+.historyRun[data-status='cancelled'] .historyRunStatus {
+  color: var(--warning-color);
+}
+
+/* ---------- run comparison ---------- */
+
+.comparison {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(72px, 0.6fr) repeat(2, minmax(96px, 1fr));
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.comparison > * {
+  min-width: 0;
+  padding: 6px 12px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.comparison > :nth-child(3n) {
+  border-right: 0;
+}
+
+.comparison > :nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+
+.comparisonRun {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.comparisonRun strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.comparisonRun code {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparisonMetric {
+  color: var(--muted-foreground);
+}
+
+.comparisonValue {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.comparisonValue[data-status='running'] {
+  color: var(--agent-blue-500);
+}
+
+.comparisonValue[data-status='completed'] {
+  color: var(--success-color);
+}
+
+.comparisonValue[data-status='failed'] {
+  color: var(--error-color);
+}
+
+.comparisonValue[data-status='paused'],
+.comparisonValue[data-status='pausing'],
+.comparisonValue[data-status='cancelled'] {
+  color: var(--warning-color);
+}
+
+/* ---------- toolbar: metrics + run controls ---------- */
+
+.toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.metrics {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.approvalMetric,
+.approvalMetric strong {
+  color: var(--warning-color);
+}
+
+.toolbarActions {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* The controls come from the task panel with its own classes. Geometry is
+   restated here so they sit flush with the strip, and every non-primary
+   variant is deliberately flattened to a neutral outline so the strip reads
+   as one toolbar — only [data-tone='primary'] keeps the owner's colour. */
+.toolbarActions button {
+  min-height: 26px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.toolbarActions button:not([data-tone='primary']) {
+  border: 1px solid var(--border);
+  background: transparent;
+}
+
+.toolbarActions button:not([data-tone='primary']):hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--secondary);
+}
+
+.graphOmission {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  box-shadow: inset 2px 0 0 var(--warning-color);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* ---------- graph ---------- */
+
+.workbench {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 232px;
+}
+
+.viewport {
+  min-width: 0;
+  min-height: 200px;
+  overflow: auto;
+  background: var(--background);
+}
+
+.canvas {
+  position: relative;
+  min-width: 100%;
+}
+
+.lane {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-right: 1px solid var(--border);
+}
+
+.lane[data-last='true'] {
+  border-right: 0;
+}
+
+.laneHeading {
+  display: flex;
+  min-width: 0;
+  height: var(--workflow-lane-header-height, 40px);
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.laneIndex {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.laneHeading strong {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.laneHeading small {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lane[data-active='true'] .laneHeading {
+  box-shadow: inset 0 -2px 0 var(--agent-blue-500);
+}
+
+.lane[data-active='true'] .laneHeading strong {
+  color: var(--agent-blue-500);
+}
+
+.edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.edges marker path {
+  fill: var(--muted-foreground);
+  fill: context-stroke;
+}
+
+.edge {
+  fill: none;
+  stroke: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
+  stroke-width: 1.25px;
+  transition:
+    opacity 120ms ease,
+    stroke-width 120ms ease;
+  vector-effect: non-scaling-stroke;
+}
+
+.edge[data-status='running'] {
+  stroke: var(--agent-blue-500);
+}
+
+.edge[data-status='queued'] {
+  stroke-dasharray: 3 4;
+}
+
+.edge[data-status='completed'],
+.edge[data-status='cached'] {
+  stroke: var(--success-color);
+}
+
+.edge[data-status='failed'] {
+  stroke: var(--error-color);
+}
+
+.edge[data-path-emphasis='related'] {
+  stroke-width: 2px;
+}
+
+.edge[data-path-emphasis='dimmed'] {
+  opacity: 0.15;
+}
+
+.node {
+  --workflow-node-accent: var(--muted-foreground);
+  position: absolute;
+  display: grid;
+  width: var(--workflow-node-width);
+  height: var(--workflow-node-height);
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px 0 9px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--workflow-node-accent);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.node:hover {
+  border-color: color-mix(in srgb, var(--foreground) 28%, var(--border));
+  border-left-color: var(--workflow-node-accent);
+}
+
+.node:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.node[aria-pressed='true'],
+.node[data-path-emphasis='active'] {
+  border-color: var(--workflow-node-accent);
+  background: color-mix(
+    in srgb,
+    var(--workflow-node-accent) 6%,
+    var(--background)
+  );
+}
+
+.node[data-status='running'] {
+  --workflow-node-accent: var(--agent-blue-500);
+}
+
+.node[data-status='completed'],
+.node[data-status='cached'] {
+  --workflow-node-accent: var(--success-color);
+}
+
+.node[data-status='failed'] {
+  --workflow-node-accent: var(--error-color);
+}
+
+/* No `opacity: 1` here: the queued/cancelled, related and dimmed rules
+   below have the same specificity and come later, so they win wherever they
+   co-occur, and nothing lowers opacity otherwise. Making an approval hold
+   full opacity through those states would be a deliberate change — raise
+   the specificity or move the rule past them. */
+.node[data-workflow-approval] {
+  --workflow-node-accent: var(--warning-color);
+}
+
+.node[data-status='queued'],
+.node[data-status='cancelled'] {
+  opacity: 0.62;
+}
+
+.node[data-status='queued'] {
+  border-style: dashed;
+  border-left-style: solid;
+}
+
+.node[data-path-emphasis='related'] {
+  opacity: 0.92;
+}
+
+.node[data-path-emphasis='dimmed'] {
+  opacity: 0.24;
+}
+
+.nodeState {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--workflow-node-accent) 14%, transparent);
+  color: var(--workflow-node-accent);
+}
+
+.nodeState svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.4;
+}
+
+.nodeState > svg,
+.nodeState::after {
+  grid-area: 1 / 1;
+}
+
+.node[data-status='running'] .nodeState::after {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid color-mix(in srgb, var(--agent-blue-500) 30%, transparent);
+  border-top-color: var(--agent-blue-500);
+  border-radius: 50%;
+  animation: workflow-spin 0.8s linear infinite;
+  content: '';
+}
+
+.nodeCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.nodeCopy strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodeCopy small {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.nodeStatus {
+  overflow: hidden;
+  color: var(--workflow-node-accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node[data-status='queued'] .nodeStatus,
+.node[data-status='cancelled'] .nodeStatus {
+  color: var(--muted-foreground);
+}
+
+.nodeTime {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- inspector ---------- */
+
+.inspector {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 14px;
+  border-left: 1px solid var(--border);
+  background: var(--background);
+}
+
+.inspectorHeading {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 3px 10px;
+}
+
+.inspectorHeading > span {
+  grid-column: 1 / -1;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.inspectorHeading > strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspectorHeading > small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.inspectorHeading > small[data-status='running'] {
+  color: var(--agent-blue-500);
+}
+
+.inspectorHeading > small[data-status='completed'],
+.inspectorHeading > small[data-status='cached'] {
+  color: var(--success-color);
+}
+
+.inspectorHeading > small[data-status='failed'] {
+  color: var(--error-color);
+}
+
+.inspectorPrompt {
+  max-height: 140px;
+  margin: 0;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+}
+
+.inspector dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px 14px;
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.inspector dl > div {
+  display: contents;
+}
+
+.inspector dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.inspector dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.dispatchError,
+.approvalCallout {
+  padding: 8px 10px;
+  border-radius: 0 4px 4px 0;
+  box-shadow: inset 2px 0 0 var(--error-color);
+  background: color-mix(in srgb, var(--error-color) 8%, transparent);
+  color: var(--error-color);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dispatchError {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.approvalCallout {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-shadow: inset 2px 0 0 var(--warning-color);
+  background: color-mix(in srgb, var(--warning-color) 8%, transparent);
+  color: var(--foreground);
+}
+
+.approvalCallout strong {
+  color: var(--warning-color);
+  font-weight: 600;
+}
+
+.approvalCallout small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.empty {
+  padding: 16px 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* ---------- narrow container ---------- */
+
+@container (max-width: 680px) {
+  .historyBar,
+  .toolbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .historyActions,
+  .toolbarActions {
+    width: 100%;
+  }
+
+  .historyTools {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .historyTools > span {
+    display: none;
+  }
+
+  .historyRunSelect {
+    grid-template-columns: minmax(128px, 1fr) 60px 44px;
+  }
+
+  .historyRunSelect > :nth-child(4),
+  .historyRunSelect > :nth-child(5) {
+    display: none;
+  }
+
+  .workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .inspector {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+}
+
+@keyframes workflow-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .edge,
+  .node,
+  .nodeState::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

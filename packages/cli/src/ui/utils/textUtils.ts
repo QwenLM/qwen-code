@@ -36,6 +36,22 @@ export const getAsciiArtWidth = (asciiArt: string): number => {
 const codePointsCache = new Map<string, string[]>();
 const MAX_STRING_LENGTH_TO_CACHE = 1000;
 
+/** Max entries in each text cache before eviction */
+export const TEXT_CACHE_MAX_ENTRIES = 500;
+
+/**
+ * Evict oldest entry if a cache reaches the soft cap.
+ * Map iteration order is insertion order, so the first key is the oldest.
+ */
+function evictOldestTextCacheEntry<K, V>(cache: Map<K, V>): void {
+  if (cache.size >= TEXT_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) {
+      cache.delete(firstKey);
+    }
+  }
+}
+
 export function toCodePoints(str: string): string[] {
   // ASCII fast path - check if all chars are ASCII (0-127)
   let isAscii = true;
@@ -59,8 +75,9 @@ export function toCodePoints(str: string): string[] {
 
   const result = Array.from(str);
 
-  // Cache result (unlimited like Ink)
+  // Cache result (bounded; oldest entry evicted at the cap)
   if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
+    evictOldestTextCacheEntry(codePointsCache);
     codePointsCache.set(str, result);
   }
 
@@ -127,8 +144,9 @@ export function stripUnsafeCharacters(str: string): string {
 const stringWidthCache = new Map<string, number>();
 
 /**
- * Cached version of stringWidth function for better performance
- * Follows Ink's approach with unlimited cache (no eviction)
+ * Cached version of stringWidth function for better performance.
+ * Bounded with oldest-entry eviction so long sessions cannot grow it
+ * without limit.
  */
 export const getCachedStringWidth = (str: string): number => {
   // ASCII printable chars have width 1
@@ -136,11 +154,16 @@ export const getCachedStringWidth = (str: string): number => {
     return str.length;
   }
 
+  if (str.length > MAX_STRING_LENGTH_TO_CACHE) {
+    return stringWidth(str);
+  }
+
   if (stringWidthCache.has(str)) {
     return stringWidthCache.get(str)!;
   }
 
   const width = stringWidth(str);
+  evictOldestTextCacheEntry(stringWidthCache);
   stringWidthCache.set(str, width);
 
   return width;
@@ -276,58 +299,23 @@ export function sliceTextByVisualHeight(
 }
 
 /**
- * Wrap text into the visual rows it occupies at `width` columns, accounting
- * for both explicit newlines and code-point-width-aware soft wrapping. Unlike
- * `sliceTextByVisualHeight` (which keeps only a head/tail window), this returns
- * every visual row, so callers that scroll an arbitrary offset can slice the
- * rows the user actually sees.
- */
-export function wrapToVisualLines(text: string, width: number): string[] {
-  if (width <= 0) {
-    return [''];
-  }
-  const visualLines: string[] = [];
-  for (const logicalLine of text.split('\n')) {
-    if (logicalLine === '') {
-      visualLines.push('');
-      continue;
-    }
-    let currentLine = '';
-    let currentWidth = 0;
-    for (const char of logicalLine) {
-      // Clamped to 1, matching sliceTextByVisualHeight. `string-width` reports
-      // 0 for TAB, ZWJ and combining marks, so without this a run of them was
-      // charged nothing and the whole run counted as a single row: 50 tabs at
-      // width 10 came back as 1 row here and 5 there, for the same input. Any
-      // caller mixing the two -- scroll offsets, pending-render height -- then
-      // disagreed with itself. Erring high is the safe direction for a
-      // terminal: reserving a row too many costs a blank line, while counting
-      // one too few overflows the region and pushes content off screen.
-      const charWidth = Math.max(getCachedStringWidth(char), 1);
-      if (currentWidth + charWidth > width && currentWidth > 0) {
-        visualLines.push(currentLine);
-        currentLine = '';
-        currentWidth = 0;
-      }
-      currentLine += char;
-      currentWidth += charWidth;
-    }
-    if (currentLine) {
-      visualLines.push(currentLine);
-    }
-  }
-  if (visualLines.length === 0) {
-    visualLines.push('');
-  }
-  return visualLines;
-}
-
-/**
  * Clear the string width cache
  */
 export const clearStringWidthCache = (): void => {
   stringWidthCache.clear();
 };
+
+/**
+ * Report current sizes of the module-level text caches.
+ * @internal — only used in tests to verify cache bounds.
+ */
+export const __getTextUtilsCacheSizes = (): {
+  codePoints: number;
+  stringWidth: number;
+} => ({
+  codePoints: codePointsCache.size,
+  stringWidth: stringWidthCache.size,
+});
 
 const regex = ansiRegex();
 
@@ -384,6 +372,16 @@ export function escapeAnsiCtrlCodes<T>(obj: T): T {
   }
 
   if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+
+  const record = obj as Record<string, unknown>;
+  if (
+    !Array.isArray(obj) &&
+    typeof record['data'] === 'string' &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].toLowerCase().startsWith('image/')
+  ) {
     return obj;
   }
 

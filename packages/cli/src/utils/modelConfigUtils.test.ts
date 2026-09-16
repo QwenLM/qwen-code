@@ -114,6 +114,49 @@ describe('modelConfigUtils', () => {
       expect(getAuthTypeFromEnv()).toBe(AuthType.USE_VERTEX_AI);
     });
 
+    it('should return USE_VERTEX_AI for keyless Vertex AI env vars', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should preserve keyed Vertex AI precedence', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_API_KEY: 'test-key',
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
+    it('should not infer keyless Vertex AI without a model', () => {
+      expect(
+        getAuthTypeFromEnv({ GOOGLE_CLOUD_PROJECT: 'test-project' }),
+      ).toBeUndefined();
+    });
+
+    it('should not infer keyless Vertex AI without a project', () => {
+      expect(
+        getAuthTypeFromEnv({ GOOGLE_MODEL: 'vertex-model' }),
+      ).toBeUndefined();
+    });
+
+    it('should prefer keyless Vertex AI over a complete Anthropic env', () => {
+      expect(
+        getAuthTypeFromEnv({
+          GOOGLE_CLOUD_PROJECT: 'test-project',
+          GOOGLE_MODEL: 'vertex-model',
+          ANTHROPIC_API_KEY: 'test-key',
+          ANTHROPIC_MODEL: 'anthropic-model',
+          ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+        }),
+      ).toBe(AuthType.USE_VERTEX_AI);
+    });
+
     it('should return undefined when Google env vars are incomplete', () => {
       process.env['GOOGLE_API_KEY'] = 'test-key';
       // Missing GOOGLE_MODEL
@@ -180,6 +223,34 @@ describe('modelConfigUtils', () => {
         ...overrides,
       } as Settings;
     }
+
+    it('loads none as an explicit reasoning disable', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: {
+          model: 'qwen3.8-max',
+          apiKey: '',
+          baseUrl: '',
+          reasoning: { effort: 'xhigh' },
+        },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBe(false);
+      expect(result.warnings).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Ignoring invalid model.reasoningEffort'),
+        ]),
+      );
+    });
 
     it('should resolve config from argv with highest precedence', () => {
       const argv = {

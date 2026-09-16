@@ -83,10 +83,9 @@ rules:
     check-keys: true
 
 ignore:
+  - 'pnpm-lock.yaml'
   - 'thirdparty/'
   - 'third_party/'
   - 'vendor/'
   - 'node_modules/'
   - 'integration-tests/terminal-bench/'
-  - 'packages/desktop/.github/'
-  - 'packages/desktop/apps/electron/electron-builder.yml'

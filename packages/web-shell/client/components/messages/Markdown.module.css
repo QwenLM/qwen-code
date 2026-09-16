@@ -8,6 +8,14 @@
   overflow-wrap: break-word;
 }
 
+.streamingPlainText {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .content > :first-child {
   margin-top: 0;
 }
@@ -19,7 +27,7 @@
 .content strong,
 .content b {
   color: var(--foreground);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .content h1,

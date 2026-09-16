@@ -12,6 +12,19 @@ export interface ExternalContextProvider {
   }): Promise<readonly ExternalContextItem[]>;
 }
 
+export interface ExternalMemoryWriter {
+  remember(input: {
+    content: string;
+    signal: AbortSignal;
+  }): Promise<RememberResult>;
+}
+
+export type RememberResult =
+  | { status: 'stored'; providerOperationId?: string }
+  | { status: 'accepted'; providerOperationId: string }
+  | { status: 'failed' }
+  | { status: 'unknown' };
+
 export interface ExternalContextItem {
   id: string;
   content: string;
@@ -25,6 +38,9 @@ export interface ExternalContextConfigV1 {
   version: 1;
   timeoutMs: number;
   provider: ProviderConfig;
+  write?: {
+    enabled: true;
+  };
 }
 
 export interface ExternalContextConfigV2 {

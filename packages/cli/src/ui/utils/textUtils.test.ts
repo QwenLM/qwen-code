@@ -10,13 +10,17 @@ import type {
   ToolEditConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
+  TEXT_CACHE_MAX_ENTRIES,
+  __getTextUtilsCacheSizes,
+  clearStringWidthCache,
   escapeAnsiCtrlCodes,
+  getCachedStringWidth,
   sanitizeFilenameForDisplay,
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
   sliceTextByVisualHeight,
+  toCodePoints,
   truncateToWidth,
-  wrapToVisualLines,
 } from './textUtils.js';
 
 describe('textUtils', () => {
@@ -91,6 +95,17 @@ describe('textUtils', () => {
 
       it('should handle an empty string', () => {
         expect(escapeAnsiCtrlCodes('')).toBe('');
+      });
+
+      it('preserves inline image data while sanitizing surrounding text', () => {
+        const imageData = 'payload\u001bwith-control-code';
+        const sanitized = escapeAnsiCtrlCodes({
+          text: '\u001b[31mcaption\u001b[0m',
+          images: [{ data: imageData, mimeType: 'image/png' }],
+        });
+
+        expect(sanitized.text).toBe('\\u001b[31mcaption\\u001b[0m');
+        expect(sanitized.images[0].data).toBe(imageData);
       });
 
       describe('toolConfirmationDetails case study', () => {
@@ -397,50 +412,60 @@ describe('textUtils', () => {
       expect(truncateToWidth('目标配置参数设置', 11)).toBe('目标配置参…');
     });
   });
-});
 
-describe('visual row counting agrees between wrap and slice', () => {
-  // Both functions are documented as measuring visual rows at a given width,
-  // and callers mix them (scroll offsets, pending-render height). They
-  // disagreed on anything `string-width` reports as zero width, because only
-  // one of them clamped the per-character width to 1.
-  // `hiddenLinesCount + visible` only recovers the true row count when the
-  // text actually overflows `visible`, so every case below is chosen to.
-  const rowsFromSlice = (text: string, width: number): number => {
-    const visible = 3;
-    return (
-      sliceTextByVisualHeight(text, visible, width).hiddenLinesCount + visible
-    );
-  };
+  describe('text cache bounds', () => {
+    it('does not grow the caches for ASCII fast-path input', () => {
+      const before = __getTextUtilsCacheSizes();
+      getCachedStringWidth('plain-ascii-input');
+      toCodePoints('plain-ascii-input');
+      expect(__getTextUtilsCacheSizes()).toEqual(before);
+    });
 
-  it.each([
-    ['tabs', '\t'.repeat(50)],
-    ['combining marks', '́'.repeat(50)],
-    ['zero-width joiners', '‍'.repeat(50)],
-    ['a letter then combining marks', 'e' + '́'.repeat(49)],
-  ])('agrees on a run of %s', (_label, text) => {
-    expect(wrapToVisualLines(text, 10).length).toBe(rowsFromSlice(text, 10));
-  });
+    it('bounds the code points cache and keeps results correct', () => {
+      const probe = (i: number) => `cache-bound-probe-${i}-é`;
+      for (let i = 0; i < TEXT_CACHE_MAX_ENTRIES + 50; i++) {
+        toCodePoints(probe(i));
+      }
 
-  // Guards against over-correcting: ordinary and wide characters were always
-  // consistent and must stay so. These pass before and after.
-  it.each([
-    ['ascii', 'a'.repeat(50), 10],
-    ['wide CJK', '漢'.repeat(25), 10],
-    ['mixed', 'ab漢cd'.repeat(10), 10],
-  ])('still agrees on %s', (_label, text, width) => {
-    expect(wrapToVisualLines(text, width).length).toBe(
-      rowsFromSlice(text, width),
-    );
-  });
+      expect(TEXT_CACHE_MAX_ENTRIES).toBe(500);
+      expect(__getTextUtilsCacheSizes().codePoints).toBe(
+        TEXT_CACHE_MAX_ENTRIES,
+      );
 
-  it('still wraps a string shorter than the width to one row', () => {
-    expect(wrapToVisualLines('abc', 10)).toEqual(['abc']);
-  });
+      const fresh = 'fresh-é-probe';
+      expect(toCodePoints(fresh)).toEqual(Array.from(fresh));
+      // An evicted key must recompute to the same result.
+      expect(toCodePoints(probe(0))).toEqual(Array.from(probe(0)));
+    });
 
-  it('counts a run of tabs as more than one row', () => {
-    // The concrete regression: 50 zero-width characters at width 10 used to
-    // wrap to a single row.
-    expect(wrapToVisualLines('\t'.repeat(50), 10).length).toBe(5);
+    it('bounds the string width cache and keeps widths correct', () => {
+      const probe = (i: number) => `width-bound-probe-${i}-é`;
+      for (let i = 0; i < TEXT_CACHE_MAX_ENTRIES + 50; i++) {
+        getCachedStringWidth(probe(i));
+      }
+
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(
+        TEXT_CACHE_MAX_ENTRIES,
+      );
+
+      expect(getCachedStringWidth('héllo')).toBe(5);
+      expect(getCachedStringWidth('目标')).toBe(4);
+    });
+
+    it('does not cache long string width keys', () => {
+      clearStringWidthCache();
+      const longCjk = '目'.repeat(1001);
+
+      expect(getCachedStringWidth(longCjk)).toBe(2002);
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(0);
+    });
+
+    it('caches string width keys at the length limit', () => {
+      clearStringWidthCache();
+      const limitCjk = '目'.repeat(1000);
+
+      expect(getCachedStringWidth(limitCjk)).toBe(2000);
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(1);
+    });
   });
 });

@@ -8,9 +8,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
-import type { PermissionRequest } from '../../adapters/types';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
+import type { PermissionRequest, TodoItem } from '../../adapters/types';
+import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
+import type { SessionContentGenerator } from './AssistantMessage';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -38,6 +40,18 @@ const execRequest: PermissionRequest = {
   },
 };
 
+const planRequest: PermissionRequest = {
+  id: 'req-plan',
+  toolKind: 'switch_mode',
+  toolName: 'exit_plan_mode',
+  title: 'Exit Plan Mode',
+  content: [{ type: 'text', text: 'Implement the approved workflow.' }],
+  options: [
+    { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+    { id: 'reject', label: 'Keep planning', kind: 'reject_once' },
+  ],
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
@@ -56,14 +70,23 @@ afterEach(() => {
 function rerender(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  planTodos?: readonly TodoItem[],
+  language: WebShellLanguage = 'en',
+  generateContent?: SessionContentGenerator,
+  planExecutionMode?: string,
+  disabled?: boolean,
 ): void {
   act(() =>
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ToolApproval
           request={req}
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
+          planTodos={planTodos}
+          generateContent={generateContent}
+          planExecutionMode={planExecutionMode}
+          disabled={disabled}
         />
       </I18nProvider>,
     ),
@@ -73,11 +96,24 @@ function rerender(
 function render(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  planTodos?: readonly TodoItem[],
+  language: WebShellLanguage = 'en',
+  generateContent?: SessionContentGenerator,
+  planExecutionMode?: string,
+  disabled?: boolean,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req);
+  rerender(
+    keyboardActive,
+    req,
+    planTodos,
+    language,
+    generateContent,
+    planExecutionMode,
+    disabled,
+  );
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -88,6 +124,12 @@ function optionButtons(): HTMLButtonElement[] {
   );
 }
 
+function optionLabels(): (string | null | undefined)[] {
+  return optionButtons().map(
+    (o) => o.querySelector('[data-web-shell-option-label]')?.textContent,
+  );
+}
+
 function pressKey(target: Element, key: string): void {
   act(() => {
     target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
@@ -95,6 +137,357 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('renders generic parameter content even when it equals the title', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-input',
+        kind: 'permission',
+        requestId: 'request-input',
+        sessionId: 'session-input',
+        title: '{}',
+        options: [],
+        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const preview = container!.querySelector('pre');
+    expect(preview?.textContent).toBe('{}');
+    const describedBy = container!
+      .querySelector('[role="alertdialog"]')
+      ?.getAttribute('aria-describedby')
+      ?.split(' ');
+    expect(describedBy).toContain(preview?.id);
+    pressKey(container!.querySelector('[role="alertdialog"]')!, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-input',
+      'reject',
+    );
+  });
+
+  it('keeps the complete literal parameter body available without interpreting markup', () => {
+    const input = {
+      content: '<b>' + '😀'.repeat(3970) + '\n LAST_CHARACTER </b>  ',
+    };
+    render(undefined, {
+      ...request,
+      title: 'Save',
+      contentIsInput: true,
+      content: [{ type: 'text', text: JSON.stringify(input, null, 2) }],
+    });
+    const preview = container!.querySelector('pre');
+    expect(JSON.parse(preview?.textContent ?? '')).toEqual(input);
+    expect(preview?.querySelector('b')).toBeNull();
+  });
+
+  it('explains Shell commands through session generation', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-1',
+        seq: 0,
+        text: '该命令会删除临时数据。',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 10,
+        outputTokens: 6,
+      };
+    });
+    render(undefined, execRequest, undefined, 'zh-CN', generateContent);
+
+    const explain =
+      container!.querySelector<HTMLButtonElement>('button[title="解释"]');
+    expect(explain?.textContent).toContain('解释');
+
+    await act(async () => explain?.click());
+
+    expect(generateContent).toHaveBeenCalledWith(
+      expect.stringContaining('rm -rf /tmp/data'),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(generateContent.mock.calls[0]?.[0]).toContain('Simplified Chinese');
+    expect(document.body.textContent).toContain('该命令会删除临时数据。');
+
+    const popover = document.body.querySelector(
+      '[data-approval-shortcuts-ignore]:not(button)',
+    )!;
+    pressKey(popover, '1');
+    pressKey(popover, 'Escape');
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('only offers explanations for Shell commands', () => {
+    const generateContent = async function* () {};
+    render(undefined, request, undefined, 'en', generateContent);
+
+    expect(container!.querySelector('button[title="Explain"]')).toBeNull();
+  });
+
+  it('resets an open explanation when a new request arrives', async () => {
+    const generateContent = vi.fn(async function* (prompt: string) {
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'explain-reset',
+        seq: 0,
+        text: prompt.includes('pwd') ? 'New explanation' : 'Old explanation',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-reset',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    });
+    render(undefined, execRequest, undefined, 'en', generateContent);
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+    expect(document.body.textContent).toContain('Old explanation');
+
+    rerender(
+      true,
+      {
+        ...execRequest,
+        id: 'req-exec-2',
+        rawInput: { command: 'pwd', description: 'Print directory' },
+      },
+      undefined,
+      'en',
+      generateContent,
+    );
+    expect(document.body.textContent).not.toContain('Old explanation');
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+    expect(document.body.textContent).toContain('New explanation');
+  });
+
+  it('keeps Escape rejection when the closed explanation trigger is focused', () => {
+    render(undefined, execRequest, undefined, 'en', async function* () {});
+    const explain = container!.querySelector<HTMLButtonElement>(
+      'button[title="Explain"]',
+    )!;
+    explain.focus();
+
+    pressKey(explain, 'Escape');
+
+    expect(onConfirm).toHaveBeenCalledWith('req-exec', 'reject');
+  });
+
+  it('shows the active Todo workflow before exiting Plan Mode', () => {
+    render(undefined, planRequest, [
+      { id: 'prepare', content: 'Prepare', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship',
+        status: 'pending',
+        blockedBy: ['prepare'],
+      },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).not.toBeNull();
+    expect(container!.textContent).toContain('Prepare');
+    expect(container!.textContent).toContain('Ship');
+    expect(container!.textContent).toContain(
+      'Implement the approved workflow.',
+    );
+  });
+
+  it('localizes Workflow approval without changing ordinary approvals', () => {
+    const planTodos = [
+      { id: 'review', content: 'Review', status: 'pending' as const },
+    ];
+    render(undefined, planRequest, planTodos, 'zh-CN');
+
+    expect(container!.textContent).toContain('计划并审阅');
+    expect(container!.textContent).toContain('确认计划并开始协作？');
+    expect(optionLabels()).toEqual(['继续完善计划', '确认并开始']);
+
+    rerender(undefined, planRequest, planTodos, 'en');
+    expect(container!.textContent).toContain('Plan & Review');
+    expect(container!.textContent).toContain(
+      'Confirm the plan and start collaboration?',
+    );
+    expect(optionLabels()).toEqual(['Continue planning', 'Confirm and start']);
+
+    rerender(undefined, request, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('是否继续？');
+    expect(container!.textContent).not.toContain('确认计划并开始协作？');
+  });
+
+  it('blocks plan handoff clicks and shortcuts while disabled, then allows confirmation', () => {
+    render(undefined, request, undefined, 'en', undefined, undefined, true);
+    act(() => optionButtons()[1].click());
+    pressKey(container!.querySelector('[role="alertdialog"]')!, '2');
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(optionButtons().every((button) => button.disabled)).toBe(true);
+    rerender(undefined, request, undefined, 'en', undefined, undefined, false);
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(request.id, 'proceed');
+  });
+
+  it('re-arms a plan handoff after the parent rejects a same-tick busy confirmation', async () => {
+    onConfirm.mockRejectedValueOnce(
+      new Error('Approval mode is still pending'),
+    );
+    render();
+    await act(async () => optionButtons()[1].click());
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the latest execution permission without automatically approving the plan', () => {
+    const req: PermissionRequest = {
+      ...planRequest,
+      options: [
+        { id: 'restore_previous', label: 'Restore YOLO', kind: 'allow_once' },
+        { id: 'proceed_always', label: 'Auto edits', kind: 'allow_always' },
+        { id: 'proceed_once', label: 'Default', kind: 'allow_once' },
+        { id: 'cancel', label: 'Cancel', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionLabels()).toEqual([
+      'Continue planning',
+      'Approve and execute · Full Access',
+    ]);
+    rerender(undefined, req, undefined, 'en', undefined, 'default');
+    expect(optionLabels()).toEqual([
+      'Continue planning',
+      'Approve and execute · Ask Approval',
+    ]);
+    expect(onConfirm).not.toHaveBeenCalled();
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'restore_previous');
+  });
+
+  it('does not invent a plan approval option missing from the server request', () => {
+    render(undefined, planRequest, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'reject',
+    ]);
+    act(() => optionButtons()[0].click());
+    expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
+  });
+
+  it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {
+    render(undefined, request, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'reject',
+      'proceed',
+    ]);
+  });
+
+  it('keeps restore_previous distinct from confirm in a Workflow approval', () => {
+    // The production exit_plan_mode option set: two `allow_once` options whose
+    // outcomes differ materially, so they must never share one label.
+    const productionPlanRequest: PermissionRequest = {
+      ...planRequest,
+      options: [
+        {
+          id: 'restore_previous',
+          label: 'Yes, restore previous mode (yolo)',
+          kind: 'allow_once',
+        },
+        {
+          id: 'proceed_always',
+          label: 'Yes, and auto-accept edits',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_once',
+          label: 'Yes, and manually approve edits',
+          kind: 'allow_once',
+        },
+        { id: 'cancel', label: 'No, keep planning (esc)', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, productionPlanRequest, [
+      { id: 'review', content: 'Review', status: 'pending' },
+    ]);
+
+    const labels = optionLabels();
+    expect(labels).toContain('Confirm and start');
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(
+      labels.filter((label) => label === 'Confirm and start'),
+    ).toHaveLength(1);
+  });
+
+  it('keeps the text-only Plan Mode approval when there are no Todos', () => {
+    render(undefined, planRequest);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).toContain(
+      'Implement the approved workflow.',
+    );
+  });
+
+  it('shows a dependency-free Plan Mode workflow as a list', () => {
+    render(undefined, planRequest, [
+      { id: 'review', content: 'Review the change', status: 'pending' },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).toContain('Review the change');
+  });
+
+  it('does not apply approval shortcuts to a focused workflow node', () => {
+    render(undefined, planRequest, [
+      { id: 'review', content: 'Review the change', status: 'pending' },
+    ]);
+    const node = container!.querySelector<HTMLButtonElement>(
+      '[data-plan-node-id="review"]',
+    )!;
+    node.focus();
+
+    pressKey(node, 'j');
+    expect(document.activeElement).toBe(node);
+    pressKey(node, '2');
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => node.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(false);
+  });
+
+  it('does not show a stale workflow for another switch-mode tool', () => {
+    render(undefined, { ...planRequest, toolName: 'enter_plan_mode' }, [
+      { id: 'old', content: 'Old plan', status: 'pending' },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).not.toContain('Old plan');
+  });
+
+  it('requires a switch-mode permission before showing the workflow', () => {
+    render(undefined, { ...planRequest, toolKind: 'other' }, [
+      { id: 'unsafe', content: 'Unrelated workflow', status: 'pending' },
+    ]);
+
+    expect(container!.textContent).not.toContain('Unrelated workflow');
+  });
+
   it('exposes an alertdialog of real, focusable buttons', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-permission-panel]');
@@ -166,6 +559,112 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  describe('yielding to active typing (#9571)', () => {
+    let composer: HTMLTextAreaElement;
+
+    beforeEach(() => {
+      // The user is typing in the composer when the approval arrives. In the
+      // app the overlay commit hides the composer in the same render, so the
+      // editable target still holds focus when the focus effect runs (jsdom
+      // mirrors that: display:none never blurs).
+      composer = document.createElement('textarea');
+      document.body.appendChild(composer);
+      composer.focus();
+    });
+
+    afterEach(() => {
+      composer.remove();
+    });
+
+    it('does not grab focus to the default option while an editable target is focused', () => {
+      expect(document.activeElement).toBe(composer);
+      render(undefined);
+      // Stealing focus here redirects the in-progress keystroke (Enter to
+      // send, Space, digits) onto the safe-default option and can confirm it.
+      expect(document.activeElement).toBe(composer);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+    });
+
+    it('does not re-grab focus when a new request arrives mid-typing', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      rerender(true, { ...request, id: 'req-2' });
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('does not grab focus on re-activation while typing', () => {
+      render(false);
+      expect(document.activeElement).toBe(composer);
+      rerender(true);
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('still operates by keyboard once the user tabs in', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      // Explicit tab-in: focusing an option engages the usual roving behavior.
+      const opts = optionButtons();
+      act(() => {
+        opts[0]!.focus();
+      });
+      pressKey(opts[0]!, 'ArrowDown');
+      expect(document.activeElement).toBe(opts[1]);
+    });
+
+    it('yields to a contenteditable composer (CodeMirror shape)', () => {
+      // The production composer is a CodeMirror EditorView — a contenteditable
+      // div inside `.cm-editor` (the textarea backend is touch devices only).
+      // The textarea cases above never exercise isEditableTarget's
+      // contenteditable branches; pin them so simplifying the helper to bare
+      // form controls cannot silently re-open #9571.
+      const editor = document.createElement('div');
+      editor.className = 'cm-editor';
+      const editable = document.createElement('div');
+      editable.setAttribute('contenteditable', 'true');
+      editor.appendChild(editable);
+      document.body.appendChild(editor);
+      act(() => {
+        editable.focus();
+      });
+      expect(document.activeElement).toBe(editable);
+      render(undefined);
+      expect(document.activeElement).toBe(editable);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+      editor.remove();
+    });
+
+    it('yields in shadow-DOM (portal) mode, where document.activeElement retargets', () => {
+      // Portal mode mounts the shell inside a shadow root, where
+      // document.activeElement retargets to the non-editable host; the guard
+      // must resolve the active element from the panel's own root instead.
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      const shadowComposer = document.createElement('textarea');
+      shadowRoot.appendChild(shadowComposer);
+      const shadowContainer = document.createElement('div');
+      shadowRoot.appendChild(shadowContainer);
+      act(() => {
+        shadowComposer.focus();
+      });
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+
+      container = shadowContainer;
+      root = createRoot(container);
+      rerender(undefined);
+
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+      expect(optionButtons().some((o) => o === shadowRoot.activeElement)).toBe(
+        false,
+      );
+      host.remove();
+    });
+  });
+
   it('confirms the clicked option', () => {
     render(undefined);
     act(() => {
@@ -173,6 +672,48 @@ describe('ToolApproval accessibility', () => {
     });
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
   });
+
+  it.each([
+    ['en' as const, 'Yes, allow once', 'Allow once and switch to Default mode'],
+    ['zh-CN' as const, '是，允许一次', '允许一次并切换到默认模式'],
+  ])(
+    'distinguishes the switch-to-default approval in %s',
+    (language, allowOnceLabel, switchLabel) => {
+      render(
+        undefined,
+        {
+          ...request,
+          options: [
+            {
+              id: 'proceed_once',
+              label: 'Allow',
+              kind: 'allow_once',
+            },
+            {
+              id: 'proceed_once_and_switch_to_default',
+              label: 'Switch to Default Mode and allow once (recommended)',
+              kind: 'allow_once',
+            },
+          ],
+        },
+        undefined,
+        language,
+      );
+
+      expect(optionLabels()).toEqual([
+        expect.stringContaining(allowOnceLabel),
+        expect.stringContaining(switchLabel),
+      ]);
+
+      act(() => {
+        optionButtons()[1]!.click();
+      });
+      expect(onConfirm).toHaveBeenCalledWith(
+        'req-1',
+        'proceed_once_and_switch_to_default',
+      );
+    },
+  );
 
   it('confirms by digit shortcut, scoped to the panel', () => {
     render(undefined);
@@ -247,6 +788,68 @@ describe('ToolApproval accessibility', () => {
     expect(document.activeElement).toBe(optionButtons()[0]);
   });
 
+  it('defaults an agent-launch dialog to the one-shot allow, not Reject', () => {
+    render(undefined, {
+      id: 'req-agent-launch',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
+      'cancel',
+      'proceed_always_user',
+      'proceed_always_project',
+      'proceed_once',
+    ]);
+    // Launching the agent is the proposed next action: focus and initial
+    // selection land on the one-shot allow instead of the reject button.
+    expect(document.activeElement).toBe(opts[3]);
+    expect(opts[3]!.tabIndex).toBe(0);
+  });
+
+  it('defaults an agent-launch dialog to Reject when no one-shot allow exists', () => {
+    render(undefined, {
+      id: 'req-agent-no-once',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    // No one-shot allow: the default must be the reject, never a permanent
+    // allow rule.
+    expect(opts[0]!.getAttribute('data-option-id')).toBe('cancel');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
+  });
+
   it('leaves Enter to native button activation (no double-press guard)', () => {
     render(undefined);
     const opts = optionButtons();
@@ -265,5 +868,398 @@ describe('ToolApproval accessibility', () => {
     // interception exists. (jsdom doesn't synthesize the native Enter->click, so
     // we assert the handler leaves the event un-cancelled instead.)
     expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('deduplicates options with the same id', () => {
+    const dupRequest: PermissionRequest = {
+      id: 'req-dup',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    };
+    render(undefined, dupRequest);
+    const opts = optionButtons();
+    expect(opts).toHaveLength(2);
+    expect(opts[0]!.getAttribute('data-option-id')).toBe('reject');
+    expect(opts[1]!.getAttribute('data-option-id')).toBe('proceed_once');
+  });
+
+  it.each([
+    [
+      'en' as const,
+      ['Reject', 'Yes, restore previous mode', 'Yes, allow once'],
+    ],
+    ['zh-CN' as const, ['拒绝', '是，恢复之前的模式', '是，允许一次']],
+  ])(
+    'renders plan-mode allow_once options as distinct, localized buttons in %s',
+    (language, expectedLabels) => {
+      // plan mode emits two allow_once options (restore_previous +
+      // proceed_once). They must stay distinct AND both localize: before
+      // restore_previous got its own i18n key, zh-CN leaked the English server
+      // labels for both.
+      render(
+        undefined,
+        {
+          id: 'req-plan',
+          content: [],
+          options: [
+            {
+              id: 'restore_previous',
+              label: 'Yes, restore previous mode (default)',
+              kind: 'allow_once',
+            },
+            {
+              id: 'proceed_once',
+              label: 'Yes, and manually approve edits',
+              kind: 'allow_once',
+            },
+            { id: 'reject', label: 'Reject', kind: 'reject_once' },
+          ],
+        },
+        undefined,
+        language,
+      );
+      const opts = optionButtons();
+      expect(opts).toHaveLength(3);
+      expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
+        'reject',
+        'restore_previous',
+        'proceed_once',
+      ]);
+      expect(optionLabels()).toEqual(expectedLabels);
+    },
+  );
+
+  it('falls back to i18n when a standard option has an empty label', () => {
+    render(undefined, {
+      id: 'req-empty',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: '', kind: 'allow_once' },
+        { id: 'reject', label: '', kind: 'reject_once' },
+      ],
+    });
+    const labels = optionLabels();
+    expect(labels).toContain('Yes, allow once');
+    expect(labels).toContain('Reject');
+  });
+
+  it('never renders a blank button when colliding options have empty labels', () => {
+    // Two generic allow_once options share the allowOnce key, so the collision
+    // guard reaches for their server labels, but both are empty. It must
+    // degrade to the localized string (duplicated yet readable) rather than
+    // render an unlabeled button a screen reader cannot announce.
+    render(undefined, {
+      id: 'req-collide-empty',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: '', kind: 'allow_once' },
+        { id: 'proceed_once_alt', label: '', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    expect(optionLabels()).toEqual([
+      'Reject',
+      'Yes, allow once',
+      'Yes, allow once',
+    ]);
+  });
+
+  it('falls back to distinct server labels when options share an i18n key', () => {
+    render(undefined, {
+      id: 'req-collide',
+      content: [],
+      options: [
+        { id: 'proceed_once', label: 'Allow A', kind: 'allow_once' },
+        { id: 'proceed_once_alt', label: 'Allow B', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    expect(optionLabels()).toEqual(['Reject', 'Allow A', 'Allow B']);
+  });
+
+  it('re-enables confirmation when a new request arrives', () => {
+    render(undefined);
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+  });
+
+  it('re-enables confirmation when submission rejects', async () => {
+    onConfirm
+      .mockRejectedValueOnce(new Error('submit failed'))
+      .mockResolvedValueOnce(undefined);
+    render(undefined);
+
+    act(() => optionButtons()[1]!.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[1]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-arm the submit guard on a stale rejection from a previous request', async () => {
+    let rejectStale: ((err: Error) => void) | undefined;
+    const staleSubmission = new Promise<void>((_resolve, reject) => {
+      rejectStale = reject;
+    });
+    const successorSubmission = new Promise<void>(() => {});
+    onConfirm
+      .mockReturnValueOnce(staleSubmission)
+      .mockReturnValueOnce(successorSubmission);
+    render(undefined);
+
+    // Confirm request A; its submission stays in flight.
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    // The daemon replaces A with request B (this instance is reused — no key
+    // at the mount sites); the id-keyed reset effect re-arms the guard, and
+    // confirming B arms it again while B's submission is in flight.
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+
+    // A's stale submission rejects late (the daemon answers duplicates with
+    // "No pending permission request"). It must not disarm B's guard.
+    await act(async () => {
+      rejectStale?.(new Error('No pending permission request'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[0]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-arm the submit guard when the same request changes options', () => {
+    render(undefined, {
+      id: 'same-id',
+      content: [],
+      options: [
+        { id: 'reject_always', label: 'Never', kind: 'reject_always' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+      ],
+    });
+    act(() => optionButtons()[0]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    // Same request id, but options change so safeDefaultIndex flips 1 -> 0.
+    // The reset effect must NOT re-run: it is keyed strictly to request.id.
+    rerender(undefined, {
+      id: 'same-id',
+      content: [],
+      options: [
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+      ],
+    });
+    act(() => optionButtons()[0]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+});
+
+const goalObjective =
+  'Outcome: Audit open PRs. Done when: Every PR has evidence. Must not: Push or comment. Budget: 20 turns. On block: Report missing access. Context: Preserve the exact budget assumption.';
+const goalNotice =
+  'Replace the paused Goal and start working toward this objective?';
+const goalRequest: PermissionRequest = {
+  ...request,
+  id: 'goal-request',
+  toolName: 'propose_goal',
+  title: `Propose Goal: ${goalObjective}`,
+  rawInput: { objective: goalObjective },
+  content: [{ type: 'text', text: `${goalNotice}\n\n${goalObjective}` }],
+};
+
+function switchGoalTab(value: string) {
+  const tab =
+    container!.querySelectorAll<HTMLButtonElement>('[role="tab"]')[
+      value === 'full' ? 1 : 0
+    ];
+  act(() => {
+    tab.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+    );
+  });
+}
+
+describe('goal approval', () => {
+  it('formats the draft without hiding constraints or the replacement notice', () => {
+    render(false, goalRequest, undefined, 'zh-CN');
+    expect(container!.textContent).toContain('确认会话目标');
+    expect(container!.textContent).toContain('设置并继续');
+    expect(container!.textContent).toContain('暂不设置');
+    expect(container!.textContent).toContain(goalNotice);
+    expect(container!.textContent).toContain('Push or comment.');
+    expect(container!.textContent).toContain(
+      'Preserve the exact budget assumption.',
+    );
+    expect(container!.textContent).not.toContain('Propose Goal:');
+    expect(container!.querySelector('pre')).toBeNull();
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('retains arbitrary objectives and fallback confirmation content', () => {
+    render(false, { ...goalRequest, rawInput: undefined });
+    expect(container!.textContent!.split(goalNotice)).toHaveLength(2);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
+    rerender(false, {
+      ...goalRequest,
+      id: 'plain',
+      rawInput: { objective: '原样保留\n  command --flag' },
+      content: [],
+    });
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe('原样保留\n  command --flag');
+  });
+
+  it('does not invoke approval shortcuts while reading goal tabs or text', () => {
+    render(false, goalRequest);
+    const panel = container!.querySelector(
+      '[role="tabpanel"][data-state="active"]',
+    )!;
+    act(() => {
+      for (const key of ['1', '2', 'j', 'k', 'Home', 'End', 'Escape']) {
+        panel.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true }),
+        );
+      }
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('disables duplicate submissions and retains the full view when retrying', async () => {
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    render(false, goalRequest);
+    switchGoalTab('full');
+    const approve = container!.querySelector<HTMLButtonElement>(
+      '[data-option-id="proceed"]',
+    )!;
+    act(() => {
+      approve.click();
+      approve.click();
+    });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(approve.disabled).toBe(true);
+    await act(async () => {
+      fail(new Error('offline'));
+    });
+    expect(approve.disabled).toBe(false);
+    expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+      'Please try again',
+    );
+    expect(
+      container!.querySelector('[role="tab"][data-state="active"]')!
+        .textContent,
+    ).toBe('Full content');
+    act(() => approve.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('goal-request', 'proceed');
+  });
+
+  it('rearms synchronous failures and ignores late rejection of an older request', async () => {
+    onConfirm.mockImplementationOnce(() => {
+      throw new Error('offline');
+    });
+    render(false, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(container!.querySelector('[role="alert"]')).not.toBeNull();
+    let fail!: (reason: Error) => void;
+    onConfirm.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    rerender(false, { ...goalRequest, id: 'next-goal' });
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    await act(async () => {
+      fail(new Error('old request'));
+    });
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe('successive goal approvals', () => {
+  it('focuses the safe default when a pending request is replaced', () => {
+    render(true, goalRequest);
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .click(),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="proceed"]')!
+        .disabled,
+    ).toBe(true);
+    rerender(true, { ...goalRequest, id: 'new-goal' });
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-option-id="reject"]'),
+    );
+    expect(
+      container!.querySelector<HTMLButtonElement>('[data-option-id="reject"]')!
+        .disabled,
+    ).toBe(false);
+  });
+});
+
+describe('goal approval objective whitespace', () => {
+  it('does not repeat an objective trimmed by the confirmation producer', () => {
+    render(false, {
+      ...goalRequest,
+      rawInput: { objective: `  ${goalObjective}\n` },
+    });
+    expect(container!.textContent!.split('Audit open PRs.')).toHaveLength(2);
+    expect(container!.textContent).toContain(goalNotice);
+    switchGoalTab('full');
+    expect(
+      container!.querySelector('[role="tabpanel"][data-state="active"]')!
+        .textContent,
+    ).toBe(`${goalNotice}\n\n${goalObjective}`);
   });
 });

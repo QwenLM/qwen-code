@@ -36,6 +36,7 @@ import type {
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
+  GoalStateEvent,
   ExtensionInstallEvent,
   ExtensionUninstallEvent,
   ToolOutputTruncatedEvent,
@@ -71,7 +72,7 @@ import {
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { sanitizeHookName } from '../sanitize.js';
-import { InstallationManager } from '../../utils/installationManager.js';
+import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
 
@@ -102,6 +103,9 @@ const MAX_EVENTS = 1000;
  * Maximum events to retry after a failed RUM flush
  */
 const MAX_RETRY_EVENTS = 100;
+
+const ERROR_TEXT_PROPERTY_KEYS = ['error_message', 'error_excerpt'];
+const REDACTED_ERROR_TEXT = '***REDACTED***';
 
 export interface LogResponse {
   nextRequestWaitMs?: number;
@@ -181,6 +185,7 @@ export class QwenLogger {
 
   enqueueLogEvent(event: RumEvent): void {
     try {
+      this.redactEventErrorText(event);
       // Manually handle overflow for FixedDeque, which throws when full.
       const wasAtCapacity = this.events.size >= MAX_EVENTS;
 
@@ -197,6 +202,23 @@ export class QwenLogger {
       }
     } catch (error) {
       this.debugLogger.error('QwenLogger: Failed to enqueue log event.', error);
+    }
+  }
+
+  private redactEventErrorText(event: RumEvent): void {
+    const properties = event.properties;
+    if (properties) {
+      for (const key of ERROR_TEXT_PROPERTY_KEYS) {
+        const value = properties[key];
+        if (typeof value === 'string') {
+          properties[key] = REDACTED_ERROR_TEXT;
+        }
+      }
+    }
+
+    const message = (event as RumExceptionEvent).message;
+    if (typeof message === 'string') {
+      (event as RumExceptionEvent).message = REDACTED_ERROR_TEXT;
     }
   }
 
@@ -285,7 +307,8 @@ export class QwenLogger {
         auth_type: authType,
         model: this.config?.getModel(),
         base_url:
-          authType === AuthType.USE_OPENAI
+          authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES
             ? this.config?.getContentGeneratorConfig().baseUrl || ''
             : '',
         ...(this.config?.getChannel?.()
@@ -538,9 +561,13 @@ export class QwenLogger {
       `tool_call#${event.function_name}`,
       {
         properties: {
+          call_id: event.call_id,
           prompt_id: event.prompt_id,
           response_id: event.response_id,
           tool_name: event.function_name,
+          status: event.status,
+          execution_status: event.execution_status,
+          tool_type: event.tool_type,
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
@@ -580,12 +607,42 @@ export class QwenLogger {
         subagent_name: event.subagent_name,
         status: event.status,
         terminate_reason: event.terminate_reason,
+        ...(event.loop_type ? { loop_type: event.loop_type } : {}),
       },
       snapshots: JSON.stringify({
         ...(event.execution_summary
           ? { execution_summary: event.execution_summary }
           : {}),
       }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logGoalStateEvent(event: GoalStateEvent): void {
+    // The Goal id is left out: this sink aggregates by installation, where a
+    // per-Goal identifier only adds a unique value to every row.
+    const properties: Record<string, unknown> = {
+      cause: event.cause,
+      revision: event.revision,
+    };
+    for (const key of [
+      'status',
+      'limit_kind',
+      'turn_count',
+      'tokens_used',
+      'no_progress_turns',
+      'token_budget',
+      'turn_budget',
+      'active_time_ms',
+      'active_time_budget_ms',
+      'objective_length',
+    ] as const) {
+      if (event[key] !== undefined) properties[key] = event[key];
+    }
+    const rumEvent = this.createActionEvent('goal', 'goal_state', {
+      properties,
     });
 
     this.enqueueLogEvent(rumEvent);
@@ -1001,7 +1058,7 @@ export class QwenLogger {
   }
 
   // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
-  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  // logContentRetryEvent which is fired by llmChat's content-recovery loop.
   logApiRetryEvent(event: ApiRetryEvent): void {
     const rumEvent = this.createActionEvent('misc', 'api_retry', {
       properties: {
@@ -1091,10 +1148,6 @@ export class QwenLogger {
       success: event.success ? 1 : 0,
       exit_code: event.exit_code,
     };
-
-    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
-      properties['error'] = event.error;
-    }
 
     const rumEvent = this.createActionEvent(
       'hook',

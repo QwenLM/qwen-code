@@ -19,6 +19,7 @@ import {
   sendStructuredMessage,
   disposeInboxLocks,
 } from './mailbox.js';
+import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
   const original =
@@ -137,6 +138,24 @@ describe('mailbox', () => {
     expect(texts).toContain('recent-read'); // read but within window → kept
     expect(texts).toContain('aged-unread'); // unread → never dropped
     expect(texts).toContain('fresh');
+  });
+
+  // ─── Lock compromise ─────────────────────────────────────
+
+  it('still writes the message when the lock is compromised', async () => {
+    const { lockSpy, getOnCompromised } = mockCompromisedLock();
+
+    try {
+      await expect(
+        writeMessage('team', 'worker', makeMessage({ text: 'compromised' })),
+      ).resolves.toBeUndefined();
+      expect(getOnCompromised()).toBeTypeOf('function');
+    } finally {
+      lockSpy.mockRestore();
+    }
+
+    const messages = await readInbox('team', 'worker');
+    expect(messages.map((m) => m.text)).toEqual(['compromised']);
   });
 
   // ─── consumeUnread ─────────────────────────────────────────

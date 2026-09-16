@@ -8,13 +8,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
 import type {
+  AgentEventEmitter,
   Config,
   ToolRegistry,
-  AgentEventEmitter,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
   AgentStreamTextEvent,
+  AgentUsageEvent,
   ToolEditConfirmationDetails,
   ToolInfoConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
@@ -261,10 +262,48 @@ describe('SubAgentTracker', () => {
 
       eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
-      // Give time for any async operation
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('should emit progress update to parent on TOOL_CALL event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createToolCallEvent({
+        name: 'read_file',
+        callId: 'call-123',
+        args: { path: 'test.ts' },
+        description: 'Reading file',
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining('read_file'),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
+          }),
+        }),
+      );
     });
 
     it('should not emit when aborted', async () => {
@@ -282,6 +321,60 @@ describe('SubAgentTracker', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('uses enriched message when tool description is available', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const mockToolRegistry =
+        mockContext.config.getToolRegistry() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+      mockToolRegistry.getTool = vi.fn().mockReturnValue({
+        displayName: 'ReadFile',
+        getDescription: () => 'Reading file',
+      });
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-enriched',
+          args: { path: 'test.ts' },
+          description: 'Reading file',
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+      const text = sendUpdateSpy.mock.calls[0][0].content[0].content.text;
+      expect(text).toBe('ReadFile: Reading file');
+    });
+
+    it('falls back to Running tool: <name> when tool description throws', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const mockToolRegistry =
+        mockContext.config.getToolRegistry() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+      mockToolRegistry.getTool = vi.fn().mockReturnValue({
+        displayName: 'ReadFile',
+        getDescription: () => {
+          throw new Error('boom');
+        },
+      });
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-fallback',
+          args: { path: 'test.ts' },
+          description: undefined, // force fallback path
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+      const text = sendUpdateSpy.mock.calls[0][0].content[0].content.text;
+      expect(text).toBe('Running tool: ReadFile');
     });
   });
 
@@ -352,10 +445,42 @@ describe('SubAgentTracker', () => {
       });
     });
 
-    it('should emit plan update for TodoWriteTool results', async () => {
+    it('treats rejected nested tool updates as best-effort', async () => {
+      sendUpdateSpy.mockRejectedValue(new Error('client unavailable'));
       tracker.setup(eventEmitter, abortController.signal);
 
-      // Store args via tool call
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({
+          name: 'read_file',
+          callId: 'call-best-effort',
+          args: { path: '/test.ts' },
+        }),
+      );
+      eventEmitter.emit(
+        AgentEventType.TOOL_RESULT,
+        createToolResultEvent({
+          name: 'read_file',
+          callId: 'call-best-effort',
+          success: true,
+          resultDisplay: 'contents',
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalledTimes(3);
+      });
+      await Promise.resolve();
+    });
+
+    // Subagent todo state is isolated from the parent session plan: a
+    // subagent's TodoWrite result must not promote into a session-level
+    // plan update. The guard lives in ToolCallEmitter.emitResult, keyed on
+    // the subagentMeta this tracker stamps onto every emit.
+
+    it('does not promote a subagent TodoWrite as the session plan', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
       eventEmitter.emit(
         AgentEventType.TOOL_CALL,
         createToolCallEvent({
@@ -367,7 +492,6 @@ describe('SubAgentTracker', () => {
         }),
       );
 
-      // Emit result with todo_list display
       const resultEvent = createToolResultEvent({
         name: ToolNames.TODO_WRITE,
         callId: 'call-todo',
@@ -380,14 +504,12 @@ describe('SubAgentTracker', () => {
 
       eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
-      await vi.waitFor(() => {
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [
-            { content: 'Task 1', priority: 'medium', status: 'completed' },
-          ],
-        });
-      });
+      // emitResult is fire-and-forget; flush the microtask queue before
+      // asserting so a regression that re-enables plan emission is caught.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(sendUpdateSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sessionUpdate: 'plan' }),
+      );
     });
 
     it('should clean up state after result', async () => {
@@ -475,6 +597,81 @@ describe('SubAgentTracker', () => {
           }),
         }),
       );
+    });
+
+    it('should emit progress update to parent on TOOL_WAITING_APPROVAL Event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-edit',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: '/test.ts',
+          originalContent: 'old',
+          newContent: 'new',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining(
+                  'Waiting for permission: edit_file',
+                ),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
+          }),
+        }),
+      );
+    });
+
+    it('should deduplicate progress updates for the same approval callId', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-eidt-dedup',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: '/test.ts',
+          originalContent: 'old',
+          newContent: 'new',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      const progressCalls = sendUpdateSpy.mock.calls.filter(
+        (call) => call[0]?._meta?.subagentProgress === true,
+      );
+      expect(progressCalls).toHaveLength(1);
     });
 
     it('should respond to subagent with permission outcome', async () => {
@@ -574,6 +771,62 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
       });
+    });
+
+    it('hides project persistence for a standalone nested permission', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+        },
+      });
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        undefined,
+        (params, signal) => requestPermissionSpy(params, signal),
+        {
+          allowProjectPersistence: false,
+          allowUserPersistence: true,
+        },
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+
+      eventEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        createApprovalEvent({
+          name: 'shell',
+          callId: 'call-standalone-shell',
+          confirmationDetails: {
+            type: 'exec',
+            title: 'Confirm shell',
+            command: 'git status',
+            rootCommand: 'git',
+            permissionRules: ['Bash(git status)'],
+          } as AgentApprovalRequestEvent['confirmationDetails'],
+          respond: respondSpy,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      });
+      const request = requestPermissionSpy.mock.calls[0]?.[0] as {
+        options: Array<{ optionId: string }>;
+      };
+      expect(request.options.map((option) => option.optionId)).not.toContain(
+        ToolConfirmationOutcome.ProceedAlwaysProject,
+      );
+      expect(request.options.map((option) => option.optionId)).toContain(
+        ToolConfirmationOutcome.ProceedAlwaysUser,
+      );
+      expect(respondSpy).not.toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedAlwaysProject,
+        expect.anything(),
+      );
     });
 
     it('notifies when nested ask_user_question is cancelled', async () => {
@@ -685,6 +938,40 @@ describe('SubAgentTracker', () => {
       expect(onPermissionCancel.mock.invocationCallOrder[0]).toBeLessThan(
         respondSpy.mock.invocationCallOrder[0],
       );
+    });
+
+    it('does not report parent abort as an explicit nested permission cancellation', async () => {
+      requestPermissionSpy.mockReturnValue(new Promise<never>(() => {}));
+      const onPermissionCancel = vi.fn();
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        onPermissionCancel,
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      eventEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        createApprovalEvent({
+          name: 'shell',
+          callId: 'call-shell',
+          confirmationDetails: createInfoConfirmation(),
+          respond: respondSpy,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalledOnce();
+      });
+      abortController.abort();
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      });
+
+      expect(onPermissionCancel).not.toHaveBeenCalled();
     });
 
     it('notifies when nested permission failure cannot respond', async () => {
@@ -874,6 +1161,39 @@ describe('SubAgentTracker', () => {
   });
 
   describe('stream text handling', () => {
+    it.each([
+      [
+        'stream text',
+        AgentEventType.STREAM_TEXT,
+        () =>
+          createStreamTextEvent({
+            text: 'best-effort stream text',
+          }),
+      ],
+      [
+        'usage metadata',
+        AgentEventType.USAGE_METADATA,
+        () =>
+          ({
+            subagentId: 'test-subagent',
+            round: 1,
+            timestamp: Date.now(),
+            usage: { promptTokenCount: 1 },
+            durationMs: 5,
+          }) satisfies AgentUsageEvent,
+      ],
+    ])('treats rejected %s updates as best-effort', async (_, type, event) => {
+      sendUpdateSpy.mockRejectedValue(new Error('client unavailable'));
+      tracker.setup(eventEmitter, abortController.signal);
+
+      eventEmitter.emit(type, event());
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalledOnce();
+      });
+      await Promise.resolve();
+    });
+
     it('should emit agent_message_chunk on STREAM_TEXT event', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 

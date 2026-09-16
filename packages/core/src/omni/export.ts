@@ -221,6 +221,16 @@ function textOfPart(part: unknown): string | undefined {
   return undefined;
 }
 
+function functionResponseOfPart(
+  part: unknown,
+): { id?: unknown; parts?: unknown[] } | undefined {
+  if (typeof part !== 'object' || part === null) return undefined;
+  const response = (part as { functionResponse?: unknown }).functionResponse;
+  if (typeof response !== 'object' || response === null) return undefined;
+  const { id, parts } = response as { id?: unknown; parts?: unknown };
+  return { id, ...(Array.isArray(parts) ? { parts } : {}) };
+}
+
 function isThoughtPart(part: unknown): boolean {
   return (
     typeof part === 'object' &&
@@ -380,7 +390,11 @@ function consumeRecordParts(
   record: TranscriptRecordView,
   collectProse: boolean,
 ): void {
-  for (const part of record.message?.parts ?? []) {
+  const parts = (record.message?.parts ?? []).flatMap((part) => [
+    part,
+    ...(functionResponseOfPart(part)?.parts ?? []),
+  ]);
+  for (const part of parts) {
     const raw = textOfPart(part);
     if (raw === undefined) continue;
     // Reminders are harness plumbing, never annotation carriers — strip
@@ -659,8 +673,18 @@ function buildMemoryRecords(snapshot: MediaMemorySnapshot): MemoryRecords {
 function filterToSession(
   memory: MemoryRecords,
   turns: OmniTrajectoryTurnRecord[],
+  transcriptLines: TranscriptRecordView[],
 ): MemoryRecords {
   const callIds = new Set<string>();
+  // Code-mode child calls are recorded as tool results under the outer exec
+  // call. Join their execution IDs without inventing model-authored arguments.
+  for (const record of activeChainRecords(transcriptLines)) {
+    if (record.type !== 'tool_result') continue;
+    for (const part of record.message?.parts ?? []) {
+      const id = functionResponseOfPart(part)?.id;
+      if (typeof id === 'string') callIds.add(id);
+    }
+  }
   const mediaNames = new Set<string>();
   for (const turn of turns) {
     for (const call of turn.response.toolCalls) {
@@ -770,7 +794,7 @@ export async function exportOmniTrajectory(
 
   const snapshot = await readSnapshotRaw(options.omniRootDir);
   const memoryRecords = snapshot
-    ? filterToSession(buildMemoryRecords(snapshot), turns)
+    ? filterToSession(buildMemoryRecords(snapshot), turns, transcriptLines)
     : { files: [], executions: [] };
   // files before executions, each sorted by id — deterministic re-export.
   records.push(

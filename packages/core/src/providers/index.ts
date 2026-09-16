@@ -34,6 +34,8 @@ export {
   shouldShowStep,
 } from './provider-config.js';
 
+export { discoverProviderModels } from './model-discovery.js';
+
 // Provider registry
 export {
   ALL_PROVIDERS,
@@ -51,6 +53,7 @@ export {
   idealabProvider,
   minimaxProvider,
   modelscopeProvider,
+  moonshotProvider,
   openRouterProvider,
   requestyProvider,
   THIRD_PARTY_PROVIDERS,

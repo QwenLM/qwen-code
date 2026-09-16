@@ -89,6 +89,9 @@ export class ModelRegistry {
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
 
+  /** Raw providers config this registry was last built from. */
+  private modelProvidersConfig?: ModelProvidersConfig;
+
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
       case AuthType.QWEN_OAUTH:
@@ -106,6 +109,7 @@ export class ModelRegistry {
   ) {
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
+    this.modelProvidersConfig = modelProvidersConfig;
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -235,6 +239,8 @@ export class ModelRegistry {
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,
+      visionOnly: model.visionOnly,
+      supportsImageGeneration: model.supportsImageGeneration,
       imageOnly: model.imageOnly,
     }));
   }
@@ -295,7 +301,9 @@ export class ModelRegistry {
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
-    return Array.from(models.values()).find((model) => !model.imageOnly);
+    return Array.from(models.values()).find(
+      (model) => !model.imageOnly && !model.voiceOnly,
+    );
   }
 
   /**
@@ -342,6 +350,7 @@ export class ModelRegistry {
     const selectorOnlyCount = [
       config.fastOnly,
       config.voiceOnly,
+      config.visionOnly,
       config.imageOnly,
     ].filter(Boolean).length;
     if (selectorOnlyCount > 1) {
@@ -366,18 +375,21 @@ export class ModelRegistry {
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    if (providerProtocolConfig !== undefined) {
-      this.providerProtocolConfig = providerProtocolConfig;
-    }
+    const reloaded = new ModelRegistry(
+      modelProvidersConfig,
+      providerProtocolConfig ?? this.providerProtocolConfig,
+    );
+    this.modelsByAuthType = reloaded.modelsByAuthType;
+    this.providerProtocolConfig = reloaded.providerProtocolConfig;
+    this.modelProvidersConfig = reloaded.modelProvidersConfig;
+  }
 
-    // Clear existing user-configured models (preserve qwen-oauth)
-    for (const authType of this.modelsByAuthType.keys()) {
-      if (authType !== AuthType.QWEN_OAUTH) {
-        this.modelsByAuthType.delete(authType);
-      }
-    }
+  /** The raw providers config this registry was last built from. */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelProvidersConfig;
+  }
 
-    // Re-register user-configured models under their resolved protocol
-    this.registerProvidersConfig(modelProvidersConfig);
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.providerProtocolConfig;
   }
 }

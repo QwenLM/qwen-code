@@ -1,28 +1,25 @@
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonBackgroundTurn,
+  DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
-import {
-  FileAudioIcon,
-  FileCode2Icon,
-  FileIcon,
-  FileImageIcon,
-  FileTextIcon,
-  FileVideoIcon,
-  LinkIcon,
-  NotebookTabsIcon,
-  type LucideIcon,
-} from 'lucide-react';
-import { memo, useState } from 'react';
+import { DownloadIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
   formatArtifactSize,
+  downloadWorkspaceFile,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
+  normalizePath,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
+import { ArtifactIcon } from './ArtifactIcon';
+import { useArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import styles from './TurnOutputs.module.css';
 
 export interface TurnOutputFileChange {
@@ -50,6 +47,7 @@ export interface TurnOutputScheduledTask {
   prompt: string;
   recurring: boolean;
   durable: boolean;
+  workspaceId?: string;
   display?: string;
 }
 
@@ -61,7 +59,24 @@ export const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
   'scheduled_task',
 ];
 
-export type TurnOutputOpenRequest =
+export const TURN_OUTPUT_VISIBLE_LIMIT = 3;
+
+export function visibleTurnOutputs<T>(
+  items: readonly T[],
+  expanded: boolean,
+): readonly T[] {
+  return expanded ? items : items.slice(0, TURN_OUTPUT_VISIBLE_LIMIT);
+}
+
+export type TurnOutputOpenRequest = (
+  | {
+      id: string;
+      kind: 'background_task';
+      title: string;
+      turnId: string;
+      backgroundTurn: DaemonBackgroundTurn;
+      workspaceCwd?: string;
+    }
   | {
       id: 'review';
       kind: 'review';
@@ -69,7 +84,29 @@ export type TurnOutputOpenRequest =
       turnId: string;
       changes: readonly TurnOutputFileChange[];
       selectedPath?: string;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
+    }
+  | {
+      id: 'image';
+      kind: 'image';
+      title: string;
+      turnId: string;
+      src: string;
+      alt?: string;
+      attachmentId?: string;
+    }
+  | {
+      id: string;
+      kind: 'attachment';
+      silentUnavailable?: boolean;
+      title: string;
+      turnId: string;
+      mimeType?: string;
+      data?: Blob;
+      text?: string;
+      attachmentId?: string;
+      workspacePath?: string;
       workspaceCwd?: string;
     }
   | {
@@ -80,7 +117,8 @@ export type TurnOutputOpenRequest =
       artifactId: string;
       managedId?: string;
       artifact: DaemonSessionArtifact;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
       previewContent?: string;
     }
   | {
@@ -89,7 +127,8 @@ export type TurnOutputOpenRequest =
       title: string;
       turnId: string;
       task: TurnOutputScheduledTask;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
     }
   | {
       id: string;
@@ -99,7 +138,11 @@ export type TurnOutputOpenRequest =
       tool: ACPToolCall;
       sessionId: string;
       workspaceCwd?: string;
-    };
+    }
+) & {
+  /** Session whose transcript produced this output. */
+  sourceSessionId?: string;
+};
 
 interface TurnOutputsProps {
   turnId: string;
@@ -114,6 +157,7 @@ interface TurnOutputsProps {
   ) => void;
   onOpenArtifact: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask: (task: TurnOutputScheduledTask) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }
 
 function TurnOutputsComponent({
@@ -126,9 +170,13 @@ function TurnOutputsComponent({
   onReviewChanges,
   onOpenArtifact,
   onOpenScheduledTask,
+  onError,
 }: TurnOutputsProps) {
   const { t } = useI18n();
+  const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
+  const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
+  const [showAllArtifacts, setShowAllArtifacts] = useState(false);
   if (
     changes.length === 0 &&
     artifacts.length === 0 &&
@@ -136,8 +184,10 @@ function TurnOutputsComponent({
   ) {
     return null;
   }
-  const visibleChanges = showAllChanges ? changes : changes.slice(0, 3);
-  const remainingChanges = changes.length - 3;
+  const visibleChanges = visibleTurnOutputs(changes, showAllChanges);
+  const remainingChanges = changes.length - TURN_OUTPUT_VISIBLE_LIMIT;
+  const visibleArtifacts = visibleTurnOutputs(artifacts, showAllArtifacts);
+  const remainingArtifacts = artifacts.length - TURN_OUTPUT_VISIBLE_LIMIT;
   const totals = sumLineStats(changes);
   const openReview = (selectedPath?: string) => {
     if (onOpenRequest) {
@@ -148,6 +198,9 @@ function TurnOutputsComponent({
         turnId,
         changes,
         ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
         ...(selectedPath ? { selectedPath } : {}),
       });
       return;
@@ -169,6 +222,10 @@ function TurnOutputsComponent({
         artifactId: artifact.id,
         ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
         artifact,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       });
       return;
@@ -182,7 +239,13 @@ function TurnOutputsComponent({
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
         turnId,
-        task,
+        task: workspaceTarget?.workspaceId
+          ? { ...task, workspaceId: workspaceTarget.workspaceId }
+          : task,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
       });
       return;
     }
@@ -304,13 +367,45 @@ function TurnOutputsComponent({
         </div>
       )}
 
-      {artifacts.map((artifact) => (
+      {visibleArtifacts.map((artifact) => (
         <ArtifactCard
           key={artifact.id}
           artifact={artifact}
-          onOpen={() => openArtifact(artifact)}
+          onOpen={
+            canOpenWorkspaceArtifact(artifact)
+              ? () => openArtifact(artifact)
+              : undefined
+          }
+          onError={onError}
+          onDownload={
+            canDownloadArtifact(artifact) && workspaceActions
+              ? (isCancelled) =>
+                  downloadWorkspaceFile(
+                    workspaceActions,
+                    artifact.workspacePath,
+                    artifact.mimeType,
+                    isCancelled,
+                  )
+              : undefined
+          }
         />
       ))}
+      {remainingArtifacts > 0 && (
+        <button
+          type="button"
+          className={styles.showMoreButton}
+          onClick={() => setShowAllArtifacts((value) => !value)}
+        >
+          <span>
+            {showAllArtifacts
+              ? t('turnOutputs.collapseArtifacts')
+              : t('turnOutputs.showMoreArtifacts', {
+                  count: remainingArtifacts,
+                })}
+          </span>
+          <ChevronIcon open={showAllArtifacts} />
+        </button>
+      )}
 
       {scheduledTasks.map((task) => (
         <ScheduledTaskCard
@@ -327,57 +422,101 @@ function TurnOutputsComponent({
 function ArtifactCard({
   artifact,
   onOpen,
+  onDownload,
+  onError,
 }: {
   artifact: DaemonSessionArtifact;
-  onOpen: () => void;
+  onOpen?: () => void;
+  onDownload?: (isCancelled: () => boolean) => Promise<void>;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
+  const [downloading, setDownloading] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // StrictMode replays setup -> cleanup -> setup without re-running useRef's
+    // initializer, so restore the flag or every download looks cancelled.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
-  const FormatIcon = getArtifactFormatIcon(artifact.kind);
+  const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
+  const downloadName =
+    (artifact.workspacePath &&
+      normalizePath(artifact.workspacePath).split('/').at(-1)) ||
+    artifact.title;
+  const handleDownload = async () => {
+    if (!onDownload || downloading) return;
+    setDownloading(true);
+    try {
+      await onDownload(() => !mountedRef.current);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      const message = t('common.downloadFailed', {
+        message: extractErrorDetail(error),
+      });
+      if (onError) onError(new Error(message, { cause: error }), message);
+      else console.error(message, error);
+    } finally {
+      setDownloading(false);
+    }
+  };
   return (
     <div className={styles.card}>
       <div className={styles.summary}>
         <span className={styles.icon} aria-hidden="true">
-          {FormatIcon ? (
-            <FormatIcon className={styles.iconSvg} strokeWidth={1.8} />
-          ) : (
-            <DocumentIcon />
-          )}
+          <ArtifactIcon artifact={artifact} className={styles.iconSvg} />
         </span>
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[getArtifactTypeLabel(artifact), size].filter(Boolean).join(' · ')}
+            {[
+              artifact.metadata?.['artifactType'] === 'web_preview_snapshot'
+                ? t('webPreview.saved')
+                : getArtifactTypeLabel(artifact),
+              size,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
           </div>
         </div>
         <div className={styles.actions}>
-          <button
-            type="button"
-            className={styles.reviewButton}
-            onClick={onOpen}
-            title={artifact.title}
+          {onDownload && (
+            <button
+              type="button"
+              className={styles.reviewButton}
+              onClick={() => void handleDownload()}
+              title={`${t('common.download')} ${downloadName}`}
+              disabled={downloading}
+            >
+              <DownloadIcon size={16} strokeWidth={1.8} aria-hidden="true" />
+              {t(downloading ? 'common.downloading' : 'common.download')}
+            </button>
+          )}
+          <span
+            className={styles.openButtonWrapper}
+            title={blockedReason ?? artifact.title}
           >
-            {t('common.open')}
-          </button>
+            <button
+              type="button"
+              className={styles.reviewButton}
+              onClick={onOpen}
+              disabled={!onOpen}
+            >
+              <SquareArrowOutUpRightIcon
+                size={16}
+                strokeWidth={1.8}
+                aria-hidden="true"
+              />
+              {t('common.open')}
+            </button>
+          </span>
         </div>
       </div>
     </div>
   );
-}
-
-const ARTIFACT_FORMAT_ICONS: Readonly<Record<string, LucideIcon>> = {
-  file: FileIcon,
-  link: LinkIcon,
-  html: FileCode2Icon,
-  image: FileImageIcon,
-  video: FileVideoIcon,
-  audio: FileAudioIcon,
-  pdf: FileTextIcon,
-  notebook: NotebookTabsIcon,
-};
-
-export function getArtifactFormatIcon(kind: string): LucideIcon | undefined {
-  return ARTIFACT_FORMAT_ICONS[kind];
 }
 
 function ScheduledTaskCard({
@@ -421,34 +560,6 @@ function ScheduledTaskCard({
         </div>
       </div>
     </div>
-  );
-}
-
-function DocumentIcon() {
-  return (
-    <svg
-      className={styles.iconSvg}
-      viewBox="0 0 24 24"
-      fill="none"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <rect
-        x="6"
-        y="4"
-        width="12"
-        height="16"
-        rx="2"
-        stroke="currentColor"
-        strokeWidth="1.8"
-      />
-      <path
-        d="M9 10h6M9 14h4"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 
@@ -548,6 +659,41 @@ export function isRenderedFilePath(value: string) {
     path.endsWith('.markdown') ||
     getImageMimeTypeFromPath(path) !== undefined
   );
+}
+
+export function isDownloadableReviewFilePath(value: string) {
+  return /\.(?:html?|md|markdown)$/i.test(value);
+}
+
+function canDownloadArtifact(
+  artifact: DaemonSessionArtifact,
+): artifact is DaemonSessionArtifact & { workspacePath: string } {
+  return (
+    artifact.storage === 'workspace' &&
+    artifact.status === 'available' &&
+    Boolean(artifact.workspacePath)
+  );
+}
+
+export function canOpenWorkspaceArtifact(
+  artifact: DaemonSessionArtifact,
+): boolean {
+  if (artifact.storage !== 'workspace') {
+    return true;
+  }
+  return artifact.status === 'available' || artifact.status === 'changed';
+}
+
+export function getWorkspaceArtifactOpenBlockReason(
+  artifact: DaemonSessionArtifact,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string | undefined {
+  if (canOpenWorkspaceArtifact(artifact)) {
+    return undefined;
+  }
+  return artifact.workspacePath
+    ? t('turnOutputs.artifactUnavailable', { path: artifact.workspacePath })
+    : t('turnOutputs.artifactMissing');
 }
 
 export function displayPath(path: string, workspaceCwd?: string) {

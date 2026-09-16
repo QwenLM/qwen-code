@@ -10,6 +10,8 @@ interface TodoPanelProps {
   todos: TodoItem[];
   title?: string;
   statusItems?: readonly WebShellBottomStatusItem[];
+  hasLiveActivity?: boolean;
+  onOpen?: () => void;
 }
 
 function getStatusClass(status: TodoItem['status']): string {
@@ -27,6 +29,8 @@ export const TodoPanel = memo(function TodoPanel({
   todos,
   title,
   statusItems = [],
+  hasLiveActivity = true,
+  onOpen,
 }: TodoPanelProps) {
   const { t } = useI18n();
   if (todos.length === 0 && statusItems.length === 0) return null;
@@ -64,7 +68,28 @@ export const TodoPanel = memo(function TodoPanel({
       tabIndex={0}
     >
       <div className={styles.summary} aria-label={summaryAriaLabel}>
-        {hasTodos && (
+        {hasTodos && onOpen ? (
+          <button
+            type="button"
+            className={styles.progressButton}
+            aria-label={summaryAriaLabel}
+            onClick={onOpen}
+          >
+            <span
+              className={styles.progressRing}
+              style={{ '--todo-progress': String(progress) } as CSSProperties}
+              aria-hidden="true"
+            />
+            <span className={styles.stepText}>
+              <span className={styles.fullText}>
+                {t('todo.stepProgress', { current: stepIndex, total })}
+              </span>
+              <span className={styles.compactText}>
+                {t('todo.stepFraction', { current: stepIndex, total })}
+              </span>
+            </span>
+          </button>
+        ) : hasTodos ? (
           <>
             <span
               className={styles.progressRing}
@@ -80,7 +105,7 @@ export const TodoPanel = memo(function TodoPanel({
               </span>
             </span>
           </>
-        )}
+        ) : null}
         {statusItems.map((item, index) => (
           <span key={item.id} className={styles.statusSegmentWrap}>
             {(total > 0 || index > 0) && (
@@ -115,7 +140,7 @@ export const TodoPanel = memo(function TodoPanel({
               className={`${styles.item} ${getStatusClass(todo.status)}`}
             >
               <span className={styles.icon} aria-hidden="true">
-                {todo.status === 'in_progress' ? (
+                {todo.status === 'in_progress' && hasLiveActivity ? (
                   <span className={styles.loadingIcon} />
                 ) : (
                   getTodoStatusIcon(todo.status)

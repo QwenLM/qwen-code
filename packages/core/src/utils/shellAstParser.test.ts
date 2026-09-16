@@ -5,10 +5,15 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
   classifyShellCommandSafety,
   initParser,
   isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
   extractCommandRules,
   _resetParser,
   _setParserFailedForTesting,
@@ -42,6 +47,104 @@ describe('isShellCommandReadOnlyAST', () => {
 
   it('rejects command substitution', async () => {
     expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
+  });
+
+  it('rejects the two substitution forms from issue #8582', async () => {
+    for (const command of [
+      'echo "$\\\n(touch /tmp/pwned)"',
+      'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+    }
+  });
+
+  it('keeps literal twins of issue #8582 read-only', async () => {
+    for (const command of [
+      'echo "\\$\\\n(touch /tmp/pwned)"',
+      'echo "$$\\\n(touch /tmp/pwned)"',
+      "echo '$\\\n(touch /tmp/pwned)'",
+      "echo '${two@P}'",
+      'echo "${two@Q}"',
+    ]) {
+      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
+    }
+  });
+
+  describe('repository-local Git config (#8575)', () => {
+    const tempDirs: string[] = [];
+    const createRepo = (): string => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'qwen-git-config-'));
+      tempDirs.push(dir);
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      return dir;
+    };
+    const gitConfig = (cwd: string, ...args: string[]): void => {
+      execFileSync('git', ['config', ...args], { cwd });
+    };
+
+    afterEach(() => {
+      for (const dir of tempDirs.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('downgrades only the two reproduced command/config pairs', async () => {
+      const cwd = createRepo();
+      gitConfig(cwd, 'diff.external', 'example-external-diff');
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        false,
+      );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+
+      gitConfig(cwd, '--unset', 'diff.external');
+      gitConfig(cwd, 'core.fsmonitor', 'example-fsmonitor');
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(false);
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+
+      gitConfig(cwd, 'core.fsmonitor', 'false');
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+    });
+
+    it('uses Git include and precedence semantics', async () => {
+      const cwd = createRepo();
+      const included = path.join(cwd, 'included.config');
+      writeFileSync(included, '[diff]\n\texternal = included-driver\n');
+      gitConfig(cwd, 'include.path', included);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory("git 'diff'", cwd),
+      ).toBe(false);
+
+      gitConfig(cwd, 'diff.external', '');
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+    });
+
+    it('fails closed instead of simulating a changed directory', async () => {
+      const cwd = createRepo();
+      const target = createRepo();
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `cd ${JSON.stringify(target)} && git status`,
+          cwd,
+        ),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory(
+          `git status && cd ${JSON.stringify(target)}`,
+          cwd,
+        ),
+      ).toBe(true);
+    });
   });
 
   // Regression coverage for PR #4386 round 4: the AST walker previously
@@ -407,6 +510,22 @@ describe('isShellCommandReadOnlyAST', () => {
 // =========================================================================
 
 describe('classifyShellCommandSafety', () => {
+  // Budget for `process.cpuUsage()`, which is process-wide: it sums user +
+  // system across every thread for the window, so V8's background GC and JIT
+  // threads and the parser runtime's own threads are charged to it alongside
+  // the work under test. Measured against the built package on an idle
+  // machine, that reports 2.1-3.1x the wall time of the same commands -- 2.1x
+  // even when they run sequentially, so the inflation is the accounting, not
+  // the `Promise.all` fan-out below. The 1000 this replaces was a wall-clock
+  // number carried over unchanged when the metric changed, which put it below
+  // the floor of what a healthy run reports: ~270 ms here, 1232-1361 ms on
+  // GitHub-hosted runners.
+  //
+  // These tests guard against catastrophic backtracking on 10k-repetition
+  // adversarial inputs, which costs orders of magnitude rather than a small
+  // multiple, so the headroom below does not blunt them.
+  const maxClassificationCpuMs = 4000;
+
   it.each([
     'ls -la',
     'git status --short',
@@ -805,20 +924,23 @@ describe('classifyShellCommandSafety', () => {
     expect(await classifyShellCommandSafety(command)).toBe('unknown');
   });
 
-  it('classifies deeply nested redirected substitutions without repeated traversal', async () => {
+  it('classifies deeply nested redirected substitutions within the CPU budget', async () => {
     const commands = ['git status', 'git status'];
     for (let depth = 0; depth < 20; depth++) {
       commands[0] = `echo $(${commands[0]}) < /dev/null`;
       commands[1] = `< <(${commands[1]}) cat`;
     }
-    const startedAt = performance.now();
+    const startedCpuUsage = process.cpuUsage();
     await expect(
       Promise.all(commands.map(classifyShellCommandSafety)),
     ).resolves.toEqual(['unknown', 'unknown']);
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
   });
 
-  it('classifies adversarial rule inputs in bounded time', async () => {
+  it('classifies adversarial rule inputs within the CPU budget', async () => {
     const backslashes = '\\'.repeat(10_000);
     const repeatedSed = 'p;'.repeat(10_000);
     const repeatedPrint = 'print value; '.repeat(10_000);
@@ -832,7 +954,7 @@ describe('classifyShellCommandSafety', () => {
       `find . ${repeatedFindExec}`,
       `git status ${unmatchedBraces}`,
     ];
-    const startedAt = performance.now();
+    const startedCpuUsage = process.cpuUsage();
     await expect(
       Promise.all(commands.map(classifyShellCommandSafety)),
     ).resolves.toEqual([
@@ -843,7 +965,10 @@ describe('classifyShellCommandSafety', () => {
       'unknown',
       'read-only',
     ]);
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
   });
 });
 
@@ -1017,6 +1142,22 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     _setParserFailedForTesting();
     expect(await classifyShellCommandSafety('git status')).toBe('unknown');
     expect(await isShellCommandReadOnlyAST('git status')).toBe(true);
+  });
+
+  it('keeps the Git config gate when the parser is unavailable', async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'qwen-git-fallback-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd });
+      execFileSync('git', ['config', 'core.fsmonitor', 'example-fsmonitor'], {
+        cwd,
+      });
+      _setParserFailedForTesting();
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it('treats syntax errors as unknown without widening the boolean API', async () => {

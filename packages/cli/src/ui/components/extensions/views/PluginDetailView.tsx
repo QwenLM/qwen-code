@@ -13,6 +13,7 @@ import {
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
+import { extensionComponentsSummary } from '../../../../services/extension-components-summary.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
 
 export type PluginDetailAction =
@@ -52,19 +53,6 @@ const InfoRow = ({
     </Box>
   </Box>
 );
-
-function componentSummary(ext: Extension): string {
-  const parts: string[] = [];
-  const mcpCount = ext.mcpServers ? Object.keys(ext.mcpServers).length : 0;
-  if (mcpCount) parts.push(t('{{count}} MCP', { count: String(mcpCount) }));
-  if (ext.skills?.length)
-    parts.push(t('{{count}} Skills', { count: String(ext.skills.length) }));
-  if (ext.commands?.length)
-    parts.push(t('{{count}} Commands', { count: String(ext.commands.length) }));
-  if (ext.agents?.length)
-    parts.push(t('{{count}} Agents', { count: String(ext.agents.length) }));
-  return parts.length ? parts.join(' · ') : t('None');
-}
 
 export const PluginDetailView = ({
   extension,
@@ -141,7 +129,14 @@ export const PluginDetailView = ({
             {redactUrlCredentials(ext.installMetadata.source)}
           </InfoRow>
         )}
-        <InfoRow label={t('Components:')}>{componentSummary(ext)}</InfoRow>
+        {ext.installMetadata?.originSource && (
+          <InfoRow label={t('Origin:')}>
+            {ext.installMetadata.originSource}
+          </InfoRow>
+        )}
+        <InfoRow label={t('Components:')}>
+          {extensionComponentsSummary(ext)}
+        </InfoRow>
       </Box>
 
       <Box flexDirection="column">

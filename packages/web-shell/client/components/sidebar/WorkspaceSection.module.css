@@ -4,10 +4,12 @@
 }
 
 .headerRow {
+  position: relative;
   display: flex;
   align-items: center;
   width: 100%;
   border-radius: 6px;
+  cursor: pointer;
   transition: background 0.1s;
 }
 
@@ -16,12 +18,13 @@
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 5px;
+  padding: 5px 4px 5px 8px;
   border: none;
   background: transparent;
   color: var(--sidebar-foreground);
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
 }
@@ -33,6 +36,7 @@
 
 .headerDisabled {
   opacity: 0.5;
+  cursor: default;
 }
 
 .headerDisabled .header {
@@ -76,44 +80,31 @@
   border-radius: 4px;
 }
 
-/* Live git chip in the folder header — icon-only (the chip's `compact` form): a
-   status dot on the branch icon conveys dirty / conflict / in-progress at a
-   glance, while the branch name + ahead/behind live in the hover tooltip.
-   Rendered as a sibling of the header button (buttons can't nest), kept snug
-   after the folder name. The chip is a fixed 28px box, so the pill grows only to
-   carry the spare width to the hover actions on the right. */
-.gitPill {
-  display: inline-flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 0;
-  border: none;
-  background: none;
-  font: inherit;
-  color: inherit;
-  text-align: inherit;
-  cursor: pointer;
-}
-
-/* With a chip present, let the pill — not the folder name — own the spare width,
-   so the icon sits right after the name and the hover actions stay pinned to the
-   right edge. Without a chip the header keeps growing as before. */
-.headerRow:has(.gitPill) .header {
-  flex-grow: 0;
-}
-
 /* Trusted sessions use the sidebar's shared row with its own left indent;
    read-only rows apply the same indent below. */
 .sessions {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   margin-bottom: 12px;
+}
+
+/* Tree guide under the folder icon, in the spirit of file-explorer indent
+   guides; hovered/selected rows paint over it with their own background. */
+.sessions::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 10px;
+  left: 15px;
+  width: 1px;
+  background: color-mix(in srgb, var(--sidebar-foreground) 14%, transparent);
 }
 
 .empty {
   padding: 4px 8px 4px 26px;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 
@@ -135,14 +126,40 @@
 }
 
 .sessionName {
+  position: relative;
+  min-width: 0;
   flex: 1;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sessionTime {
-  flex: 0 0 auto;
-  font-size: 10px;
-  color: var(--muted-foreground);
+.sessionName[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
+.sessionNameInner {
+  display: inline-block;
+  min-width: max-content;
+}
+
+.sessionItemReadOnly:hover .sessionNameInner {
+  animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+@keyframes sessionTitleScroll {
+  to {
+    transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionItemReadOnly:hover .sessionNameInner {
+    animation: none;
+  }
 }

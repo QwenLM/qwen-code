@@ -9,15 +9,17 @@
  * panel just frames the daemon once one is reachable and permits framing.
  *
  * Static asset (no bundler). Constants intentionally duplicate daemon/config.ts
- * (which the bundled service worker uses) to stay standalone.
+ * (which the bundled service worker uses). The capability model is loaded from
+ * sidepanel/capability-status.js via a script tag in sidepanel.html.
  */
-/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL */
+/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL, QwenCapabilityStatus, console */
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4170';
 const STORAGE_KEY = 'qwen.daemon';
 const POLL_MS = 2000;
 const PROBE_TIMEOUT_MS = 2000;
 const FRAMED_MISS_LIMIT = 2;
+const MCP_POLL_EVERY = 5;
 const SHELL_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 
 /** The command to start a daemon that allows this extension's own origin. */
@@ -33,6 +35,7 @@ const els = {
   cmdRow: document.getElementById('cmd-row'),
   copy: document.getElementById('copy'),
   copyLabel: document.getElementById('copy-label'),
+  warning: document.getElementById('capability-warning'),
 };
 
 /** Whether a URL points at the local loopback interface. */
@@ -69,6 +72,8 @@ async function readConfig() {
 }
 
 /** GET a daemon endpoint with a short timeout; returns parsed JSON or null. */
+// A non-JSON body returns null (not {}) so callers treat it as unreachable
+// rather than as a valid-but-empty response.
 async function probeJson(url, token) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
@@ -78,7 +83,7 @@ async function probeJson(url, token) {
       signal: ctrl.signal,
     });
     if (!res.ok) return null;
-    return await res.json().catch(() => ({}));
+    return await res.json();
   } catch {
     return null;
   } finally {
@@ -87,22 +92,55 @@ async function probeJson(url, token) {
 }
 
 /** Probe `/health` then `/capabilities` and reduce to an onboarding state. */
+let mcpProbeCounter = 0;
+let cachedMcpSnapshot;
+let lastProbedBaseUrl;
 async function probeState(baseUrl, token) {
+  const { deriveCapabilityStatus } = QwenCapabilityStatus;
+  if (baseUrl !== lastProbedBaseUrl) {
+    lastProbedBaseUrl = baseUrl;
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+  }
   const health = await probeJson(`${baseUrl}/health`, token);
-  if (!health) return 'down';
+  if (!health) {
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+    return deriveCapabilityStatus(false, []);
+  }
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
-  return features.includes('allow_origin') ? 'ready' : 'needs-allow-origin';
+  let mcpSnapshot;
+  if (features.includes('browser_automation_mcp')) {
+    // `/workspace/mcp` is a cross-process RPC to the ACP child while a channel
+    // is live, so refresh it on a slower cadence than health/capabilities and
+    // reuse the last snapshot in between. The banner content changes rarely and
+    // need not contend with an in-flight generation on every 2s tick.
+    if (mcpProbeCounter % MCP_POLL_EVERY === 0) {
+      const fresh = await probeJson(`${baseUrl}/workspace/mcp`, token);
+      // A transient failure after a successful probe keeps the previous
+      // snapshot instead of pinning automation-unavailable for
+      // MCP_POLL_EVERY ticks.
+      if (fresh !== null || !cachedMcpSnapshot) cachedMcpSnapshot = fresh;
+    }
+    mcpProbeCounter += 1;
+    mcpSnapshot = cachedMcpSnapshot;
+  } else {
+    mcpProbeCounter = 0;
+    cachedMcpSnapshot = undefined;
+  }
+  return deriveCapabilityStatus(true, features, mcpSnapshot, baseUrl);
 }
 
 /** Render the welcome screen for a non-ready state. */
-function showWelcome(state, command) {
+function showWelcome(status, command) {
   framedUrl = null;
   els.iframe.removeAttribute('src');
   els.iframe.classList.add('hidden');
+  els.warning.classList.add('hidden');
   els.welcome.classList.remove('hidden');
   els.cmd.textContent = command;
-  if (state === 'down') {
+  if (status.state === 'down') {
     els.title.textContent = 'Start qwen serve';
     els.desc.textContent =
       'No local qwen serve daemon is reachable. Run this in a terminal and ' +
@@ -130,7 +168,7 @@ function postShellAuth(baseUrl, token) {
 }
 
 /** Swap to the Web Shell iframe; only (re)assigns src when the URL changes. */
-function showShell(baseUrl, token) {
+function showShell(baseUrl, token, status) {
   framedMisses = 0;
   els.welcome.classList.add('hidden');
   els.iframe.onload = () => postShellAuth(baseUrl, token);
@@ -141,6 +179,9 @@ function showShell(baseUrl, token) {
     postShellAuth(baseUrl, token);
   }
   els.iframe.classList.remove('hidden');
+  const warning = status.warning || '';
+  if (els.warning.textContent !== warning) els.warning.textContent = warning;
+  els.warning.classList.toggle('hidden', !warning);
 }
 
 /**
@@ -149,25 +190,39 @@ function showShell(baseUrl, token) {
  */
 let ticking = false;
 async function tick() {
-  // Reentrancy guard: probeState runs two sequential fetches (up to ~4s) but
-  // setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
+  // Reentrancy guard: probeState can run three sequential fetches (up to ~6s),
+  // but setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
   // burning the FRAMED_MISS_LIMIT tolerance at ~2× and flashing the welcome
   // screen (clearing the user's in-flight chat) while the daemon is just slow.
   if (ticking) return;
   ticking = true;
   try {
     const { baseUrl, token } = await readConfig();
-    const state = await probeState(baseUrl, token);
-    if (state === 'ready') {
-      showShell(baseUrl, token);
+    const status = await probeState(baseUrl, token);
+    if (status.shellReady) {
+      showShell(baseUrl, token, status);
     } else {
       if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
         framedMisses += 1;
         return;
       }
       framedMisses = 0;
-      showWelcome(state, allowOriginCommand(chrome.runtime.id));
+      showWelcome(status, allowOriginCommand(chrome.runtime.id));
     }
+  } catch (err) {
+    console.error('sidepanel probe failed:', err);
+    if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
+      framedMisses += 1;
+      return;
+    }
+    framedMisses = 0;
+    showWelcome(
+      { state: 'down', shellReady: false, warning: null },
+      allowOriginCommand(chrome.runtime.id),
+    );
+    els.desc.textContent =
+      'The side panel hit an internal error. Reload the panel or ' +
+      'reinstall the extension if this persists.';
   } finally {
     ticking = false;
   }

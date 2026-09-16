@@ -707,7 +707,7 @@ export class MemoryPressureMonitor extends EventEmitter {
       }
       case 'compact_history': {
         try {
-          const client = this.coreConfig.getGeminiClient?.();
+          const client = this.coreConfig.getLlmClient?.();
           if (!client?.isInitialized?.()) {
             debugLogger.debug(
               '[COMPACT_HISTORY] skipped: client not initialized',
@@ -735,7 +735,7 @@ export class MemoryPressureMonitor extends EventEmitter {
             },
           );
           if (result.meta) {
-            chat.setHistory(result.history);
+            chat.setHistory(result.history, chat.getCompletedToolCallIds());
             // Explicitly clear fileReadCache here instead of relying on
             // the subsequent clear_file_cache step. This removes the
             // implicit coupling between step ordering.

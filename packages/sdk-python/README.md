@@ -141,8 +141,9 @@ Common fields:
 - `path_to_qwen_executable`: `qwen`, an absolute binary path, or a `.js` CLI
   bundle
 - `model`: model override for this session
-- `permission_mode`: one of `default`, `plan`, `auto-edit`, or `yolo`; `yolo`
-  auto-approves all tools, so use it only in trusted or sandboxed environments
+- `permission_mode`: one of `default`, `plan`, `auto-edit`, `auto`, or `yolo`;
+  `auto` lets an LLM classifier approve tool calls; `yolo` auto-approves all
+  tools, so use it only in trusted or sandboxed environments
 - `env`: extra environment variables passed to the CLI process
 - `system_prompt` / `append_system_prompt`: override or extend the system
   prompt

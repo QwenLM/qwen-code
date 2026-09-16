@@ -43,6 +43,7 @@ const sanitizeDaemonMessage = (message: string): string =>
 
 export const redactExtensionDisplaySource = (source: string): string => {
   const redacted = redactUrlCredentials(source);
+  if (redacted.startsWith('upload:')) return redacted;
   if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
   try {
     const url = new URL(redacted);
@@ -98,9 +99,32 @@ export type ExtensionMutationEvent = {
   source?: string;
   name?: string;
   version?: string;
+  credentialPersistence?: 'stored' | 'one_time';
+  credentialStorage?: 'keychain' | 'encrypted_file';
   updated?: boolean;
   reason?: string;
   states?: Record<string, string>;
+  resourceStates?: {
+    skills: Array<{
+      name: string;
+      defaultEnabled: boolean;
+      workspaceEnabled: boolean | null;
+      effectiveEnabled: boolean;
+      disabledReason?: 'hard' | 'default' | 'inactive_extension';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>;
+  };
+  results?: Array<
+    | {
+        name: string;
+        defaultActivation: 'enabled' | 'disabled';
+      }
+    | {
+        name: string;
+        workspaceActivation: 'enabled' | 'disabled' | null;
+        effectiveActivation: 'enabled' | 'disabled';
+      }
+  >;
 };
 
 export type ExtensionPendingInteraction =
@@ -242,6 +266,7 @@ export interface ExtensionsController {
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -295,7 +320,6 @@ export function createExtensionsController(
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
-      networkPolicy: 'public',
       requestSetting:
         interactions?.requestSetting ??
         (async (setting: ExtensionSetting) => {
@@ -458,6 +482,7 @@ export function createExtensionsController(
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -614,16 +639,23 @@ export function createExtensionsController(
               async (release) => {
                 assertGenerationOpen?.();
                 return await task((generation) => {
-                  reconciliationReservation ??=
-                    options.reserveRuntimeReconciliation?.();
+                  // sendOperation passes reserveRuntimeReconciliation even on
+                  // skipRefresh routes; an operation that will not reconcile
+                  // never runs a reservation, so it must not take one.
+                  if (!options.skipRefresh) {
+                    reconciliationReservation ??=
+                      options.reserveRuntimeReconciliation?.();
+                  }
                   committedGeneration = generation;
                   release();
                 });
               },
             );
             if (committedGeneration === undefined) {
-              reconciliationReservation ??=
-                options.reserveRuntimeReconciliation?.();
+              if (!options.skipRefresh) {
+                reconciliationReservation ??=
+                  options.reserveRuntimeReconciliation?.();
+              }
               committedGeneration = result.generation;
             }
             for (const warning of result.warnings ?? []) {
@@ -683,14 +715,21 @@ export function createExtensionsController(
                   const startedAt = Date.now();
                   try {
                     runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                    return {
-                      status: 'fulfilled' as const,
-                      result:
-                        await runtime.bridge.refreshExtensionsForAllSessions(
-                          bridgeMutationEvent(event),
-                        ),
-                      elapsedMs: Date.now() - startedAt,
-                    };
+                    try {
+                      return {
+                        status: 'fulfilled' as const,
+                        result:
+                          await runtime.bridge.refreshExtensionsForAllSessions(
+                            bridgeMutationEvent(event),
+                            ...(options.skillsOnly
+                              ? [{ skillsOnly: true }]
+                              : []),
+                          ),
+                        elapsedMs: Date.now() - startedAt,
+                      };
+                    } finally {
+                      runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                    }
                   } catch (reason) {
                     return {
                       status: 'rejected' as const,
@@ -771,10 +810,15 @@ export function createExtensionsController(
             const { result, elapsedMs } = await runReconciliation(async () => {
               workspace.invalidateWorkspaceSkillsStatus();
               const startedAt = Date.now();
-              const result = await bridge.refreshExtensionsForAllSessions(
-                bridgeMutationEvent(event),
-              );
-              return { result, elapsedMs: Date.now() - startedAt };
+              try {
+                const result = await bridge.refreshExtensionsForAllSessions(
+                  bridgeMutationEvent(event),
+                  ...(options.skillsOnly ? [{ skillsOnly: true }] : []),
+                );
+                return { result, elapsedMs: Date.now() - startedAt };
+              } finally {
+                workspace.invalidateWorkspaceSkillsStatus();
+              }
             });
             const warnings: NonNullable<ExtensionOperationStatus['warnings']> =
               [...commitWarnings];
@@ -1013,7 +1057,8 @@ export function createExtensionsController(
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
-            ...(ext.installMetadata?.source
+            ...(ext.installMetadata?.source &&
+            ext.installMetadata.type !== 'snapshot'
               ? {
                   source: redactExtensionDisplaySource(
                     ext.installMetadata.source,
@@ -1032,7 +1077,17 @@ export function createExtensionsController(
             ...(ext.installMetadata?.autoUpdate !== undefined
               ? { autoUpdate: ext.installMetadata.autoUpdate }
               : {}),
-            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
+            ...(ext.installMetadata?.type === 'snapshot'
+              ? { credentialPersistence: 'one_time' as const }
+              : ext.installMetadata?.credentialPersistence === 'stored'
+                ? { credentialPersistence: 'stored' as const }
+                : {}),
+            updateState:
+              ext.installMetadata?.type === 'snapshot'
+                ? 'not updatable'
+                : ext.installMetadata
+                  ? 'unknown'
+                  : 'not updatable',
             capabilities,
             details: {
               mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],

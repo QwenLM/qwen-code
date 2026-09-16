@@ -271,6 +271,19 @@ export class HookSystem {
       : undefined;
   }
 
+  async fireSessionDeleteEvent(
+    deletedSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionDeleteEvent(
+      deletedSessionId,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SessionDelete', result.finalOutput)
+      : undefined;
+  }
+
   /**
    * Fire a PreToolUse event - called before tool execution
    */
@@ -306,6 +319,7 @@ export class HookSystem {
     permissionMode: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseEvent(
       toolName,
@@ -315,6 +329,7 @@ export class HookSystem {
       permissionMode,
       signal,
       tool_call_id,
+      durationMs,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUse', result.finalOutput)
@@ -333,6 +348,7 @@ export class HookSystem {
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseFailureEvent(
       toolUseId,
@@ -343,6 +359,7 @@ export class HookSystem {
       permissionMode,
       signal,
       tool_call_id,
+      durationMs,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
@@ -628,7 +645,11 @@ export class HookSystem {
     event: HookEventName,
     matcher: string,
     hook: CommandHookConfig | HttpHookConfig,
-    options?: { sequential?: boolean },
+    options?: {
+      sequential?: boolean;
+      skillRoot?: string;
+      trustGated?: boolean;
+    },
   ): string {
     return this.sessionHooksManager.addSessionHook(
       sessionId,

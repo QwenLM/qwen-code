@@ -6,7 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {
@@ -16,6 +16,7 @@ import {
 } from './prompt.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
@@ -104,6 +105,10 @@ function truncate(text: string, maxChars: number): string {
 }
 
 async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
+  // Deliberately capped, unlike recall (recall.ts) and forget (forget.ts):
+  // every doc is rendered into the extraction agent's task prompt below, so
+  // an uncapped scan would grow that prompt without bound. Anything past the
+  // cap stays reachable — the agent holds read_file/grep/glob/ls.
   // User-level scan is best-effort: a read failure on `~/.qwen/memories/`
   // must not deny the extraction agent its view of existing project-level
   // memories (which it uses to avoid creating duplicates).
@@ -151,12 +156,13 @@ function buildTaskPrompt(
     '',
     'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
     '',
-    'Available tools in this run: `read_file`, `grep_search`, `glob`, `list_directory`, read-only `run_shell_command`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
+    'Available tools in this run: `read_file`, `grep_search`, `glob`, read-only `run_shell_command`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
     '- Do not use any other tools.',
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
     '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
     '- Do not inspect repository code, git history, or unrelated files.',
-    '- Prefer updating an existing memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
+    `- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory in either managed memory root as protected read-only records. You may read them to avoid duplicates, but never modify, overwrite, rename, merge into, or delete them, and do not intentionally remove their valid entries from \`${AUTO_MEMORY_INDEX_FILENAME}\`.`,
+    '- Prefer updating an existing writable memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
     '- Keep one durable memory per file under `user/`, `feedback/`, `project/`, or `reference/` inside the chosen directory.',
     '',
     '## How to save memories',
@@ -245,7 +251,7 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
 ): Promise<AutoMemoryExtractionExecutionResult> {
-  const cacheSafe = getCacheSafeParams();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(
       'runAutoMemoryExtractionByAgent: no cache-safe params available; ' +
@@ -259,6 +265,7 @@ export async function runAutoMemoryExtractionByAgent(
   const userMemoryRoot = getUserAutoMemoryRoot();
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     allowShell: true,
+    protectPinnedMemory: true,
   });
 
   const result = await runForkedAgent({
@@ -270,13 +277,12 @@ export async function runAutoMemoryExtractionByAgent(
       topicSummaries,
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
-    maxTurns: 5,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? 5,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? 2,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
       ToolNames.GLOB,
-      ToolNames.LS,
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,

@@ -93,6 +93,13 @@ export function resetLinuxClipboardTool(): void {
   cachedWlPasteImageTypes = null;
 }
 
+export function isWaylandSession(): boolean {
+  return (
+    process.env['XDG_SESSION_TYPE']?.toLowerCase() === 'wayland' ||
+    Boolean(process.env['WAYLAND_DISPLAY'])
+  );
+}
+
 /**
  * Detect the Linux clipboard tool.
  * Handles WSL2 where XDG_SESSION_TYPE may be unset but WAYLAND_DISPLAY is set.
@@ -101,12 +108,11 @@ function getLinuxClipboardTool(): 'wl-paste' | 'xclip' | null {
   if (linuxClipboardTool !== undefined) return linuxClipboardTool;
 
   const sessionType = process.env['XDG_SESSION_TYPE'];
-  const waylandDisplay = process.env['WAYLAND_DISPLAY'];
   const display = process.env['DISPLAY'];
 
   let toolName: 'wl-paste' | 'xclip' | null = null;
 
-  if (sessionType === 'wayland' || waylandDisplay) {
+  if (isWaylandSession()) {
     toolName = 'wl-paste';
   } else if (sessionType === 'x11' || display) {
     toolName = 'xclip';

@@ -17,6 +17,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
@@ -103,6 +104,7 @@ describe('ReadFileTool', () => {
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
         getProjectDir: () => path.join(tempRootDir, '.project'),
+        getWorkflowRunsDir: () => path.join(tempRootDir, '.workflow-runs'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),
@@ -939,22 +941,30 @@ describe('ReadFileTool', () => {
 
       it('preserves ordinary images for the shared tool-result bridge', async () => {
         const imagePath = path.join(tempRootDir, 'image.png');
-        await fsp.writeFile(
-          imagePath,
-          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        );
+        await sharp({
+          create: {
+            width: 8,
+            height: 8,
+            channels: 3,
+            background: '#306090',
+          },
+        })
+          .png()
+          .toFile(imagePath);
         const invocation = createTextOnlyTool().build({
           file_path: imagePath,
         }) as ToolInvocation<ReadFileToolParams, ToolResult>;
 
         const result = await invocation.execute(abortSignal);
 
-        expect(result.llmContent).toMatchObject({
-          inlineData: {
-            mimeType: 'image/png',
-            displayName: 'image.png',
-          },
-        });
+        // An ordinary decodable image keeps its inline media (the rendered
+        // overview) and never routes through the vision bridge.
+        const parts = result.llmContent as Array<{
+          inlineData?: { mimeType?: string };
+        }>;
+        expect(
+          parts.some((part) => part.inlineData?.mimeType === 'image/jpeg'),
+        ).toBe(true);
         expect(visionBridgeMocks.runVisionBridge).not.toHaveBeenCalled();
       });
     });
@@ -1239,6 +1249,34 @@ describe('ReadFileTool', () => {
         expect(String(result.llmContent).length).toBeLessThan(1000);
         expect(result.llmContent).toContain('has 31 pages');
         expect(result.llmContent).toContain("Use the 'pages' parameter");
+      });
+
+      it('keeps nested reads usable without claiming their bytes reached history', async () => {
+        const filePath = path.join(tempRootDir, 'program-input.txt');
+        await fsp.writeFile(filePath, 'program input', 'utf-8');
+        const source = {
+          kind: 'code_mode' as const,
+        };
+        await read({ file_path: filePath });
+        for (let i = 0; i < 2; i++) {
+          const result = await runWithToolCallSource(source, () =>
+            read({ file_path: filePath }),
+          );
+          expect(result.llmContent).toBe('program input');
+        }
+        const stats = await fsp.stat(filePath);
+        const cached = fileReadCache.check(stats);
+        expect(cached.state).toBe('fresh');
+        if (cached.state !== 'fresh') throw new Error('missing read record');
+        expect(cached.entry.lastReadWasFull).toBe(true);
+        expect(cached.entry.lastReadCacheable).toBe(true);
+        expect(cached.entry.readResidentInHistory).toBe(false);
+        expect((await read({ file_path: filePath })).llmContent).toBe(
+          'program input',
+        );
+        expect((await read({ file_path: filePath })).llmContent).toMatch(
+          /unchanged since/,
+        );
       });
 
       it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {

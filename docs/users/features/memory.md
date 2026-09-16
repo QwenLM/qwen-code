@@ -19,6 +19,7 @@ Add things you'd otherwise have to repeat every session:
 - Coding conventions your team follows ("all new files must have JSDoc comments")
 - Architectural decisions ("we use the repository pattern, never call the database directly from controllers")
 - Personal preferences ("always use pnpm, not npm")
+- A verification policy for high-stakes work — for example "verify against the database before concluding" (see [Enforce evidence-based conclusions](../common-workflow.md#enforce-evidence-based-conclusions) for a ready-made template)
 
 Don't include things Qwen can figure out by reading your code. QWEN.md works best when it's short and specific — the longer it gets, the less reliably Qwen follows it.
 
@@ -94,6 +95,33 @@ Qwen doesn't save everything — only things that would actually be useful next 
 Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of the same checkout share the same memory folder, so what Qwen learns in one branch is available in others. Each linked git worktree gets its own memory folder, matching the per-worktree isolation of chats and other session state — repository-wide conventions you want in every worktree belong in [team memory](#team-memory-shared-with-collaborators).
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
+
+#### Pinned memory
+
+Put hand-curated documents that automatic memory maintenance should preserve
+under `pinned/` in a managed-memory directory, for example
+`~/.qwen/projects/<project>/memory/pinned/architecture.md` or
+`~/.qwen/memories/pinned/preferences.md`. Use the same frontmatter as other
+memory documents. Valid pinned files are readable by Qwen and are included the
+next time `MEMORY.md` is rebuilt, under the same size and file-count limits as
+other memory documents.
+
+Only the top-level `pinned/` directory directly inside a managed-memory root is
+protected; nested directories such as `memory/project/pinned/` are ordinary
+writable memory. Automatic extraction and Dream workers match the reserved
+directory name case-insensitively.
+
+Automatic extraction is instructed to leave pinned records and their valid
+index entries unchanged, while Dream is instructed to skip `pinned/` during
+consolidation. Both automatic extraction and forked Dream workers, including
+background cleanup, enforce the pinned-file boundary on their write and edit
+tools, including paths that resolve through a symlink into `pinned/`; their
+existing read-only shell policy blocks command-line deletion. You still control
+these files directly and can remove them with an explicit `/forget` request.
+
+> **Note:** The visible `/dream` slash command runs on the main Agent. It
+> receives the same skip instruction, but does not yet receive the forked
+> worker's deterministic per-turn tool gate.
 
 ### Periodic cleanup
 

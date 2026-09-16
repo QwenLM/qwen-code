@@ -20,6 +20,7 @@ import {
   ApiRequestPhase,
 } from './metrics.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import type { GoalStateEvent } from './types.js';
 
 const mockCounterAddFn: Mock<
   (value: number, attributes?: Attributes, context?: Context) => void
@@ -67,7 +68,10 @@ vi.mock('@opentelemetry/api');
 
 describe('Telemetry Metrics', () => {
   let initializeMetricsModule: typeof import('./metrics.js').initializeMetrics;
+  let recordToolCallMetricsModule: typeof import('./metrics.js').recordToolCallMetrics;
   let recordTokenUsageMetricsModule: typeof import('./metrics.js').recordTokenUsageMetrics;
+  let recordToolExecutionMetricsModule: typeof import('./metrics.js').recordToolExecutionMetrics;
+  let recordRepeatedToolFailureGuardMetricsModule: typeof import('./metrics.js').recordRepeatedToolFailureGuardMetrics;
   let recordFileOperationMetricModule: typeof import('./metrics.js').recordFileOperationMetric;
   let recordChatCompressionMetricsModule: typeof import('./metrics.js').recordChatCompressionMetrics;
   let recordStartupPerformanceModule: typeof import('./metrics.js').recordStartupPerformance;
@@ -82,6 +86,7 @@ describe('Telemetry Metrics', () => {
   let recordBaselineComparisonModule: typeof import('./metrics.js').recordBaselineComparison;
   let recordChannelMemoryRecallMetricsModule: typeof import('./metrics.js').recordChannelMemoryRecallMetrics;
   let recordMemoryRecallDeliveryMetricsModule: typeof import('./metrics.js').recordMemoryRecallDeliveryMetrics;
+  let recordGoalStateMetricsModule: typeof import('./metrics.js').recordGoalStateMetrics;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -93,7 +98,12 @@ describe('Telemetry Metrics', () => {
 
     const metricsJsModule = await import('./metrics.js');
     initializeMetricsModule = metricsJsModule.initializeMetrics;
+    recordToolCallMetricsModule = metricsJsModule.recordToolCallMetrics;
     recordTokenUsageMetricsModule = metricsJsModule.recordTokenUsageMetrics;
+    recordToolExecutionMetricsModule =
+      metricsJsModule.recordToolExecutionMetrics;
+    recordRepeatedToolFailureGuardMetricsModule =
+      metricsJsModule.recordRepeatedToolFailureGuardMetrics;
     recordFileOperationMetricModule = metricsJsModule.recordFileOperationMetric;
     recordChatCompressionMetricsModule =
       metricsJsModule.recordChatCompressionMetrics;
@@ -113,6 +123,7 @@ describe('Telemetry Metrics', () => {
       metricsJsModule.recordChannelMemoryRecallMetrics;
     recordMemoryRecallDeliveryMetricsModule =
       metricsJsModule.recordMemoryRecallDeliveryMetrics;
+    recordGoalStateMetricsModule = metricsJsModule.recordGoalStateMetrics;
 
     const otelApiModule = await import('@opentelemetry/api');
 
@@ -125,6 +136,48 @@ describe('Telemetry Metrics', () => {
     (otelApiModule.metrics.getMeter as Mock).mockReturnValue(mockMeterInstance);
     mockCreateCounterFn.mockReturnValue(mockCounterInstance);
     mockCreateHistogramFn.mockReturnValue(mockHistogramInstance);
+  });
+
+  describe('recordToolCallMetrics', () => {
+    const config = makeFakeConfig({
+      sessionId: 'test-session-id',
+    });
+
+    it('records an explicit terminal status only on the counter', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 25, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(25, {
+        function_name: 'read_file',
+      });
+    });
+
+    it('derives status from success for legacy callers', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 10, {
+        function_name: 'legacy_tool',
+        success: false,
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'legacy_tool',
+        success: false,
+        status: 'error',
+      });
+    });
   });
 
   describe('recordChatCompressionMetrics', () => {
@@ -153,6 +206,214 @@ describe('Telemetry Metrics', () => {
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         tokens_after: 100,
         tokens_before: 200,
+      });
+    });
+  });
+
+  describe('recordGoalStateMetrics', () => {
+    const histogramSpies = new Map<string, Mock>();
+    beforeEach(() => {
+      histogramSpies.clear();
+      mockCreateHistogramFn.mockImplementation((name: string) => {
+        const record = vi.fn((...args: Parameters<Histogram['record']>) =>
+          mockHistogramRecordFn(...args),
+        );
+        histogramSpies.set(name, record);
+        return { record } as Histogram;
+      });
+    });
+
+    const goalEvent = (fields: Partial<GoalStateEvent>): GoalStateEvent => ({
+      'event.name': 'goal_state',
+      'event.timestamp': '2025-01-01T00:00:00.000Z',
+      cause: 'create',
+      goal_id: 'g-1',
+      revision: 1,
+      ...fields,
+    });
+
+    it('records nothing before metrics are initialized', () => {
+      recordGoalStateMetricsModule(
+        makeFakeConfig({}),
+        goalEvent({ cause: 'complete', tokens_used: 10, turn_count: 1 }),
+      );
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('registers the Goal counter and histograms', () => {
+      initializeMetricsModule(makeFakeConfig({}));
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.goal.transition.count',
+        expect.anything(),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.goal.tokens_used',
+        expect.objectContaining({
+          unit: '{token}',
+          advice: {
+            explicitBucketBoundaries: [
+              1_000, 10_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
+              30_000_000, 100_000_000, 300_000_000, 600_000_000,
+            ],
+          },
+        }),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.goal.turn_count',
+        expect.objectContaining({
+          unit: '{turn}',
+          advice: {
+            explicitBucketBoundaries: [
+              1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000, 10_000, 25_000,
+              50_000,
+            ],
+          },
+        }),
+      );
+    });
+
+    it('counts a transition by its bounded attributes only', () => {
+      // The Goal id and revision are per-Goal values; on a metric they would
+      // open a new time series for every Goal.
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordGoalStateMetricsModule(
+        config,
+        goalEvent({
+          cause: 'pause',
+          status: 'paused',
+          turn_count: 3,
+          tokens_used: 500,
+        }),
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        cause: 'pause',
+        status: 'paused',
+      });
+      // A pause is not an outcome, so nothing is recorded as spend.
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it.each(['complete', 'blocked', 'usage_limited'] as const)(
+      'records spend and turns on %s',
+      (cause) => {
+        const config = makeFakeConfig({ sessionId: 'test-session-id' });
+        initializeMetricsModule(config);
+        mockCounterAddFn.mockClear();
+        const limitAttributes =
+          cause === 'usage_limited'
+            ? { limit_kind: 'time_budget' as const }
+            : {};
+
+        recordGoalStateMetricsModule(
+          config,
+          goalEvent({
+            cause,
+            status: cause,
+            ...limitAttributes,
+            turn_count: 12,
+            tokens_used: 45_000,
+          }),
+        );
+
+        expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+          cause,
+          status: cause,
+          ...limitAttributes,
+        });
+        expect(
+          histogramSpies.get('qwen-code.goal.tokens_used'),
+        ).toHaveBeenCalledWith(45_000, {
+          cause,
+          ...limitAttributes,
+        });
+        expect(
+          histogramSpies.get('qwen-code.goal.turn_count'),
+        ).toHaveBeenCalledWith(12, {
+          cause,
+          ...limitAttributes,
+        });
+      },
+    );
+
+    it.each([
+      'create',
+      'replace',
+      'edit',
+      'pause',
+      'resume',
+      'clear',
+      'verifier_reject',
+    ] as const)('records no outcome figure on %s', (cause) => {
+      const config = makeFakeConfig({});
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+      recordGoalStateMetricsModule(
+        config,
+        goalEvent({ cause, tokens_used: 45_000, turn_count: 12 }),
+      );
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, { cause });
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('records cumulative observations on each stop of a resumed Goal', () => {
+      const config = makeFakeConfig({});
+      initializeMetricsModule(config);
+      for (const [tokens_used, turn_count] of [
+        [30_000_000, 2],
+        [60_000_000, 4],
+      ]) {
+        recordGoalStateMetricsModule(
+          config,
+          goalEvent({
+            cause: 'usage_limited',
+            limit_kind: 'token_budget',
+            tokens_used,
+            turn_count,
+          }),
+        );
+      }
+      const attributes = { cause: 'usage_limited', limit_kind: 'token_budget' };
+      expect(
+        histogramSpies.get('qwen-code.goal.tokens_used')?.mock.calls,
+      ).toEqual([
+        [30_000_000, attributes],
+        [60_000_000, attributes],
+      ]);
+      expect(
+        histogramSpies.get('qwen-code.goal.turn_count')?.mock.calls,
+      ).toEqual([
+        [2, attributes],
+        [4, attributes],
+      ]);
+    });
+
+    it('records zero spend and turns on an outcome', () => {
+      const config = makeFakeConfig({});
+      initializeMetricsModule(config);
+
+      recordGoalStateMetricsModule(
+        config,
+        goalEvent({
+          cause: 'complete',
+          status: 'complete',
+          tokens_used: 0,
+          turn_count: 0,
+        }),
+      );
+
+      expect(mockHistogramRecordFn).toHaveBeenCalledTimes(2);
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(1, 0, {
+        cause: 'complete',
+      });
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 0, {
+        cause: 'complete',
       });
     });
   });
@@ -229,6 +490,103 @@ describe('Telemetry Metrics', () => {
       expect(mockCounterAddFn).toHaveBeenCalledWith(200, {
         model: 'gemini-ultra',
         type: 'input',
+      });
+    });
+  });
+
+  describe('recordToolExecutionMetrics', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getTelemetryEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
+    } as unknown as Config;
+
+    it('does not record before metrics are initialized', () => {
+      recordToolExecutionMetricsModule(mockConfig, {
+        execution_status: 'unknown',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+    });
+
+    it('uses a dedicated low-cardinality counter', () => {
+      initializeMetricsModule(mockConfig);
+      mockCounterAddFn.mockClear();
+
+      recordToolExecutionMetricsModule(mockConfig, {
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.tool.execution.count',
+        expect.any(Object),
+      );
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+    });
+
+    it('merges common attributes when session id is opted in', () => {
+      const configWithSession = {
+        ...mockConfig,
+        getTelemetryMetricsIncludeSessionId: () => true,
+      } as unknown as Config;
+      initializeMetricsModule(configWithSession);
+      mockCounterAddFn.mockClear();
+
+      recordToolExecutionMetricsModule(configWithSession, {
+        execution_status: 'success',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        'session.id': 'test-session-id',
+        execution_status: 'success',
+        tool_type: 'native',
+      });
+    });
+  });
+
+  describe('recordRepeatedToolFailureGuardMetrics', () => {
+    const config = makeFakeConfig({
+      sessionId: 'test-session-id',
+    });
+
+    it('records only low-cardinality transition attributes', () => {
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordRepeatedToolFailureGuardMetricsModule({
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        terminal_status: 'error',
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.repeated_tool_failure_guard.count',
+        expect.any(Object),
+      );
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        terminal_status: 'error',
+        execution_status: 'error',
+        tool_type: 'mcp',
       });
     });
   });

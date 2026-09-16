@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Storage } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -16,6 +17,7 @@ import semver from 'semver';
 import { getNpmCliPath } from './installationInfo.js';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
+const debugLogger = createDebugLogger('MANAGED_NPM_UPDATE');
 const execFileAsync = promisify(execFile);
 
 interface ManagedNpmUpdate {
@@ -310,6 +312,9 @@ export async function activateManagedNpmUpdate(
     realpath: false,
     stale: 30_000,
     retries: { retries: 50, minTimeout: 20, maxTimeout: 100 },
+    onCompromised: (err) => {
+      debugLogger.warn('managed npm update lock compromised:', err);
+    },
   });
   try {
     const base = readBaseInstallation(resolvedBootstrapPath);
@@ -365,7 +370,11 @@ export async function activateManagedNpmUpdate(
       await fsPromises.rm(temporaryActivePath, { force: true });
     }
   } finally {
-    await release();
+    try {
+      await release();
+    } catch (error) {
+      debugLogger.warn('Failed to release managed npm update lock:', error);
+    }
   }
 }
 

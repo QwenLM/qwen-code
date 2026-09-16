@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -8,6 +8,7 @@ import styles from './ApprovalModeDialog.module.css';
 
 interface ApprovalModeDialogProps {
   currentMode: string;
+  sessionWorkflowEnabled?: boolean;
   onSelect: (modeId: string) => void;
 }
 
@@ -23,7 +24,9 @@ export function ApprovalModeDialog({
 }: ApprovalModeDialogProps) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
-  const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.map((id) => ({
+  const approvalModes: ModeItem[] = DAEMON_APPROVAL_MODES.filter(
+    (id) => id !== 'plan',
+  ).map((id) => ({
     id,
     name: t(`mode.listLabel.${id}`),
     description: t(`mode.desc.${id}`),

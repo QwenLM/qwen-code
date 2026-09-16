@@ -55,7 +55,7 @@ describe('cdCommand', () => {
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => false,
           relocateWorkingDirectory,
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
           }),
         } as unknown as Config,
@@ -164,7 +164,7 @@ describe('cdCommand', () => {
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => true,
           relocateWorkingDirectory,
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
           }),
         } as unknown as Config,
@@ -336,6 +336,24 @@ describe('cdCommand', () => {
       type: 'message',
       messageType: 'warning',
       content: `Moved to ${realNextDir}. Memory refresh failed: memory failed`,
+    });
+  });
+
+  it('reports a successful move when MCP refresh fails afterward', async () => {
+    relocateWorkingDirectory.mockResolvedValue({
+      mcpRefreshError: new Error('MCP failed'),
+    });
+
+    const result = (await cdCommand.action?.(
+      context,
+      '../next',
+    )) as MessageActionReturn;
+    const realNextDir = await realpath(nextDir);
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'warning',
+      content: `Moved to ${realNextDir}. MCP refresh failed: MCP failed`,
     });
   });
 

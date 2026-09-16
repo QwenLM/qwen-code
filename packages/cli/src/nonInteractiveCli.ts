@@ -10,23 +10,33 @@ import type {
   Config,
   CronJob,
   CronScheduler,
+  GoalRuntime,
+  GoalSnapshotV2,
+  GoalTurnHost,
+  GoalContinuationTurn,
+  GoalTurnPermit,
+  ActiveGoal,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  RuntimeContentGeneratorView,
+  ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
+import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
   executeToolCall,
   shutdownTelemetry,
   isTelemetrySdkInitialized,
-  GeminiEventType,
+  LlmEventType,
   FatalInputError,
   promptIdContext,
   OutputFormat,
   InputFormat,
   LoopType,
   ToolNames,
+  goalToolResultProvenance,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -43,6 +53,9 @@ import {
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  getCachedToolCallFingerprint,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
   parsePositiveIntegerEnv,
@@ -50,6 +63,25 @@ import {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   ToolErrorType,
   finalizeToolResponses,
+  clampInlineMediaPart,
+  formatFullTurnVisionNotice,
+  formatVisionBridgeNotice,
+  getFullTurnVisionModelSelector,
+  hasImageParts,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  splitImageParts,
+  GoalPersistenceUnavailableError,
+  GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForHeadlessFailure,
+  goalPauseReasonForRunBudget,
+  addAgentOutputMessageAttributes,
+  endInteractionSpan,
+  getErrorType,
+  getActiveInteractionSpan,
+  buildGoalContinuationParts,
+  goalCheckpointHealthLine,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -72,11 +104,18 @@ import { RunBudgetEnforcer } from './utils/runBudget.js';
 import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
-} from './utils/chat-recording-failure.js';
+} from './nonInteractive/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
+
+export class TurnInterruptedError extends Error {
+  constructor() {
+    super('Operation cancelled.');
+    this.name = 'TurnInterruptedError';
+  }
+}
 
 const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
 
@@ -122,8 +161,8 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     : SUPPRESSED_OUTPUT_RETRY;
 }
 
+import { normalizePartList } from './utils/normalize-part-list.js';
 import {
-  normalizePartList,
   extractPartsFromUserMessage,
   buildSystemMessage,
   createToolProgressHandler,
@@ -131,7 +170,7 @@ import {
   computeUsageFromMetrics,
   buildInitialSystemReminders,
   insertAfterFunctionResponses,
-} from './utils/nonInteractiveHelpers.js';
+} from './nonInteractive/nonInteractiveHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -139,8 +178,12 @@ import {
 const LOOP_TYPE_LABELS: Record<LoopType, string> = {
   [LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS]:
     'the model repeated the same tool call with identical arguments',
+  // Reasoning-stream chants fire this type too (checkReasoningContentLoop),
+  // and getResponseText filters reasoning out of visible output — the label
+  // must name both channels so a headless halt on an empty stdout is not
+  // mistaken for a detector misfire.
   [LoopType.CHANTING_IDENTICAL_SENTENCES]:
-    'the model repeated the same sentence in its output',
+    'the model repeated the same sentence in its output or reasoning',
   [LoopType.REPETITIVE_THOUGHTS]:
     'the model repeated the same reasoning thought',
   [LoopType.READ_FILE_LOOP]:
@@ -157,6 +200,8 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the turn reached the per-turn tool-call limit',
   [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
     'the model repeatedly sent invalid tool parameters without correcting them',
+  [LoopType.REPEATED_TOOL_EXECUTION_FAILURE]:
+    'the same tool execution failure continued after a corrective reminder',
 };
 
 function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
@@ -170,7 +215,8 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
     loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
     loopType === LoopType.SHELL_COMMAND_STAGNATION ||
     loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
-    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION;
+    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION ||
+    loopType === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
   const hint =
     loopType === LoopType.TURN_TOOL_CALL_CAP
       ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
@@ -178,6 +224,127 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
         ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
         : ' Set the `model.skipLoopDetection` setting to true to disable.';
   return `Loop detection halted the run${detail}.${hint}`;
+}
+
+interface HeadlessGoalTurn extends GoalContinuationTurn {
+  permit: GoalTurnPermit;
+  turnKey: string;
+  controller: AbortController;
+  origin: 'runtime' | 'user';
+}
+
+function sameGoalPermit(
+  left: GoalTurnPermit | undefined,
+  right: GoalTurnPermit,
+): boolean {
+  return (
+    left?.goalId === right.goalId &&
+    left.revision === right.revision &&
+    left.turnId === right.turnId
+  );
+}
+
+function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
+  const goal = snapshot.goal;
+  if (goal?.status !== 'active') return null;
+  return {
+    condition: goal.objective,
+    iterations: goal.turnCount,
+    setAt: goal.createdAt,
+    tokensAtStart: 0,
+    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
+    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
+  };
+}
+
+/**
+ * The TEXT rendering of a Goal control's outcome.
+ *
+ * Exported so its shape can be pinned directly: the states worth checking --
+ * a Goal mid-run, one with no budget, one that has billed nothing -- are far
+ * cheaper to construct as snapshots than to drive a headless run into.
+ */
+export function formatGoalState(
+  snapshot: GoalSnapshotV2,
+  operation: 'status' | 'set' | 'edit' | 'pause' | 'resume' | 'clear',
+): string {
+  const goal = snapshot.goal;
+  if (!goal) {
+    return operation === 'clear' ? 'Goal cleared.' : 'No Goal is set.';
+  }
+  const status =
+    goal.status === 'usage_limited' ? 'usage limited' : goal.status;
+  const summary = `Goal ${status}: ${goal.objective}`;
+  // Spelled out rather than abbreviated: this output is read in a terminal
+  // scrollback and piped into scripts, neither of which is helped by `1.2k`.
+  const usage: string[] = [];
+  if (goal.turnCount > 0) {
+    usage.push(`${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`);
+  }
+  if (goal.tokensUsed > 0) {
+    const used = goal.tokensUsed.toLocaleString('en-US');
+    usage.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used} of ${goal.tokenBudget.toLocaleString('en-US')} tokens`,
+    );
+  }
+  const lines = [summary];
+  if (usage.length > 0) lines.push(`Usage: ${usage.join(' · ')}`);
+  // Every non-active status now carries a reason, so gating on two of them
+  // drops a paused Goal's reason from TEXT output while STREAM_JSON still
+  // ships it -- and the user doc promises every pause states why.
+  // Both lines are written to stdout as they are, so both are sanitized: a
+  // pause reason can embed a raw provider error.
+  if (goal.status !== 'active' && goal.lastReason) {
+    lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
+  }
+  // The checkpoint line the interactive cards show, in the same words: a
+  // checkpoint stop reason names the kind of failure, only this says which.
+  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
+  if (checkpoint !== undefined) lines.push(`Checkpoint: ${checkpoint}`);
+  return lines.join('\n');
+}
+
+async function claimUserGoalTurn(
+  runtime: GoalRuntime,
+  turnKey: string,
+  signal: AbortSignal,
+): Promise<GoalTurnPermit | undefined> {
+  const immediate =
+    runtime.permitForTurn(turnKey) ?? runtime.beginTurn(turnKey);
+  if (immediate || runtime.getSnapshot().goal?.status !== 'active') {
+    return immediate;
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = () => {};
+    const finish = (permit: GoalTurnPermit | undefined, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      signal.removeEventListener('abort', onAbort);
+      if (error !== undefined) reject(error);
+      else resolve(permit);
+    };
+    const inspect = () => {
+      try {
+        const permit = runtime.permitForTurn(turnKey);
+        if (permit || runtime.getSnapshot().goal?.status !== 'active') {
+          finish(permit);
+        }
+      } catch (error) {
+        finish(undefined, error);
+      }
+    };
+    const onAbort = () => finish(undefined);
+
+    unsubscribe = runtime.subscribe(inspect);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    else inspect();
+  });
 }
 
 /**
@@ -258,7 +425,7 @@ async function emitNonInteractiveFinalMessage(params: {
   // (systemMessage should already be emitted by caller)
   adapter.startAssistantMessage();
   adapter.processEvent({
-    type: GeminiEventType.Content,
+    type: LlmEventType.Content,
     value: message,
   } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
   adapter.finalizeAssistantMessage();
@@ -302,6 +469,13 @@ export interface RunNonInteractiveOptions {
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
+  /**
+   * Emit a terminal result and return from this turn when its controller is
+   * aborted with {@link TurnInterruptedError}, instead of exiting the process.
+   * Reusable stream-json sessions use this so a protocol interrupt does not
+   * tear down the session; one-shot callers retain the process-level default.
+   */
+  recoverableCancellation?: boolean;
   /**
    * Continue the most recent unfinished turn from chat history instead of
    * submitting `input` (which is ignored). No new user message enters the
@@ -407,14 +581,230 @@ export async function runNonInteractive(
     );
 
     let turnCount = 0;
+    let limitedTurnCount = 0;
     let totalApiDurationMs = 0;
     const startTime = Date.now();
+    let activeInteractionPromptId = prompt_id;
+    let activeInteractionOwner: ReturnType<typeof getActiveInteractionSpan>;
+    const selectActiveInteraction = (
+      promptId: string,
+      startsInteraction = false,
+    ) => {
+      if (startsInteraction || activeInteractionPromptId !== promptId) {
+        activeInteractionOwner = undefined;
+      }
+      activeInteractionPromptId = promptId;
+    };
+    const captureActiveInteractionOwner = () => {
+      activeInteractionOwner ??= getActiveInteractionSpan(
+        activeInteractionPromptId,
+      );
+      return activeInteractionOwner;
+    };
+    const endActiveInteraction = (
+      status: 'ok' | 'error' | 'cancelled',
+      metadata: {
+        errorMessage?: string;
+        errorType?: string;
+      } = {},
+    ) => {
+      const owner = captureActiveInteractionOwner();
+      if (
+        !owner ||
+        getActiveInteractionSpan(activeInteractionPromptId) !== owner
+      ) {
+        return;
+      }
+      endInteractionSpan(status, {
+        promptId: activeInteractionPromptId,
+        ...metadata,
+      });
+    };
 
-    const geminiClient = config.getGeminiClient();
+    const llmClient = config.getLlmClient();
     const abortController = options.abortController ?? new AbortController();
+    const queuedGoalTurns: HeadlessGoalTurn[] = [];
+    let activeGoalTurn: HeadlessGoalTurn | undefined;
+    let goalRuntimeUnsubscribe: (() => void) | undefined;
+    const emitGoalSnapshot = (snapshot: GoalSnapshotV2) => {
+      adapter.processEvent({
+        type: LlmEventType.GoalState,
+        value: snapshot,
+      });
+      adapter.processEvent({
+        type: LlmEventType.ActiveGoal,
+        value: projectLegacyActiveGoal(snapshot),
+      });
+    };
+    const observeGoalRuntime = (runtime: GoalRuntime) => {
+      goalRuntimeUnsubscribe ??= runtime.subscribe(emitGoalSnapshot);
+    };
+    const enforceSessionTurnLimit = async (
+      isRuntimeGoalTurn: boolean,
+    ): Promise<void> => {
+      if (isRuntimeGoalTurn) return;
+
+      limitedTurnCount++;
+      const maxSessionTurns = config.getMaxSessionTurns();
+      if (maxSessionTurns >= 0 && limitedTurnCount > maxSessionTurns) {
+        await failClosedActiveGoalTurn(
+          'Headless Goal stopped after the session turn limit',
+        );
+        await settleBeforeTerminalOutput();
+        await handleMaxTurnsExceededError(config);
+      }
+    };
+    let goalHostUnbind: (() => void) | undefined;
+    const goalHost: GoalTurnHost = {
+      startGoalTurn: async (input) => {
+        if (
+          queuedGoalTurns.some(
+            ({ permit }) => permit.turnId === input.permit.turnId,
+          )
+        ) {
+          return;
+        }
+        const { permit, ...continuation } = input;
+        queuedGoalTurns.push({
+          permit: { ...permit },
+          turnKey: `goal-runtime:${permit.turnId}`,
+          controller: new AbortController(),
+          origin: 'runtime',
+          ...continuation,
+        });
+      },
+      preemptGoalTurn: (reason) => {
+        for (const turn of queuedGoalTurns.splice(0)) {
+          turn.controller.abort(reason);
+        }
+        activeGoalTurn?.controller.abort(reason);
+      },
+    };
+    const bindGoalHost = () => {
+      goalHostUnbind ??= config.bindGoalTurnHost(goalHost);
+    };
+    const markGoalTurnDelivered = (turn: HeadlessGoalTurn): void => {
+      try {
+        config.getGoalRuntime().markTurnDelivered(turn.turnKey);
+      } catch {
+        // Goal runtime is optional during early initialization.
+      }
+    };
+    let settlingGoalTurn: HeadlessGoalTurn | undefined;
+    let goalTurnSettlement: Promise<void> | undefined;
+    const failClosedActiveGoalTurn = (
+      reason: string,
+      pauseReason?: string,
+    ): Promise<void> => {
+      const turn = activeGoalTurn;
+      if (!turn) return Promise.resolve();
+      if (settlingGoalTurn === turn && goalTurnSettlement) {
+        return goalTurnSettlement;
+      }
+
+      settlingGoalTurn = turn;
+      goalTurnSettlement = (async () => {
+        if (!turn.controller.signal.aborted) {
+          turn.controller.abort(reason);
+        }
+
+        try {
+          const runtime = await config.getGoalRuntimeReady();
+          if (
+            !sameGoalPermit(runtime.permitForTurn(turn.turnKey), turn.permit)
+          ) {
+            return;
+          }
+
+          if (runtime.getSnapshot().goal?.status === 'active') {
+            try {
+              await runtime.dispatch({
+                action: 'pause',
+                expectedGoalId: turn.permit.goalId,
+                expectedRevision: turn.permit.revision,
+                reason:
+                  pauseReason ?? goalPauseReasonForHeadlessFailure(reason),
+              });
+            } catch (error) {
+              debugLogger.warn('Failed to pause terminal headless Goal', error);
+            }
+          }
+
+          try {
+            await config.getChatRecordingService?.()?.flush();
+          } catch (error) {
+            debugLogger.warn('Failed to flush terminal headless Goal', error);
+          }
+
+          if (
+            sameGoalPermit(runtime.permitForTurn(turn.turnKey), turn.permit)
+          ) {
+            await runtime.finishTurn(turn.permit);
+          }
+        } catch (error) {
+          debugLogger.warn('Failed to close terminal headless Goal', error);
+        } finally {
+          if (activeGoalTurn === turn) {
+            activeGoalTurn = undefined;
+          }
+          if (settlingGoalTurn === turn) {
+            settlingGoalTurn = undefined;
+            goalTurnSettlement = undefined;
+          }
+        }
+      })();
+      return goalTurnSettlement;
+    };
+    const finishGoalTurn = async (turn: HeadlessGoalTurn): Promise<void> => {
+      const runtime = await config.getGoalRuntimeReady();
+      if (!sameGoalPermit(runtime.permitForTurn(turn.turnKey), turn.permit)) {
+        return;
+      }
+
+      let abortSettlement: Promise<void> | undefined;
+      const pauseOnAbort = () => {
+        // Read the enforcer here rather than above: `budgetEnforcer` is
+        // declared after `finishGoalTurn`, and this listener only ever runs
+        // from call sites that follow its `start()`.
+        const exceeded = budgetEnforcer.getExceeded();
+        abortSettlement ??= runtime
+          .dispatch({
+            action: 'pause',
+            expectedGoalId: turn.permit.goalId,
+            expectedRevision: turn.permit.revision,
+            // The only thing that aborts this controller without tripping a
+            // budget is a signal or the embedder cancelling the run, which
+            // `routeAbort` names a user interrupt. Naming it anything else
+            // here would make the recorded reason depend on which side of
+            // `finishTurn`'s persistence window the same Ctrl+C landed on.
+            reason: exceeded
+              ? goalPauseReasonForRunBudget(exceeded.kind)
+              : GOAL_PAUSE_REASON_USER_INTERRUPT,
+          })
+          .then(() => undefined)
+          .catch((error) => {
+            debugLogger.warn('Failed to pause aborted headless Goal', error);
+          });
+      };
+      abortController.signal.addEventListener('abort', pauseOnAbort, {
+        once: true,
+      });
+      if (abortController.signal.aborted) pauseOnAbort();
+
+      try {
+        if (!abortController.signal.aborted) {
+          await runtime.finishTurn(turn.permit);
+        }
+      } finally {
+        abortController.signal.removeEventListener('abort', pauseOnAbort);
+        await abortSettlement;
+      }
+    };
 
     // Run-level budget enforcement for headless / unattended runs
-    // (issue #4103). Tied to the same abortController as user-initiated
+    // (issue #4103). Explicit per-request safety limits still apply to Goal
+    // turns; only the generic session turn limit excludes runtime Goal
+    // continuations. Tied to the same abortController as user-initiated
     // SIGINT so the existing cancellation plumbing carries the abort;
     // `routeAbort` below interprets the reason so the user sees
     // "budget exceeded" instead of a generic "cancelled" envelope.
@@ -425,6 +815,17 @@ export async function runNonInteractive(
       },
       abortController,
     );
+    const stampBudgetAbort = () => {
+      const exceeded = budgetEnforcer.getExceeded();
+      if (!exceeded) return;
+      endActiveInteraction('error', {
+        errorMessage: exceeded.message,
+        errorType: 'run_budget_exceeded',
+      });
+    };
+    abortController.signal.addEventListener('abort', stampBudgetAbort, {
+      once: true,
+    });
     budgetEnforcer.start();
 
     /**
@@ -436,8 +837,22 @@ export async function runNonInteractive(
      * `unreachable` throw is only present to keep the type-checker honest.
      */
     const routeAbort = async (): Promise<never> => {
-      await settleBeforeTerminalOutput();
       const exceeded = budgetEnforcer.getExceeded();
+      endActiveInteraction(exceeded ? 'error' : 'cancelled', {
+        ...(exceeded
+          ? {
+              errorMessage: exceeded.message,
+              errorType: 'run_budget_exceeded',
+            }
+          : {}),
+      });
+      await failClosedActiveGoalTurn(
+        exceeded?.message ?? 'Headless Goal execution was cancelled',
+        exceeded
+          ? goalPauseReasonForRunBudget(exceeded.kind)
+          : GOAL_PAUSE_REASON_USER_INTERRUPT,
+      );
+      await settleBeforeTerminalOutput();
       if (exceeded) {
         await handleBudgetExceededError(config, exceeded);
         // Explicit unreachable — `handleBudgetExceededError` is `never`
@@ -447,6 +862,12 @@ export async function runNonInteractive(
         // so the outer catch's `errorMessage` field stays actionable
         // (vs. a useless literal "unreachable").
         throw new Error(exceeded.message);
+      }
+      if (
+        options.recoverableCancellation === true &&
+        abortController.signal.reason instanceof TurnInterruptedError
+      ) {
+        throw abortController.signal.reason;
       }
       await handleCancellationError(config);
       throw new Error('Operation cancelled.');
@@ -513,6 +934,7 @@ export async function runNonInteractive(
     // is also wrong: the abort path runs handleCancellationError → exit
     // 130 and re-introduces the same bypass.)
     let pipeBroken = false;
+    let workflowApprovalChannelRegistered = false;
     const stdoutErrorHandler = (err: NodeJS.ErrnoException) => {
       if (err.code === 'EPIPE' && !pipeBroken) {
         pipeBroken = true;
@@ -625,9 +1047,13 @@ export async function runNonInteractive(
             pendingTeammateMessages.push(
               `<team_notice>\n${reason}\n</team_notice>`,
             );
-            event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
-              debugLogger.warn('Teammate approval Cancel failed:', err);
-            });
+            event
+              .respond(ToolConfirmationOutcome.Cancel, {
+                cancelMessage: reason,
+              })
+              .catch((err) => {
+                debugLogger.warn('Teammate approval Cancel failed:', err);
+              });
           };
         }
         manager
@@ -646,6 +1072,20 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      if (options.controlService) {
+        config
+          .getWorkflowRunRegistry()
+          .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
+            options.controlService!.permission.handleWorkflowApproval(
+              entry.runId,
+              approval,
+              rawArgs,
+              signal,
+            ),
+          );
+        workflowApprovalChannelRegistered = true;
+      }
+
       config.onTeamManagerChange(onTeamManagerChangeHandler);
 
       // Handle the case where a manager already exists (e.g.,
@@ -661,6 +1101,7 @@ export async function runNonInteractive(
         config,
         sessionId,
         permissionMode,
+        settings,
       );
       adapter.emitMessage(systemMessage);
 
@@ -678,6 +1119,16 @@ export async function runNonInteractive(
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
+      const userMessageContent = options.userMessage?.message.content;
+      const submittedPrompt =
+        typeof userMessageContent === 'string'
+          ? userMessageContent
+          : Array.isArray(userMessageContent)
+            ? userMessageContent
+                .filter((block) => block.type === 'text')
+                .map((block) => (block.type === 'text' ? block.text : ''))
+                .join(' ')
+            : input;
       // Per-turn model override captured from an inline `/model <id> <prompt>`
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
@@ -690,7 +1141,8 @@ export async function runNonInteractive(
         // runs once per (rare) continue request, so the full clone is fine.
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: geminiClient.getChat().getHistory(),
+          apiHistory: llmClient.getChat().getHistory(),
+          completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -766,6 +1218,64 @@ export async function runNonInteractive(
               }
               slashHandled = true;
               break;
+            case 'goal_control': {
+              const { snapshot } = slashCommandResult.response;
+              const shouldRunGoalWorker =
+                snapshot.goal?.status === 'active' &&
+                (slashCommandResult.operation.kind === 'set' ||
+                  slashCommandResult.operation.kind === 'edit' ||
+                  slashCommandResult.operation.kind === 'resume');
+              try {
+                observeGoalRuntime(await config.getGoalRuntimeReady());
+              } catch (error) {
+                // `goalCommand` already degrades a persistence-unavailable
+                // `status`/`clear` into a successful empty snapshot; asking
+                // for the very runtime that just failed must not turn that
+                // answer back into an exit-1 crash. Only a snapshot that
+                // still needs a worker genuinely requires the runtime.
+                if (
+                  shouldRunGoalWorker ||
+                  !(error instanceof GoalPersistenceUnavailableError)
+                ) {
+                  throw error;
+                }
+                debugLogger.debug(
+                  '[runNonInteractive] canonical Goal runtime unavailable; answering goal_control from the degraded snapshot',
+                );
+              }
+              emitGoalSnapshot(snapshot);
+
+              const message = formatGoalState(
+                snapshot,
+                slashCommandResult.operation.kind,
+              );
+              if (!shouldRunGoalWorker) {
+                await emitNonInteractiveFinalMessage({
+                  message,
+                  isError: false,
+                  adapter,
+                  config,
+                  startTimeMs: startTime,
+                  beforeEmit: settleBeforeTerminalOutput,
+                });
+                return 0;
+              }
+
+              if (outputFormat === OutputFormat.TEXT) {
+                process.stdout.write(`${message}\n`);
+              }
+              bindGoalHost();
+              activeGoalTurn = queuedGoalTurns.shift();
+              if (!activeGoalTurn) {
+                throw new FatalInputError(
+                  'The Goal runtime did not schedule a continuation.',
+                );
+              }
+              markGoalTurnDelivered(activeGoalTurn);
+              initialPartList = buildGoalContinuationParts(activeGoalTurn);
+              slashHandled = true;
+              break;
+            }
             case 'message': {
               // systemMessage already emitted above
               await emitNonInteractiveFinalMessage({
@@ -829,7 +1339,7 @@ export async function runNonInteractive(
       }
 
       // Inject a worktree context notice into the model's first prompt.
-      // Two sources: the `--worktree` startup flag (set by gemini.tsx
+      // Two sources: the `--worktree` startup flag (set by llm.tsx
       // before loadCliConfig) takes precedence over the Phase C resume
       // restore. TUI does this via historyManager.addItem(INFO); here in
       // headless we prepend a `<system-reminder>` block since there is
@@ -891,7 +1401,114 @@ export async function runNonInteractive(
         initialPartList = withReminder(initialPartList, recoveredAgentsNotice);
       }
 
-      const initialParts = normalizePartList(initialPartList);
+      let initialParts = normalizePartList(initialPartList);
+      let fullTurnModelOverride: string | undefined;
+      let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
+      const emitVisionNotice = (subtype: string, notice: string) => {
+        if (outputFormat === OutputFormat.TEXT) {
+          process.stderr.write(`${notice}\n`);
+        } else {
+          adapter.emitSystemMessage(subtype, { notice });
+        }
+      };
+      if (
+        inlineModelOverride === undefined &&
+        shouldRunVisionBridge(config) &&
+        hasImageParts(initialParts)
+      ) {
+        const fullTurnModel = config.getDefaultVisionBridgeModel();
+        if (fullTurnModel?.agentCapable) {
+          const fullTurnParts = initialParts.map((part) =>
+            clampInlineMediaPart(part),
+          );
+          initialParts = fullTurnParts;
+          if (hasImageParts(fullTurnParts)) {
+            fullTurnModelOverride =
+              getFullTurnVisionModelSelector(fullTurnModel);
+            fullTurnRuntimeView = await config
+              .getBaseLlmClient()
+              .resolveForModel(fullTurnModelOverride.slice(0, -1), {
+                failClosed: true,
+              });
+            emitVisionNotice(
+              'vision_routing',
+              formatFullTurnVisionNotice(fullTurnModel),
+            );
+          }
+        } else {
+          try {
+            const bridgeResult = await runVisionBridge({
+              config,
+              parts: initialParts,
+              signal: abortController.signal,
+            });
+            if (
+              bridgeResult.status !== 'skipped' ||
+              bridgeResult.egressOccurred
+            ) {
+              emitVisionNotice(
+                'vision_bridge',
+                formatVisionBridgeNotice(bridgeResult),
+              );
+            }
+            initialParts =
+              bridgeResult.applied && bridgeResult.parts != null
+                ? normalizePartList(bridgeResult.parts)
+                : splitImageParts(initialParts).nonImageParts;
+          } catch (error) {
+            debugLogger.debug(
+              `vision bridge: failed before replacement; falling back to text-only parts error=${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            emitVisionNotice(
+              'vision_bridge_failed',
+              'Vision bridge failed; proceeding without the image(s).',
+            );
+            initialParts = splitImageParts(initialParts).nonImageParts;
+          }
+        }
+      }
+      const initialSendType =
+        continueSendType ??
+        options.sendMessageType ??
+        SendMessageType.UserQuery;
+      if (!activeGoalTurn && initialSendType === SendMessageType.UserQuery) {
+        try {
+          const runtime = await config.getGoalRuntimeReady();
+          observeGoalRuntime(runtime);
+          if (runtime.getSnapshot().goal?.status === 'active') {
+            const permit = await claimUserGoalTurn(
+              runtime,
+              prompt_id,
+              abortController.signal,
+            );
+            if (abortController.signal.aborted) {
+              await routeAbort();
+            }
+            if (permit) {
+              const goal = runtime.getSnapshot().goal;
+              if (!goal) {
+                throw new Error('Goal turn admission lost its active Goal');
+              }
+              const verifierFeedback = runtime.getVerifierFeedback(permit);
+              activeGoalTurn = {
+                permit,
+                turnKey: prompt_id,
+                controller: new AbortController(),
+                origin: 'user',
+                continuationContext: goal.objective,
+                ...(verifierFeedback ? { verifierFeedback } : {}),
+              };
+              bindGoalHost();
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) {
+            throw error;
+          }
+        }
+      }
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
       // Register the callback early so background agents launched during the main
@@ -978,17 +1595,20 @@ export async function runNonInteractive(
       }
 
       let isFirstTurn = true;
+      let isFirstGoalSegment = activeGoalTurn !== undefined;
       let hasUnsentToolResponse = false;
-      let modelOverride: string | undefined = inlineModelOverride;
+      let modelOverride: string | undefined =
+        inlineModelOverride ?? fullTurnModelOverride;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
-      // submitted prompt to the session model mid-turn. Unlike useGeminiStream's
+      // submitted prompt to the session model mid-turn. Unlike useLlmStream's
       // ref-based `applyModelOverride`/`clearModelOverride` helpers, this is a
       // run-scoped const — non-interactive mode is single-turn, so there is no
       // retry-clearing or skill-tool takeover to guard against, just the
       // within-turn precedence above.
       const inlineModelOverrideActive = inlineModelOverride !== undefined;
+      const fullTurnModelOverrideActive = fullTurnModelOverride !== undefined;
       if (inlineModelOverrideActive) {
         debugLogger.debug(
           `[runNonInteractive] inline model override active for turn: ${inlineModelOverride}`,
@@ -1020,6 +1640,31 @@ export async function runNonInteractive(
       // no-op), so unconditional invocation is safe even when the drain
       // path already finalized monitors before reaching here.
       const emitStructuredSuccess = async (): Promise<0> => {
+        const owner = captureActiveInteractionOwner();
+        if (
+          owner &&
+          getActiveInteractionSpan(activeInteractionPromptId) === owner
+        ) {
+          let responseText: string | undefined;
+          try {
+            responseText = JSON.stringify(structuredSubmission);
+          } catch {
+            responseText = undefined;
+          }
+          if (responseText !== undefined) {
+            addAgentOutputMessageAttributes(
+              config,
+              owner,
+              responseText,
+              'tool_call',
+            );
+          }
+          endActiveInteraction('ok');
+        }
+        await failClosedActiveGoalTurn(
+          'Headless Goal ended with structured output',
+          GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+        );
         registry.abortAll();
         // `abortAll()` marks each task `cancelled` synchronously, but
         // the matching `task_notification` is emitted later by the
@@ -1056,6 +1701,13 @@ export async function runNonInteractive(
       };
 
       const emitLoopDetectedResult = async (): Promise<1> => {
+        endActiveInteraction('error', {
+          errorMessage: 'loop detected',
+          errorType: 'loop_detected',
+        });
+        await failClosedActiveGoalTurn(
+          'Headless Goal stopped after loop detection',
+        );
         registry.abortAll();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
@@ -1083,6 +1735,71 @@ export async function runNonInteractive(
         return 1;
       };
 
+      const emitRetryProgress = (
+        event: ServerLlmStreamEvent,
+        discardedToolCallCount: number,
+        preserveText: boolean,
+      ): void => {
+        if (event.type === LlmEventType.ModelFallback) {
+          process.stderr.write(
+            `Falling back from ${event.fromModel} to ${event.toModel} (${discardedToolCallCount} buffered tool call(s) discarded).\n`,
+          );
+          return;
+        }
+        if (event.type !== LlmEventType.Retry) return;
+        if (!event.retryInfo) {
+          process.stderr.write(
+            `Retrying provider attempt (${discardedToolCallCount} buffered tool call(s) discarded${
+              preserveText ? '; preserving delivered text' : ''
+            }).\n`,
+          );
+          return;
+        }
+        const { attempt, maxRetries, delayMs, message } = event.retryInfo;
+        const delaySeconds = Math.ceil(delayMs / 1000);
+        process.stderr.write(
+          `Retrying in ${delaySeconds}s (attempt ${attempt}/${maxRetries})${
+            message ? `: ${message}` : ''
+          }\n`,
+        );
+      };
+
+      const discardAbandonedAttempt = (
+        event: ServerLlmStreamEvent,
+        pendingRequests: ToolCallRequestInfo[],
+        onDiscardText?: () => void,
+      ): void => {
+        if (
+          event.type !== LlmEventType.Retry &&
+          event.type !== LlmEventType.ModelFallback
+        ) {
+          return;
+        }
+        const discardedToolCalls = pendingRequests.splice(0);
+        const preserveText =
+          event.type === LlmEventType.Retry && event.isContinuation === true;
+        adapter.restartAttempt(preserveText, discardedToolCalls);
+        if (!preserveText) {
+          onDiscardText?.();
+        }
+        const retryInfo =
+          event.type === LlmEventType.Retry ? event.retryInfo : undefined;
+        adapter.emitSystemMessage('retry', {
+          reason:
+            event.type === LlmEventType.Retry ? 'retry' : 'model_fallback',
+          ...(retryInfo
+            ? {
+                attempt: retryInfo.attempt,
+                maxRetries: retryInfo.maxRetries,
+                delayMs: retryInfo.delayMs,
+              }
+            : {}),
+          discardedToolCalls: discardedToolCalls.length,
+          preserveText,
+        });
+        emitRetryProgress(event, discardedToolCalls.length, preserveText);
+      };
+
       /**
        * Shared per-turn tool-call dispatch for the main-turn loop and
        * `drainBatch`. Both call sites used to reproduce ~120 lines of
@@ -1103,8 +1820,11 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
-      const handledProviderToolCallIds =
-        geminiClient.getHistoryFunctionResponseIds();
+      // Fresh map per call today; copy so a future cached accessor cannot
+      // turn this run's cross-turn recording into shared-state mutation.
+      const handledToolCallFingerprints = new Map(
+        llmClient.getHistoryToolCallFingerprints(),
+      );
       // Tracks duplicate-error responses emitted during this headless run.
       // Once a provider id reaches this set, seeing it again is terminal for
       // the current tool batch so we do not send partial tool responses.
@@ -1113,12 +1833,15 @@ export async function runNonInteractive(
       type ToolCallBatchResult = {
         responseParts: Part[];
         repeatedDuplicateProviderToolCall: boolean;
+        terminateTurn: boolean;
       };
 
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => boolean,
+        runtimeView?: RuntimeContentGeneratorView,
       ): Promise<ToolCallBatchResult> => {
+        let terminateTurn = false;
         const responseByRequest = new Map<
           ToolCallRequestInfo,
           ToolCallResponseInfo
@@ -1156,10 +1879,26 @@ export async function runNonInteractive(
           }
           return true;
         });
+        const isReplayOfHandledRequest = (
+          request: ToolCallRequestInfo,
+        ): boolean => {
+          const providerCallId = getProviderResponseId(request);
+          return providerCallId
+            ? isReplayOfHandledToolCall(
+                handledToolCallFingerprints,
+                providerCallId,
+                getCachedToolCallFingerprint(
+                  request,
+                  request.name,
+                  request.args,
+                ),
+              )
+            : false;
+        };
         const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
           [...uniqueBatchRequests, ...duplicateBatchRequests],
           getProviderResponseId,
-          handledProviderToolCallIds,
+          isReplayOfHandledRequest,
           duplicateProviderToolCallResponseIds,
         );
         if (repeatedDuplicateRequest) {
@@ -1172,6 +1911,7 @@ export async function runNonInteractive(
           return {
             responseParts: [],
             repeatedDuplicateProviderToolCall: true,
+            terminateTurn: false,
           };
         }
 
@@ -1184,8 +1924,16 @@ export async function runNonInteractive(
             continue;
           }
 
-          if (!handledProviderToolCallIds.has(providerCallId)) {
-            handledProviderToolCallIds.add(providerCallId);
+          if (!isReplayOfHandledRequest(requestInfo)) {
+            recordHandledToolCall(
+              handledToolCallFingerprints,
+              providerCallId,
+              getCachedToolCallFingerprint(
+                requestInfo,
+                requestInfo.name,
+                requestInfo.args,
+              ),
+            );
             executableBatchRequests.push(requestInfo);
             continue;
           }
@@ -1316,7 +2064,12 @@ export async function runNonInteractive(
           const response = await executeToolCall(
             config,
             requestInfo,
-            abortController.signal,
+            activeGoalTurn
+              ? AbortSignal.any([
+                  abortController.signal,
+                  activeGoalTurn.controller.signal,
+                ])
+              : abortController.signal,
             {
               recordToolResult: false,
               onToolResultFullTurnModel: (model) => {
@@ -1329,6 +2082,7 @@ export async function runNonInteractive(
                   statusByResponse.set(call.response, call.status);
                 }
               },
+              runtimeView,
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
@@ -1363,13 +2117,15 @@ export async function runNonInteractive(
               typeof toolResponse.resultDisplay === 'string'
                 ? toolResponse.resultDisplay
                 : undefined,
+              { approvalRequired: toolResponse.approvalRequired === true },
             );
           }
 
           adapter.emitToolResult(requestInfo, toolResponse);
           responseByRequest.set(requestInfo, toolResponse);
+          terminateTurn ||= toolResponse.terminateTurn === true;
           config
-            .getGeminiClient()
+            .getLlmClient()
             .recordCompletedToolCall(
               requestInfo.name,
               requestInfo.args as Record<string, unknown>,
@@ -1417,6 +2173,7 @@ export async function runNonInteractive(
             resultDisplay: error.message,
             error,
             errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
           });
           responseByRequest.set(requestInfo, {
             callId: requestInfo.callId,
@@ -1424,6 +2181,7 @@ export async function runNonInteractive(
             resultDisplay: error.message,
             error,
             errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
           });
           executedRequests.add(requestInfo);
         };
@@ -1575,6 +2333,7 @@ export async function runNonInteractive(
               resultDisplay: skippedOutput,
               error: undefined,
               errorType: undefined,
+              executionStatus: 'not_started',
             };
             adapter.emitToolResult(call, toolResponse);
             responseByRequest.set(call, toolResponse);
@@ -1606,7 +2365,14 @@ export async function runNonInteractive(
             toolName: request.name,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
           })),
+          new Map(
+            orderedResponses.map(({ request }) => [
+              request.callId,
+              request.prompt_id,
+            ]),
+          ),
         );
 
         const chatRecordingService = config.getChatRecordingService?.();
@@ -1615,20 +2381,29 @@ export async function runNonInteractive(
           const { request, response } = orderedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          chatRecordingService?.recordToolResult?.(finalizedParts, {
-            callId: request.callId,
-            status:
-              statusByResponse.get(response) ??
-              (response.error ? 'error' : 'success'),
-            resultDisplay: response.resultDisplay,
-            error: response.error,
-            errorType: response.errorType,
-          });
+          const goalProvenance = goalToolResultProvenance(request);
+          chatRecordingService?.recordToolResult?.(
+            finalizedParts,
+            {
+              callId: request.callId,
+              status:
+                statusByResponse.get(response) ??
+                (response.error ? 'error' : 'success'),
+              resultDisplay: response.resultDisplay,
+              persistedOutputFiles: finalized[index].persistedOutputFiles,
+              artifacts: finalized[index].artifacts,
+              error: response.error,
+              errorType: response.errorType,
+              executionStatus: response.executionStatus,
+            },
+            ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+          );
         }
 
         return {
           responseParts: toolResponseParts,
           repeatedDuplicateProviderToolCall: false,
+          terminateTurn,
         };
       };
 
@@ -1645,7 +2420,7 @@ export async function runNonInteractive(
         if (!isFirstTurn && pendingTeammateMessages.length > 0) {
           const batch = pendingTeammateMessages.splice(0);
           const teammatePart = { text: batch.join('\n\n') };
-          if (hasUnsentToolResponse && currentMessages[0]) {
+          if ((hasUnsentToolResponse || activeGoalTurn) && currentMessages[0]) {
             currentMessages[0].parts = [
               ...(currentMessages[0].parts || []),
               teammatePart,
@@ -1667,32 +2442,41 @@ export async function runNonInteractive(
         hasUnsentToolResponse = false;
 
         turnCount++;
-        if (
-          config.getMaxSessionTurns() >= 0 &&
-          turnCount > config.getMaxSessionTurns()
-        ) {
-          await settleBeforeTerminalOutput();
-          await handleMaxTurnsExceededError(config);
-        }
+        const goalTurn = activeGoalTurn;
+        await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
 
         let sendType: SendMessageType;
-        if (isFirstTurn) {
+        if (goalTurn && isFirstGoalSegment) {
+          sendType =
+            goalTurn.origin === 'runtime'
+              ? SendMessageType.Goal
+              : SendMessageType.UserQuery;
+        } else if (isTeammateTurn) {
+          sendType = SendMessageType.Teammate;
+        } else if (goalTurn) {
+          sendType = SendMessageType.ToolResult;
+        } else if (isFirstTurn) {
           sendType =
             continueSendType ??
             options.sendMessageType ??
             SendMessageType.UserQuery;
-        } else if (isTeammateTurn) {
-          sendType = SendMessageType.Teammate;
         } else {
           sendType = SendMessageType.ToolResult;
         }
         if (isTeammateTurn) {
+          selectActiveInteraction(currentPromptId);
+          endActiveInteraction('ok');
           currentPromptId = `${prompt_id}/teammate/${turnCount}`;
         }
+        selectActiveInteraction(
+          currentPromptId,
+          sendType !== SendMessageType.ToolResult,
+        );
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
+        const attemptPreviewLength = plainTextPreview.length;
         const apiStartTime = Date.now();
-        const responseStream = geminiClient.sendMessageStream(
+        const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
           currentPromptId,
@@ -1700,17 +2484,52 @@ export async function runNonInteractive(
             type: sendType,
             modelOverride,
             ...(isFirstTurn &&
+              sendType === SendMessageType.UserQuery &&
+              !options.continueInterrupted &&
+              submittedPrompt.trim().length > 0 && { submittedPrompt }),
+            ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
               }),
+            ...(goalTurn
+              ? {
+                  goalPermit: goalTurn.permit,
+                  goalTurnKey: goalTurn.turnKey,
+                  goalSignal: goalTurn.controller.signal,
+                  goalOrigin: goalTurn.origin,
+                  getInterruptedGoalPauseReason: (interruption) => {
+                    const exceeded = budgetEnforcer.getExceeded();
+                    if (exceeded) {
+                      return goalPauseReasonForRunBudget(exceeded.kind);
+                    }
+                    if (abortController.signal.aborted) {
+                      return GOAL_PAUSE_REASON_USER_INTERRUPT;
+                    }
+                    if (interruption?.cause === 'stop-hook-cap') {
+                      return goalPauseReasonForHeadlessFailure(
+                        'a Stop hook blocked this session too many times in a row',
+                      );
+                    }
+                    // A turn that died with an error did not end cleanly, so
+                    // it must not read as the run simply finishing first --
+                    // but it stays in the headless register, which never
+                    // tells the reader to run a slash command.
+                    return interruption?.failure
+                      ? goalPauseReasonForHeadlessFailure(interruption.failure)
+                      : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED;
+                  },
+                }
+              : {}),
           },
         );
         isFirstTurn = false;
+        isFirstGoalSegment = false;
 
         // Start assistant message for this turn
         adapter.startAssistantMessage();
 
         for await (const event of responseStream) {
+          captureActiveInteractionOwner();
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode
             // doesn't leave an unterminated message_start when a budget /
@@ -1719,23 +2538,24 @@ export async function runNonInteractive(
             adapter.finalizeAssistantMessage();
             await routeAbort();
           }
-          // Use adapter for all event processing
+          discardAbandonedAttempt(event, toolCallRequests, () => {
+            plainTextPreview = plainTextPreview.slice(0, attemptPreviewLength);
+          });
+          // Process fallback metadata only after the abandoned attempt has
+          // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
-          if (event.type === GeminiEventType.ModelFallback) {
-            toolCallRequests.length = 0;
-          }
           if (
-            event.type === GeminiEventType.Content &&
+            event.type === LlmEventType.Content &&
             plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
           ) {
             const remaining =
               PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
             plainTextPreview += String(event.value).slice(0, remaining);
           }
-          if (event.type === GeminiEventType.LoopDetected) {
+          if (event.type === LlmEventType.LoopDetected) {
             if (!loopDetected) {
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
@@ -1744,22 +2564,21 @@ export async function runNonInteractive(
             }
             loopDetected = true;
           }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === GeminiEventType.Error
-          ) {
+          if (event.type === LlmEventType.Error) {
             const errorText = parseAndFormatApiError(
               event.value.error,
               config.getContentGeneratorConfig()?.authType,
             );
-            process.stderr.write(`${errorText}\n`);
-            // We have already formatted and written the message; mark the
-            // throw so the top-level handleError doesn't reformat (which
-            // would yield "[API Error: [API Error: ...]]") or print it a
-            // second time. Exit code stays 1 — same as before.
+            if (outputFormat === OutputFormat.TEXT) {
+              process.stderr.write(`${errorText}\n`);
+            }
+            // The adapter has already captured the formatted error in JSON
+            // modes, while text mode wrote it above. Mark the throw so the
+            // terminal error result is emitted without formatting it again.
             throw new AlreadyReportedError(errorText);
           }
         }
+        captureActiveInteractionOwner();
 
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
@@ -1769,6 +2588,7 @@ export async function runNonInteractive(
           return emitLoopDetectedResult();
         }
 
+        let shouldFinalizeTurn = toolCallRequests.length === 0;
         if (toolCallRequests.length > 0) {
           // Dispatch the per-turn tool-call batch through the shared
           // helper (see processToolCallBatch above). The helper handles
@@ -1784,14 +2604,22 @@ export async function runNonInteractive(
           const {
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
-          } = await processToolCallBatch(toolCallRequests, (override) => {
-            if (inlineModelOverrideActive) return false;
-            if (modelOverride?.endsWith('\0') && modelOverride !== override) {
-              return false;
-            }
-            modelOverride = override;
-            return true;
-          });
+            terminateTurn,
+          } = await processToolCallBatch(
+            toolCallRequests,
+            (override) => {
+              if (inlineModelOverrideActive) return false;
+              if (fullTurnModelOverrideActive && modelOverride !== override) {
+                return false;
+              }
+              if (modelOverride?.endsWith('\0') && modelOverride !== override) {
+                return false;
+              }
+              modelOverride = override;
+              return true;
+            },
+            fullTurnRuntimeView,
+          );
 
           if (structuredSubmission !== undefined) {
             // Single-shot terminal contract; aborts in-flight background
@@ -1811,9 +2639,63 @@ export async function runNonInteractive(
             );
             return emitLoopDetectedResult();
           }
-          currentMessages = [{ role: 'user', parts: toolResponseParts }];
-          hasUnsentToolResponse = true;
-        } else {
+          if (terminateTurn && activeGoalTurn) {
+            llmClient.addHistory({
+              role: 'user',
+              parts: toolResponseParts,
+            });
+            await config.getChatRecordingService?.()?.flush();
+            await finishGoalTurn(activeGoalTurn);
+            activeGoalTurn = undefined;
+            selectActiveInteraction(currentPromptId);
+            endActiveInteraction('ok');
+            const nextGoalTurn = queuedGoalTurns.shift();
+            if (nextGoalTurn) {
+              activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
+              isFirstGoalSegment = true;
+              currentMessages = [
+                {
+                  role: 'user',
+                  parts: buildGoalContinuationParts(nextGoalTurn),
+                },
+              ];
+              hasUnsentToolResponse = false;
+              continue;
+            }
+            shouldFinalizeTurn = true;
+          }
+          if (!shouldFinalizeTurn) {
+            currentMessages = [{ role: 'user', parts: toolResponseParts }];
+            hasUnsentToolResponse = true;
+          }
+        }
+        if (shouldFinalizeTurn) {
+          if (activeGoalTurn) {
+            const completedGoalTurn = activeGoalTurn;
+            await config.getChatRecordingService?.()?.flush();
+            await finishGoalTurn(completedGoalTurn);
+            if (activeGoalTurn === completedGoalTurn) {
+              activeGoalTurn = undefined;
+            }
+            selectActiveInteraction(currentPromptId);
+            endActiveInteraction('ok');
+            const nextGoalTurn = queuedGoalTurns.shift();
+            if (nextGoalTurn) {
+              activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
+              isFirstGoalSegment = true;
+              currentMessages = [
+                {
+                  role: 'user',
+                  parts: buildGoalContinuationParts(nextGoalTurn),
+                },
+              ];
+              hasUnsentToolResponse = false;
+              continue;
+            }
+          }
+
           // No more tool calls — check if teammates are active.
           const teamManager = config.getTeamManager();
           if (teamManager?.hasActiveTeammates()) {
@@ -1874,8 +2756,7 @@ export async function runNonInteractive(
           // immediately instead of falling through to the
           // success path.
           if (abortController.signal.aborted) {
-            await settleBeforeTerminalOutput();
-            await handleCancellationError(config);
+            await routeAbort();
           }
 
           // Force one final inbox drain before deciding to exit.
@@ -1930,13 +2811,7 @@ export async function runNonInteractive(
             };
 
             turnCount++;
-            if (
-              config.getMaxSessionTurns() >= 0 &&
-              turnCount > config.getMaxSessionTurns()
-            ) {
-              await settleBeforeTerminalOutput();
-              await handleMaxTurnsExceededError(config);
-            }
+            await enforceSessionTurnLimit(false);
 
             let itemMessages: Content[] = [
               { role: 'user', parts: [{ text: item.modelText }] },
@@ -1948,7 +2823,8 @@ export async function runNonInteractive(
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
-              const itemStream = geminiClient.sendMessageStream(
+              selectActiveInteraction(itemPromptId, itemIsFirstTurn);
+              const itemStream = llmClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
                 itemPromptId,
@@ -1968,6 +2844,7 @@ export async function runNonInteractive(
               adapter.startAssistantMessage();
 
               for await (const event of itemStream) {
+                captureActiveInteractionOwner();
                 if (abortController.signal.aborted) {
                   // Pair the startAssistantMessage() above so stream-json
                   // mode doesn't leave an unterminated message_start, then
@@ -1988,11 +2865,12 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
+                discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
-                if (event.type === GeminiEventType.ToolCallRequest) {
+                if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
-                if (event.type === GeminiEventType.LoopDetected) {
+                if (event.type === LlmEventType.LoopDetected) {
                   if (!loopDetected) {
                     loopDetectedMessage = emitLoopDetectedMessage(
                       config,
@@ -2001,21 +2879,19 @@ export async function runNonInteractive(
                   }
                   loopDetected = true;
                 }
-                if (
-                  outputFormat === OutputFormat.TEXT &&
-                  event.type === GeminiEventType.Error
-                ) {
+                if (event.type === LlmEventType.Error) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
                   );
-                  process.stderr.write(`${errorText}\n`);
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError doesn't reformat or
-                  // reprint downstream.
+                  if (outputFormat === OutputFormat.TEXT) {
+                    process.stderr.write(`${errorText}\n`);
+                  }
+                  // See the matching main-stream branch above.
                   throw new AlreadyReportedError(errorText);
                 }
               }
+              captureActiveInteractionOwner();
 
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
@@ -2242,7 +3118,7 @@ export async function runNonInteractive(
           }
 
           const memoryTaskPromises = config
-            .getGeminiClient()
+            .getLlmClient()
             .consumePendingMemoryTaskPromises();
           if (memoryTaskPromises.length > 0) {
             await Promise.allSettled(memoryTaskPromises);
@@ -2288,6 +3164,10 @@ export async function runNonInteractive(
             const errorMessage =
               `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
               previewSuffix;
+            endActiveInteraction('error', {
+              errorMessage: 'model did not produce structured output',
+              errorType: 'structured_output_missing',
+            });
             await emitResult({
               isError: true,
               durationMs: Date.now() - startTime,
@@ -2312,6 +3192,35 @@ export async function runNonInteractive(
         }
       }
     } catch (error) {
+      const budgetExceeded = budgetEnforcer.getExceeded();
+      const failureMessage =
+        error instanceof Error ? error.message : String(error);
+      endActiveInteraction(
+        budgetExceeded || !abortController.signal.aborted
+          ? 'error'
+          : 'cancelled',
+        {
+          ...(budgetExceeded
+            ? {
+                errorMessage: budgetExceeded.message,
+                errorType: 'run_budget_exceeded',
+              }
+            : abortController.signal.aborted
+              ? {}
+              : {
+                  errorMessage: 'headless invocation failed',
+                  errorType: getErrorType(error),
+                }),
+        },
+      );
+      await failClosedActiveGoalTurn(
+        error instanceof Error
+          ? error.message
+          : 'Headless Goal execution failed',
+        budgetExceeded
+          ? goalPauseReasonForRunBudget(budgetExceeded.kind)
+          : undefined,
+      );
       // Ensure message_start / message_stop (and content_block events) are
       // properly paired even when an error aborts the turn mid-stream.
       // The call is safe when no message was started (throws → caught) or
@@ -2333,14 +3242,17 @@ export async function runNonInteractive(
       // depend on that envelope to close the stream cleanly) and (b)
       // exit with the budget handler's exit code 55 instead of the
       // generic `handleError` exit code 1 from a raw "AbortError".
-      const budgetExceeded = budgetEnforcer.getExceeded();
+      const recoverableCancellation =
+        !budgetExceeded &&
+        options.recoverableCancellation === true &&
+        abortController.signal.reason instanceof TurnInterruptedError;
 
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = budgetExceeded
         ? budgetExceeded.message
-        : error instanceof Error
-          ? error.message
-          : String(error);
+        : recoverableCancellation
+          ? abortController.signal.reason.message
+          : failureMessage;
       const metrics = uiTelemetryService.getMetrics();
       const usage = computeUsageFromMetrics(metrics);
       // Get stats for JSON format output
@@ -2394,8 +3306,21 @@ export async function runNonInteractive(
         // see a terminal result envelope before the process dies.
         await handleBudgetExceededError(config, budgetExceeded);
       }
+      if (recoverableCancellation) {
+        return 130;
+      }
       await handleError(error, config);
     } finally {
+      await failClosedActiveGoalTurn(
+        'Headless Goal host stopped before its permit was released',
+      );
+      goalRuntimeUnsubscribe?.();
+      goalRuntimeUnsubscribe = undefined;
+      goalHostUnbind?.();
+      goalHostUnbind = undefined;
+      if (workflowApprovalChannelRegistered) {
+        config.getWorkflowRunRegistry().setApprovalRequestCallback(undefined);
+      }
       cleanupReviewWorktrees();
       unregisterReviewWorktreeCleanup();
       // Unsubscribe the leader message callback and approval
@@ -2414,6 +3339,7 @@ export async function runNonInteractive(
       // run completes — important for callers (e.g. the `qwen serve`
       // daemon, SDK) that reuse a single process across many runs.
       budgetEnforcer.stop();
+      abortController.signal.removeEventListener('abort', stampBudgetAbort);
 
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);

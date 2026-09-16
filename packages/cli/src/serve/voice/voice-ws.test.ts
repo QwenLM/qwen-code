@@ -7,11 +7,58 @@
 // @vitest-environment node
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import { createVoiceWsConnectionHandler } from './voice-ws.js';
 import { WorkspaceVoiceCoordinator } from './workspace-voice-coordinator.js';
 import type { DaemonVoiceContext } from './resolve-voice-config.js';
 import type { VoiceStreamSession } from '../../ui/voice/voice-stream-session.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
+
+// The daemon defaults (defaultOpenStream/defaultTranscribe) pass the resolved
+// config into assertVoiceBaseUrlNetworkAllowed; the default-wiring tests below
+// drive them without injected openStream/transcribe, so the upstream `ws`
+// module is swapped for a dial-recording fake to keep the tests offline.
+const { FakeUpstreamSocket } = vi.hoisted(() => {
+  class FakeUpstreamSocket {
+    static instances: FakeUpstreamSocket[] = [];
+    readonly OPEN = 1;
+    readyState = this.OPEN;
+    readonly url: string;
+    readonly sent: Array<string | Uint8Array> = [];
+    private readonly handlers = new Map<
+      string,
+      Array<(...args: unknown[]) => void>
+    >();
+
+    constructor(url: string, _options?: unknown) {
+      this.url = url;
+      FakeUpstreamSocket.instances.push(this);
+    }
+
+    send(data: string | Uint8Array): void {
+      this.sent.push(data);
+    }
+
+    close(): void {
+      this.readyState = 3;
+    }
+
+    on(event: string, cb: (...args: unknown[]) => void): void {
+      const list = this.handlers.get(event) ?? [];
+      list.push(cb);
+      this.handlers.set(event, list);
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      for (const handler of this.handlers.get(event) ?? []) {
+        handler(...args);
+      }
+    }
+  }
+  return { FakeUpstreamSocket };
+});
+
+vi.mock('ws', () => ({ default: FakeUpstreamSocket }));
 
 /** Minimal stand-in for a `ws` WebSocket the handler attaches to. */
 class FakeWs {
@@ -599,5 +646,138 @@ describe('createVoiceWsConnectionHandler', () => {
 
     expect(ws.closeCode).toBe(1012);
     expect(ws.closeReason).toBe('Server shutting down');
+  });
+});
+
+// These tests drive the production defaults (no injected openStream/transcribe)
+// so a revert that drops allowInsecureBaseUrl from the default guard wiring
+// fails instead of staying green (CLI analogue of the desktop
+// voice-ws-handler.isolated.ts default-wiring tests).
+describe('daemon default guard wiring', () => {
+  const PRIVATE_BASE_URL = 'http://10.0.0.8/v1';
+
+  function allowlistedCtx(
+    voiceModel: string,
+    streaming: boolean,
+  ): DaemonVoiceContext {
+    return {
+      settings: {
+        merged: {
+          security: { allowedInsecureVoiceBaseUrls: [PRIVATE_BASE_URL] },
+        },
+      } as unknown as DaemonVoiceContext['settings'],
+      models: {
+        getAllConfiguredModels: () => [
+          {
+            id: voiceModel,
+            label: 'Private ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: PRIVATE_BASE_URL,
+          },
+        ],
+      },
+      voiceModel,
+      streaming,
+    };
+  }
+
+  it('reaches the default batch transport when the private-network opt-in is set', async () => {
+    const fetchedUrls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: unknown) => {
+      fetchedUrls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'hello gateway' } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const ws = new FakeWs();
+      const handler = createVoiceWsConnectionHandler('/ws', {
+        loadContext: () => allowlistedCtx('qwen3-asr-flash', false),
+      });
+      handler(ws as never, {} as never);
+
+      ws.text({ type: 'start' });
+      await tick();
+      ws.binary([1, 2, 3, 4]);
+      await tick();
+      ws.text({ type: 'stop' });
+      await tick();
+
+      expect(fetchedUrls).toContain('http://10.0.0.8/v1/chat/completions');
+      expect(ws.frames()).toContainEqual({
+        type: 'final',
+        text: 'hello gateway',
+      });
+      expect(ws.frames().some((f) => f['type'] === 'error')).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('blocks the default batch transport for a private gateway without the opt-in', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn() as typeof fetch;
+
+    try {
+      const ws = new FakeWs();
+      const handler = createVoiceWsConnectionHandler('/ws', {
+        loadContext: () =>
+          ({
+            settings: {
+              merged: {},
+            } as unknown as DaemonVoiceContext['settings'],
+            models: {
+              getAllConfiguredModels: () => [
+                {
+                  id: 'qwen3-asr-flash',
+                  label: 'Private ASR',
+                  authType: AuthType.USE_OPENAI,
+                  baseUrl: 'https://10.0.0.8/v1',
+                },
+              ],
+            },
+            voiceModel: 'qwen3-asr-flash',
+            streaming: false,
+          }) satisfies DaemonVoiceContext,
+      });
+      handler(ws as never, {} as never);
+
+      ws.text({ type: 'start' });
+      await tick();
+      ws.binary([1, 2, 3, 4]);
+      await tick();
+      ws.text({ type: 'stop' });
+      await tick();
+
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(ws.frames().some((f) => f['type'] === 'error')).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('reaches the default streaming transport when the private-network opt-in is set', async () => {
+    FakeUpstreamSocket.instances.length = 0;
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => allowlistedCtx('qwen3-asr-flash-realtime', true),
+    });
+    handler(ws as never, {} as never);
+
+    ws.text({ type: 'start' });
+    await tick();
+
+    // The guard let the allowlisted gateway through: the production default
+    // dialed the upstream realtime socket instead of rejecting.
+    const upstream = FakeUpstreamSocket.instances.at(-1);
+    expect(upstream?.url).toBe(
+      'ws://10.0.0.8/api-ws/v1/realtime?model=qwen3-asr-flash-realtime',
+    );
+    expect(ws.frames().some((f) => f['type'] === 'error')).toBe(false);
   });
 });

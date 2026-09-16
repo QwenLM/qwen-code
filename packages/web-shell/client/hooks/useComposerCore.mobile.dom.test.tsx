@@ -71,18 +71,21 @@ function Harness({
   // Mirrors the ChatEditor render seam: the mobile backend renders a plain
   // controlled textarea at the single mount point, desktop keeps the
   // CodeMirror container div.
-  return composer.mobileComposer ? (
-    <textarea
-      ref={composer.mobileComposer.textareaRef}
-      value={composer.mobileComposer.value}
-      onChange={composer.mobileComposer.onChange}
-      onBlur={composer.mobileComposer.onBlur}
-      onPaste={composer.mobileComposer.onPaste}
-      placeholder={composer.mobileComposer.placeholder}
-      data-web-shell-composer-editor
-    />
-  ) : (
-    <div ref={composer.containerRef} data-web-shell-composer-editor />
+  return (
+    <div {...composer.imageTransferHandlers} data-web-shell-composer-surface>
+      {composer.mobileComposer ? (
+        <textarea
+          ref={composer.mobileComposer.textareaRef}
+          value={composer.mobileComposer.value}
+          onChange={composer.mobileComposer.onChange}
+          onBlur={composer.mobileComposer.onBlur}
+          placeholder={composer.mobileComposer.placeholder}
+          data-web-shell-composer-editor
+        />
+      ) : (
+        <div ref={composer.containerRef} data-web-shell-composer-editor />
+      )}
+    </div>
   );
 }
 
@@ -368,22 +371,33 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(document.activeElement).toBe(content);
   });
 
-  it('collects pasted images and lets plain text paste natively', async () => {
+  it('collects image-only paste and lets mixed text/image paste natively', async () => {
     mockTouchDevice();
     await mount();
     const preventDefault = vi.fn();
     const imageItem = {
+      kind: 'file',
       type: 'image/png',
       getAsFile: () =>
         new File([new Uint8Array([137, 80, 78, 71])], 'x.png', {
           type: 'image/png',
         }),
     };
+    const imageEvent = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(imageEvent, 'clipboardData', {
+      value: {
+        files: [],
+        items: [imageItem],
+        types: ['Files'],
+        getData: () => '',
+      },
+    });
     await act(async () => {
-      latest!.mobileComposer!.onPaste({
-        clipboardData: { items: [imageItem] },
-        preventDefault,
-      } as unknown as React.ClipboardEvent<HTMLTextAreaElement>);
+      imageEvent.preventDefault = preventDefault;
+      container!.querySelector('textarea')!.dispatchEvent(imageEvent);
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     expect(preventDefault).toHaveBeenCalled();
@@ -391,15 +405,28 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.pastedImages[0].media_type).toBe('image/png');
 
     const textPreventDefault = vi.fn();
+    const textEvent = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(textEvent, 'clipboardData', {
+      value: {
+        files: [],
+        items: [
+          imageItem,
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? 'PPT 文字' : ''),
+      },
+    });
     act(() => {
-      latest!.mobileComposer!.onPaste({
-        clipboardData: {
-          items: [{ type: 'text/plain', getAsFile: () => null }],
-        },
-        preventDefault: textPreventDefault,
-      } as unknown as React.ClipboardEvent<HTMLTextAreaElement>);
+      textEvent.preventDefault = textPreventDefault;
+      container!.querySelector('textarea')!.dispatchEvent(textEvent);
     });
     expect(textPreventDefault).not.toHaveBeenCalled();
+    expect(latest!.pastedImages).toHaveLength(1);
+    expect(latest!.pendingImageBatchCount).toBe(0);
   });
 
   it('saves the draft immediately on blur before the debounce timer fires', async () => {
@@ -427,5 +454,50 @@ describe('useComposerCore mobile textarea backend', () => {
       ),
     ).toBe('mobile draft text');
     vi.useRealTimers();
+  });
+
+  it('walks prompt history from navigatePrevHistory/navigateNextHistory', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('first message');
+    act(() => latest!.submitText());
+    typeText('second message');
+    act(() => latest!.submitText());
+    typeText('working draft');
+    expect(latest!.mobileComposer!.value).toBe('working draft');
+
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('second message');
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('first message');
+    act(() => latest!.navigateNextHistory());
+    expect(latest!.mobileComposer!.value).toBe('second message');
+    act(() => latest!.navigateNextHistory());
+    expect(latest!.mobileComposer!.value).toBe('working draft');
+  });
+
+  it('persists the draft again once the user edits after a history walk', async () => {
+    mockTouchDevice();
+    await mount({
+      sessionId: 'mobile-session',
+      atWorkspaceCwd: '/workspace/mobile',
+    });
+    typeText('first message');
+    act(() => latest!.submitText());
+    typeText('draft text');
+    act(() => latest!.navigatePrevHistory());
+    expect(latest!.mobileComposer!.value).toBe('first message');
+
+    typeText('edited after walk');
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(
+      localStorage.getItem(
+        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
+      ),
+    ).toBe('edited after walk');
   });
 });

@@ -7,7 +7,7 @@
 import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import type { HistoryItemDoctor } from '../types.js';
-import { runDoctorChecks } from '../../utils/doctorChecks.js';
+import { runDoctorChecks } from './doctorChecks.js';
 import {
   collectMemoryPressureSamples,
   formatMemoryDiagnostics,
@@ -21,14 +21,23 @@ import {
   startCpuProfile,
   stopCpuProfile,
 } from '../../utils/cpuProfiler.js';
-import { rollbackStandaloneUpdate } from '../../utils/standalone-update.js';
+import { rollbackStandaloneUpdate } from '../standalone-update.js';
 import { getInstallationInfo } from '../../utils/installationInfo.js';
 import { t } from '../../i18n/index.js';
 import {
   collectMemoryDiagnostics,
+  analyzeToolResultRetention,
+  canonicalToolName,
+  COMBINED_PASS_TOLERANCE_FACTOR,
+  createDebugLogger,
+  resolveSlimmingConfig,
+  ToolDisplayNamesMigration,
   type MemoryDiagnostics,
+  type ToolResultRetentionStats,
 } from '@qwen-code/qwen-code-core';
 import { formatMemoryUsage } from '../utils/formatters.js';
+
+const debugLogger = createDebugLogger('DOCTOR_MEMORY');
 
 const MEMORY_SUBCOMMAND = 'memory';
 const CPU_PROFILE_SUBCOMMAND = 'cpu-profile';
@@ -111,6 +120,10 @@ export const doctorCommand: SlashCommand = {
       }
 
       let report = formatMemoryDiagnostics(diagnostics);
+      const toolResultRetention = collectToolResultRetention(context);
+      if (toolResultRetention) {
+        report = `${report}\n\n${formatToolResultRetention(toolResultRetention)}`;
+      }
       let messageType: 'info' | 'error' = 'info';
       let heapSnapshotWritten = false;
 
@@ -328,6 +341,8 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
       return;
     }
 
+    const toolResultRetention = collectToolResultRetention(context);
+
     return {
       type: 'message' as const,
       messageType:
@@ -335,8 +350,18 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
           ? ('warning' as const)
           : ('info' as const),
       content: tokens.includes('--json')
-        ? JSON.stringify(diagnostics, null, 2)
-        : formatCoreDiagnostics(diagnostics),
+        ? JSON.stringify(
+            {
+              ...diagnostics,
+              ...(toolResultRetention ? { toolResultRetention } : {}),
+            },
+            null,
+            2,
+          )
+        : formatCoreDiagnostics(diagnostics) +
+          (toolResultRetention
+            ? `\n\n${formatToolResultRetention(toolResultRetention)}`
+            : ''),
     };
   } catch (error) {
     if (context.abortSignal?.aborted) {
@@ -431,6 +456,125 @@ function formatCoreDiagnostics(diagnostics: MemoryDiagnostics): string {
     risks,
     `recommendation: ${diagnostics.analysis.recommendation}`,
   );
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Tool result retention diagnostics (issue #4184, phase 1)
+// ---------------------------------------------------------------------------
+
+interface ToolResultRetentionReport extends ToolResultRetentionStats {
+  /** Tool outputs rendered in UI history above their tool's budget. */
+  largeOutputsInUIHistory: number;
+  /** Whether oversized results in live history are fed to compression input. */
+  presentInCompressionInput: boolean;
+}
+
+function collectToolResultRetention(
+  context: CommandContext,
+): ToolResultRetentionReport | null {
+  try {
+    const config = context.services.config;
+    const history = config?.getLlmClient()?.getHistoryShallow();
+    if (!history) {
+      return null;
+    }
+    // History records raw request names (legacy aliases like `task`), while
+    // the registry is keyed by canonical names — canonicalize before lookup.
+    const resolveToolBudgetChars = (name: string): number | undefined =>
+      config?.getToolRegistry?.()?.getTool(canonicalToolName(name))
+        ?.maxOutputChars;
+    // UI history stores display names (e.g. 'Shell'), not registry keys (e.g.
+    // 'run_shell_command'), so getTool(displayName) returns undefined. Build a
+    // display-name → budget map from the registry to bridge the gap.
+    const displayNameBudgets = new Map<string, number | undefined>();
+    for (const tool of config?.getToolRegistry?.()?.getAllTools() ?? []) {
+      if (tool.displayName) {
+        displayNameBudgets.set(tool.displayName, tool.maxOutputChars);
+      }
+    }
+    const stats = analyzeToolResultRetention(history, {
+      // Compare each result against its own tool's declared budget (mirroring
+      // the scheduler), so compliant high-budget results (e.g. MCP) are not
+      // flagged; tools declaring none fall back to the configured global
+      // threshold — the bound the scheduler applies to them.
+      resolveToolBudgetChars,
+      thresholdChars: config?.getTruncateToolOutputThreshold?.(),
+      imageTokenEstimate: resolveSlimmingConfig(config?.getChatCompression?.())
+        .imageTokenEstimate,
+    });
+    const threshold =
+      config?.getTruncateToolOutputThreshold?.() ??
+      stats.oversizedThresholdChars;
+    // Tool outputs live in `tool_group` items as `tools[].resultDisplay`
+    // strings; scanning top-level text items would count model responses.
+    // Each display is compared against its own tool's budget, matching the
+    // API-history calibration.
+    //
+    // Phase-1 scope: only string `resultDisplay` values are measured.
+    // Structured display objects (file diffs, ANSI captures, agent result
+    // summaries) carry their own rendering contracts and are not
+    // char-comparable in the same way; they are left for a follow-up PR.
+    let largeOutputsInUIHistory = 0;
+    for (const item of context.ui.history ?? []) {
+      if (item.type !== 'tool_group') {
+        continue;
+      }
+      for (const tool of item.tools) {
+        if (typeof tool.resultDisplay !== 'string') {
+          continue;
+        }
+        const migratedName =
+          ToolDisplayNamesMigration[
+            tool.name as keyof typeof ToolDisplayNamesMigration
+          ] ?? tool.name;
+        const budget =
+          displayNameBudgets.get(tool.name) ??
+          displayNameBudgets.get(migratedName) ??
+          resolveToolBudgetChars(tool.name) ??
+          threshold;
+        if (
+          Number.isFinite(budget) &&
+          tool.resultDisplay.length > budget * COMBINED_PASS_TOLERANCE_FACTOR
+        ) {
+          largeOutputsInUIHistory += 1;
+        }
+      }
+    }
+    return {
+      ...stats,
+      largeOutputsInUIHistory,
+      // Derived assumption: compression reads the live history by reference
+      // (getHistoryShallow; see chatCompressionService). If compression input
+      // assembly ever changes to copy or filter history, this derivation must
+      // be revisited.
+      presentInCompressionInput: stats.oversizedResultCount > 0,
+    };
+  } catch (error) {
+    // Diagnostics must never break /doctor memory; degrade to "unavailable",
+    // but leave a greppable trace so a silently dying section is debuggable.
+    debugLogger.warn(
+      `Tool result retention diagnostics unavailable: ${formatErrorMessage(error)}`,
+    );
+    return null;
+  }
+}
+
+function formatToolResultRetention(stats: ToolResultRetentionReport): string {
+  const lines = [
+    'Tool result retention',
+    `  Tool results in history: ${stats.toolResultCount}`,
+    `  Total retained: ${stats.totalChars} chars`,
+    `  Largest result: ${stats.largestResultChars} chars`,
+    `  Oversized results (above tool budget): ${stats.oversizedResultCount}`,
+    `  Oversized also rendered in UI history: ${stats.largeOutputsInUIHistory} item(s)`,
+    `  Oversized also in compression input: ${stats.presentInCompressionInput ? 'yes (shared by reference, no extra copy)' : 'no'}`,
+  ];
+  if (stats.oversizedResultCount > 0) {
+    lines.push(
+      '  Hint: oversized tool results stay in context and tax every later turn; /compress can reclaim space.',
+    );
+  }
   return lines.join('\n');
 }
 

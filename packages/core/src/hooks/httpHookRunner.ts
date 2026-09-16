@@ -31,11 +31,6 @@ const DEFAULT_HTTP_TIMEOUT = 10 * 60 * 1000;
 const MAX_OUTPUT_LENGTH = 10000;
 
 /**
- * Callback for displaying status messages during hook execution
- */
-export type StatusMessageCallback = (message: string) => void;
-
-/**
  * Resolve a hostname and validate that all resolved IPs are not in blocked
  * ranges. This is the core of DNS-level SSRF protection, aligned with
  *
@@ -106,7 +101,6 @@ export class HttpHookRunner {
   private urlValidator: UrlValidator;
   private readonly allowPrivateNetworkHosts: boolean;
   private readonly executedOnceHooks: Set<string> = new Set();
-  private statusMessageCallback?: StatusMessageCallback;
 
   constructor(
     allowedUrls?: string[],
@@ -114,13 +108,6 @@ export class HttpHookRunner {
   ) {
     this.allowPrivateNetworkHosts = allowPrivateNetworkHosts;
     this.urlValidator = new UrlValidator(allowedUrls, allowPrivateNetworkHosts);
-  }
-
-  /**
-   * Set callback for displaying status messages
-   */
-  setStatusMessageCallback(callback: StatusMessageCallback): void {
-    this.statusMessageCallback = callback;
   }
 
   /**
@@ -166,11 +153,6 @@ export class HttpHookRunner {
         };
       }
       this.executedOnceHooks.add(onceKey);
-    }
-
-    // Display status message if configured
-    if (hookConfig.statusMessage && this.statusMessageCallback) {
-      this.statusMessageCallback(hookConfig.statusMessage);
     }
 
     try {
@@ -243,6 +225,11 @@ export class HttpHookRunner {
           },
           body,
           signal: combinedSignal,
+          // Never follow redirects: the whitelist and DNS-level SSRF checks
+          // above validated only this URL, and a 30x would re-send the hook
+          // payload to an unvalidated target. A 3xx response falls into the
+          // non-2xx branch below (non-blocking error).
+          redirect: 'manual',
         });
 
         cleanup();

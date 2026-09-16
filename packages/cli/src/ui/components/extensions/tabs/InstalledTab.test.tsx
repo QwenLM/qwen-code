@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { act } from 'react';
 import { render } from 'ink-testing-library';
@@ -66,7 +67,7 @@ describe('InstalledTab', () => {
     } as unknown as Config;
     const statuses: Array<StatusMessage | null> = [];
 
-    render(
+    const { lastFrame } = render(
       <InstalledTab
         config={config}
         isActive
@@ -78,6 +79,11 @@ describe('InstalledTab', () => {
     );
 
     await waitFor(() => expect(manager.refreshCache).toHaveBeenCalledOnce());
+    // refreshCache fires at the start of load(), before items are set; wait for
+    // the loaded row to render so the handler grabbed below closes over
+    // populated items instead of the initial empty-items render (flaky under
+    // parallel load).
+    await waitFor(() => expect(lastFrame()).toContain('demo'));
     const listHandler = mockUseKeypress.mock.calls
       .filter((call) => call[1]?.isActive === true)
       .at(-1)?.[0] as

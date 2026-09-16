@@ -10,6 +10,21 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ConfigSources } from '../utils/configResolver.js';
+import type { ModelReasoningOverride } from '../core/reasoning-overrides.js';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
+
+export type ModelReasoningCapabilities = (
+  | { toggleOnly: true }
+  | {
+      toggleOnly?: false;
+      efforts: readonly ReasoningEffort[];
+      defaultEffort?: ReasoningEffort;
+    }
+) & {
+  thinking: true;
+  canDisable?: false;
+  disableField: 'enable_thinking' | 'reasoning_effort' | 'thinking';
+};
 
 /**
  * Model capabilities configuration
@@ -19,6 +34,8 @@ export interface ModelCapabilities {
   vision?: boolean;
   /** Can run the normal agent tool loop, not only transcription requests. */
   agent?: boolean;
+  /** Declarative reasoning controls and wire behavior for this model route. */
+  reasoning?: ModelReasoningCapabilities | ModelReasoningOverride;
 }
 
 /**
@@ -31,12 +48,16 @@ export type ModelGenerationConfig = Pick<
   ContentGeneratorConfig,
   | 'samplingParams'
   | 'timeout'
+  | 'streamIdleTimeoutMs'
   | 'maxRetries'
   | 'retryInitialDelayMs'
   | 'retryMaxDelayMs'
   | 'retryErrorCodes'
   | 'enableCacheControl'
+  | 'enableRequestMetadata'
   | 'forceGlobalCacheScope'
+  | 'cacheRetention'
+  | 'cacheRetentionByBlock'
   | 'schemaCompliance'
   | 'reasoning'
   | 'customHeaders'
@@ -70,6 +91,10 @@ export interface ModelConfig {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector, not the main model list */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the vision model selector, not the main model list */
+  visionOnly?: boolean;
+  /** Whether this route can be used by the built-in image_gen tool */
+  supportsImageGeneration?: boolean;
   /** When true, this model only appears in the image generation model selector */
   imageOnly?: boolean;
 }
@@ -138,6 +163,10 @@ export interface AvailableModel {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the vision model selector */
+  visionOnly?: boolean;
+  /** Whether this route can be used by the built-in image_gen tool */
+  supportsImageGeneration?: boolean;
   /** When true, this model only appears in the image generation model selector */
   imageOnly?: boolean;
 

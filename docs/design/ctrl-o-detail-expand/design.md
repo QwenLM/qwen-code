@@ -1,5 +1,7 @@
 # 设计方案：Ctrl+O 行为重构 —— 对齐 Claude Code 的 Transcript 模型
 
+> **⚠️ 已被取代（superseded）**：本文档记录的 **`TranscriptView` + `AlternateScreen` 全详情冻结快照屏** 方案已在后续重构（PR #8077）中**移除**。当前实现中，`Ctrl+O`（与 `Alt+T` 共用 `Command.TOGGLE_THINKING_EXPANDED`）不再打开独立的 transcript 屏，而是**就地切换 full-detail 模式**：通过 `ThoughtExpandedContext.allExpanded` 由 `MainContent` 以 `fullDetail` 下传给每个 `HistoryItemDisplay`，在主视图内联展开所有思考块与工具组（并解除工具结果截断），再按一次收起。下文凡描述独立 transcript 屏与 alt-screen 的章节（如 §3.2、§4.2–§4.5、§9 的栈式 commit 拆分）仅作**历史记录**保留，与现行代码不符。
+
 - 分支：`feat/ctrl-o-detail-expand`
 - worktree：`<worktree-path>`
 - 状态：**实现进行中——本文档为当前 PR 实现的验收基线**（非 docs-only；当前 PR 已含实现文件改动）

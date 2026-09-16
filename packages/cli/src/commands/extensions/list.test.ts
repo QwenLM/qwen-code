@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { listCommand, handleList } from './list.js';
+import { t } from '../../i18n/index.js';
 import yargs from 'yargs';
 
 const mockGetLoadedExtensions = vi.hoisted(() => vi.fn());
@@ -53,7 +54,7 @@ describe('handleList', () => {
     await handleList();
 
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      'No extensions installed.',
+      t('No extensions installed.'),
     );
 
     processExitSpy.mockRestore();

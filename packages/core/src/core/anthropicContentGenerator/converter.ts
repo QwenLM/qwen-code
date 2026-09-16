@@ -27,6 +27,7 @@ import {
 } from '../../utils/schemaConverter.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -35,7 +36,20 @@ type AnthropicMessageParam = Anthropic.MessageParam;
 // model `cache_control` as `{ type: 'ephemeral' }` only, so we widen the
 // shape here for the fields where we actually attach it (tool params and
 // the system text block).
-type AnthropicCacheControl = { type: 'ephemeral'; scope?: 'global' };
+//
+// `ttl` is the Anthropic spec's extended-cache-tier field
+// (`ttl?: '5m' | '1h'`). Anthropic's current docs describe the 1h tier as
+// GA with no beta requirement; `extended-cache-ttl-2025-04-11` is sent
+// defensively for older Anthropic-compatible backends that may still gate
+// the field on it (see `hasExtendedCacheTtlOnWire` in
+// anthropicContentGenerator.ts). Omitting `ttl` means the spec default
+// (5m). It composes freely with `scope`: the two are independent and
+// Anthropic accepts both on the same cache_control entry.
+type AnthropicCacheControl = {
+  type: 'ephemeral';
+  scope?: 'global';
+  ttl?: '5m' | '1h';
+};
 type AnthropicToolParam = Anthropic.Tool & {
   cache_control?: AnthropicCacheControl;
 };
@@ -46,7 +60,42 @@ type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
 const debugLogger = createDebugLogger('AnthropicConverter');
 
-export interface ConvertGeminiRequestToAnthropicOptions {
+/**
+ * Internal token for "how long should a cache anchor live?", resolved from
+ * `ContentGeneratorConfig.cacheRetention` (settings.json:
+ * `model.generationConfig.cacheRetention`), threaded into the converter
+ * per-call alongside `enableCacheControl`/`useGlobalCacheScope`.
+ *
+ * `'ephemeral'` (default) omits `ttl` on the wire — spec default is 5m.
+ * `'1h'` requests the extended cache tier (`ttl: '1h'`) unconditionally --
+ * live verification against the Anthropic Messages API found every
+ * currently-active model (Haiku 4.5 through Opus 4.8 and Sonnet 5) accepts
+ * it, so there is no known model-specific allowlist to gate on. If a future
+ * model rejects it, the 400 from Anthropic surfaces directly to the caller
+ * rather than being silently masked by an incomplete allowlist.
+ */
+export type CacheRetention = 'ephemeral' | '1h';
+
+/**
+ * Per-anchor override of {@link CacheRetention}. Keys are the three cache
+ * anchors this converter places `cache_control` on — the system text
+ * block, the last tool definition, and the trailing user message (a
+ * single anchor; this converter marks only one trailing user message with
+ * cache_control, not a sliding multi-turn window). Missing keys inherit
+ * the top-level retention.
+ *
+ * These render on the wire in a fixed order — `tool` -> `system` ->
+ * `user.last` — and Anthropic requires cache entries with a longer TTL to
+ * appear before shorter ones. Resolution (see `resolveCacheRetention`)
+ * normalizes for this automatically: setting one anchor to `'1h'`
+ * promotes every anchor before it on the wire to `'1h'` as well, so any
+ * combination of overrides here produces a legal request body.
+ */
+export type CacheRetentionByBlock = Partial<
+  Record<'system' | 'tool' | 'user.last', CacheRetention>
+>;
+
+export interface ConvertLlmRequestToAnthropicOptions {
   /**
    * On every assistant turn, fill in `signature: ''` on any `thinking` block
    * that lacks the required `signature` field. Preserves the original
@@ -90,6 +139,49 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
+   * Ensure every assistant message that carries a `tool_use` block starts
+   * with its first contiguous thinking/redacted-thinking run. Anthropic
+   * manual extended thinking requires an assistant turn in a tool loop to
+   * begin with thinking; adaptive thinking does not. Gate this on the
+   * outgoing request's actual `thinking.type === 'enabled'` mode so adaptive
+   * histories keep their exact chronological block order.
+   *
+   * Applies to prior turns as well as the current one -- see
+   * `ensureLeadingThinkingOnToolUseAssistantMessages` for why scoping it to
+   * the latest message both misses the #3786 shape one turn later and breaks
+   * the prompt cache on every request.
+   */
+  ensureLeadingAssistantThinking?: boolean;
+  /**
+   * Strip a trailing assistant message that would otherwise be sent as an
+   * "assistant-turn prefill" (a request whose final message has
+   * `role: 'assistant'`). Anthropic Opus/Sonnet 4.6+ (and every 5.x
+   * family — Fable 5, Mythos 5, …) reject prefill outright:
+   *
+   *   "This model does not support assistant message prefill. The
+   *    conversation must end with a user message."
+   *
+   * Per Anthropic's own migration guidance this is a model-generation
+   * change, not a backend quirk — it 400s identically on the native API,
+   * Vertex AI, and Bedrock for every 4.6+ model.
+   *
+   * A trailing assistant message reaches the converter when Gemini history
+   * ends on a model turn with no follow-up (e.g. context-window trimming
+   * drops the next user turn, or a subagent's transcript is replayed
+   * mid-turn). Two cases are handled:
+   *   - The trailing assistant message is empty/whitespace-only (a
+   *     leftover prefill artifact with no real content) — drop it.
+   *   - The trailing assistant message carries real content (text,
+   *     tool_use, thinking) — keep it in history but append a synthetic
+   *     user turn so the request satisfies "must end with a user message"
+   *     without discarding anything the model already said.
+   *
+   * Only meaningful when the active model requires adaptive thinking
+   * (Claude 4.6+); older models accept prefill on every backend, so this
+   * should be gated on `modelSupportsAdaptiveThinking()` in the caller.
+   */
+  stripTrailingAssistantPrefill?: boolean;
+  /**
    * Per-call override for `enableCacheControl`. Falls back to the value
    * captured at construction. The generator passes the live
    * `contentGeneratorConfig.enableCacheControl` here so a hot
@@ -122,11 +214,33 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * than before. Only meaningful when `enableCacheControl` is on.
    */
   staticSystemPrefix?: string;
+  /**
+   * Default Anthropic `cache_control` retention for every cache anchor
+   * (system text, last tool, trailing user message) unless overridden
+   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
+   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
+   * extended cache tier. See {@link CacheRetention}.
+   */
+  cacheRetention?: CacheRetention;
+  /**
+   * Per-anchor override of {@link cacheRetention}. See
+   * {@link CacheRetentionByBlock}.
+   */
+  cacheRetentionByBlock?: CacheRetentionByBlock;
 }
 
 export class AnthropicContentConverter {
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
+  /**
+   * Per-request tool ID sanitization state (see {@link resolveToolUseId}).
+   * The converter instance is long-lived across requests (constructed once
+   * per generator), so this state is reset at the top of every
+   * `convertLlmRequestToAnthropic` call rather than at construction.
+   */
+  private readonly toolIdMap = new Map<string, string>();
+  private readonly usedToolIds = new Set<string>();
+  private generatedToolIdCounter = 0;
 
   constructor(
     _model: string,
@@ -137,20 +251,25 @@ export class AnthropicContentConverter {
     this.enableCacheControl = enableCacheControl;
   }
 
-  convertGeminiRequestToAnthropic(
+  convertLlmRequestToAnthropic(
     request: GenerateContentParameters,
-    options: ConvertGeminiRequestToAnthropicOptions = {},
+    options: ConvertLlmRequestToAnthropicOptions = {},
   ): {
     system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
+    this.resetToolIdState();
     let messages: AnthropicMessageParam[] = [];
 
     const systemText = this.extractTextFromContentUnion(
       request.config?.systemInstruction,
     );
 
-    this.processContents(request.contents, messages);
+    this.processContents(
+      request.contents,
+      messages,
+      !!options.dropUnsignedAssistantThinking,
+    );
 
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
@@ -176,13 +295,55 @@ export class AnthropicContentConverter {
     messages = mergeConsecutiveAssistantMessages(messages);
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
+    // Must run BEFORE dropEmptyTextThinkingBlocks: dropUnsignedThinking...
+    // throws when an unsigned thinking block belongs to a turn that's part
+    // of an unbroken, still-active tool_use/tool_result chain reaching the
+    // end of history -- a real proxy bug that should fail loudly rather
+    // than silently continue. An empty-text thinking block with no
+    // signature is unsigned by this same definition; if the empty-text
+    // guard ran first it would delete the block outright before this
+    // check ever saw it, silently swallowing exactly the proxy bug this
+    // throw exists to surface (the same pass-ordering hazard raised
+    // against the removed PATCH-B heuristic, which retyped instead of
+    // deleted but had the identical effect of hiding the block from this
+    // check).
     if (options.dropUnsignedAssistantThinking) {
       messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
+    }
+    // Must run BEFORE dropEmptyTextThinkingBlocks: that pass computes
+    // "the latest assistant message" once and skips stripping an
+    // empty-text thinking block only from that index -- if a genuinely
+    // empty trailing assistant message (a leftover prefill artifact) gets
+    // popped here AFTER dropEmptyTextThinkingBlocks already ran, the
+    // message it promotes to "new latest" would have had its own
+    // empty-text signed thinking block stripped under the now-stale
+    // premise that it wasn't the latest turn, violating manual-mode
+    // thinking's leading-thinking requirement if that promoted message
+    // also carries a tool_use. Running this first ensures
+    // dropEmptyTextThinkingBlocks's one-shot "latest" computation reflects
+    // the array's true final shape.
+    if (options.stripTrailingAssistantPrefill) {
+      this.stripTrailingAssistantPrefill(messages);
+    }
+    // Defense-in-depth against an empty-text thinking block surviving into
+    // a non-latest turn (see dropEmptyTextThinkingBlocks's doc) -- e.g. one
+    // that DOES carry a signature, so dropUnsignedThinkingFromAssistant...
+    // above leaves it alone. Skipped for DeepSeek's injectThinkingOnToolUseTurns
+    // path: DeepSeek's synthetic thinking placeholder (injected above) is
+    // deliberately `{type:'thinking', thinking:'', signature:''}` on every
+    // tool-use turn, and DeepSeek doesn't validate a signature the way
+    // Anthropic does, so this guard would strip the very placeholder
+    // DeepSeek needs.
+    if (!options.injectThinkingOnToolUseTurns) {
+      messages = dropEmptyTextThinkingBlocks(messages);
     }
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
+    if (options.ensureLeadingAssistantThinking) {
+      ensureLeadingThinkingOnToolUseAssistantMessages(messages);
+    }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -196,15 +357,29 @@ export class AnthropicContentConverter {
     const enableCacheControl =
       options.enableCacheControl ?? this.enableCacheControl;
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
+    const cacheRetention = options.cacheRetention ?? 'ephemeral';
+    const cacheRetentionByBlock = options.cacheRetentionByBlock ?? {};
     const system = enableCacheControl
       ? this.buildSystemWithCacheControl(
           systemText,
           useGlobalCacheScope,
           options.staticSystemPrefix,
+          this.resolveCacheRetention(
+            'system',
+            cacheRetention,
+            cacheRetentionByBlock,
+          ),
         )
       : systemText;
     if (enableCacheControl) {
-      this.addCacheControlToMessages(messages);
+      this.addCacheControlToMessages(
+        messages,
+        this.resolveCacheRetention(
+          'user.last',
+          cacheRetention,
+          cacheRetentionByBlock,
+        ),
+      );
     }
 
     return {
@@ -213,16 +388,18 @@ export class AnthropicContentConverter {
     };
   }
 
-  async convertGeminiToolsToAnthropic(
-    geminiTools: ToolListUnion,
+  async convertLlmToolsToAnthropic(
+    llmTools: ToolListUnion,
     options: {
       enableCacheControl?: boolean;
       useGlobalCacheScope?: boolean;
+      cacheRetention?: CacheRetention;
+      cacheRetentionByBlock?: CacheRetentionByBlock;
     } = {},
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
 
-    for (const tool of geminiTools) {
+    for (const tool of llmTools) {
       let actualTool: Tool;
 
       if ('tool' in tool) {
@@ -274,7 +451,7 @@ export class AnthropicContentConverter {
     // ship the standard per-session shape so they don't see a scope
     // extension they may not recognize.
     // Per-call overrides mirror the request-shape gates in
-    // `convertGeminiRequestToAnthropic` so a qwen-oauth-style hot flip of
+    // `convertLlmRequestToAnthropic` so a qwen-oauth-style hot flip of
     // `enableCacheControl` (the only field `Config.handleModelChange()`
     // mutates in place without recreating the generator) doesn't leave
     // the tool body and the beta header out of sync. `baseUrl` isn't
@@ -285,21 +462,28 @@ export class AnthropicContentConverter {
     const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
     if (enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
+      const resolvedRetention = this.resolveCacheRetention(
+        'tool',
+        options.cacheRetention ?? 'ephemeral',
+        options.cacheRetentionByBlock ?? {},
+      );
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],
-        cache_control: useGlobalCacheScope
-          ? { type: 'ephemeral', scope: 'global' }
-          : { type: 'ephemeral' },
+        cache_control: {
+          type: 'ephemeral',
+          ...(useGlobalCacheScope ? { scope: 'global' as const } : {}),
+          ...(resolvedRetention === '1h' ? { ttl: '1h' as const } : {}),
+        },
       };
     }
 
     return tools;
   }
 
-  convertAnthropicResponseToGemini(
+  convertAnthropicResponseToLlm(
     response: Anthropic.Message,
   ): GenerateContentResponse {
-    const geminiResponse = new GenerateContentResponse();
+    const llmResponse = new GenerateContentResponse();
     const parts: Part[] = [];
 
     for (const block of response.content || []) {
@@ -356,21 +540,21 @@ export class AnthropicContentConverter {
       safetyRatings: [],
     };
 
-    const finishReason = this.mapAnthropicFinishReasonToGemini(
+    const finishReason = this.mapAnthropicFinishReasonToLlm(
       response.stop_reason,
     );
     if (finishReason) {
       candidate.finishReason = finishReason;
     }
 
-    geminiResponse.candidates = [candidate];
-    geminiResponse.responseId = response.id;
-    geminiResponse.createTime = Date.now().toString();
-    geminiResponse.modelVersion = response.model || undefined;
-    geminiResponse.promptFeedback = { safetyRatings: [] };
+    llmResponse.candidates = [candidate];
+    llmResponse.responseId = response.id;
+    llmResponse.createTime = Date.now().toString();
+    llmResponse.modelVersion = response.model || undefined;
+    llmResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
-      geminiResponse.usageMetadata = buildAnthropicUsageMetadata({
+      llmResponse.usageMetadata = buildAnthropicUsageMetadata({
         inputTokens: response.usage.input_tokens || 0,
         cacheReadTokens: response.usage.cache_read_input_tokens || 0,
         cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
@@ -382,25 +566,27 @@ export class AnthropicContentConverter {
       });
     }
 
-    return geminiResponse;
+    return llmResponse;
   }
 
   private processContents(
     contents: ContentListUnion,
     messages: AnthropicMessageParam[],
+    demoteForeignThoughtToText: boolean,
   ): void {
     if (Array.isArray(contents)) {
       for (const content of contents) {
-        this.processContent(content, messages);
+        this.processContent(content, messages, demoteForeignThoughtToText);
       }
     } else if (contents) {
-      this.processContent(contents, messages);
+      this.processContent(contents, messages, demoteForeignThoughtToText);
     }
   }
 
   private processContent(
     content: ContentUnion | PartUnion,
     messages: AnthropicMessageParam[],
+    demoteForeignThoughtToText: boolean,
   ): void {
     if (typeof content === 'string') {
       messages.push({
@@ -414,7 +600,6 @@ export class AnthropicContentConverter {
     const parts = content.parts || [];
     const role = content.role === 'model' ? 'assistant' : 'user';
     const contentBlocks: AnthropicContentBlockParam[] = [];
-    let toolCallIndex = 0;
 
     for (const part of parts) {
       if (typeof part === 'string') {
@@ -428,14 +613,46 @@ export class AnthropicContentConverter {
             type: 'thinking',
             thinking: part.text || '',
           };
+          let dropThinkingBlock = false;
           if (
             'thoughtSignature' in part &&
             typeof part.thoughtSignature === 'string'
           ) {
-            (thinkingBlock as { signature?: string }).signature =
-              part.thoughtSignature;
+            // `thoughtSignature` carries no origin marker, so a Responses-API
+            // reasoning replay payload (`{"id":…,"encrypted_content":…}`)
+            // reaches here unchanged after a provider switch. It is not an
+            // Anthropic signature — forwarding it puts a foreign opaque blob
+            // on the wire as `thinking.signature`. Drop the payload instead,
+            // mirroring the fallback `responses-converter.ts` already applies
+            // in the other direction for an unreplayable signature.
+            // https://github.com/QwenLM/qwen-code/issues/9453
+            if (isResponsesReasoningSignature(part.thoughtSignature)) {
+              debugLogger.debug(
+                'Dropping a Responses reasoning replay payload from thoughtSignature',
+              );
+              // When the caller asked to drop unsigned thinking
+              // (`dropUnsignedAssistantThinking`), an unsigned `thinking`
+              // block is exactly the shape the pass below treats as a proxy
+              // protocol violation, so do not emit one — keep the visible
+              // summary as plain text when present. Otherwise leave the block
+              // unsigned (never attach the foreign payload as a signature) so
+              // `stripThinkingFromAssistantMessages` removes it under
+              // `stripAssistantThinking` and `fillMissingThinkingSignatures`
+              // fills `signature: ''` under DeepSeek normalization.
+              if (demoteForeignThoughtToText) {
+                dropThinkingBlock = true;
+                if (part.text) {
+                  contentBlocks.push({ type: 'text', text: part.text });
+                }
+              }
+            } else {
+              (thinkingBlock as { signature?: string }).signature =
+                part.thoughtSignature;
+            }
           }
-          contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
+          if (!dropThinkingBlock) {
+            contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
+          }
         }
       }
 
@@ -452,11 +669,10 @@ export class AnthropicContentConverter {
         if (role === 'assistant') {
           contentBlocks.push({
             type: 'tool_use',
-            id: part.functionCall.id || `tool_${toolCallIndex}`,
+            id: this.resolveToolUseId(part.functionCall.id),
             name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
-          toolCallIndex += 1;
         }
       }
 
@@ -471,6 +687,24 @@ export class AnthropicContentConverter {
     }
 
     if (contentBlocks.length > 0) {
+      // Anthropic requires tool_result to be the first content in a user
+      // message replying to a tool_use -- it doesn't scan past a leading
+      // non-tool_result block to find the result later in the same
+      // message. The source Gemini parts can arrive in any order (e.g. a
+      // text part preceding the functionResponse part within the same
+      // Content), so move tool_result blocks to the front of a user
+      // message whenever any are present. A stable sort preserves the
+      // relative order of multiple tool_result blocks against each other.
+      if (
+        role === 'user' &&
+        contentBlocks.some((b) => b.type === 'tool_result')
+      ) {
+        contentBlocks.sort((a, b) => {
+          if (a.type === 'tool_result' && b.type !== 'tool_result') return -1;
+          if (a.type !== 'tool_result' && b.type === 'tool_result') return 1;
+          return 0;
+        });
+      }
       messages.push({ role, content: contentBlocks });
     }
   }
@@ -504,13 +738,82 @@ export class AnthropicContentConverter {
 
     return {
       type: 'tool_result',
-      tool_use_id: response.id || '',
+      tool_use_id: this.resolveToolUseId(response.id),
       content,
       ...(response.response &&
       Object.prototype.hasOwnProperty.call(response.response, 'error')
         ? { is_error: true }
         : {}),
     };
+  }
+
+  private resetToolIdState(): void {
+    this.toolIdMap.clear();
+    this.usedToolIds.clear();
+    this.generatedToolIdCounter = 0;
+  }
+
+  /**
+   * Resolve a `functionCall.id` / `functionResponse.id` into a wire-safe
+   * `tool_use.id` / `tool_result.tool_use_id`. Anthropic validates both
+   * fields against `^[a-zA-Z0-9_-]+$` server-side (HTTP 400 otherwise) and
+   * rejects the empty string the same way, since `+` requires at least one
+   * character. The Gemini lingua-franca's `id` field has no such
+   * constraint -- it can carry another provider's ID scheme, a
+   * composite/namespaced ID, or be entirely absent.
+   *
+   * The same source ID always resolves to the same wire ID within a
+   * request (memoized in `toolIdMap`), so a `tool_use`/`tool_result` pair
+   * that shares a source ID still links up correctly after sanitization.
+   * State is scoped to a single `convertLlmRequestToAnthropic` call
+   * (reset via {@link resetToolIdState}), since the converter instance
+   * itself is long-lived across requests.
+   */
+  private resolveToolUseId(rawId?: string): string {
+    const sourceId = typeof rawId === 'string' ? rawId.trim() : '';
+    const existingId = sourceId ? this.toolIdMap.get(sourceId) : undefined;
+    if (existingId) {
+      return existingId;
+    }
+
+    const baseId = sourceId
+      ? this.sanitizeToolUseId(sourceId)
+      : this.nextGeneratedToolId();
+    const uniqueId = this.makeUniqueToolUseId(baseId);
+
+    if (sourceId) {
+      this.toolIdMap.set(sourceId, uniqueId);
+    }
+
+    return uniqueId;
+  }
+
+  private sanitizeToolUseId(id: string): string {
+    const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return cleaned || this.nextGeneratedToolId();
+  }
+
+  private nextGeneratedToolId(): string {
+    const id = `tool_${this.generatedToolIdCounter}`;
+    this.generatedToolIdCounter += 1;
+    return id;
+  }
+
+  private makeUniqueToolUseId(baseId: string): string {
+    if (!this.usedToolIds.has(baseId)) {
+      this.usedToolIds.add(baseId);
+      return baseId;
+    }
+
+    let suffix = 1;
+    let candidate = `${baseId}_${suffix}`;
+    while (this.usedToolIds.has(candidate)) {
+      suffix += 1;
+      candidate = `${baseId}_${suffix}`;
+    }
+
+    this.usedToolIds.add(candidate);
+    return candidate;
   }
 
   private createMediaBlockFromPart(
@@ -669,7 +972,7 @@ export class AnthropicContentConverter {
     return {};
   }
 
-  mapAnthropicFinishReasonToGemini(
+  mapAnthropicFinishReasonToLlm(
     reason?: string | null,
   ): FinishReason | undefined {
     if (!reason) return undefined;
@@ -679,6 +982,11 @@ export class AnthropicContentConverter {
       tool_use: FinishReason.STOP,
       max_tokens: FinishReason.MAX_TOKENS,
       content_filter: FinishReason.SAFETY,
+      // Anthropic's refusal stop_reason is a provider safety decision; it
+      // must land in the content-filter family so downstream gates (e.g.
+      // the quiet post-tool-result acceptance in llmChat, #9026) keep
+      // it fatal instead of masking it with an "(empty content)" turn.
+      refusal: FinishReason.SAFETY,
     };
     return mapping[reason] || FinishReason.FINISH_REASON_UNSPECIFIED;
   }
@@ -693,6 +1001,49 @@ export class AnthropicContentConverter {
       'parts' in content &&
       Array.isArray((content as Record<string, unknown>)['parts'])
     );
+  }
+
+  /**
+   * Resolve the effective {@link CacheRetention} for one cache anchor,
+   * normalized so retention is monotonically non-increasing in wire order.
+   *
+   * Render order is `tools` -> `system` -> `messages`, so this converter's
+   * three anchors sit on the wire in exactly that order: `tool` -> `system`
+   * -> `user.last`. Anthropic requires "cache entries with longer TTL must
+   * appear before shorter TTLs" — an anchor at the spec's 5-minute default
+   * (no `ttl`) is a short-TTL entry for this rule's purposes, so a raw
+   * per-anchor override like `cacheRetentionByBlock: { system: '1h' }`
+   * would otherwise leave the (still 5m-default) `tool` anchor ahead of a
+   * 1h `system` anchor on the wire — an ordering violation Anthropic 400s
+   * on.
+   *
+   * Resolving with a scan instead of a straight per-anchor lookup avoids
+   * that: `anchor` resolves to `'1h'` if `anchor` itself OR any anchor
+   * later on the wire resolves to `'1h'`. That makes every
+   * `cacheRetentionByBlock` configuration legal — anchors before a `'1h'`
+   * anchor are promoted to `'1h'` too — without adding a new error surface
+   * or rejecting any input. `{ tool: '1h' }` alone is unaffected (nothing
+   * follows it that needs promoting); `{ system: '1h' }` alone now also
+   * promotes `tool` to `'1h'`, which is exactly the "cache my big system
+   * prompt for an hour" usage the per-anchor override exists for.
+   */
+  private resolveCacheRetention(
+    anchor: 'system' | 'tool' | 'user.last',
+    cacheRetention: CacheRetention,
+    cacheRetentionByBlock: CacheRetentionByBlock,
+  ): CacheRetention {
+    const wireOrder: ReadonlyArray<'tool' | 'system' | 'user.last'> = [
+      'tool',
+      'system',
+      'user.last',
+    ];
+    const anchorIndex = wireOrder.indexOf(anchor);
+    for (let i = wireOrder.length - 1; i >= anchorIndex; i--) {
+      if ((cacheRetentionByBlock[wireOrder[i]] ?? cacheRetention) === '1h') {
+        return '1h';
+      }
+    }
+    return 'ephemeral';
   }
 
   /**
@@ -724,14 +1075,17 @@ export class AnthropicContentConverter {
     systemText: string,
     useGlobalCacheScope: boolean,
     staticSystemPrefix?: string,
+    cacheRetention: CacheRetention = 'ephemeral',
   ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
     }
 
-    const scopedCacheControl: AnthropicCacheControl = useGlobalCacheScope
-      ? { type: 'ephemeral', scope: 'global' }
-      : { type: 'ephemeral' };
+    const scopedCacheControl: AnthropicCacheControl = {
+      type: 'ephemeral',
+      ...(useGlobalCacheScope ? { scope: 'global' as const } : {}),
+      ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
+    };
 
     if (
       staticSystemPrefix &&
@@ -747,7 +1101,16 @@ export class AnthropicContentConverter {
         {
           type: 'text',
           text: systemText.slice(staticSystemPrefix.length),
-          cache_control: { type: 'ephemeral' },
+          // Deliberately never carries `scope: 'global'` (see class doc
+          // above — the suffix varies per session, cross-session reuse
+          // has ~zero hit rate). `cacheRetention` still applies: the
+          // suffix is cached within a session, and a caller that asked
+          // for the 1h tier benefits from it surviving longer gaps
+          // between turns even on this volatile block.
+          cache_control: {
+            type: 'ephemeral',
+            ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
+          },
         },
       ];
     }
@@ -956,6 +1319,58 @@ export class AnthropicContentConverter {
   }
 
   /**
+   * Strip a trailing empty-content assistant message, or append a
+   * synthetic user turn to satisfy Anthropic's "must end with a user
+   * message" requirement (Opus/Sonnet 4.6+, every 5.x family) when the
+   * conversation would otherwise end on a non-empty assistant message.
+   * See {@link ConvertLlmRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
+   */
+  private stripTrailingAssistantPrefill(
+    messages: AnthropicMessageParam[],
+  ): void {
+    // Phase 1: drop genuinely empty trailing assistant messages (no real
+    // content — a leftover prefill artifact from history trimming/replay).
+    while (messages.length > 0) {
+      const last = messages[messages.length - 1]!;
+      if (last.role !== 'assistant') return;
+      if (!this.isEmptyAssistantMessage(last)) break;
+      messages.pop();
+    }
+
+    // Phase 2: a real-content assistant message is still trailing — keep
+    // it in history (it may carry tool_use/thinking the model needs to see
+    // again) and append a synthetic user turn instead of dropping it.
+    if (
+      messages.length > 0 &&
+      messages[messages.length - 1]!.role === 'assistant'
+    ) {
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: 'Continue.' }],
+      });
+    }
+  }
+
+  private isEmptyAssistantMessage(message: AnthropicMessageParam): boolean {
+    const content = message.content;
+    if (!content) return true;
+    if (typeof content === 'string') return content.trim().length === 0;
+    if (!Array.isArray(content) || content.length === 0) return true;
+
+    for (const block of content) {
+      const type = (block as { type?: string }).type;
+      if (type === 'text') {
+        const text = (block as { text?: string }).text;
+        if (typeof text === 'string' && text.trim().length > 0) return false;
+      } else {
+        // Any non-text block (tool_use, thinking, etc.) is real content.
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * Add cache_control to the last user message's content.
    * This enables prompt caching for the conversation context.
    *
@@ -967,7 +1382,10 @@ export class AnthropicContentConverter {
    * system prefix and tool prefixes (which DO repeat across sessions) carry
    * `scope: 'global'` instead.
    */
-  private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
+  private addCacheControlToMessages(
+    messages: Anthropic.MessageParam[],
+    cacheRetention: CacheRetention = 'ephemeral',
+  ): void {
     // Find the last user message to add cache_control. The Anthropic docs
     // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
     // explicitly list both `text` and `tool_result` blocks as cacheable in
@@ -994,6 +1412,7 @@ export class AnthropicContentConverter {
             if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
               lastContent.cache_control = {
                 type: 'ephemeral',
+                ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
               };
             }
           }
@@ -1016,9 +1435,19 @@ export class AnthropicContentConverter {
  * pairing and cause HTTP 400 "tool_use ids were found without tool_result
  * blocks immediately after".
  *
- * Thinking blocks must come first in Anthropic's content array, so merged
- * blocks are reordered: all thinking blocks (from both messages) precede
- * non-thinking blocks (text, tool_use, etc.).
+ * Concatenates each side's blocks in original order rather than hoisting
+ * every thinking block to the front. "Thinking blocks must come first" only
+ * holds for classic (non-interleaved) extended thinking; this generator
+ * unconditionally enables interleaved-thinking-2025-05-14 whenever
+ * `thinking` is set (see buildPerRequestHeaders), and interleaved
+ * thinking's entire point is allowing thinking blocks between tool_use
+ * blocks in original generation order — hoisting all thinking blocks ahead
+ * of both messages' other content destroys that order (e.g. a leading
+ * `[text, thinkingX]` merged with `[thinkingY, tool_use]` previously
+ * produced `[thinkingX, thinkingY, text, tool_use]`, moving `text` after
+ * `thinkingY` even though it chronologically preceded it). The classic
+ * single-leading-thinking-block case is unaffected by this change since
+ * there is nothing to reorder in that shape either way.
  *
  * Mirrors the same-name function in the OpenAI converter.
  */
@@ -1041,17 +1470,10 @@ function mergeConsecutiveAssistantMessages(
         const lastBlocks = lastMessage.content as AnthropicContentBlockParam[];
         const currentBlocks = message.content as AnthropicContentBlockParam[];
 
-        const isThinking = (b: AnthropicContentBlockParam): boolean => {
-          const t = (b as { type?: string }).type;
-          return t === 'thinking' || t === 'redacted_thinking';
-        };
-
         const seenToolUseIds = new Set<string>();
         const combined: AnthropicContentBlockParam[] = [
-          ...lastBlocks.filter(isThinking),
-          ...currentBlocks.filter(isThinking),
-          ...lastBlocks.filter((b) => !isThinking(b)),
-          ...currentBlocks.filter((b) => !isThinking(b)),
+          ...lastBlocks,
+          ...currentBlocks,
         ].filter((b) => {
           const t = (b as { type?: string }).type;
           if (t === 'tool_use') {
@@ -1075,13 +1497,136 @@ function mergeConsecutiveAssistantMessages(
 }
 
 /**
+ * Relocate the first contiguous run of `thinking`/`redacted_thinking`
+ * blocks to the front of its content array, for every assistant message
+ * that carries a `tool_use` block and doesn't already start with thinking.
+ *
+ * See {@link ConvertGeminiRequestToAnthropicOptions.ensureLeadingAssistantThinking}
+ * for why this is needed: `mergeConsecutiveAssistantMessages`'s straight
+ * concatenation -- and, now that reasoning episodes are no longer hoisted
+ * to `parts[0]` during history consolidation, an ordinary "say a line,
+ * then think, then call a tool" turn -- can leave a leading text block
+ * ahead of a later thinking run, which is chronologically correct but
+ * invalid on the wire for Anthropic's manual-mode extended thinking. Only
+ * the first thinking run moves; every other block -- including any later
+ * thinking blocks and their relative order -- is untouched, and nothing is
+ * fabricated when the message has no thinking block at all.
+ *
+ * Applied to EVERY tool_use-bearing assistant message rather than only the
+ * most recent one, for two independent reasons:
+ *
+ *  1. The constraint is not latest-turn-only. #3786 describes the
+ *     anthropic-compatible rejection in terms of a PRIOR assistant turn
+ *     carrying `tool_use`, and `injectEmptyThinkingOnToolUseTurns`
+ *     correspondingly repairs every tool_use turn, not just the last. Under
+ *     latest-only scoping a turn normalized while it was current reverts to
+ *     the text-leading shape on the very next request, so the defect
+ *     surfaces one turn after the turn that produced it.
+ *  2. Latest-only scoping makes an assistant turn's serialization depend on
+ *     its position in history, so the same turn goes out two different ways
+ *     on consecutive requests. `addCacheControlToMessages` puts its
+ *     breakpoint on the last user message, so that rewrites the cached
+ *     prefix and forces a full re-read on every turn for the life of the
+ *     conversation. Normalizing uniformly makes the shape position-
+ *     independent and the prefix stable.
+ *
+ * Gated on `tool_use` because that is the boundary the wire actually
+ * enforces (matching this option's documented scope and
+ * `injectEmptyThinkingOnToolUseTurns`): a plain-text assistant turn that
+ * doesn't lead with thinking is accepted, so reordering one would move
+ * blocks for no protocol reason.
+ */
+function ensureLeadingThinkingOnToolUseAssistantMessages(
+  messages: AnthropicMessageParam[],
+): void {
+  const blockType = (b: AnthropicContentBlockParam) =>
+    (b as { type?: string }).type;
+  const isThinking = (b: AnthropicContentBlockParam) => {
+    const t = blockType(b);
+    return t === 'thinking' || t === 'redacted_thinking';
+  };
+
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    if (!Array.isArray(message.content)) continue;
+
+    const blocks = message.content as AnthropicContentBlockParam[];
+    if (blocks.length === 0 || isThinking(blocks[0]!)) continue;
+    if (!blocks.some((b) => blockType(b) === 'tool_use')) continue;
+
+    const runStart = blocks.findIndex(isThinking);
+    if (runStart === -1) continue;
+
+    let runEnd = runStart;
+    while (runEnd < blocks.length && isThinking(blocks[runEnd]!)) {
+      runEnd++;
+    }
+
+    const run = blocks.slice(runStart, runEnd);
+    const rest = [...blocks.slice(0, runStart), ...blocks.slice(runEnd)];
+    message.content = [...run, ...rest];
+  }
+}
+
+/**
+ * Builds a first-wins predicate for deduplicating tool_result blocks by
+ * tool_use_id. Anthropic rejects a message with more than one tool_result
+ * for the same tool_use_id ("each `tool_use` block must have a single
+ * result" -- HTTP 400); a duplicate can happen when a tool call's result is
+ * recorded twice in history (a retried conversion pass, or a history source
+ * that double-appends a function response). In the cases observed so far
+ * the duplicate blocks are byte-identical, so first-wins vs. last-wins is
+ * indistinguishable in practice -- first-wins is chosen only because it
+ * requires no lookahead. id-less blocks always pass through unfiltered,
+ * preserving prior behavior for blocks Anthropic doesn't validate this way.
+ *
+ * Two independent call sites need this: `cleanOrphanedToolCalls` (the
+ * common case, a duplicate within one message) and
+ * `mergeConsecutiveUserMessages` (a duplicate that only becomes
+ * co-located after two originally-separate messages are combined).
+ */
+function makeToolResultDeduper(): (id: string | undefined) => boolean {
+  const seen = new Set<string>();
+  return (id) => {
+    if (!id) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  };
+}
+
+/**
  * Remove tool_use blocks that have no matching tool_result in the
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
+ * Also cascade-strips `thinking`/`redacted_thinking` blocks from an
+ * assistant turn whenever a `tool_use` is removed from that same turn by
+ * this pass AND no other `tool_use` survives in it -- the signature on
+ * those blocks was computed over content that included the now-removed
+ * `tool_use`, so replaying it produces Anthropic 400 "thinking blocks in
+ * the latest assistant message cannot be modified". The model regenerates
+ * thinking on its next turn regardless. Scoped to "no surviving tool_use"
+ * rather than "any tool_use removed": a turn with `[thinking, tool_use A,
+ * tool_use B]` where only B is a genuine orphan still sends A on the wire,
+ * and per Anthropic's manual-mode extended-thinking contract the final
+ * assistant turn of a thinking-enabled request must begin with a thinking
+ * block when any `tool_use` remains in it -- stripping the thinking here
+ * would trade one 400 for another.
+ *
+ * A `tool_use` in the very last message (no message follows it at all) is
+ * never condemned as orphaned here -- "no result yet" isn't the same as
+ * "no result ever": the tool may simply not have finished executing yet,
+ * or this conversion may not be building the completed turn to send to
+ * Anthropic at all (token counting, a resumed/replayed session snapshot,
+ * a retry issued before tool execution completes, ...). Only a `tool_use`
+ * whose subsequent message was actually scanned and found lacking a
+ * matching `tool_result` is a genuine orphan.
  *
  * Empty messages produced by the cleanup are dropped entirely. A subsequent
- * mergeConsecutiveAssistantMessages call fixes any alternation issues
- * created by dropped messages.
+ * mergeConsecutiveAssistantMessages call fixes alternation issues created
+ * by a dropped assistant message sandwiched between two other assistant
+ * messages; mergeConsecutiveUserMessages (later in the pipeline) does the
+ * same when the sandwiching messages are user turns instead.
  *
  * Mirrors the same-name function in the OpenAI converter.
  */
@@ -1106,6 +1651,20 @@ function cleanOrphanedToolCalls(
       }
     }
     if (toolUseBlocks.size === 0) continue;
+
+    // No message follows this assistant turn at all -- these tool_use
+    // blocks are unresolved (the tool hasn't finished executing yet, or
+    // this conversion isn't building the completed turn for Anthropic at
+    // all, e.g. a token-count pass or a mid-tool-call snapshot), not
+    // orphaned. Protect them from the filter below. A genuine orphan
+    // requires a subsequent message that was actually scanned and found
+    // to lack a matching tool_result -- "history ends here" is not that.
+    if (i === messages.length - 1) {
+      for (const block of toolUseBlocks.values()) {
+        validToolUseBlocks.add(block as object);
+      }
+      continue;
+    }
 
     for (let j = i + 1; j < messages.length; j++) {
       const nextMessage = messages[j];
@@ -1153,21 +1712,48 @@ function cleanOrphanedToolCalls(
       continue;
     }
 
+    let toolUseRemoved = false;
+    const keepToolResult = makeToolResultDeduper();
+
     const filtered = blocks.filter((b) => {
       const t = (b as { type?: string }).type;
       if (t === 'tool_use') {
         const id = (b as { id?: string }).id;
-        return !id || validToolUseBlocks.has(b as object);
+        const keep = !id || validToolUseBlocks.has(b as object);
+        if (!keep) toolUseRemoved = true;
+        return keep;
       }
       if (t === 'tool_result') {
         const id = (b as { tool_use_id?: string }).tool_use_id;
-        return !id || validToolResultBlocks.has(b as object);
+        if (!id) return true;
+        if (!validToolResultBlocks.has(b as object)) return false;
+        return keepToolResult(id);
       }
       return true;
     });
 
-    if (filtered.length > 0) {
-      cleaned.push({ ...message, content: filtered });
+    // A tool_use was stripped from this turn and none survives -- any
+    // thinking/redacted_thinking sibling in the same turn is now
+    // untrustworthy (see function doc). If a tool_use survives, the
+    // thinking sibling is left in place: it's still needed to satisfy
+    // Anthropic's manual-mode "final turn must begin with thinking when a
+    // tool_use is present" rule, and only cascading on total removal keeps
+    // this narrower than a blanket "any removal" rule. tool_use/thinking
+    // only ever co-occur on assistant messages, but the role check is
+    // defensive.
+    const survivingToolUse = filtered.some(
+      (b) => (b as { type?: string }).type === 'tool_use',
+    );
+    const finalBlocks =
+      toolUseRemoved && !survivingToolUse && message.role === 'assistant'
+        ? filtered.filter((b) => {
+            const t = (b as { type?: string }).type;
+            return t !== 'thinking' && t !== 'redacted_thinking';
+          })
+        : filtered;
+
+    if (finalBlocks.length > 0) {
+      cleaned.push({ ...message, content: finalBlocks });
     } else {
       debugLogger.debug(
         'cleanOrphanedToolCalls: dropping message with only orphaned tool blocks',
@@ -1176,6 +1762,93 @@ function cleanOrphanedToolCalls(
   }
 
   return cleaned;
+}
+
+/**
+ * Drops any `thinking` block with empty text from a non-latest assistant
+ * turn (dropping the whole message if that empties it out). An Anthropic
+ * `thinking` block's signature is computed over its own text content; a
+ * block with no text at all cannot represent valid signed reasoning
+ * regardless of whether a signature is present. This arises when a
+ * `redacted_thinking` block -- whose opaque `data` doesn't survive the
+ * Gemini-`Part` round trip, see
+ * {@link AnthropicContentConverter.convertAnthropicResponseToLlm} --
+ * is replayed back through history construction as an empty-text
+ * `thinking` block.
+ *
+ * Scoped to non-latest assistant turns, matching Anthropic's contract that
+ * the latest assistant turn's signatures must replay byte-exact: a
+ * signed, empty-text `thinking` block is not inherently invalid (see
+ * geminiChat.ts's flushThoughtEpisode, which deliberately keeps this same
+ * shape as still potentially replayable when it belongs to the ACTIVE
+ * turn). This pass drops it only from earlier, non-latest turns, where
+ * Anthropic doesn't require prior thinking to survive verbatim -- do not
+ * broaden it to the latest turn on the theory that the shape itself is
+ * unreplayable; that would delete a legitimately signed episode from an
+ * active tool loop.
+ *
+ * This was originally one guard inside a larger `pruneUntrustworthyThinking`
+ * pass that also tried to detect and downgrade a non-latest, thinking-only
+ * turn whose `tool_use` had gone stale in an earlier trim (a cross-turn
+ * complement to {@link cleanOrphanedToolCalls}'s same-turn cascade). That
+ * broader heuristic was removed after review: it could not distinguish "this
+ * turn's tool_use was removed by an earlier trim" from "this turn was
+ * always thinking-only" (both are structurally identical by the time it
+ * ran), it ran before the passes that already handle unsigned thinking
+ * correctly (reordering caused them to stop recognizing thinking it had
+ * already re-typed as text), its DeepSeek exclusion only covered one of
+ * DeepSeek's two thinking modes, and live A/B verification against a real
+ * session showed it re-typing a thinking-only turn on the very next
+ * request just because a newer assistant turn had been appended --
+ * invalidating a cache breakpoint and adding token cost for content that
+ * was never actually invalid. Investigation into this codebase's actual
+ * compaction (`chatCompressionService` is full-history, not a partial
+ * trim that could strand a `tool_use`) and orphan-repair
+ * (`repairOrphanedToolUseTurns` already synthesizes an error
+ * `tool_result` for a genuine cross-turn orphan before it would reach this
+ * pass) did not reproduce the state the broader heuristic existed to
+ * clean up. This guard is the one part of that pass that is unconditionally
+ * correct regardless of that heuristic's premise, so it's kept on its own.
+ */
+function dropEmptyTextThinkingBlocks(
+  messages: AnthropicMessageParam[],
+): AnthropicMessageParam[] {
+  let latestAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === 'assistant') {
+      latestAssistantIdx = i;
+      break;
+    }
+  }
+
+  const out: AnthropicMessageParam[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) {
+      out.push(msg);
+      continue;
+    }
+    if (i === latestAssistantIdx) {
+      out.push(msg);
+      continue;
+    }
+
+    const blocks = msg.content as AnthropicContentBlockParam[];
+    const filtered = blocks.filter((raw) => {
+      const bType = (raw as { type?: string }).type;
+      const bThinkingRaw = (raw as { thinking?: unknown }).thinking;
+      const bThinking =
+        typeof bThinkingRaw === 'string' ? bThinkingRaw : undefined;
+      return !(
+        bType === 'thinking' &&
+        (bThinking === undefined || bThinking.length === 0)
+      );
+    });
+
+    if (filtered.length === 0) continue;
+    out.push({ role: msg.role, content: filtered });
+  }
+  return out;
 }
 
 function mergeConsecutiveUserMessages(
@@ -1195,10 +1868,20 @@ function mergeConsecutiveUserMessages(
         ...(lastMessage.content as AnthropicContentBlockParam[]),
         ...(message.content as AnthropicContentBlockParam[]),
       ];
+      // Two originally-separate user messages can each carry a valid
+      // tool_result for the same tool_use_id (cleanOrphanedToolCalls only
+      // dedupes within a single message, before this merge combines
+      // several into one). Re-apply the same first-wins dedup here so a
+      // cross-message duplicate can't survive the merge and reach the
+      // wire as two tool_result blocks for one tool_use_id.
+      const keepToolResult = makeToolResultDeduper();
+      const toolResults = combined.filter((b) => {
+        if ((b as { type?: string }).type !== 'tool_result') return false;
+        const id = (b as { tool_use_id?: string }).tool_use_id;
+        return keepToolResult(id);
+      });
       lastMessage.content = [
-        ...combined.filter(
-          (b) => (b as { type?: string }).type === 'tool_result',
-        ),
+        ...toolResults,
         ...combined.filter(
           (b) => (b as { type?: string }).type !== 'tool_result',
         ),

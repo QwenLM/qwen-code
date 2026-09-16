@@ -20,6 +20,10 @@ public enum PermissionMode {
      */
     AUTO_EDIT("auto-edit"),
     /**
+     * Auto permission mode.
+     */
+    AUTO("auto"),
+    /**
      * YOLO permission mode.
      */
     YOLO("yolo");

@@ -18,6 +18,7 @@ import { deepseekProvider } from './presets/deepseek.js';
 import { grokProvider } from './presets/grok.js';
 import { minimaxProvider } from './presets/minimax.js';
 import { zaiProvider } from './presets/zai.js';
+import { moonshotProvider } from './presets/moonshot.js';
 import { idealabProvider } from './presets/idealab.js';
 import { modelscopeProvider } from './presets/modelscope.js';
 import { customProvider } from './presets/custom-provider.js';
@@ -33,6 +34,7 @@ export {
   grokProvider,
   minimaxProvider,
   zaiProvider,
+  moonshotProvider,
   idealabProvider,
   modelscopeProvider,
   customProvider,
@@ -47,6 +49,9 @@ export {
 // ---------------------------------------------------------------------------
 
 /** All known providers, in display order. */
+// Adding a provider that reads credentials from a new env key? Also add that
+// key to the no-AK gate's cleared-env list in .github/workflows/ci.yml and to
+// scripts/tests/no-ak-integration-ci.test.js, or the gate can leak runner creds.
 export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   codingPlanProvider,
   tokenPlanProvider,
@@ -55,6 +60,7 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   grokProvider,
   minimaxProvider,
   zaiProvider,
+  moonshotProvider,
   idealabProvider,
   modelscopeProvider,
   openRouterProvider,

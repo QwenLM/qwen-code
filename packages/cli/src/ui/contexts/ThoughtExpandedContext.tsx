@@ -7,7 +7,12 @@
 import { createContext, useContext } from 'react';
 
 export interface ThoughtExpandedValue {
-  /** Alt+T global toggle — expands every thinking block at once. */
+  /**
+   * Ctrl+O / Alt+T global toggle. Despite the name this is the app-wide
+   * full-detail switch: it force-expands every thinking block AND every tool
+   * group (untruncating tool results), not thinking alone. `MainContent` reads
+   * it and forwards it to each `HistoryItemDisplay` as `fullDetail`.
+   */
   allExpanded: boolean;
   /**
    * Head ids of thoughts the user expanded individually (by clicking the

@@ -18,9 +18,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeGitProbe } from './comment-status.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 
 let repo: string;
 let savedCwd: string;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
@@ -44,6 +46,14 @@ function commitFile(path: string, content: string, message: string): string {
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'comment-status-probe-'));
   savedCwd = process.cwd();
+
+  // Isolate the fixture from the user's git environment (shared helper —
+  // see isolateHostGitConfig for the incident class): a global
+  // `commit.gpgsign=true` fails every commitFile for want of a key, and a
+  // global `core.hooksPath` executes host-state hooks on each fixture
+  // commit.
+  gitIsolation = isolateHostGitConfig();
+
   execFileSync('git', ['init', '-q', repo]);
   mkdirSync(join(repo, 'pkg', 'src'), { recursive: true });
 });
@@ -51,6 +61,25 @@ beforeEach(() => {
 afterEach(() => {
   process.chdir(savedCwd);
   rmSync(repo, { recursive: true, force: true });
+  gitIsolation.dispose();
+});
+
+describe('fixture git-config isolation', () => {
+  it('spawned git reads the throwaway global config, not the host user config', () => {
+    // Same tripwire as test-efficacy.integration.test.ts: if the
+    // beforeEach isolation is ever removed, the sentinel below becomes
+    // unreadable through a child git and this goes red on every host —
+    // not only on hosts whose real config happens to be hostile.
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      '[qwen]\n\tisolation = sentinel\n',
+    );
+    expect(git('config', '--global', 'qwen.isolation')).toBe('sentinel');
+    expect(process.env['GIT_CONFIG_NOSYSTEM']).toBe('1');
+    expect(process.env['GIT_CONFIG_GLOBAL']).toBe(
+      join(gitIsolation.home, '.gitconfig'),
+    );
+  });
 });
 
 describe('makeGitProbe (real git)', () => {

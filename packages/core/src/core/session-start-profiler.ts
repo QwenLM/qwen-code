@@ -64,10 +64,17 @@ function roundMs(value: number): number {
 
 function getAppendProfileOpenFlags(): number {
   const constants = fs.constants;
-  const noFollow = constants.O_NOFOLLOW;
-  if (noFollow === undefined) {
-    throw new Error('session-start profiler requires O_NOFOLLOW support');
-  }
+  // Windows does not expose O_NOFOLLOW, so there the JSONL profile is opened
+  // WITHOUT symlink protection — the lstat pre-check in
+  // assertSafeExistingProfileFile is the guard that still rejects a planted link
+  // before the open. That is a deliberate trade, not a no-loss fallback: the
+  // previous behaviour threw here, refusing to profile on Windows at all, and
+  // append-only startup diagnostics are not worth that. Key the trade on the
+  // platform, not on the flag's presence: every other platform Node runs on
+  // exposes O_NOFOLLOW, and `?? 0` alone would silently drop the hardening on
+  // any future platform that lacked it for an unrelated reason.
+  const noFollow =
+    process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
   return (
     (constants.O_APPEND ?? 0) |
     (constants.O_CREAT ?? 0) |

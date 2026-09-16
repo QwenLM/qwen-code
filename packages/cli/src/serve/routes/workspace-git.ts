@@ -4,19 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application, Request, Response } from 'express';
+import type { Application } from 'express';
 import { getGitWorkingTreeStatus } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
-} from '../workspace-registry.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  requireTrustedWorkspaceRuntime,
   resolveContainedCwd,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
@@ -58,16 +54,6 @@ export function registerWorkspaceGitRoutes(
       deps.sendBridgeError(res, err, { route: 'GET /workspace/git' });
     }
   });
-}
-
-function resolveTrustedRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
 }
 
 export function registerWorkspaceQualifiedGitRoutes(

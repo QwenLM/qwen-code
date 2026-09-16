@@ -22,6 +22,7 @@ import {
   utimesSync,
 } from 'node:fs';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { trace, TraceFlags, type Span } from '@opentelemetry/api';
 import {
   buildDaemonLogLine,
   initDaemonLogger,
@@ -29,6 +30,25 @@ import {
 } from './daemon-logger.js';
 
 const openLoggers = new Set<DaemonLogger>();
+const TRACE_ID = '1'.repeat(32);
+const SPAN_ID = '2'.repeat(16);
+
+function fakeSpan({
+  recording = true,
+  traceId = TRACE_ID,
+  spanId = SPAN_ID,
+  traceFlags = TraceFlags.SAMPLED,
+}: {
+  recording?: boolean;
+  traceId?: string;
+  spanId?: string;
+  traceFlags?: number;
+} = {}): Span {
+  return {
+    isRecording: () => recording,
+    spanContext: () => ({ traceId, spanId, traceFlags }),
+  } as unknown as Span;
+}
 
 async function createLogger(
   options: Parameters<typeof initDaemonLogger>[0],
@@ -41,6 +61,7 @@ async function createLogger(
 afterEach(async () => {
   await Promise.all([...openLoggers].map((logger) => logger.close()));
   openLoggers.clear();
+  vi.restoreAllMocks();
 });
 
 describe('buildDaemonLogLine', () => {
@@ -74,6 +95,22 @@ describe('buildDaemonLogLine', () => {
         'route=POST /session/:id/prompt sessionId=sess-1 clientId=client-x ' +
         'childPid=4242 channelId=ch-9 route failed\n',
     );
+  });
+
+  it('stays pure in an active span and filters reserved trace keys', () => {
+    const getActiveSpan = vi
+      .spyOn(trace, 'getActiveSpan')
+      .mockReturnValue(fakeSpan());
+
+    expect(
+      buildDaemonLogLine({
+        level: 'INFO',
+        message: 'request completed',
+        now: FIXED,
+        ctx: { trace_id: 'spoofed-trace', span_id: 'spoofed-span' },
+      }),
+    ).toBe('2026-05-26T03:14:15.926Z [INFO] [DAEMON] request completed\n');
+    expect(getActiveSpan).not.toHaveBeenCalled();
   });
 
   it('appends extra ctx keys sorted lexicographically after fixed keys', () => {
@@ -169,6 +206,28 @@ describe('initDaemonLogger opt-out', () => {
       }
     });
   }
+
+  it('adds sampled recording trace context in stderr-only mode', async () => {
+    process.env['QWEN_DAEMON_LOG_FILE'] = 'off';
+    const getActiveSpan = vi
+      .spyOn(trace, 'getActiveSpan')
+      .mockReturnValue(fakeSpan());
+    const stderr: string[] = [];
+    const logger = await createLogger({
+      boundWorkspace: '/tmp/ws',
+      stderr: (line) => stderr.push(line),
+    });
+
+    logger.info('info');
+    logger.warn('warn');
+    logger.error('error');
+
+    expect(getActiveSpan).toHaveBeenCalledTimes(3);
+    expect(stderr).toHaveLength(3);
+    for (const line of stderr) {
+      expect(line).toContain(`[trace_id=${TRACE_ID} span_id=${SPAN_ID}]`);
+    }
+  });
 });
 
 describe('initDaemonLogger file init', () => {
@@ -197,6 +256,9 @@ describe('initDaemonLogger file init', () => {
   });
 
   it('derives daemon-scoped daemon-id and creates the stable log file', async () => {
+    const getActiveSpan = vi
+      .spyOn(trace, 'getActiveSpan')
+      .mockReturnValue(fakeSpan());
     const logger = await createLogger({
       boundWorkspace: '/workspace/foo',
       pid: 1234,
@@ -209,6 +271,10 @@ describe('initDaemonLogger file init', () => {
     expect(readFileSync(logger.getLogPath(), 'utf8')).toMatch(
       /\[INFO\] \[DAEMON\] runId=0123456789abcdef0123456789abcdef pid=1234 workspace=\/workspace\/foo workspaceHash=[0-9a-f]{8} daemon started/,
     );
+    expect(readFileSync(logger.getLogPath(), 'utf8')).not.toContain(
+      'trace_id=',
+    );
+    expect(getActiveSpan).not.toHaveBeenCalled();
     if (process.platform !== 'win32') {
       expect(lstatSync(path.join(tmp, 'daemon')).mode & 0o777).toBe(0o700);
       expect(
@@ -258,7 +324,10 @@ describe('initDaemonLogger raw', () => {
     }
   });
 
-  it('appends prefixed line, no stderr tee', async () => {
+  it('appends prefixed line without ambient trace or stderr tee', async () => {
+    const getActiveSpan = vi
+      .spyOn(trace, 'getActiveSpan')
+      .mockReturnValue(fakeSpan());
     const stderr: string[] = [];
     const logger = await createLogger({
       boundWorkspace: '/w',
@@ -277,6 +346,8 @@ describe('initDaemonLogger raw', () => {
     expect(content).toMatch(
       /\[INFO\] \[DAEMON\] runId=[0-9a-f]{32} pid=1 \[serve pid=123 cwd=\/x\] another\n/,
     );
+    expect(content).not.toContain('trace_id=');
+    expect(getActiveSpan).not.toHaveBeenCalled();
     // No new stderr lines from raw()
     expect(stderr.length).toBe(stderrBefore);
   });
@@ -314,6 +385,125 @@ describe('initDaemonLogger info/warn/error', () => {
     // Stderr saw the same line (after boot banner, which isn't teed here).
     const teedLines = stderr.filter((s) => s.includes('[INFO] [DAEMON]'));
     expect(teedLines).toHaveLength(1);
+  });
+
+  it('captures one active trace context for stderr and file records', async () => {
+    const getActiveSpan = vi
+      .spyOn(trace, 'getActiveSpan')
+      .mockReturnValueOnce(fakeSpan())
+      .mockReturnValue(fakeSpan({ traceId: '3'.repeat(32) }));
+    const stderr: string[] = [];
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+    });
+
+    logger.info('request completed', {
+      route: 'GET /daemon/status',
+      trace_id: 'spoofed-trace',
+      span_id: 'spoofed-span',
+    });
+    await logger.flush();
+
+    const tracePrefix = `[trace_id=${TRACE_ID} span_id=${SPAN_ID}]`;
+    const stderrRecord = stderr.at(-1) ?? '';
+    const fileRecord = readFileSync(logger.getLogPath(), 'utf8')
+      .split('\n')
+      .find((line) => line.endsWith('request completed'));
+    expect(getActiveSpan).toHaveBeenCalledOnce();
+    expect(stderrRecord).toContain(`[DAEMON] ${tracePrefix} route=`);
+    expect(fileRecord).toContain(
+      `[DAEMON] runId=${logger.getStatus().runId} pid=1 ${tracePrefix} route=`,
+    );
+    expect(stderrRecord.match(/trace_id=/g)).toHaveLength(1);
+    expect(fileRecord?.match(/trace_id=/g)).toHaveLength(1);
+    expect(stderrRecord).not.toContain('spoofed');
+    expect(fileRecord).not.toContain('spoofed');
+  });
+
+  it.each([
+    ['record-only', fakeSpan({ traceFlags: TraceFlags.NONE })],
+    ['non-recording', fakeSpan({ recording: false })],
+    ['zero trace id', fakeSpan({ traceId: '0'.repeat(32) })],
+    ['invalid trace id length', fakeSpan({ traceId: '1'.repeat(31) })],
+    ['invalid span id characters', fakeSpan({ spanId: 'z'.repeat(16) })],
+  ])('omits trace context for %s spans', async (_label, span) => {
+    vi.spyOn(trace, 'getActiveSpan').mockReturnValue(span);
+    const stderr: string[] = [];
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+    });
+
+    logger.warn('still logged');
+    await logger.flush();
+
+    expect(stderr.at(-1)).toContain('[WARN] [DAEMON] still logged');
+    expect(stderr.at(-1)).not.toContain('trace_id=');
+    expect(readFileSync(logger.getLogPath(), 'utf8')).toContain(
+      '[WARN] [DAEMON] runId=',
+    );
+  });
+
+  it.each([
+    [
+      'active span lookup',
+      () => {
+        throw new Error('lookup failed');
+      },
+    ],
+    [
+      'recording check',
+      () =>
+        ({
+          isRecording: () => {
+            throw new Error('recording failed');
+          },
+        }) as unknown as Span,
+    ],
+    [
+      'span context lookup',
+      () =>
+        ({
+          isRecording: () => true,
+          spanContext: () => {
+            throw new Error('context failed');
+          },
+        }) as unknown as Span,
+    ],
+    [
+      'span context validation',
+      () =>
+        ({
+          isRecording: () => true,
+          spanContext: () => ({
+            get traceId(): string {
+              throw new Error('validation failed');
+            },
+            spanId: SPAN_ID,
+            traceFlags: TraceFlags.SAMPLED,
+          }),
+        }) as unknown as Span,
+    ],
+  ])('keeps logging when %s throws', async (_label, getSpan) => {
+    vi.spyOn(trace, 'getActiveSpan').mockImplementation(getSpan);
+    const stderr: string[] = [];
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+    });
+
+    logger.error('still logged');
+    await logger.flush();
+
+    expect(stderr.at(-1)).toContain('[ERROR] [DAEMON] still logged');
+    expect(stderr.at(-1)).not.toContain('trace_id=');
   });
 
   it('error appends err.stack as continuation', async () => {
@@ -476,13 +666,16 @@ describe('initDaemonLogger bounded storage', () => {
         maxPendingBytes: 1_024,
       },
     });
+    vi.spyOn(trace, 'getActiveSpan').mockReturnValue(fakeSpan());
     const message = '你'.repeat(200);
     logger.info(message);
     await logger.flush();
 
     const content = readFileSync(logger.getLogPath(), 'utf8');
     expect(content).toContain('[truncated originalBytes=');
+    expect(content).toContain(`[trace_id=${TRACE_ID} span_id=${SPAN_ID}]`);
     expect(content).not.toContain('\ufffd');
+    expect(lstatSync(logger.getLogPath()).size).toBeLessThanOrEqual(512);
     expect(stderr.join('\n')).toContain(message);
   });
 
@@ -499,6 +692,7 @@ describe('initDaemonLogger bounded storage', () => {
         maxPendingBytes: 8 * 1024,
       },
     });
+    vi.spyOn(trace, 'getActiveSpan').mockReturnValue(fakeSpan());
     for (let i = 0; i < 12; i += 1) {
       logger.info(`record-${i}-${'x'.repeat(140)}`);
     }
@@ -640,6 +834,9 @@ describe('initDaemonLogger bounded storage', () => {
         maxPendingBytes: 400,
       },
     });
+    const getActiveSpan = vi
+      .spyOn(trace, 'getActiveSpan')
+      .mockReturnValue(fakeSpan());
     blockAppends = true;
     for (let i = 0; i < 5; i += 1) {
       logger.info(`queued-${i}-${'x'.repeat(90)}`);
@@ -658,6 +855,17 @@ describe('initDaemonLogger bounded storage', () => {
     const summaryIndex = content.indexOf('daemon file log records dropped');
     expect(summaryIndex).toBeGreaterThanOrEqual(0);
     expect(summaryIndex).toBeLessThan(content.indexOf('after-recovery'));
+    const summaryLine = content
+      .split('\n')
+      .find((line) => line.includes('daemon file log records dropped'));
+    const recoveredLine = content
+      .split('\n')
+      .find((line) => line.endsWith('after-recovery'));
+    expect(summaryLine).not.toContain('trace_id=');
+    expect(recoveredLine).toContain(
+      `[trace_id=${TRACE_ID} span_id=${SPAN_ID}]`,
+    );
+    expect(getActiveSpan).toHaveBeenCalledTimes(6);
   });
 
   it('attempts the final queue-loss summary during close', async () => {

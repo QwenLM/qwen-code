@@ -11,7 +11,11 @@ import {
   ModelsConfig,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import type {
+  AuthType,
+  ContentGeneratorConfig,
+} from '@qwen-code/qwen-code-core';
 import type {
   ServeWorkspaceProviderCurrent,
   ServeWorkspaceProviderModel,
@@ -27,12 +31,15 @@ import {
 } from '../utils/modelConfigUtils.js';
 import type { CliGenerationConfigInputs } from '../utils/modelConfigUtils.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import { buildModelReasoningRoutePreview } from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
+import { getModelConfigurationKey } from './model-configuration.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
@@ -161,14 +168,43 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
+      const resolved = modelsConfig.getResolvedModel(
+        model.authType,
+        model.id,
+        model.registryBaseUrl,
+      );
+      const generation: ContentGeneratorConfig = {
+        ...resolved?.generationConfig,
+        model: model.id,
+        authType: model.authType,
+        baseUrl: resolved?.baseUrl,
+      };
+      const configOptions = buildModelReasoningRoutePreview(
+        generation,
+        resolveReasoningCapabilities(generation, model.capabilities?.reasoning),
+        settings.model?.reasoningEffort,
+        modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+      );
+      const configurationKey = getModelConfigurationKey(
+        loaded,
+        authType,
+        model.id,
+        model.registryBaseUrl,
+      );
       const providerModel: ServeWorkspaceProviderModel = {
+        ...(configurationKey ? { configurationKey } : {}),
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
         name: model.label,
         ...(model.description !== undefined
           ? { description: model.description }
           : {}),
-        contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
+        // A non-positive contextWindowSize is meaningless (the SDK rejects it
+        // on the wire); treat it as unset and fall back to the estimate.
+        contextLimit:
+          model.contextWindowSize !== undefined && model.contextWindowSize > 0
+            ? model.contextWindowSize
+            : tokenLimit(effectiveModelId),
         ...(model.modalities !== undefined
           ? { modalities: model.modalities }
           : {}),
@@ -178,6 +214,7 @@ function buildWorkspaceProvidersStatus(
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         isCurrent,
         isRuntime: false,
+        ...(configOptions ? { configOptions } : {}),
       };
       provider.models.push(providerModel);
       if (isCurrent) provider.current = true;

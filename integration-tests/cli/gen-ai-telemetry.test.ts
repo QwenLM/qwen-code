@@ -16,6 +16,9 @@ import {
 type TelemetryRecord = {
   name?: string;
   attributes?: Record<string, unknown>;
+  _spanContext?: { traceId?: string; spanId?: string };
+  parentSpanContext?: { traceId?: string; spanId?: string };
+  status?: { code?: number; message?: string };
   events?: Array<{ name?: string }>;
   resource?: {
     _rawAttributes?: Array<[string, unknown]>;
@@ -81,6 +84,7 @@ describeLocal('GenAI telemetry fields', () => {
       requestIndex === 0
         ? {
             model: 'provider-model-tool',
+            content: 'I will run the tool.',
             toolCalls: [
               fakeToolCall(
                 'run_shell_command',
@@ -118,7 +122,7 @@ describeLocal('GenAI telemetry fields', () => {
     );
 
     rig = new TestRig();
-    rig.setup('gen-ai-telemetry', {
+    await rig.setup('gen-ai-telemetry', {
       settings: {
         security: { auth: { selectedType: 'openai' } },
         model: {
@@ -178,12 +182,60 @@ describeLocal('GenAI telemetry fields', () => {
 
     const firstLlm = llmSpans[0]!.attributes!;
     const secondLlm = llmSpans[1]!.attributes!;
-    const interactionSpan = records.find(
+    const interactionSpans = records.filter(
       (record) => record.name === 'qwen-code.interaction',
     );
+    expect(interactionSpans).toHaveLength(1);
+    const interactionSpan = interactionSpans[0]!;
     expect(interactionSpan?.attributes?.['gen_ai.user.id']).toBe(
       'integration-user-079458',
     );
+    expect(interactionSpan.attributes).toMatchObject({
+      'gen_ai.operation.name': 'invoke_agent',
+      'gen_ai.agent.name': 'qwen-code',
+      'gen_ai.conversation.id': expect.any(String),
+      'qwen-code.model': 'request-model',
+    });
+    expect(interactionSpan.attributes).not.toHaveProperty(
+      'gen_ai.request.model',
+    );
+    expect(interactionSpan.attributes).not.toHaveProperty(
+      'gen_ai.provider.name',
+    );
+    expect(interactionSpan.attributes).not.toHaveProperty('gen_ai.output.type');
+    expect(
+      JSON.parse(
+        interactionSpan.attributes?.['gen_ai.input.messages'] as string,
+      ),
+    ).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            type: 'text',
+            content: 'Run the requested tool and then report completion.',
+          },
+        ],
+      },
+    ]);
+    expect(
+      JSON.parse(
+        interactionSpan.attributes?.['gen_ai.output.messages'] as string,
+      ),
+    ).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'Tool completed.' }],
+        finish_reason: 'stop',
+      },
+    ]);
+    const interactionMessages = JSON.stringify({
+      input: interactionSpan.attributes?.['gen_ai.input.messages'],
+      output: interactionSpan.attributes?.['gen_ai.output.messages'],
+    });
+    expect(interactionMessages).not.toContain('I will run the tool.');
+    expect(interactionMessages).not.toContain('Alternative final answer.');
+    expect(interactionMessages).not.toContain('provider-call-123');
     expect(firstLlm).toMatchObject({
       'gen_ai.user.id': 'integration-user-079458',
       'gen_ai.operation.name': 'chat',
@@ -279,6 +331,7 @@ describeLocal('GenAI telemetry fields', () => {
       {
         role: 'assistant',
         parts: [
+          { type: 'text', content: 'I will run the tool.' },
           {
             type: 'tool_call',
             id: 'provider-call-123',
@@ -303,6 +356,7 @@ describeLocal('GenAI telemetry fields', () => {
     ]);
 
     for (const attributes of [firstLlm, secondLlm]) {
+      expect(attributes).not.toHaveProperty('gen_ai.agent.name');
       expect(attributes).not.toHaveProperty('qwen-code.model');
       expect(attributes).not.toHaveProperty('response_id');
       expect(attributes).not.toHaveProperty('input_tokens');
@@ -350,6 +404,7 @@ describeLocal('GenAI telemetry fields', () => {
     expect(toolSpan?.attributes).toMatchObject({
       'gen_ai.user.id': 'integration-user-079458',
       'gen_ai.operation.name': 'execute_tool',
+      'gen_ai.agent.name': 'qwen-code',
       'gen_ai.tool.name': 'run_shell_command',
       'gen_ai.tool.type': 'function',
       'gen_ai.tool.call.id': 'provider-call-123',
@@ -369,6 +424,20 @@ describeLocal('GenAI telemetry fields', () => {
     expect(toolSpan?.attributes).not.toHaveProperty('tool.name');
     expect(toolSpan?.attributes).not.toHaveProperty('tool_input');
     expect(toolSpan?.attributes).not.toHaveProperty('tool_result');
+
+    const interactionContext = interactionSpan._spanContext!;
+    expect(interactionContext.traceId).toEqual(expect.any(String));
+    expect(interactionContext.spanId).toEqual(expect.any(String));
+    for (const child of [...llmSpans, toolSpan!]) {
+      expect(child._spanContext?.traceId).toBe(interactionContext.traceId);
+      expect(child.parentSpanContext).toMatchObject({
+        traceId: interactionContext.traceId,
+        spanId: interactionContext.spanId,
+      });
+    }
+    for (const span of [interactionSpan, ...llmSpans, toolSpan!]) {
+      expect(span.status?.code).toBe(0);
+    }
 
     const canonicalSpanNames = new Set([
       'qwen-code.interaction',
@@ -407,7 +476,7 @@ describeLocal('GenAI telemetry fields', () => {
     }));
 
     rig = new TestRig();
-    rig.setup('gen-ai-telemetry-no-user', {
+    await rig.setup('gen-ai-telemetry-no-user', {
       settings: {
         security: { auth: { selectedType: 'openai' } },
         model: { name: 'request-model' },
@@ -483,7 +552,7 @@ describeLocal('GenAI telemetry fields', () => {
     );
 
     rig = new TestRig();
-    rig.setup('gen-ai-default-choice-count', {
+    await rig.setup('gen-ai-default-choice-count', {
       settings: {
         security: { auth: { selectedType: 'openai' } },
         model: {
@@ -531,6 +600,15 @@ describeLocal('GenAI telemetry fields', () => {
     }
 
     const records = parseTelemetry(rig.readFile('telemetry.log'));
+    const interactionSpan = records.find(
+      (record) => record.name === 'qwen-code.interaction',
+    );
+    expect(interactionSpan?.attributes).not.toHaveProperty(
+      'gen_ai.input.messages',
+    );
+    expect(interactionSpan?.attributes).not.toHaveProperty(
+      'gen_ai.output.messages',
+    );
     const llmSpans = records.filter(
       (record) => record.name === 'qwen-code.llm_request',
     );

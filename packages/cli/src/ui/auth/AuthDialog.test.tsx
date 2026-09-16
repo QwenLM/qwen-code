@@ -16,6 +16,15 @@ import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
 
+const discoverProviderModelsMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(null),
+);
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  discoverProviderModels: discoverProviderModelsMock,
+}));
+
 type UIStateOverrides = Partial<UIState> & Partial<UIState['auth']>;
 
 type UIActionsOverrides = Partial<UIActions> & Partial<UIActions['auth']>;
@@ -139,6 +148,18 @@ const waitForSelectedOption = async (
   await vi.waitFor(
     () => {
       expectSelectedOption(lastFrame(), label);
+    },
+    { timeout: WAIT_FOR_TIMEOUT },
+  );
+};
+
+const waitForText = async (
+  lastFrame: () => string | undefined,
+  expectedText: string,
+) => {
+  await vi.waitFor(
+    () => {
+      expect(lastFrame()).toContain(expectedText);
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
@@ -1103,6 +1124,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Grok (xAI) API Key');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
       await pressEnterAndWaitFor(
         stdin,
@@ -1249,6 +1271,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         lastFrame,
         'Alibaba ModelStudio · Step 3/3 · Model IDs',
       );
+      await waitForText(lastFrame, 'Enter model IDs directly');
       stdin.write('\r');
       await vi.waitFor(
         () => {
@@ -1329,6 +1352,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         lastFrame,
         'Alibaba ModelStudio · Step 3/3 · Model IDs',
       );
+      await waitForText(lastFrame, 'Enter model IDs directly');
 
       // The Model IDs input is pre-filled with the saved custom model id
       // (which only exists in settings, never among the built-in defaults).
@@ -1764,6 +1788,81 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
           }),
         );
       });
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'previews the persisted reasoning shape for the OpenAI Responses protocol',
+    async () => {
+      // The review screen promises "the following JSON will be saved", but
+      // provider persistence normalizes enable_thinking to
+      // `generationConfig.reasoning.effort` on this protocol
+      // (provider-config.ts: buildAdvancedGenerationConfig), so the preview
+      // was showing a shape that never reaches settings.json.
+      const settings = createStandardSettings();
+
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions();
+
+      const mockConfig = {
+        getAuthType: vi.fn(() => undefined),
+        getContentGeneratorConfig: vi.fn(() => ({})),
+      } as unknown as Config;
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <UIStateContext.Provider value={mockUIState}>
+          <UIActionsContext.Provider value={mockUIActions}>
+            <AuthDialog />
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>,
+        { settings, config: mockConfig },
+      );
+
+      await navigateToCustomProtocolSelect(stdin, lastFrame);
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'OpenAI Responses');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 2/6 · Base URL',
+      );
+      // Submit the placeholder default endpoint for this protocol.
+      await wait();
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 3/6 · API Key',
+      );
+      await typeText(stdin, 'sk-test');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 4/6 · Model IDs',
+      );
+      await typeText(stdin, 'model-1');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 5/6 · Advanced Config',
+      );
+
+      // Toggle thinking (initially focused), then continue to review.
+      stdin.write(' ');
+      await wait();
+      stdin.write('\r');
+      await wait();
+
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('"generationConfig"');
+          expect(frame).toContain('"reasoning"');
+          expect(frame).toContain('"effort": "medium"');
+          expect(frame).not.toContain('"enable_thinking"');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
 
       unmount();
     },

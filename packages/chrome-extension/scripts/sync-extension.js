@@ -9,8 +9,13 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { realpathSync } from 'fs';
 import fs from 'fs/promises';
 import { watch } from 'fs';
+import {
+  resolveNightlyBuildNumber,
+  toChromeManifestVersion,
+} from './manifest-version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +32,20 @@ const targetDir = path.resolve(
 );
 
 const staticSrcDir = path.join(projectRoot, 'public');
+export async function syncManifestVersion(sourceDir = projectRoot) {
+  const packageJson = JSON.parse(
+    await fs.readFile(path.join(sourceDir, 'package.json'), 'utf8'),
+  );
+  const manifestPath = path.join(targetDir, 'manifest.json');
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  manifest.version = toChromeManifestVersion(
+    packageJson.version,
+    resolveNightlyBuildNumber(packageJson.version),
+  );
+  manifest.version_name = packageJson.version;
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 async function copyStatic(clean = false) {
   if (clean) {
     await fs.rm(targetDir, { recursive: true, force: true });
@@ -34,6 +53,7 @@ async function copyStatic(clean = false) {
   await fs.mkdir(targetDir, { recursive: true });
 
   await fs.cp(staticSrcDir, targetDir, { recursive: true });
+  await syncManifestVersion();
   console.log(
     `Static assets synced -> ${path.relative(projectRoot, targetDir)}`,
   );
@@ -85,7 +105,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('Failed to sync extension assets:', err);
-  process.exit(1);
-});
+// Node realpaths the ESM main entry but not process.argv[1], so comparing the
+// raw paths silently skips main() under a symlinked checkout.
+const isMainEntry = () =>
+  Boolean(process.argv[1]) && __filename === realpathSync(process.argv[1]);
+
+if (isMainEntry()) {
+  main().catch((err) => {
+    console.error('Failed to sync extension assets:', err);
+    process.exit(1);
+  });
+}

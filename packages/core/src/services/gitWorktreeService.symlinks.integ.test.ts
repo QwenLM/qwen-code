@@ -21,13 +21,23 @@ import { GitWorktreeService } from './gitWorktreeService.js';
 describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () => {
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
+  // The repo lives one level DOWN inside a per-test parent dir so that
+  // tests needing a sibling of the repo (`../foo` traversal coverage)
+  // have a private place to put it. Rooting the repo directly at
+  // `os.tmpdir()` would make `path.dirname(repoRoot)` the machine-wide
+  // temp dir, where a fixed sibling name collides with any concurrent
+  // run on the same host — and stays behind forever once a run is
+  // killed mid-test, wedging every later run on that machine.
+  let repoParent: string;
   let repoRoot: string;
 
   beforeEach(async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-symlinks-'));
     // Resolve symlinks (macOS /var → /private/var) so path comparisons
     // line up with what GitWorktreeService produces internally.
-    repoRoot = await fs.realpath(dir);
+    repoParent = await fs.realpath(dir);
+    repoRoot = path.join(repoParent, 'repo');
+    await fs.mkdir(repoRoot);
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
     execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repoRoot });
     execFileSync('git', ['config', 'user.name', 't'], { cwd: repoRoot });
@@ -42,7 +52,8 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
   });
 
   afterEach(async () => {
-    await fs.rm(repoRoot, { recursive: true, force: true });
+    // Removes the repo AND anything a test parked beside it.
+    await fs.rm(repoParent, { recursive: true, force: true });
   });
 
   it('symlinks a configured directory into the new worktree', async () => {
@@ -170,17 +181,21 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
   it('rejects paths that traverse outside the repo root', async () => {
     // Put a sibling directory next to the repo so `../sibling` resolves to
     // something real — proving the guard fires on traversal shape rather
-    // than on "source missing".
+    // than on "source missing". `path.dirname(repoRoot)` is this test's
+    // own parent temp dir, so the fixed name below is private to this
+    // run: no cross-run collision, and afterEach reclaims it even if the
+    // process is killed before the cleanup below.
     const siblingDir = path.join(path.dirname(repoRoot), 'qwen-wt-sibling');
-    await fs.mkdir(siblingDir);
-    await fs.writeFile(path.join(siblingDir, 'marker'), 'outside');
-
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('traverse', 'main', {
-      symlinkDirectories: ['../qwen-wt-sibling'],
-    });
 
     try {
+      await fs.mkdir(siblingDir);
+      await fs.writeFile(path.join(siblingDir, 'marker'), 'outside');
+
+      const service = new GitWorktreeService(repoRoot);
+      const result = await service.createUserWorktree('traverse', 'main', {
+        symlinkDirectories: ['../qwen-wt-sibling'],
+      });
+
       expect(result.success).toBe(true);
       const dest = path.join(result.worktree!.path, '..', 'qwen-wt-sibling');
       // No symlink was created inside the worktree directory.

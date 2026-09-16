@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type {
+  FileDiff,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
@@ -611,6 +612,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         await this.config.getFileSystemService().writeTextFile({
           path: this.params.file_path,
           content: editData.newContent,
+          toolWriteOrigin: 'edit',
           _meta: {
             bom: useBOM,
           },
@@ -619,6 +621,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         await this.config.getFileSystemService().writeTextFile({
           path: this.params.file_path,
           content: editData.newContent,
+          toolWriteOrigin: 'edit',
           _meta: {
             bom: editData.bom,
             encoding: editData.encoding,
@@ -672,9 +675,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         'Current',
         'Proposed',
       );
-      const displayResult = {
+      const displayResult: FileDiff = {
         fileDiff,
         fileName,
+        filePath: this.params.file_path,
         originalContent: editData.currentContent,
         newContent: editData.newContent,
         diffStat,

@@ -44,6 +44,26 @@ export type SubagentLevel =
   | 'builtin';
 
 /**
+ * Declares that a subagent's turn is executed by an external agent process
+ * speaking ACP or Codex app-server, rather than the in-process reasoning loop.
+ *
+ * `parseAgentExecutor` validates this strictly: an unrecognized `kind`, a
+ * missing/blank `command`, or a malformed `args` yields `undefined`. The
+ * frontmatter loader then **rejects the whole definition** rather than dropping
+ * the field — a dropped field would leave the definition running in-process,
+ * silently substituting a different agent for the one it asked for. This is a
+ * deliberate divergence from the lenient drop used for `mcpServers` and `hooks`.
+ */
+export interface SubagentExecutorSpec {
+  /** Protocol used by the external executable. */
+  kind: 'acp' | 'codex';
+  /** Executable to run, resolved on PATH. */
+  command: string;
+  /** Arguments passed to `command`. Omitted when the definition declares none. */
+  args?: string[];
+}
+
+/**
  * Core configuration for a subagent as stored in Markdown files.
  * This interface represents the file-based configuration that gets
  * converted to runtime configuration for AgentHeadless.
@@ -162,6 +182,22 @@ export interface SubagentConfig {
   hooks?: Record<string, unknown>;
 
   /**
+   * Optional external executor. When present, the subagent's turn is run by an
+   * external agent process instead of the in-process `AgentCore` reasoning
+   * loop; `SubagentManager.createAgentHeadless` dispatches to the executor
+   * injected via `Config.setExternalAgentExecutor`.
+   *
+   * Absent (the default) keeps the in-process executor. A definition that
+   * declares an executor while none is injected fails loudly rather than
+   * silently falling back to in-process.
+   *
+   * `command` is resolved on PATH. Project-level executors require a trusted
+   * workspace. Declared host tool restrictions, MCP servers, hooks and
+   * model/provider overrides are unsupported and rejected before spawning.
+   */
+  executor?: SubagentExecutorSpec;
+
+  /**
    * Indicates whether this is a built-in agent.
    * Built-in agents cannot be modified or deleted.
    */
@@ -171,6 +207,20 @@ export interface SubagentConfig {
    * For extension-level subagents: the name of the providing extension
    */
   extensionName?: string;
+}
+
+/**
+ * Concrete model route a subagent definition's `model:` selector resolves
+ * to: the model ID plus the auth type a dedicated ContentGenerator must be
+ * created with. Returned by `SubagentManager.resolveSubagentModelRoute`
+ * for spawn paths that need the definition's provider route (e.g. Agent
+ * Team teammates, #10071).
+ */
+export interface SubagentModelRoute {
+  /** Concrete model ID the selector resolved to. */
+  modelId: string;
+  /** Auth type that hosts the model on this route. */
+  authType: string;
 }
 
 /**

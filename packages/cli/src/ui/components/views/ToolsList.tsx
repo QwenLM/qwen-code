@@ -41,6 +41,12 @@ export const ToolsList: React.FC<ToolsListProps> = ({
                   {t('[fixed-only: runs via media policies, not the model]')}
                 </Text>
               )}
+              {tool.deferred ? (
+                <Text bold={false} color={theme.text.secondary}>
+                  {' '}
+                  {t('(on demand)')}
+                </Text>
+              ) : null}
             </Text>
             {showDescriptions && tool.description && (
               <MarkdownDisplay
@@ -54,6 +60,17 @@ export const ToolsList: React.FC<ToolsListProps> = ({
       ))
     ) : (
       <Text color={theme.text.primary}> {t('No tools available')}</Text>
+    )}
+    {tools.some((tool) => tool.deferred) && (
+      <>
+        <Box height={1} />
+        <Text color={theme.text.secondary}>
+          {'  '}
+          {t(
+            'Tools marked "(on demand)" are not offered to the model upfront; tool_search can load them when enabled. Use tools.eager for eager-by-default tools or tools.visible for on-demand tools to send a schema upfront.',
+          )}
+        </Text>
+      </>
     )}
   </Box>
 );

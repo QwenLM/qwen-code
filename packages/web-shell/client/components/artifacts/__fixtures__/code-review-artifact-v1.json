@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "target": "pr-8402",
+  "effort": "high",
+  "verdict": {
+    "event": "COMMENT",
+    "body": "Two findings remain open after the fix round.",
+    "baseEvent": "REQUEST_CHANGES",
+    "cappedBy": ["no release-blocker evidence"],
+    "downgraded": true,
+    "downgradedFrom": "Request changes",
+    "remediation": ["Address the skipped lint finding or record why it stays."],
+    "lowSignal": {
+      "agents": 3,
+      "srcDiffLines": 87
+    },
+    "verdictLine": "Verdict: Comment — Request changes was downgraded"
+  },
+  "findings": [
+    {
+      "id": "f-critical-review",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "review",
+      "summary": "A workspace write can land outside the reviewed workspace.",
+      "shortSummary": "Cross-workspace write",
+      "failureScenario": "Open workspace B, then submit a write queued from workspace A; the file lands in B.",
+      "suggestedFix": "Resolve the owning runtime before the write.",
+      "category": "security",
+      "locations": [
+        {
+          "file": "packages/core/src/runtime/write.ts",
+          "line": 128,
+          "anchor": "writeFile(target, body);"
+        }
+      ],
+      "assets": [
+        "https://assets.example.com/reviews/pr-8402/f-critical-review.png"
+      ],
+      "outcome": "fixed",
+      "outcomeNote": "Writes now resolve the runtime first."
+    },
+    {
+      "id": "f-suggestion-build",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "build",
+      "summary": "The bundle step emits a deprecation warning for the banner plugin.",
+      "shortSummary": "The bundle step emits a deprecation warning for the banner…",
+      "failureScenario": "npm run bundle prints the plugin deprecation on every build, masking new warnings.",
+      "suggestedFix": "Pin the plugin option the warning names.",
+      "locations": [
+        {
+          "file": "esbuild.config.js",
+          "line": 31
+        }
+      ],
+      "outcome": "fixed"
+    },
+    {
+      "id": "f-suggestion-test-held",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "test",
+      "summary": "Pagination test fails on the PR build.",
+      "shortSummary": "Pagination test fails on the PR build.",
+      "failureScenario": "vitest reports the pagination spec red on the PR side; the same command is red on the merge base too.",
+      "locations": [
+        {
+          "file": "packages/cli/src/ui/pagination.ts",
+          "line": 77
+        }
+      ],
+      "heldByMeasurement": {
+        "file": "packages/cli/src/ui/pagination.test.ts"
+      },
+      "outcome": "no_change_needed",
+      "outcomeNote": "Red on the merge base as well; not caused by this change."
+    },
+    {
+      "id": "f-suggestion-lint",
+      "severity": "Suggestion",
+      "confidence": "low",
+      "source": "lint",
+      "summary": "Evidence links render the full URL and overflow narrow panels.",
+      "shortSummary": "Evidence links render the full URL and overflow narrow…",
+      "failureScenario": "A long asset URL pushes the finding card past the panel width.",
+      "category": "ui",
+      "locations": [
+        {
+          "file": "packages/web-shell/client/components/artifacts/ArtifactPanel.tsx",
+          "line": 540
+        },
+        {
+          "file": "packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx",
+          "line": 421
+        }
+      ],
+      "assets": [
+        "https://assets.example.com/reviews/pr-8402/f-suggestion-lint.png"
+      ],
+      "outcome": "skipped",
+      "outcomeNote": "Outside the reviewed diff."
+    },
+    {
+      "id": "f-nice-probe",
+      "severity": "Nice to have",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "The empty-state copy could be one line shorter.",
+      "shortSummary": "The empty-state copy could be one line shorter.",
+      "failureScenario": "The panel spends two lines on a state that carries no information yet.",
+      "locations": [
+        {
+          "file": "packages/web-shell/client/components/artifacts/ArtifactPanel.tsx"
+        }
+      ],
+      "outcome": "no_change_needed",
+      "outcomeNote": "Left as-is; copy review disagreed."
+    }
+  ],
+  "counts": {
+    "total": 5,
+    "bySeverity": {
+      "Critical": 1,
+      "Suggestion": 3,
+      "Nice to have": 1
+    },
+    "byConfidence": {
+      "high": 4,
+      "low": 1
+    },
+    "held": 1,
+    "byOutcome": {
+      "fixed": 2,
+      "skipped": 1,
+      "no_change_needed": 2
+    }
+  },
+  "outcomesRecorded": true,
+  "markdownReportPath": ".qwen/reviews/contract-v1.md"
+}

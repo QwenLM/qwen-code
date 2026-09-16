@@ -11,12 +11,16 @@ import type { Request, Response } from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createSingleWorkspaceRegistry,
+  createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import {
   resolveContainedCwd,
   resolveContainedCwdOrFail,
+  resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveTrustedRuntime,
   resolveWorkspaceRuntimeFromParam,
+  resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
 } from './workspace-route-runtime.js';
 
 function fakeReq(cwd?: unknown): Request {
@@ -51,6 +55,14 @@ describe('resolveContainedCwd', () => {
 
   it('returns the resolved path for a valid subdirectory', () => {
     const sub = path.join(workspace, 'sub');
+    fs.mkdirSync(sub);
+    expect(resolveContainedCwd(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
+  });
+
+  it('returns the resolved path for a contained directory starting with dotdot', () => {
+    const sub = path.join(workspace, '..build');
     fs.mkdirSync(sub);
     expect(resolveContainedCwd(fakeReq(sub), workspace)).toBe(
       fs.realpathSync(sub),
@@ -119,6 +131,14 @@ describe('resolveContainedCwdOrFail', () => {
     );
   });
 
+  it('returns the resolved path for a contained cwd starting with dotdot', () => {
+    const sub = path.join(workspace, '..build');
+    fs.mkdirSync(sub);
+    expect(resolveContainedCwdOrFail(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
+  });
+
   it('fails closed for a cwd that escapes the workspace', () => {
     expect(resolveContainedCwdOrFail(fakeReq(outside), workspace)).toBeNull();
   });
@@ -161,6 +181,45 @@ function makeResponse(): Response {
 }
 
 describe('resolveWorkspaceRuntimeFromParam', () => {
+  it.each(['ws-live', '/work/conversations'])(
+    'treats internal selector %s as an ordinary workspace mismatch',
+    (selector) => {
+      const primary = makeRuntime();
+      const internal = {
+        ...makeRuntime(),
+        workspaceId: 'ws-live',
+        workspaceCwd: '/work/conversations',
+        primary: false,
+        provenance: 'live-conversation' as const,
+        removable: false,
+      };
+      const registry = createWorkspaceRegistry([primary, internal]);
+      const response = makeResponse();
+      const json = vi.mocked(response.json);
+
+      expect(
+        resolveWorkspaceRuntimeFromParam(
+          registry,
+          { params: { workspace: selector } } as unknown as Request,
+          response,
+        ),
+      ).toBeNull();
+      expect(
+        resolveRegisteredWorkspaceRuntimeByPathSelector(
+          registry,
+          internal.workspaceCwd,
+        ),
+      ).toBeUndefined();
+      expect(response.status).toHaveBeenCalledWith(400);
+      expect(JSON.stringify(json.mock.calls)).not.toContain(
+        internal.workspaceCwd,
+      );
+      expect(JSON.stringify(json.mock.calls)).not.toContain(
+        internal.workspaceId,
+      );
+    },
+  );
+
   it('returns retryable unavailable for a registered transitioning workspace', () => {
     const registry = createSingleWorkspaceRegistry(makeRuntime());
     registry.beginReplacement(registry.primaryEntry, 'policy-2');
@@ -198,6 +257,113 @@ describe('resolveWorkspaceRuntimeFromParam', () => {
     expect(response.json).toHaveBeenCalledWith({
       error: '`:workspace` must decode to a workspace id or absolute path',
       code: 'workspace_mismatch',
+    });
+  });
+});
+
+describe('resolveTrustedRuntime', () => {
+  it('returns an active trusted runtime', () => {
+    const runtime = makeRuntime();
+    const registry = createSingleWorkspaceRegistry(runtime);
+
+    expect(
+      resolveTrustedRuntime(
+        registry,
+        {
+          params: { workspace: runtime.workspaceId },
+        } as unknown as Request,
+        makeResponse(),
+      ),
+    ).toBe(runtime);
+  });
+
+  it('rejects an active untrusted runtime', () => {
+    const runtime = { ...makeRuntime(), trusted: false };
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const response = makeResponse();
+
+    expect(
+      resolveTrustedRuntime(
+        registry,
+        {
+          params: { workspace: runtime.workspaceId },
+        } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
+    });
+  });
+});
+
+describe('resolveWorkspaceRuntimeWithLiveCompatibilityFromParam', () => {
+  function setup() {
+    const primary = makeRuntime();
+    const internal = {
+      ...makeRuntime(),
+      workspaceId: 'ws-live',
+      workspaceCwd: '/work/conversations',
+      primary: false,
+      provenance: 'live-conversation' as const,
+      removable: false,
+    };
+    return {
+      internal,
+      registry: createWorkspaceRegistry([primary, internal]),
+    };
+  }
+
+  it.each(['ws-live', '/work/conversations'])(
+    'allows the exact internal selector %s only through the explicit seam',
+    (selector) => {
+      const { internal, registry } = setup();
+
+      expect(
+        resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+          registry,
+          { params: { workspace: selector } } as unknown as Request,
+          makeResponse(),
+        ),
+      ).toBe(internal);
+    },
+  );
+
+  it('does not allow a path alias for the internal runtime', () => {
+    const { registry } = setup();
+    const response = makeResponse();
+
+    expect(
+      resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+        registry,
+        {
+          params: { workspace: '/work/conversations/.' },
+        } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(400);
+  });
+
+  it('returns a sanitized unavailable response for inactive internal state', () => {
+    const { internal, registry } = setup();
+    registry.beginDrain(internal);
+    const response = makeResponse();
+
+    expect(
+      resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+        registry,
+        { params: { workspace: internal.workspaceId } } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'The Conversations runtime is temporarily unavailable.',
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
     });
   });
 });

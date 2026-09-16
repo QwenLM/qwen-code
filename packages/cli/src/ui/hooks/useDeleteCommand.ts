@@ -8,6 +8,7 @@ import { useCallback, useRef, useState } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
+import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
 
 export interface UseDeleteCommandOptions {
   config: Config | null;
@@ -75,6 +76,7 @@ export function useDeleteCommand(
         const success = await sessionService.removeSession(sessionId);
 
         if (success) {
+          fireSessionDeleteHook(config, sessionId);
           addItem?.(
             {
               type: 'info',
@@ -161,6 +163,10 @@ export function useDeleteCommand(
 
         const sessionService = config.getSessionService();
         const result = await sessionService.removeSessions(filtered);
+
+        for (const sessionId of result.removed) {
+          fireSessionDeleteHook(config, sessionId);
+        }
 
         const removedCount = result.removed.length;
         const failedIds = [

@@ -2,11 +2,10 @@
 
 ## Problem
 
-Fork background agents persist the parent's rendered system instruction and
-inline tool declarations. Resume sends those launch-time declarations to the
-model, while execution still uses the current `ToolRegistry`. A removed or
-changed tool can therefore remain model-visible even though it cannot be
-executed.
+Legacy fork background transcripts persisted the parent's rendered system
+instruction and inline tool declarations. Replaying those launch-time
+declarations while execution uses the current `ToolRegistry` can leave a
+removed or changed tool model-visible even though it cannot be executed.
 
 ## Design
 
@@ -26,10 +25,16 @@ transcripts for compatibility, but resume no longer treats them as executable
 authority. New transcripts persist the inherited history and task prompt, not
 capability snapshots; current runtime state is authoritative.
 
+Launch-time execution restrictions are different from capability snapshots.
+When a fork uses `fork_tools`, its `executionAllowedTools` policy is stored in
+the `AgentMeta` sidecar and reapplied after the live tool surface is rebuilt.
+An empty persisted list remains deny-all; an absent field remains unrestricted.
+
 ## Consequences
 
 Removed tools are no longer advertised after resume, and changed tools use
 their current schemas. A resumed fork can gain a tool that is newly available
-to its parent, so this favors live consistency over byte-identical replay.
-Rebinding can also invalidate the old prompt-cache prefix, which is preferable
-to sending stale capabilities.
+to its parent only when its persisted execution policy also permits that tool.
+This favors live consistency over byte-identical replay without weakening an
+explicit launch restriction. Rebinding can also invalidate the old
+prompt-cache prefix, which is preferable to sending stale capabilities.

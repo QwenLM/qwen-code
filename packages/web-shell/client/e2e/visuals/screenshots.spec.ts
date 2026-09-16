@@ -4,11 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
+import { devices, expect, test } from '@playwright/test';
+import type {
+  DaemonEvent,
+  DaemonSessionSummary,
+  DaemonSessionContextUsageStatus,
+} from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   permissionRequestEvent,
+  toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
 } from '../utils/mockDaemon';
@@ -29,8 +35,200 @@ const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
+function createTerminalTurnErrorScenario(sessionId: string) {
+  return createWebShellDaemonScenario({
+    sessionId,
+    events: [
+      userTextEvent('Summarize the current workspace.', { id: 1 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId,
+          message:
+            'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
+          promptId: 'prompt-turn-error-visual',
+        },
+      },
+    ],
+  });
+}
+
+function createTerminalGoalStatusEvent(
+  status: 'blocked' | 'usage_limited',
+  objective: string,
+  lastReason: string,
+): DaemonEvent {
+  return {
+    id: 2,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalState: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: `goal-visual-${status.replace('_', '-')}`,
+              revision: 2,
+              objective,
+              status,
+              ...(status === 'usage_limited'
+                ? { limitKind: 'token_budget' }
+                : {}),
+              evidenceCursor: { recordId: 'goal-visual-record' },
+              turnCount: 4,
+              activeTimeMs: 5000,
+              tokensUsed: 1000,
+              createdAt: 1234,
+              updatedAt: 2345,
+              lastReason,
+            },
+          },
+          goalStatus: {
+            kind: 'aborted',
+            condition: objective,
+            iterations: 4,
+            durationMs: 5000,
+            lastReason,
+          },
+        },
+      },
+    },
+  };
+}
+
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('context usage', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        supportedCommands: {
+          availableCommands: [
+            {
+              name: 'compress',
+              description: 'Compress context',
+              input: null,
+              _meta: { source: 'builtin-command' },
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 5_000,
+                memoryFiles: 5_000,
+                skills: 10_000,
+                messages: 20_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [{ name: 'read_file', tokens: 10_000 }],
+              mcpTools: [{ name: 'mcp__github__create_issue', tokens: 5_000 }],
+              memoryFiles: [{ path: '/workspace/QWEN.md', tokens: 5_000 }],
+              skills: [
+                {
+                  name: 'review',
+                  tokens: 5_000,
+                  loaded: true,
+                  bodyTokens: 5_000,
+                },
+              ],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await expect(
+        panel.getByRole('button', { name: 'Compress context', exact: true }),
+      ).toBeEnabled();
+      await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
+    test('session overview', async ({ page }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          {
+            displayName: 'Review release approval',
+            isWaitingForPermission: true,
+          },
+          {
+            displayName: 'Choose the export format',
+            isWaitingForUserQuestion: true,
+          },
+          { displayName: 'Run the browser tests', hasActivePrompt: true },
+          { displayName: 'Update session documentation' },
+        ].map((session, index) => ({
+          ...session,
+          sessionId: `overview-${index}`,
+          workspaceCwd,
+          updatedAt: '2026-07-01T12:00:00.000Z',
+          branch: {
+            name:
+              index === 0
+                ? 'feature/session-overview-with-complete-metadata-in-constrained-viewports'
+                : 'feature/session-overview',
+            baseBranch: 'main',
+          },
+        })),
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-session-panel]'),
+      ).toContainText('Review release approval');
+      await captureScreenshot(page, `session-overview-${theme}`);
+      await page
+        .getByRole('button', {
+          name: 'Details for Review release approval',
+          exact: true,
+        })
+        .click();
+      await expect(
+        page.getByRole('dialog', {
+          name: 'Review release approval',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `session-overview-details-${theme}`);
+    });
+
     test(`session transcript`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
@@ -60,6 +258,204 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`usage-limited goal status`, async ({ page }, testInfo) => {
+      // Seed the compatibility card together with its canonical V2 state, as
+      // emitted by both live goal updates and transcript replay.
+      const usageLimitedGoalEvent = createTerminalGoalStatusEvent(
+        'usage_limited',
+        'Finish the evaluation suite',
+        'Token budget reached',
+      );
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Finish the evaluation suite.', { id: 1 }),
+          usageLimitedGoalEvent,
+          turnCompleteEvent('prompt-goal-usage-limited', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).toContainText('Token budget reached');
+      await captureScreenshot(page, `goal-usage-limited-${theme}`);
+    });
+
+    test(`blocked goal status`, async ({ page }, testInfo) => {
+      const blockedGoalEvent = createTerminalGoalStatusEvent(
+        'blocked',
+        'Wait for deployment approval',
+        'User authority is required',
+      );
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Wait for deployment approval.', { id: 1 }),
+          blockedGoalEvent,
+          turnCompleteEvent('prompt-goal-blocked', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal blocked');
+      await expect(messageList).toContainText('User authority is required');
+      await expect(messageList).not.toContainText('Goal aborted');
+      await captureScreenshot(page, `goal-blocked-${theme}`);
+    });
+
+    // Assertions only, no captures. This scenario injects a fake turn_error so
+    // the error row's Copy affordance (#10001) can be exercised. It is the only
+    // visual test that hovers a message row DELIBERATELY, and its four captures
+    // meant every web-shell preview led with full-height red error images no
+    // matter what the PR touched -- readers repeatedly took the preview for a
+    // live failure.
+    //
+    // Dropping them does not blind the hover timestamp entirely: the parallel
+    // agents test leaves the cursor resting on the group header after
+    // `summary.click()`, so `parallel-agents-expanded` paints the chip through
+    // residual hover and moves when the chip moves. That is incidental rather
+    // than intended coverage, and `visual-capture-contracts.test.ts` is what
+    // actually pins the chip's anchor and background.
+    //
+    // The reveal/hide behaviour is pinned by the opacity assertions below on
+    // every viewport and on touch; the captures added a misleading preview,
+    // not coverage.
+    test(`terminal turn error`, async ({ browser, page }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const scenario = createTerminalTurnErrorScenario(
+        'turn-error-copy-visual',
+      );
+      const daemon = await installScenario(page, scenario, baseURL);
+      await gotoSession(page, scenario, daemon, theme);
+
+      const errorRow = page
+        .locator('[data-web-shell-message-row]')
+        .filter({ hasText: 'The model provider closed the response stream' });
+      const copyButton = errorRow.getByRole('button', {
+        name: 'Copy',
+        exact: true,
+      });
+      const actions = errorRow.locator('[data-web-shell-message-actions]');
+      await expect(actions).toHaveCSS('opacity', '0');
+      await copyButton.focus();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await copyButton.evaluate((button) => button.blur());
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+
+      await page.setViewportSize({ width: 720, height: 800 });
+      await page.mouse.move(0, 0);
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+
+      const touchContext = await browser.newContext({
+        ...devices['Pixel 7'],
+        baseURL,
+      });
+      try {
+        const touchPage = await touchContext.newPage();
+        const touchScenario = createTerminalTurnErrorScenario(
+          'turn-error-copy-touch-visual',
+        );
+        const touchDaemon = await installScenario(
+          touchPage,
+          touchScenario,
+          baseURL,
+        );
+        await gotoSession(touchPage, touchScenario, touchDaemon, theme);
+        expect(
+          await touchPage.evaluate(
+            () => window.matchMedia('(hover: none)').matches,
+          ),
+        ).toBe(true);
+        const touchErrorRow = touchPage
+          .locator('[data-web-shell-message-row]')
+          .filter({ hasText: 'The model provider closed the response stream' });
+        const touchCopyButton = touchErrorRow.getByRole('button', {
+          name: 'Copy',
+          exact: true,
+        });
+        await expect(
+          touchErrorRow.locator('[data-web-shell-message-actions]'),
+        ).toHaveCSS('opacity', '1');
+        await expect(touchCopyButton).toBeVisible();
+        // No screenshot here on purpose. Touch is `hover: none`, so the hover
+        // timestamp chip never renders and this view carries zero coverage of
+        // it -- proven by a run that moved the chip and left these two captures
+        // at 0% diff. The assertions above are what guard the touch behaviour
+        // (#10001: actions stay visible without hover); the captures only added
+        // two full-height error screenshots to every preview.
+      } finally {
+        await touchContext.close();
+      }
+    });
+
+    test(`parallel agents group`, async ({ page }, testInfo) => {
+      // The group renders only when a turn carries two or more background
+      // Agent tool calls; seed both as completed so the rows are static and
+      // leave no final answer, which keeps the turn expanded around them.
+      const agentToolCallEvent = (
+        id: number,
+        toolCallId: string,
+        description: string,
+      ): DaemonEvent =>
+        toolCallEvent(
+          toolCallId,
+          'Agent',
+          { description, run_in_background: true },
+          { id },
+        );
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Split the migration across parallel agents.', {
+            id: 1,
+          }),
+          agentToolCallEvent(
+            2,
+            'call-agent-schema-audit',
+            'Audit the schema drift between services',
+          ),
+          agentToolCallEvent(
+            3,
+            'call-agent-backfill-plan',
+            'Draft the backfill plan for the users table',
+          ),
+          turnCompleteEvent('prompt-parallel-agents', { id: 4 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      const summary = messageList.getByRole('button', {
+        name: /Parallel agents/,
+      });
+      await expect(summary).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-collapsed-${theme}`);
+
+      await summary.click();
+      await expect(
+        messageList.getByText('Audit the schema drift between services'),
+      ).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-expanded-${theme}`);
     });
 
     test(`extensions manager`, async ({ page }, testInfo) => {
@@ -197,6 +593,51 @@ for (const theme of THEMES) {
                 required: true,
                 envResolvable: true,
               },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                default: 'allowlist',
+                options: [
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'disabled',
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'sessionScope',
+                label: 'Session Scope',
+                kind: 'enum',
+                required: true,
+                default: 'user',
+                options: [
+                  { value: 'user', label: 'Per user and chat' },
+                  {
+                    value: 'chat_thread',
+                    label: 'Per chat and thread',
+                  },
+                  { value: 'single', label: 'One shared session' },
+                ],
+              },
             ],
           },
           {
@@ -260,6 +701,8 @@ for (const theme of THEMES) {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
                 senderPolicy: 'pairing',
+                groupPolicy: 'disabled',
+                sessionScope: 'user',
               },
               secrets: {
                 clientSecret: { present: true, source: 'literal' },
@@ -304,6 +747,9 @@ for (const theme of THEMES) {
             },
           ],
         },
+        pairingApprovals: {
+          dingtalk: ['user-18', 'release-manager'],
+        },
       });
       await page.addInitScript(() => {
         window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
@@ -340,8 +786,154 @@ for (const theme of THEMES) {
       });
       await expect(editHeading).toBeVisible();
       await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
+      await expect(page.getByText('user-18', { exact: true })).toBeVisible();
+      await expect(
+        page.getByText('release-manager', { exact: true }),
+      ).toBeVisible();
       await editHeading.click();
+      await page
+        .getByRole('heading', { name: 'Pairing approvals' })
+        .scrollIntoViewIfNeeded();
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
+    });
+
+    test(`GitHub channel editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: { revision: '1', instances: {} },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channels', level: 1 }),
+      ).toBeVisible();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `github-channel-editor-${theme}`);
+      await page.getByLabel('Instance name').fill('github-bot');
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `github-channel-editor-credential-${theme}`,
+      );
+      await page
+        .getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        })
+        .click();
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toHaveCount(0);
+      await expect
+        .poll(() =>
+          daemon.requests.filter(
+            (request) =>
+              request.method === 'PUT' &&
+              request.path.endsWith('/channels/github-bot'),
+          ),
+        )
+        .toEqual([
+          expect.objectContaining({
+            body: expect.objectContaining({
+              config: expect.objectContaining({
+                type: 'github',
+                useLocalGh: true,
+              }),
+            }),
+          }),
+        ]);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {
@@ -533,9 +1125,33 @@ for (const theme of THEMES) {
       // turn this into a cryptic "not visible" failure.
       const primaryCwd = '/tmp/qwen-web-shell-e2e';
       const primarySessionName = 'Run auth migration';
+      const secondaryCwd = '/tmp/qwen-api-service';
+      const secondarySessionName = 'Audit API retries';
+      const sessions = [
+        {
+          sessionId: 'workspace-primary-session',
+          workspaceCwd: primaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: primarySessionName,
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'workspace-secondary-session',
+          workspaceCwd: secondaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: secondarySessionName,
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ] satisfies DaemonSessionSummary[];
       const scenario = createWebShellDaemonScenario({
         workspaceCwd: primaryCwd,
         displayName: primarySessionName,
+        sessions,
+        sessionId: 'workspace-primary-session',
         capabilities: {
           workspaces: [
             {
@@ -546,7 +1162,7 @@ for (const theme of THEMES) {
             },
             {
               id: 'ws-api',
-              cwd: '/tmp/qwen-api-service',
+              cwd: secondaryCwd,
               primary: false,
               trusted: true,
             },
@@ -571,7 +1187,15 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
-      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      const sessionRow = (name: string) =>
+        sidebar.locator('[data-web-shell-session-title]').filter({
+          hasText: name,
+        });
+      await expect(sessionRow(primarySessionName)).toHaveCount(1);
+      await expect(sessionRow(secondarySessionName)).toHaveCount(1);
+      await expect(
+        sessionRow(primarySessionName).locator('..'),
+      ).toHaveAttribute('aria-current', 'page');
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
@@ -688,6 +1312,269 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-permission-panel]'),
       ).toBeVisible();
       await captureScreenshot(page, `permission-panel-${theme}`);
+    });
+
+    test(`code review artifact`, async ({ page }, testInfo) => {
+      // The dedicated code-review renderer is gated three ways: the
+      // `session_artifacts` capability, an artifact whose metadata marks it
+      // `code_review`, and a readable workspace file behind it. Without a
+      // scenario seeding all three, the whole detail view stays invisible to
+      // the before/after preview.
+      const reviewPath = '.qwen/reviews/pr-1234.json';
+      const reviewDocument = {
+        schemaVersion: 1,
+        target: 'local',
+        effort: 'high',
+        verdict: {
+          event: 'REQUEST_CHANGES',
+          verdictLine: 'Verdict: Request changes (1 Critical, 1 Suggestion)',
+          baseEvent: 'REQUEST_CHANGES',
+          cappedBy: ['Critical finding f-critical is unresolved'],
+          downgraded: false,
+          downgradedFrom: null,
+        },
+        findings: [
+          {
+            id: 'f-critical',
+            severity: 'Critical',
+            confidence: 'high',
+            source: 'review',
+            summary:
+              'Review verdict is reported even when the child process times out',
+            shortSummary: 'timeout treated as success',
+            failureScenario:
+              'When `review run` times out, the CLI still prints a verdict as if the review completed.',
+            witness:
+              'Probe: forced a 1ms timeout — BASE prints "Verdict: Approve", PR exits 1 with "review incomplete" — flipped.',
+            suggestedFix:
+              'Fail closed when timedOut is true instead of reporting the verdict.',
+            category: 'correctness',
+            locations: [
+              { file: 'packages/cli/src/commands/review.ts', line: 412 },
+            ],
+            outcome: 'fixed',
+            outcomeNote: 'Timeouts now surface as incomplete.',
+          },
+          {
+            id: 'f-suggestion',
+            severity: 'Suggestion',
+            confidence: 'low',
+            source: 'lint',
+            summary:
+              'Artifact evidence links should render their file name only',
+            shortSummary: 'verbose evidence labels',
+            failureScenario:
+              'Long asset URLs overflow the finding card in narrow panels.',
+            locations: [
+              {
+                file: 'packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx',
+                line: 540,
+              },
+            ],
+            assets: [
+              'https://assets.example.com/reviews/pr-1234/f-suggestion.png',
+            ],
+          },
+        ],
+        counts: {
+          total: 2,
+          bySeverity: { Critical: 1, Suggestion: 1, 'Nice to have': 0 },
+          byConfidence: { high: 1, low: 1 },
+          byOutcome: { fixed: 1, skipped: 0, no_change_needed: 0 },
+          held: 0,
+        },
+        outcomesRecorded: true,
+        markdownReportPath: '.qwen/reviews/pr-1234.md',
+      };
+      const reviewDocumentJson = JSON.stringify(reviewDocument);
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'session_artifacts',
+          ],
+        },
+        events: [
+          userTextEvent('Review my changes and save the report.', { id: 1 }),
+          toolCallEvent(
+            'call-record-review',
+            'record_artifact',
+            { title: 'Code review result', workspacePath: reviewPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
+          assistantTextEvent('Review saved to the workspace.', { id: 3 }),
+          turnCompleteEvent('prompt-review', { id: 4 }),
+        ],
+        artifacts: [
+          {
+            id: 'artifact-code-review',
+            kind: 'other',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Code review result',
+            workspacePath: reviewPath,
+            mimeType: 'application/json',
+            sizeBytes: reviewDocumentJson.length,
+            metadata: { artifactType: 'code_review', schemaVersion: 1 },
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            toolCallId: 'call-record-review',
+            toolName: 'record_artifact',
+          },
+        ],
+        workspaceFiles: { [reviewPath]: reviewDocumentJson },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // Open the artifact card the turn outputs render for the recorded
+      // artifact; the right panel then loads the workspace file and renders
+      // the dedicated detail view instead of the generic file preview.
+      await page
+        .locator('[data-web-shell-message-list]')
+        .getByRole('button', { name: 'Open', exact: true })
+        .click();
+      await expect(page.getByText('Authoritative verdict')).toBeVisible();
+      await expect(
+        page.getByText('Verdict: Request changes (1 Critical, 1 Suggestion)'),
+      ).toBeVisible();
+      await expect(
+        page.getByText(
+          'Review verdict is reported even when the child process times out',
+        ),
+      ).toBeVisible();
+      // The witness row — the executed evidence the witness rule delivers to
+      // the author; gating the shot on it keeps this scenario a coverage
+      // witness for the field, not just for the card.
+      await expect(page.getByText('forced a 1ms timeout')).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-${theme}`);
+
+      // Fullscreen is only reachable once the panel is open; without
+      // expanding it here, the toggle and the fullscreen surface stay
+      // invisible to the before/after preview.
+      await page
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Exit fullscreen', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-fullscreen-${theme}`);
+
+      // Escape shrinks the panel back to its dock. Assert the restore
+      // path without a second capture: the docked layout is the same
+      // view as the code-review-artifact shot above.
+      await page.keyboard.press('Escape');
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: 'Fullscreen', exact: true }),
+      ).toBeVisible();
+    });
+
+    test(`drawer fullscreen`, async ({ page }, testInfo) => {
+      // The floating drawer's fullscreen path is styled independently of the
+      // docked surface (width, rounding, borders, safe-area padding); at a
+      // narrow viewport the panel floats, so capture it there.
+      const reportPath = 'reports/summary.json';
+      const reportJson = JSON.stringify({
+        summary: 'Drawer fullscreen visual check',
+      });
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'session_artifacts',
+          ],
+        },
+        events: [
+          userTextEvent('Open the saved report.', { id: 1 }),
+          toolCallEvent(
+            'call-record-report',
+            'record_artifact',
+            { title: 'Summary report', workspacePath: reportPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
+          assistantTextEvent('Report saved to the workspace.', { id: 3 }),
+          turnCompleteEvent('prompt-drawer', { id: 4 }),
+        ],
+        artifacts: [
+          {
+            id: 'artifact-report',
+            kind: 'other',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Summary report',
+            workspacePath: reportPath,
+            mimeType: 'application/json',
+            sizeBytes: reportJson.length,
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            toolCallId: 'call-record-report',
+            toolName: 'record_artifact',
+          },
+        ],
+        workspaceFiles: { [reportPath]: reportJson },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // Below the (min-width: 1001px) dock breakpoint the panel floats in a
+      // drawer instead of docking.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page
+        .locator('[data-web-shell-message-list]')
+        .getByRole('button', { name: 'Open', exact: true })
+        .click();
+      const drawerAside = page.locator(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      );
+      await expect(drawerAside).toBeVisible();
+
+      await drawerAside
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+      await expect(
+        page.locator('aside[class*="panelFullscreen"]'),
+      ).toBeVisible();
+      await captureScreenshot(page, `drawer-fullscreen-${theme}`);
+
+      // Escape shrinks the surface back to the drawer width; the drawer
+      // itself stays open.
+      await page.keyboard.press('Escape');
+      await expect(page.locator('aside[class*="panelFullscreen"]')).toHaveCount(
+        0,
+      );
+      await expect(drawerAside).toBeVisible();
     });
   });
 }

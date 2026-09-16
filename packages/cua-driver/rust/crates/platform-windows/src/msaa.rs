@@ -24,7 +24,7 @@ use windows::core::{Interface, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
 
-use crate::uia::{UiaNode, UiaTreeResult};
+use crate::uia::{UiaBackend, UiaNode, UiaTreeResult};
 
 const OBJID_CLIENT: u32 = 0xFFFFFFFC;
 
@@ -87,6 +87,10 @@ unsafe fn walk_unsafe(hwnd: u64) -> UiaTreeResult {
                 "- Window <SAL/VCL — MSAA fallback failed (AccessibleObjectFromWindow hr={hr:?})>\n"
             ),
             nodes: Vec::new(),
+            backend: UiaBackend::Msaa,
+            complete: false,
+            truncated: false,
+            incomplete_notes: vec!["msaa_provider_unavailable".into()],
         };
     }
     let root: IAccessible = IAccessible::from_raw(raw_root);
@@ -96,10 +100,25 @@ unsafe fn walk_unsafe(hwnd: u64) -> UiaTreeResult {
     let mut counter = 0usize;
     let mut total = 0usize;
 
-    walk(&root, 0, None, &mut nodes, &mut lines, &mut counter, &mut total);
+    walk(
+        &root,
+        0,
+        None,
+        &mut nodes,
+        &mut lines,
+        &mut counter,
+        &mut total,
+    );
 
     let tree_markdown = render_lines(&lines);
-    UiaTreeResult { tree_markdown, nodes }
+    UiaTreeResult {
+        tree_markdown,
+        nodes,
+        backend: UiaBackend::Msaa,
+        complete: false,
+        truncated: total >= MAX_TOTAL_ELEMENTS,
+        incomplete_notes: vec!["msaa_full_only".into()],
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -181,6 +200,9 @@ unsafe fn walk(
                 automation_id: None,
                 help_text: None,
                 actions: actions.clone(),
+                runtime_id: None,
+                enabled: None,
+                selected: None,
                 element_ptr: ptr,
                 center_x,
                 center_y,
@@ -188,6 +210,7 @@ unsafe fn walk(
                 msaa_role: role_int,
                 depth,
                 parent_element_index: parent_index,
+                in_web_content: false,
             }
         } else {
             UiaNode {
@@ -198,6 +221,9 @@ unsafe fn walk(
                 automation_id: None,
                 help_text: None,
                 actions: Vec::new(),
+                runtime_id: None,
+                enabled: None,
+                selected: None,
                 element_ptr: ptr,
                 center_x: 0,
                 center_y: 0,
@@ -205,6 +231,7 @@ unsafe fn walk(
                 msaa_role: role_int,
                 depth,
                 parent_element_index: parent_index,
+                in_web_content: false,
             }
         };
         // Track this node as the parent_index for its descendants only when
@@ -221,7 +248,15 @@ unsafe fn walk(
             // accChild returns IDispatch — query for IAccessible.
             if let Ok(child_disp) = acc.get_accChild(&child_var) {
                 if let Ok(child_acc) = child_disp.cast::<IAccessible>() {
-                    walk(&child_acc, depth + 1, next_parent, nodes, lines, counter, total);
+                    walk(
+                        &child_acc,
+                        depth + 1,
+                        next_parent,
+                        nodes,
+                        lines,
+                        counter,
+                        total,
+                    );
                 }
             }
         }
@@ -235,7 +270,15 @@ unsafe fn walk(
         let child_var = VARIANT::from(i);
         if let Ok(child_disp) = acc.get_accChild(&child_var) {
             if let Ok(child_acc) = child_disp.cast::<IAccessible>() {
-                walk(&child_acc, depth + 1, parent_index, nodes, lines, counter, total);
+                walk(
+                    &child_acc,
+                    depth + 1,
+                    parent_index,
+                    nodes,
+                    lines,
+                    counter,
+                    total,
+                );
             }
         }
     }

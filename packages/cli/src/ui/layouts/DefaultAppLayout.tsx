@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import { useEffect, useRef } from 'react';
-import { Box } from 'ink';
+import { Box, type DOMElement } from 'ink';
 import { MainContent } from '../components/MainContent.js';
 import { UpdateNotification } from '../components/UpdateNotification.js';
 import { DialogManager } from '../components/DialogManager.js';
@@ -19,6 +19,7 @@ import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
 import { getLiveAgentPanelVpMaxRows } from '../components/background-view/liveAgentPanelVisibility.js';
+import { ContextMenuOverlay } from '../context-menu/ContextMenuOverlay.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
@@ -29,6 +30,7 @@ import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
+  const footerRef = useRef<DOMElement>(null);
   const { refreshStatic } = useUIActions();
   const { activeView, agents } = useAgentViewState();
   const { columns: terminalWidth } = useTerminalSize();
@@ -79,7 +81,7 @@ export const DefaultAppLayout: React.FC = () => {
       ) : (
         <>
           {/* Main view: conversation history + main composer / dialogs */}
-          <MainContent />
+          <MainContent footerRef={footerRef} />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
@@ -114,7 +116,7 @@ export const DefaultAppLayout: React.FC = () => {
                     />
                   </Box>
                 )}
-                <Composer />
+                <Composer footerRef={footerRef} />
               </>
             )}
             <ExitWarning />
@@ -159,6 +161,10 @@ export const DefaultAppLayout: React.FC = () => {
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
       {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}
+
+      {/* Right-click context menu: absolutely-positioned overlay, drawn last
+          so it paints over the transcript. Renders nothing while closed. */}
+      <ContextMenuOverlay />
     </Box>
   );
 };

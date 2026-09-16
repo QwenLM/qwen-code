@@ -18,6 +18,9 @@ import {
   isPlanModeBlocked,
   isAutoEditApproved,
 } from './permissionFlow.js';
+import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
+import { applySkillAllowedTools } from '../tools/skill-utils.js';
 
 // Mock types for testing
 const mockConfig = (overrides: Partial<Config> = {}): Config =>
@@ -83,6 +86,62 @@ describe('evaluatePermissionFlow', () => {
     expect(result.finalPermission).toBe('deny');
     expect(result.denyMessage).toContain('denied by permission rules');
     expect(result.denyMessage).toContain('Matching deny rule');
+  });
+
+  it('frames a specifier-scoped deny as invocation-scoped, not tool-scoped', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      findMatchingDenyRule: vi.fn().mockReturnValue('Bash(npm view *)'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig({ getPermissionManager: vi.fn().mockReturnValue(mockPm) }),
+      invocation,
+      'shell',
+      { command: 'npm view foo' },
+    );
+
+    expect(result.finalPermission).toBe('deny');
+    // The message must read as "this call was blocked", not "the tool is gone"
+    // (issue #11405), and must reassure the model the tool is still usable.
+    expect(result.denyMessage).toContain('invocation was denied');
+    expect(result.denyMessage).toContain('Bash(npm view *)');
+    expect(result.denyMessage).toContain(
+      'Other uses of this tool are still permitted',
+    );
+  });
+
+  it('does not reassure for tool-wide catch-all deny rules (#11405)', async () => {
+    for (const raw of ['Bash(*)', 'Read(//**)', 'WebFetch(*)']) {
+      const mockPm = {
+        hasRelevantRules: vi.fn().mockReturnValue(true),
+        evaluate: vi.fn().mockResolvedValue('deny'),
+        findMatchingDenyRule: vi.fn().mockReturnValue(raw),
+        hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      };
+
+      const result = await evaluatePermissionFlow(
+        mockConfig({ getPermissionManager: vi.fn().mockReturnValue(mockPm) }),
+        mockInvocation({
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        }),
+        'shell',
+        { command: 'echo hello' },
+      );
+
+      // The rule is still cited …
+      expect(result.denyMessage).toContain(`Matching deny rule: "${raw}"`);
+      // … but a fully-blocked tool must not be told it can try other uses.
+      expect(result.denyMessage).not.toContain(
+        'Other uses of this tool are still permitted',
+      );
+    }
   });
 
   it('should return ask permission when PM has no relevant rules', async () => {
@@ -155,6 +214,47 @@ describe('evaluatePermissionFlow', () => {
     );
   });
 
+  // A rule pinned to a derived value (the Workflow tool's script digest) must
+  // be checked against the value the invocation computed, never a same-named
+  // parameter the model supplied.
+  it('matches rules against the parameters the invocation derives', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const order: string[] = [];
+    const modelParams = { name: 'audit', sha256: 'model-chosen' };
+    const invocation = mockInvocation({
+      params: modelParams,
+      getDefaultPermission: vi.fn(async () => {
+        order.push('default');
+        return 'ask' as const;
+      }),
+      getPermissionMatchParams: vi.fn(() => {
+        order.push('match');
+        return { name: 'audit', sha256: 'derived' };
+      }),
+    });
+
+    await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+      }),
+      invocation,
+      ToolNames.WORKFLOW,
+      modelParams,
+    );
+
+    // Derived after the L3 check, which is where the value is computed.
+    expect(order).toEqual(['default', 'match']);
+    expect(mockPm.evaluate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolParams: { name: 'audit', sha256: 'derived' },
+      }),
+    );
+  });
+
   it('forces interaction even when PM allows the tool', async () => {
     const mockPm = {
       hasRelevantRules: vi.fn().mockReturnValue(true),
@@ -214,6 +314,108 @@ describe('evaluatePermissionFlow', () => {
 
     expect(result.finalPermission).toBe('deny');
     expect(result.denyMessage).toContain('denied by permission rules');
+  });
+});
+
+describe('evaluatePermissionFlow with ask_user_question', () => {
+  const questions = [
+    {
+      question: 'Which check defines success?',
+      header: 'Check',
+      options: [
+        { label: 'npm test', description: 'exit code 0' },
+        { label: 'npm run lint', description: 'no warnings' },
+      ],
+      multiSelect: false,
+    },
+  ];
+
+  const askConfig = (interactive: boolean) =>
+    ({
+      isInteractive: vi.fn().mockReturnValue(interactive),
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getTargetDir: vi.fn().mockReturnValue('/test'),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue(undefined),
+    }) as unknown as Config;
+
+  const pmWithSkillGrant = () => {
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    pm.initialize();
+    // Exactly what loading a skill whose SKILL.md lists
+    // `allowedTools: [ask_user_question]` does to the session.
+    applySkillAllowedTools(pm, [ToolNames.ASK_USER_QUESTION]);
+    return pm;
+  };
+
+  it("keeps the dialog when a skill's allowedTools grant would otherwise allow the tool", async () => {
+    const config = askConfig(true);
+    const pm = pmWithSkillGrant();
+    const invocation = new AskUserQuestionTool(config).build({ questions });
+
+    const result = await evaluatePermissionFlow(
+      { ...config, getPermissionManager: () => pm } as unknown as Config,
+      invocation,
+      ToolNames.ASK_USER_QUESTION,
+      { questions },
+    );
+
+    // The grant did override the 'ask' default at L4 …
+    expect(result.defaultPermission).toBe('ask');
+    expect(await pm.evaluate(result.pmCtx)).toBe('allow');
+    // … but the invocation still reaches the user, in every approval mode.
+    expect(result.requiresUserInteraction).toBe(true);
+    expect(result.finalPermission).toBe('ask');
+    expect(
+      needsConfirmation(
+        result.finalPermission,
+        ApprovalMode.YOLO,
+        ToolNames.ASK_USER_QUESTION,
+        result.requiresUserInteraction,
+      ),
+    ).toBe(true);
+  });
+
+  it('still lets headless runs skip the tool, where nothing can prompt', async () => {
+    const config = askConfig(false);
+    const pm = pmWithSkillGrant();
+    const invocation = new AskUserQuestionTool(config).build({ questions });
+
+    const result = await evaluatePermissionFlow(
+      { ...config, getPermissionManager: () => pm } as unknown as Config,
+      invocation,
+      ToolNames.ASK_USER_QUESTION,
+      { questions },
+    );
+
+    expect(result.requiresUserInteraction).toBe(false);
+    expect(result.finalPermission).toBe('allow');
+  });
+
+  it('preserves an explicit deny rule for ask_user_question', async () => {
+    const config = askConfig(true);
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [ToolNames.ASK_USER_QUESTION],
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    pm.initialize();
+    const invocation = new AskUserQuestionTool(config).build({ questions });
+
+    const result = await evaluatePermissionFlow(
+      { ...config, getPermissionManager: () => pm } as unknown as Config,
+      invocation,
+      ToolNames.ASK_USER_QUESTION,
+      { questions },
+    );
+
+    expect(result.finalPermission).toBe('deny');
   });
 });
 

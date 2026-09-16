@@ -40,9 +40,10 @@ are logged rather than restoring the removed runtime.
 
 Runtime isolation covers cwd, environment overlay, filesystem/trust boundary,
 workspace services, bridge, Voice lease state, channel worker, and the ACP/MCP
-resource boundary. Production attempts to preheat the primary ACP child and
-retries on first use after failure; trusted secondaries start theirs on demand,
-and untrusted secondaries do not start ACP.
+resource boundary. Production attempts to preheat the trusted primary ACP child
+for compatibility; trusted secondaries start on their first runtime-backed
+command or Session, and untrusted secondaries do not start ACP. Legacy primary
+routes retain their existing compatibility behavior.
 Authentication, HTTP rate limits, listener and Voice admission caps,
 total-session admission, metrics, shutdown, and the process fault radius remain
 daemon-global. Run separate daemons when those process-level boundaries must be
@@ -50,7 +51,7 @@ independent.
 
 ## Linux: systemd user unit
 
-> **Find your `qwen` binary first.** The unit file's `ExecStart=` must hold an **absolute path** — service managers don't read your shell's `PATH`. Run `which qwen` to discover it. Common locations: `/usr/local/bin/qwen` (Linuxbrew, manual installs), `~/.nvm/versions/node/vX.Y.Z/bin/qwen` (nvm), `~/.fnm/aliases/default/bin/qwen` (fnm), `~/.volta/bin/qwen` (Volta). Substitute the actual path everywhere the templates below show `/PATH/TO/qwen`.
+> **Find your `qwen` binary and trusted tool directories first.** The unit file's `ExecStart=` must hold an **absolute path**, and its explicit `PATH` must include trusted directories for tools that daemon sessions need, such as `gh`, `git`, `npm`, and the `node` interpreter used by a script-based `qwen` launcher. Service managers don't read your shell profile. Run `which qwen gh git npm node` in your normal shell, then substitute the actual executable and directories everywhere the template below shows `/PATH/TO/qwen` and `/PATH/TO/USER/BIN`.
 
 `~/.config/systemd/user/qwen-serve.service`:
 
@@ -65,6 +66,9 @@ Type=simple
 WorkingDirectory=%h/project-a
 # Run `which qwen` to find the absolute path. systemd does NOT read $PATH.
 ExecStart=/PATH/TO/qwen serve --hostname 127.0.0.1 --port 4170 --workspace %h/project-a --workspace %h/project-b
+# Replace the first entry with trusted directories that contain qwen's
+# interpreter and user-installed tools. systemd does not read shell profiles.
+Environment=PATH=/PATH/TO/USER/BIN:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # Read the bearer token from a chmod 600 file rather than inlining it
 # in the unit. `Environment=` would expose the token in the unit file
 # (typically 644 = world-readable). EnvironmentFile keeps the token in
@@ -99,11 +103,11 @@ systemctl --user disable --now qwen-serve.service
 
 Without `loginctl enable-linger`, the user-level systemd instance shuts down when the user logs out and only restarts on next login — on a headless dev box the daemon would not survive an SSH session ending. `enable-linger` is what makes "across reboots" actually work.
 
-**System-wide alternative** (shared dev hosts, less common): drop the unit at `/etc/systemd/system/qwen-serve@.service` with `User=%i`, manage via `sudo systemctl enable --now qwen-serve@<username>.service`. Same `[Service]` body otherwise — but world-readable `Environment=` exposure is even more problematic at this level, so always use `EnvironmentFile=` pointing at the user's `chmod 600` file. Pick user-level + linger for single-user workstations.
+**System-wide alternative** (shared dev hosts, less common): drop the unit at `/etc/systemd/system/qwen-serve@.service` with `User=%i`, manage via `sudo systemctl enable --now qwen-serve@<username>.service`. Same `[Service]` body otherwise. The non-sensitive `PATH` can remain in `Environment=`, but never put the bearer token there: use `EnvironmentFile=` pointing at the user's `chmod 600` file. Pick user-level + linger for single-user workstations.
 
 ## macOS: launchd user agent
 
-> **Find your `qwen` binary first.** Same constraint as systemd — `ProgramArguments` must hold an **absolute path**. Run `which qwen` to discover it. Common locations on macOS: `/opt/homebrew/bin/qwen` (Homebrew on Apple Silicon), `/usr/local/bin/qwen` (Homebrew on Intel, manual installs), `~/.nvm/versions/node/vX.Y.Z/bin/qwen` (nvm), `~/.volta/bin/qwen` (Volta). Substitute below where the template shows `/PATH/TO/qwen`.
+> **Find your `qwen` binary and trusted tool directories first.** Same constraint as systemd: `ProgramArguments` must hold an **absolute path**, while `EnvironmentVariables.PATH` must include trusted directories containing tools daemon sessions need. Run `which qwen gh git npm node` in your normal shell. Common locations on macOS include `/opt/homebrew/bin` (Homebrew on Apple Silicon), `/usr/local/bin` (Homebrew on Intel and manual installs), `~/.nvm/versions/node/vX.Y.Z/bin` (nvm), and `~/.volta/bin` (Volta). Substitute the actual absolute paths below; launchd does not expand `~` or shell variables.
 
 `~/Library/LaunchAgents/com.qwenlm.qwen-serve.plist`:
 
@@ -133,6 +137,10 @@ Without `loginctl enable-linger`, the user-level systemd instance shuts down whe
   <string>/Users/YOUR-USERNAME/project-a</string>
   <key>EnvironmentVariables</key>
   <dict>
+    <!-- launchd does not read shell profiles. Replace the first entry with
+         trusted directories containing qwen's interpreter and user tools. -->
+    <key>PATH</key>
+    <string>/PATH/TO/USER/BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <!-- DO NOT COMMIT this file with a real token. Also chmod 600 the
          plist itself so the inlined token is not world-readable. -->
     <key>QWEN_SERVER_TOKEN</key>
@@ -180,6 +188,8 @@ tail -f ~/Library/Logs/qwen-serve/out.log ~/Library/Logs/qwen-serve/err.log
 
 After editing the plist (e.g., rotating the token) you must `unload` then `load` again — `launchctl` does not auto-reload on plist changes the way `systemd daemon-reload` does. Note: each `load` truncates the log files, so save them off if you're investigating an incident before rotating.
 
+After starting or restarting either service, open a new daemon session and verify that the tools it needs resolve without changing `PATH` inside the command, for example `command -v gh`. If a tool is missing, add its trusted, absolute containing directory to the service-level `PATH` and reload the service; do not rely on `~/.zshrc`, `~/.bashrc`, or another interactive-shell profile.
+
 ## tmux session (interactive supervision)
 
 Assumes `QWEN_SERVER_TOKEN` is already exported in your shell (see the setup section above):
@@ -216,7 +226,7 @@ curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" \
   http://127.0.0.1:4170/capabilities | jq .protocolVersions         # daemon's feature set
 ```
 
-When auth is configured (i.e., the daemon was started with `--token` / `QWEN_SERVER_TOKEN` set, OR `--require-auth=true`), every route except `/health` on loopback binds requires `Authorization: Bearer <token>`. If you started the daemon without a token on the loopback default (the `qwen serve` zero-config path), neither call requires a header. The templates above all configure a token, so the `Authorization` header is needed in practice. If `/capabilities` returns `401`, the unit / plist token doesn't match the env-exported token your `curl` is using.
+When auth is configured (`--token` or `QWEN_SERVER_TOKEN`), every normal API route except `/health` on an ordinary loopback bind requires `Authorization: Bearer <token>`; channel webhook ingress always uses its configured `x-qwen-webhook-secret`, and Web Shell document and asset routes remain pre-auth. `--require-auth=true` requires a token at boot and additionally moves loopback `/health` behind the bearer gate without changing webhook authentication. If you started the daemon without a token on the loopback default (the `qwen serve` zero-config path), neither call requires a header and any local process that can reach the primary listener receives full operator API authority, including code execution as the daemon user. The templates above all configure a token, so the `Authorization` header is needed in practice. If `/capabilities` returns `401`, the unit / plist token doesn't match the env-exported token your `curl` is using.
 
 ## Token rotation
 
@@ -250,7 +260,7 @@ A daemon **restart** drops all in-memory sessions; clients reconnect and start f
 
 - **Containerized deployment** — Dockerfile, docker-compose, Kubernetes manifests, nginx + TLS reverse proxy, multi-instance token isolation. Defers to v0.16.x once an enterprise pilot is committed; the doc would otherwise rot from no-one-validating.
 - **Cross-host federation / multi-daemon coordination on one host** — one daemon can host multiple registered workspace runtimes, but daemons do not coordinate. Instance-path token keying + stale-token cleanup defer to v0.16.x.
-- **Auto-generated daemon tokens** — alpha is BYO-token. Auto-gen + token-store infrastructure defers to v0.16.x.
+- **General daemon token storage** — Local Control uses revocable daemon-owned pairing tokens, but long-lived runtime token storage remains BYO-token. Persistent token-store infrastructure defers to v0.16.x.
 - **Windows native service** (`nssm`, Service Control Manager wrapper) — for now use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) and follow the systemd section above.
 
 See the [v0.16-alpha known limits](./qwen-serve.md#v016-alpha-known-limits) callout in the main user guide for the full deferred-features list, and [#4175](https://github.com/QwenLM/qwen-code/issues/4175) for the v0.16-alpha rollout tracking issue.

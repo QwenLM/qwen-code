@@ -90,7 +90,7 @@ function fireAllEvent(
 }
 
 describe('ExtensionFileWatcher', () => {
-  const extensionsDir = '/home/user/.qwen/extensions';
+  const extensionsDir = path.resolve('/home/user/.qwen/extensions');
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -416,7 +416,7 @@ describe('ExtensionFileWatcher', () => {
     expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
   });
 
-  it('auto-refreshes command, skill, and agent content changes', () => {
+  it('auto-refreshes command, skill, agent, and workflow content changes', () => {
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
       configWithExtensions([]),
@@ -428,14 +428,16 @@ describe('ExtensionFileWatcher', () => {
     fireAllEvent(0, 'add', `${extensionsDir}/alpha/commands/run.toml`);
     fireAllEvent(0, 'unlink', `${extensionsDir}/alpha/skills/demo/SKILL.md`);
     fireAllEvent(0, 'change', `${extensionsDir}/alpha/agents/reviewer.md`);
+    fireAllEvent(0, 'add', `${extensionsDir}/alpha/workflows/audit.js`);
 
-    expect(refreshState.markExtensionContentChanged).toHaveBeenCalledTimes(3);
+    expect(refreshState.markExtensionContentChanged).toHaveBeenCalledTimes(4);
     expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
   });
 
   it('treats content events as stale when the extension manifest is gone', () => {
     mockExistsSync.mockImplementation(
-      (filePath: string) => !filePath.endsWith('/alpha/qwen-extension.json'),
+      (filePath: string) =>
+        !filePath.endsWith(path.join('alpha', 'qwen-extension.json')),
     );
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
@@ -502,8 +504,8 @@ describe('ExtensionFileWatcher', () => {
   });
 
   it('does not watch inactive linked extension sources or context files', () => {
-    const activeSource = '/tmp/active-linked-extension';
-    const inactiveSource = '/tmp/inactive-linked-extension';
+    const activeSource = path.resolve('/tmp/active-linked-extension');
+    const inactiveSource = path.resolve('/tmp/inactive-linked-extension');
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
       {
@@ -590,9 +592,9 @@ describe('ExtensionFileWatcher', () => {
 
     expect(mockWatch).toHaveBeenCalledTimes(2);
     expect(mockWatchers[0].target).toEqual([
-      '/home/user/.qwen/extension-store/state.json',
+      path.resolve('/home/user/.qwen/extension-store/state.json'),
     ]);
-    expect(mockWatchers[1].target).toBe('/home/user/.qwen');
+    expect(mockWatchers[1].target).toBe(path.resolve('/home/user/.qwen'));
     expect(mockWatchers[1].options).toEqual(
       expect.objectContaining({
         ignoreInitial: true,

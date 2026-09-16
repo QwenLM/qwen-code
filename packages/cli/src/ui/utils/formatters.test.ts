@@ -6,8 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  contextUsageLabel,
   formatDuration,
   formatMemoryUsage,
+  formatPercentageUsed,
   formatRelativeTime,
   formatTokenCount,
 } from './formatters.js';
@@ -94,17 +96,19 @@ describe('formatters', () => {
     });
   });
 
+  // The implementation and its full case table live in core
+  // (`packages/core/src/utils/formatters.test.ts`); this module only
+  // re-exports it. These pin the re-export itself, including the unit
+  // rollover that used to differ between the copies.
   describe('formatMemoryUsage', () => {
-    it('should format bytes into KB', () => {
-      expect(formatMemoryUsage(12345)).toBe('12.1 KB');
-    });
-
-    it('should format bytes into MB', () => {
-      expect(formatMemoryUsage(12345678)).toBe('11.8 MB');
-    });
-
-    it('should format bytes into GB', () => {
-      expect(formatMemoryUsage(12345678901)).toBe('11.50 GB');
+    it.each([
+      [12345, '12.1 KB'],
+      [12345678, '11.8 MB'],
+      [12345678901, '11.50 GB'],
+      [1024 * 1024 - 1, '1.0 MB'],
+      [1024 * 1024 * 1024 - 1, '1.00 GB'],
+    ])('formats %d as %s', (bytes, expected) => {
+      expect(formatMemoryUsage(bytes)).toBe(expected);
     });
   });
 
@@ -210,6 +214,33 @@ describe('formatters', () => {
       expect(formatTokenCount(10000)).toBe('10k');
       expect(formatTokenCount(15000)).toBe('15k');
       expect(formatTokenCount(100000)).toBe('100k');
+    });
+  });
+
+  describe('formatPercentageUsed', () => {
+    it('renders the used fraction with one decimal', () => {
+      expect(formatPercentageUsed(0)).toBe('0.0');
+      expect(formatPercentageUsed(0.045)).toBe('4.5');
+    });
+
+    it('treats exactly 100% as in limit', () => {
+      expect(formatPercentageUsed(1)).toBe('100.0');
+    });
+
+    it('reports past-limit usage as >100', () => {
+      expect(formatPercentageUsed(1.5)).toBe('>100');
+    });
+  });
+
+  describe('contextUsageLabel', () => {
+    it('uses the full label at 100 columns and wider', () => {
+      expect(contextUsageLabel(100)).toBe('% context used');
+      expect(contextUsageLabel(110)).toBe('% context used');
+    });
+
+    it('drops "context" below 100 columns', () => {
+      expect(contextUsageLabel(99)).toBe('% used');
+      expect(contextUsageLabel(40)).toBe('% used');
     });
   });
 });

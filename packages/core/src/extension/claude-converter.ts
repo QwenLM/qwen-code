@@ -57,6 +57,7 @@ export interface ClaudePluginConfig {
   skills?: string | string[];
   hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   mcpServers?: string | Record<string, MCPServerConfig>;
+  workflows?: string | string[];
   outputStyles?: string | string[];
   lspServers?: string | Record<string, unknown>;
 }
@@ -453,7 +454,11 @@ export async function convertClaudePluginPackage(
   pluginName: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
   signal?: AbortSignal,
-): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+): Promise<{
+  config: ExtensionConfig;
+  convertedDir: string;
+  externalContent: boolean;
+}> {
   signal?.throwIfAborted();
   // Step 1: Load marketplace.json
   const marketplaceJsonPath = path.join(
@@ -493,7 +498,7 @@ export async function convertClaudePluginPackage(
   );
   await fs.promises.mkdir(pluginDir, { recursive: true });
 
-  const pluginSource = await resolvePluginSource(
+  const { pluginSource, externalContent } = await resolvePluginSource(
     marketplacePlugin,
     extensionDir,
     pluginDir,
@@ -544,7 +549,11 @@ export async function convertClaudePluginPackage(
     mergedConfig = marketplacePlugin as ClaudePluginConfig;
   }
 
-  return buildQwenExtensionFromPlugin(pluginSource, mergedConfig);
+  const converted = await buildQwenExtensionFromPlugin(
+    pluginSource,
+    mergedConfig,
+  );
+  return { ...converted, externalContent };
 }
 
 /**
@@ -554,7 +563,7 @@ export async function convertClaudePluginPackage(
  * could otherwise make the converter read sensitive files outside the plugin.
  * Returns the confined absolute path, or null when the reference is unsafe.
  */
-function resolvePluginRelativeFile(
+export function resolvePluginRelativeFile(
   pluginSource: string,
   relativePath: string,
 ): string | null {
@@ -591,7 +600,7 @@ function resolvePluginRelativeFile(
  * (`convertClaudePluginPackage`) and standalone (`convertClaudePluginStandalone`)
  * conversion paths.
  */
-async function buildQwenExtensionFromPlugin(
+export async function buildQwenExtensionFromPlugin(
   pluginSource: string,
   mergedConfig: ClaudePluginConfig,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
@@ -654,6 +663,18 @@ async function buildQwenExtensionFromPlugin(
       }
     }
 
+    // Declared workflows keep their relative paths, so same-named files in
+    // different directories do not overwrite each other, and the converted
+    // manifest lists the exact files. Undeclared, the copied workflows/ stays.
+    const workflowPaths =
+      mergedConfig.workflows == null
+        ? undefined
+        : collectWorkflowResources(
+            mergedConfig.workflows,
+            pluginSource,
+            tmpDir,
+          );
+
     // Handle hooks from a file path if needed.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
       const hooksPath = resolvePluginRelativeFile(
@@ -690,6 +711,9 @@ async function buildQwenExtensionFromPlugin(
     await convertAgentFiles(agentsDestDir);
 
     const qwenConfig = convertClaudeToQwenConfig(mergedConfig);
+    if (workflowPaths !== undefined) {
+      qwenConfig.workflows = workflowPaths;
+    }
 
     const qwenConfigPath = path.join(tmpDir, 'qwen-extension.json');
     fs.writeFileSync(
@@ -795,6 +819,88 @@ export async function convertClaudePluginStandalone(
   }
 
   return buildQwenExtensionFromPlugin(extensionDir, mergedConfig);
+}
+
+/**
+ * Copies a plugin's declared workflow files into the converted extension at
+ * their relative paths and returns that file list for the manifest. Reads one
+ * directory level of `.js` files, every source confined to the plugin: a
+ * symlink is accepted only when its target resolves inside the plugin, like
+ * `collectResources`, and the copy dereferences it, so the converted extension
+ * holds a regular file the workflow loader will read. Re-copying restores a
+ * workflow file the commands/skills/agents remapping removed.
+ */
+function collectWorkflowResources(
+  resourcePaths: unknown,
+  pluginRoot: string,
+  destDir: string,
+): string[] {
+  const paths = Array.isArray(resourcePaths) ? resourcePaths : [resourcePaths];
+  const collected = new Set<string>();
+
+  const copy = (srcFile: string) => {
+    const relativePath = path
+      .relative(pluginRoot, srcFile)
+      .split(path.sep)
+      .join('/');
+    if (collected.has(relativePath)) return;
+    const destFile = path.join(destDir, relativePath);
+    fs.mkdirSync(path.dirname(destFile), { recursive: true });
+    fs.copyFileSync(srcFile, destFile);
+    collected.add(relativePath);
+  };
+
+  for (const resourcePath of paths) {
+    if (typeof resourcePath !== 'string' || resourcePath.length === 0) {
+      debugLogger.warn(
+        'Ignoring a non-string workflows entry in plugin config',
+      );
+      continue;
+    }
+    const resolvedPath = resolvePluginRelativeFile(pluginRoot, resourcePath);
+    if (!resolvedPath) continue;
+    if (!fs.existsSync(resolvedPath)) {
+      debugLogger.warn(`Workflow path not found: ${resolvedPath}`);
+      continue;
+    }
+    const stat = fs.statSync(resolvedPath);
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(resolvedPath).sort()) {
+        if (!name.endsWith('.js')) continue;
+        const srcFile = path.join(resolvedPath, name);
+        if (!isRegularFileWithinPlugin(srcFile, pluginRoot)) {
+          debugLogger.debug(
+            `Skipping workflow file that is not a regular file inside the plugin: ${srcFile}`,
+          );
+          continue;
+        }
+        copy(srcFile);
+      }
+    } else if (stat.isFile() && resolvedPath.endsWith('.js')) {
+      copy(resolvedPath);
+    } else {
+      debugLogger.warn(
+        `Ignoring workflows entry that is neither a directory nor a .js file: ${resolvedPath}`,
+      );
+    }
+  }
+  return [...collected];
+}
+
+/** True when `filePath` resolves, through any symlink, to a regular file inside the plugin. */
+function isRegularFileWithinPlugin(
+  filePath: string,
+  pluginRoot: string,
+): boolean {
+  try {
+    // The shared containment primitive, so this rule cannot drift from the
+    // other symlink guards; `isFile()` excludes the plugin root itself.
+    return (
+      fs.statSync(filePath).isFile() && realPathWithin(filePath, pluginRoot)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -950,6 +1056,9 @@ export function mergeClaudeConfigs(
   if (marketplacePlugin.commands) merged.commands = marketplacePlugin.commands;
   if (marketplacePlugin.agents) merged.agents = marketplacePlugin.agents;
   if (marketplacePlugin.skills) merged.skills = marketplacePlugin.skills;
+  // `null` reads as undeclared, as it does in the workflow loader.
+  if (marketplacePlugin.workflows != null)
+    merged.workflows = marketplacePlugin.workflows;
   if (marketplacePlugin.hooks) merged.hooks = marketplacePlugin.hooks;
   if (marketplacePlugin.mcpServers)
     merged.mcpServers = marketplacePlugin.mcpServers;
@@ -1014,7 +1123,10 @@ export function isClaudePluginConfig(
 
 /**
  * Resolve plugin source from marketplace plugin configuration.
- * Returns the absolute path to the plugin source directory.
+ * Returns the absolute path to the plugin source directory and whether the
+ * plugin content was fetched from a source external to the marketplace
+ * repository (in which case the marketplace clone's commit does not describe
+ * the installed content).
  */
 async function resolvePluginSource(
   pluginConfig: ClaudeMarketplacePluginConfig,
@@ -1022,7 +1134,7 @@ async function resolvePluginSource(
   pluginDir: string,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ pluginSource: string; externalContent: boolean }> {
   signal?.throwIfAborted();
   const source = pluginConfig.source;
 
@@ -1047,7 +1159,7 @@ async function resolvePluginSource(
         signal?.throwIfAborted();
         await cloneFromGit(installMetadata, pluginDir, signal);
       }
-      return pluginDir;
+      return { pluginSource: pluginDir, externalContent: true };
     }
 
     // Relative path within marketplace. Confine it: a manifest source like
@@ -1082,12 +1194,12 @@ async function resolvePluginSource(
     // If source path equals marketplace dir (source is '.' or ''),
     // return marketplaceDir directly to avoid copying to subdirectory of self
     if (path.resolve(sourcePath) === path.resolve(marketplaceDir)) {
-      return marketplaceDir;
+      return { pluginSource: marketplaceDir, externalContent: false };
     }
 
     // Copy to plugin directory
     await fs.promises.cp(sourcePath, pluginDir, { recursive: true });
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: false };
   }
 
   // Handle object source (github or url)
@@ -1103,7 +1215,7 @@ async function resolvePluginSource(
       signal?.throwIfAborted();
       await cloneFromGit(installMetadata, pluginDir, signal);
     }
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: true };
   }
 
   if (source.source === 'url') {
@@ -1118,7 +1230,7 @@ async function resolvePluginSource(
       signal?.throwIfAborted();
       await cloneFromGit(installMetadata, pluginDir, signal);
     }
-    return pluginDir;
+    return { pluginSource: pluginDir, externalContent: true };
   }
 
   if (source.source === 'git-subdir') {
@@ -1162,7 +1274,7 @@ async function resolvePluginSource(
         `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`,
       );
     }
-    return subDir;
+    return { pluginSource: subDir, externalContent: true };
   }
 
   throw new Error(`Unsupported plugin source type: ${JSON.stringify(source)}`);

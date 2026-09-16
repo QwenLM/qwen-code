@@ -1,7 +1,7 @@
 .approval {
   margin: 0 auto;
   width: 100%;
-  max-width: min(800px, var(--chat-content-width, 800px));
+  max-width: min(100%, var(--chat-content-width, 1000px));
   box-sizing: border-box;
   padding: 16px;
   border: 1.5px solid var(--border);
@@ -16,6 +16,8 @@
 }
 
 .floating {
+  display: flex;
+  flex-direction: column;
   max-height: min(360px, 55vh);
   margin: 0 auto;
   overflow-y: auto;
@@ -26,6 +28,63 @@
     0 2px 4px -2px rgba(0, 0, 0, 0.1),
     0 4px 6px -1px rgba(0, 0, 0, 0.1);
   font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+/* Chrome holds its place and the command/content region absorbs the overflow,
+   so a long command scrolls inside the sheet instead of pushing the decision
+   buttons out of it. */
+.floating > .header,
+.floating > .desc,
+.floating > .explainRow,
+.floating > .options {
+  flex-shrink: 0;
+}
+
+.floatingWorkflow {
+  display: flex;
+  flex-direction: column;
+  max-height: min(720px, 80vh);
+  overflow-y: hidden;
+}
+
+.floatingWorkflow > :not(.planContent):not(.workflow) {
+  flex-shrink: 0;
+}
+
+.workflow {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
+}
+
+.explainRow {
+  margin: 16px 0 0 24px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.explainButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+}
+
+.explainButton:hover,
+.explainButton:focus-visible {
+  color: var(--primary);
+}
+
+.explainButton svg {
+  width: 14px;
+  height: 14px;
 }
 
 .header {
@@ -80,10 +139,6 @@
   -webkit-box-orient: vertical;
 }
 
-.desc:hover {
-  -webkit-line-clamp: unset;
-}
-
 .content {
   margin: 10px 0 0;
   margin-left: 24px;
@@ -94,20 +149,28 @@
   color: var(--foreground);
   white-space: pre-wrap;
   word-break: break-word;
+  min-height: 3.5em;
+  /* The floating sheet's flex budget binds first, so this cap governs the
+     inline variant. */
   max-height: 300px;
   overflow-y: auto;
   line-height: 1.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+}
+
+.planContent {
+  min-height: 0;
+  max-height: min(240px, 25vh);
 }
 
 .code {
+  display: flex;
+  flex-direction: column;
   margin: 10px 0 0;
   margin-left: 24px;
   padding: 8px 12px;
   background: var(--secondary);
   border-radius: 7px;
+  min-height: 3.5em;
 }
 
 .codeBlock {
@@ -118,16 +181,11 @@
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.code:hover .codeBlock,
-.content:hover {
-  display: block;
-  -webkit-line-clamp: unset;
+  min-height: 0;
+  /* The floating sheet's flex budget binds first, so this cap governs the
+     inline variant. */
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 /* Kept in the accessibility tree (used as the alertdialog's aria-describedby
@@ -160,8 +218,8 @@
   align-items: center;
   justify-content: center;
   gap: 0;
-  height: 28px;
-  padding: 0 12px;
+  min-height: 36px;
+  padding: 6px 12px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
@@ -228,4 +286,94 @@
   .options {
     justify-content: flex-start;
   }
+}
+
+.goalApproval {
+  display: flex;
+  flex-direction: column;
+  max-height: min(640px, 80dvh);
+  overflow: hidden;
+}
+
+.goalApproval > .header,
+.goalApproval > .options,
+.goalHint,
+.goalFeedback {
+  flex-shrink: 0;
+}
+
+.goalTabs {
+  min-height: 0;
+  flex: 1 1 auto;
+  margin-top: 12px;
+}
+
+.goalBody {
+  height: 310px;
+  min-height: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+
+.goalPanel {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 12px 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.goalPanel p {
+  margin: 0;
+}
+
+.goalPanel .goalNotice {
+  color: var(--muted-foreground);
+  margin-bottom: 16px;
+}
+
+.goalSection + .goalSection {
+  margin-top: 16px;
+}
+
+.goalSection h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.goalHint {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.goalFeedback {
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.goalApproval > .options {
+  margin-top: 8px;
+  gap: 12px;
+}
+
+.goalApproval .option {
+  white-space: normal;
+}
+
+.goalApproval .option:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.goalTabs > [role='tablist'] {
+  flex-shrink: 0;
 }

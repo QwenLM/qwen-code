@@ -12,6 +12,7 @@
  */
 
 import type { Content, FunctionDeclaration } from '@google/genai';
+import type { ReasoningEffort } from '../../core/reasoning-effort.js';
 
 // ─── Agent Configuration ─────────────────────────────────────
 
@@ -52,6 +53,16 @@ export interface ModelConfig {
    * TODO: In the future, this needs to support 'auto' or some other string to support routing use cases.
    */
   model?: string;
+
+  /**
+   * Reasoning effort for this agent alone, honored by
+   * `SubagentManager.createAgentHeadless`: written onto the agent's own
+   * content-generator config — never the session's — and limited to the tiers
+   * `/effort` offers for the agent's model. Spawn paths that build their own
+   * generator view (the in-process backend behind teammates and arena agents)
+   * do not read it.
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 /**
@@ -82,9 +93,16 @@ export type AgentExternalInput =
 export interface ToolConfig {
   /**
    * A list of tool names (from the tool registry) or full function declarations
-   * that the agent is permitted to use.
+   * exposed to the model.
    */
   tools: Array<string | FunctionDeclaration>;
+
+  /**
+   * Optional execution-layer allowlist. Tool declarations remain unchanged,
+   * but calls outside this list are rejected before scheduling or approval.
+   * Supports exact tool names and MCP server-level patterns.
+   */
+  executionAllowedTools?: string[];
 
   /**
    * Optional list of tool names to exclude from the agent's tool pool.
@@ -221,6 +239,25 @@ export interface AgentMessage {
    * For role='assistant' with error: error=true
    */
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * The last model-visible answer in a message history, or undefined
+ * when there is none. Scans most-recent-first; the first non-empty,
+ * non-thought assistant message wins. Shared by the team pre-attach
+ * recovery (TeamManager) and the arena final-text fallback
+ * (ArenaManager) so both apply the same selection rule.
+ */
+export function lastVisibleAnswer(
+  messages: readonly AgentMessage[],
+): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant' || message.thought) continue;
+    const text = message.content.trim();
+    if (text) return text;
+  }
+  return undefined;
 }
 
 /**

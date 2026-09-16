@@ -8,6 +8,7 @@ export type GenAiOperationName = 'chat' | 'generate_content';
 export type GenAiOutputType = 'text' | 'json' | 'image' | 'speech';
 export type GenAiAuthType =
   | 'openai'
+  | 'openai-responses'
   | 'qwen-oauth'
   | 'gemini'
   | 'vertex-ai'
@@ -30,6 +31,7 @@ const PROVIDER_BY_ENV_KEY: Readonly<Record<string, string>> = {
   MIMO_API_KEY: 'mimo',
   MISTRAL_API_KEY: 'mistral_ai',
   MODELSCOPE_API_KEY: 'modelscope',
+  MOONSHOT_API_KEY: 'moonshot',
   OPENAI_API_KEY: 'openai',
   OPENROUTER_API_KEY: 'openrouter',
   REQUESTY_API_KEY: 'requesty',
@@ -63,6 +65,12 @@ function providerFromHostname(hostname: string): string | undefined {
   if (isHostOrSubdomain(hostname, 'deepseek.com')) return 'deepseek';
   if (isHostOrSubdomain(hostname, 'x.ai')) return 'x_ai';
   if (isHostOrSubdomain(hostname, 'mistral.ai')) return 'mistral_ai';
+  if (
+    isHostOrSubdomain(hostname, 'moonshot.ai') ||
+    isHostOrSubdomain(hostname, 'moonshot.cn')
+  ) {
+    return 'moonshot';
+  }
   if (
     isHostOrSubdomain(hostname, 'minimax.io') ||
     isHostOrSubdomain(hostname, 'minimaxi.com')

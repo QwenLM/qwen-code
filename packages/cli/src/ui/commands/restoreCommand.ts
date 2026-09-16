@@ -144,11 +144,12 @@ async function restoreAction(
           content: 'loadHistory function is not available.',
         };
       }
+      context.ui.clearPendingState?.();
       loadHistory(toolCallData.history);
     }
 
     if (toolCallData.clientHistory) {
-      await config?.getGeminiClient()?.setHistory(toolCallData.clientHistory);
+      await config?.getLlmClient()?.setHistory(toolCallData.clientHistory);
     }
 
     return {

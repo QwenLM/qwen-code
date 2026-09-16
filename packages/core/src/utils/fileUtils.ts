@@ -6,12 +6,13 @@
 
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import mime from 'mime/lite';
 import { isUtf8CompatibleEncoding } from './encoding.js';
 import { loadIconvLite } from './load-iconv-lite.js';
-import { ToolErrorType } from '../tools/tool-error.js';
+import { ToolErrorType } from './tool-error-type.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
@@ -33,10 +34,19 @@ import {
   renderPDFPagesToImages,
   shouldRequirePDFPageRange,
 } from './pdf.js';
-import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
+import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
+import {
+  extensionForMimeType,
+  looksLikeText,
+  sniffFileKind,
+} from './binary-content.js';
 import { readNotebookWithMetadata } from './notebook.js';
-import { readTextRange } from './read-text-range.js';
+import {
+  readTextRange,
+  type ReadTextRangeResult,
+  detectLineEndingFromContent,
+} from './read-text-range.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
   TEXT_RANGE_FAST_PATH_MAX_SIZE,
@@ -46,6 +56,7 @@ import {
   ImageViewError,
   renderImageOverview,
 } from './image-view.js';
+import { PIPELINE_IMAGE_MIME_TYPES } from './request-tokenizer/supportedImageFormats.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 const CANONICAL_IMAGE_MIME_TYPES = new Set([
@@ -53,6 +64,38 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+// Magic-matched canonical images may be valid even when their image extension
+// differs. GIF is intentionally excluded because the canonical overview path
+// cannot render it and must not forward it under a mismatched image MIME.
+const CANONICAL_IMAGE_EXTENSIONS = new Set(
+  [...CANONICAL_IMAGE_MIME_TYPES].map((mimeType) =>
+    extensionForMimeType(mimeType),
+  ),
+);
+// Every entry must have a magic signature in sniffFileKind (binary-content.ts)
+// AND a MIME_EXTENSIONS entry (same file) mapping the mime to the exact
+// extension string the magic branch returns; missing either classifies every
+// valid image of that format as 'binary'.
+// Other image MIME types intentionally retain extension-only behavior until
+// their magic signatures and safe rendering paths are added here.
+const SNIFFABLE_IMAGE_MIME_TYPES = new Set([
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+const IMAGE_SNIFF_BYTES = 8192;
+
+// Image MIME types a model endpoint can safely consume as-is. Anything else
+// (image/heic, image/tiff, ...) must never be forwarded verbatim: providers
+// reject the unknown media during request validation, and the resulting 400
+// aborts the whole session instead of surfacing a recoverable result (#9291).
+// Derived from PIPELINE_IMAGE_MIME_TYPES in
+// request-tokenizer/supportedImageFormats.ts so the read-path gate and the
+// contract advertised to users cannot drift apart.
+const PROVIDER_SAFE_IMAGE_MIME_TYPES = new Set<string>(
+  PIPELINE_IMAGE_MIME_TYPES,
+);
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
@@ -330,15 +373,7 @@ export async function readFileWithLineAndLimit(params: {
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stats?: import('node:fs').Stats;
-}): Promise<{
-  content: string;
-  bom?: boolean;
-  encoding?: string;
-  originalLineCount: number;
-  originalLineCountExact?: boolean;
-  lineEnding?: 'crlf' | 'lf';
-  truncatedByBytes?: boolean;
-}> {
+}): Promise<ReadTextRangeResult> {
   const { path: filePath, limit, line, maxOutputBytes, signal } = params;
   const stats = params.stats ?? (await fs.promises.stat(filePath));
   if (
@@ -372,12 +407,15 @@ export async function readFileWithLineAndLimit(params: {
   const actualStartLine = Math.min(startLine, originalLineCount);
   const selectedLines = lines.slice(actualStartLine, endLine);
 
+  const joined = selectedLines.join('\n');
   return {
-    content: selectedLines.join('\n'),
+    content: joined,
     bom,
     encoding,
     originalLineCount,
     originalLineCountExact: true,
+    truncatedByBytes: false,
+    lineEnding: detectLineEndingFromContent(joined),
   };
 }
 
@@ -385,11 +423,21 @@ export async function readFileWithLineAndLimit(params: {
  * Detect the encoding of a file by reading a sample from its beginning.
  * Returns the encoding name (e.g. 'utf-8', 'gbk', 'shift_jis').
  * Uses BOM detection first, then UTF-8 validation, then chardet as fallback.
+ *
+ * Accepts an already-open handle so a caller that has pinned an inode can be
+ * told the encoding of *that* inode rather than of whatever the path resolves
+ * to now. A supplied handle is borrowed: reads go through explicit positions so
+ * the caller's file position is untouched, and it is never closed here.
  */
-export async function detectFileEncoding(filePath: string): Promise<string> {
-  let fh: fs.promises.FileHandle | null = null;
+export async function detectFileEncoding(
+  source: string | fs.promises.FileHandle,
+): Promise<string> {
+  let opened: fs.promises.FileHandle | null = null;
   try {
-    fh = await fs.promises.open(filePath, 'r');
+    const fh =
+      typeof source === 'string'
+        ? (opened = await fs.promises.open(source, 'r'))
+        : source;
     const stats = await fh.stat();
     if (stats.size === 0) return 'utf-8';
 
@@ -402,22 +450,7 @@ export async function detectFileEncoding(filePath: string): Promise<string> {
 
     // 1. Check for BOM
     const bom = detectBOM(sample);
-    if (bom) {
-      switch (bom.encoding) {
-        case 'utf8':
-          return 'utf-8';
-        case 'utf16le':
-          return 'utf-16le';
-        case 'utf16be':
-          return 'utf-16be';
-        case 'utf32le':
-          return 'utf-32le';
-        case 'utf32be':
-          return 'utf-32be';
-        default:
-          return 'utf-8';
-      }
-    }
+    if (bom) return bomEncodingToName(bom.encoding);
 
     // 2. Validate UTF-8
     if (isValidUtf8(sample)) return 'utf-8';
@@ -433,9 +466,10 @@ export async function detectFileEncoding(filePath: string): Promise<string> {
     // If file can't be read, default to UTF-8
     return 'utf-8';
   } finally {
-    if (fh) {
+    // Only what we opened. A borrowed handle outlives this call.
+    if (opened) {
       try {
-        await fh.close();
+        await opened.close();
       } catch {
         // Ignore close errors
       }
@@ -801,6 +835,58 @@ const MIME_LITE_MISSING_MEDIA_TYPES: ReadonlyMap<string, string> = new Map([
   ['.aac', 'audio/x-aac'],
 ]);
 
+async function classifyImageContent(
+  filePath: string,
+  mimeType: string,
+): Promise<FileType> {
+  if (!SNIFFABLE_IMAGE_MIME_TYPES.has(mimeType)) return 'image';
+
+  let handle: fs.promises.FileHandle | undefined;
+  try {
+    handle = await fs.promises.open(
+      filePath,
+      (fs.constants?.O_RDONLY ?? 0) | (fs.constants?.O_NONBLOCK ?? 0),
+    );
+    // Above the image source limit the read is rejected as an oversized image;
+    // sniffing anyway would reclassify zero-filled/text payloads and route them
+    // past the 100 MB gate.
+    if ((await handle.stat()).size > IMAGE_MAX_SOURCE_BYTES) return 'image';
+    const sample = Buffer.alloc(IMAGE_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
+    const bytes = sample.subarray(0, bytesRead);
+    if (bytes.length === 0) return 'image';
+
+    const sniffed = sniffFileKind(bytes, mimeType, '', `file://${filePath}`);
+    let result: FileType;
+    if (sniffed.magicMatched) {
+      result =
+        sniffed.extension === extensionForMimeType(mimeType) ||
+        CANONICAL_IMAGE_EXTENSIONS.has(sniffed.extension)
+          ? 'image'
+          : 'binary';
+    } else {
+      result =
+        bytes.length < 3 || !(detectBOM(bytes) || looksLikeText(bytes))
+          ? 'binary'
+          : 'text';
+    }
+    if (result !== 'image') {
+      debugLogger.debug(
+        `classifyImageContent: ${filePath} -> ${result} (mime ${mimeType})`,
+      );
+    }
+    return result;
+  } catch (error) {
+    debugLogger.debug(
+      `Unable to sniff image content for ${filePath}; preserving extension classification`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return 'image';
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 /**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
@@ -835,7 +921,7 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     mime.getType(filePath) ?? MIME_LITE_MISSING_MEDIA_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
-      return 'image';
+      return classifyImageContent(filePath, lookedUpMimeType);
     }
     if (lookedUpMimeType.startsWith('audio/')) {
       return 'audio';
@@ -995,6 +1081,12 @@ export interface ProcessSingleFileContentOptions {
    * PDFs use `reference` so the model gets guidance without a failed read.
    */
   largePdfBehavior?: 'error' | 'reference';
+  displayPath?: string;
+  textFileHandle?: FileHandle;
+  textFileStats?: import('node:fs').Stats;
+  textFileMaxScanBytes?: number;
+  /** Reuse a classification already performed by a validated caller. */
+  fileType?: FileType;
 }
 
 /**
@@ -1071,8 +1163,14 @@ export async function processSingleFileContent(
     preparePdfForVisionBridge = false,
     signal,
     largePdfBehavior = 'error',
+    displayPath = filePath,
   } = options;
   const rootDirectory = config.getTargetDir();
+  const relativePathForDisplay = (
+    path.isAbsolute(displayPath)
+      ? path.relative(rootDirectory, displayPath)
+      : displayPath
+  ).replace(/\\/g, '/');
   try {
     signal?.throwIfAborted();
     let stats: import('node:fs').Stats;
@@ -1080,14 +1178,14 @@ export async function processSingleFileContent(
       // Async stat doubles as the existence check — ENOENT is handled below
       // and surfaces the same FILE_NOT_FOUND error type as the old explicit
       // existsSync gate, with one fewer sync syscall on the hot path.
-      stats = await fs.promises.stat(filePath);
+      stats = options.textFileStats ?? (await fs.promises.stat(filePath));
     } catch (error: unknown) {
       if (isNodeError(error) && error.code === 'ENOENT') {
         return {
           llmContent:
             'Could not read file because no file was found at the specified path.',
           returnDisplay: 'File not found.',
-          error: `File not found: ${filePath}`,
+          error: `File not found: ${displayPath}`,
           errorType: ToolErrorType.FILE_NOT_FOUND,
         };
       }
@@ -1098,7 +1196,7 @@ export async function processSingleFileContent(
         llmContent:
           'Could not read file because the provided path is a directory, not a file.',
         returnDisplay: 'Path is a directory.',
-        error: `Path is a directory, not a file: ${filePath}`,
+        error: `Path is a directory, not a file: ${displayPath}`,
         errorType: ToolErrorType.TARGET_IS_DIRECTORY,
       };
     }
@@ -1112,23 +1210,29 @@ export async function processSingleFileContent(
       return {
         llmContent: `Cannot read file: ${path.basename(filePath)} is not a regular file (e.g. device, socket, or pipe).`,
         returnDisplay: 'Not a regular file.',
-        error: `Not a regular file: ${filePath}`,
+        error: `Not a regular file: ${displayPath}`,
         errorType: ToolErrorType.READ_CONTENT_FAILURE,
       };
     }
 
-    const fileType = await detectFileType(filePath);
     const mediaMimeType =
       mime.getType(filePath) ??
       MIME_LITE_MISSING_MEDIA_TYPES.get(path.extname(filePath).toLowerCase()) ??
       'application/octet-stream';
+    // Bridge callers (`preserveUnsupportedImage`) contract for the raw bytes so
+    // a vision model can transcribe them; content sniffing must not reroute
+    // text-looking image files to the text path and break that handoff (#9291).
+    const bridgePreservesImage =
+      preserveUnsupportedImage &&
+      mediaMimeType.startsWith('image/') &&
+      SNIFFABLE_IMAGE_MIME_TYPES.has(mediaMimeType);
+    const fileType = options.textFileHandle
+      ? 'text'
+      : (options.fileType ??
+        (bridgePreservesImage ? 'image' : await detectFileType(filePath)));
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
-    const relativePathForDisplay = path
-      .relative(rootDirectory, filePath)
-      .replace(/\\/g, '/');
-
-    const displayName = path.basename(filePath);
+    const displayName = path.basename(displayPath);
     // Use optional call (`?.()`) so mock Configs that don't implement
     // getContentGeneratorConfig still work for non-media file types.
     const modalities: InputModalities =
@@ -1205,7 +1309,7 @@ export async function processSingleFileContent(
       return {
         llmContent: `PDF file is too large for full text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_FULL_TEXT_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document into smaller files before retrying.`,
         returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_FULL_TEXT_EXTRACTION_MAX_MB}MB).`,
-        error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        error: `PDF exceeds extraction size limit: ${displayPath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
         stats,
       };
@@ -1214,7 +1318,7 @@ export async function processSingleFileContent(
       return {
         llmContent: `PDF file is too large for page-range text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_PAGED_TEXT_EXTRACTION_MAX_MB}MB limit. Split the document into smaller files before retrying.`,
         returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_PAGED_TEXT_EXTRACTION_MAX_MB}MB).`,
-        error: `PDF exceeds page-range extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        error: `PDF exceeds page-range extraction size limit: ${displayPath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
         stats,
       };
@@ -1266,7 +1370,7 @@ export async function processSingleFileContent(
     // below. Content is uploaded AS-IS (no resize/transcode — degradation
     // is the job of omni policies, which must disclose). Dynamic import
     // keeps the omni module (which reaches into the provider layer) out of
-    // fileUtils' static dependency graph. Gated per-modality on the same
+    // the utility layer's dependency graph. Gated per-modality on the same
     // `modalities` config the converter uses, so the omni path never
     // swallows a file the vision bridge would otherwise transcribe
     // (bridge only activates when modalities.image is false).
@@ -1280,7 +1384,7 @@ export async function processSingleFileContent(
       // suites and wastes a module load for every non-omni user.
       config.isOmniEnabled?.()
     ) {
-      const omni = await import('../omni/index.js');
+      const omni = await config.loadOmniMediaReader();
       if (omni.isOmniDeliveryActive(config)) {
         // Cheap content pre-sniff decides omni-vs-legacy BEFORE committing
         // to the fail-closed pipeline: formats the recognizer does not
@@ -1310,7 +1414,7 @@ export async function processSingleFileContent(
       return {
         llmContent: 'Image file exceeds the 100 MB source limit.',
         returnDisplay: 'Image file exceeds the 100 MB source limit.',
-        error: `Image file exceeds the 100 MB source limit: ${filePath}`,
+        error: `Image file exceeds the 100 MB source limit: ${displayPath}`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
@@ -1325,7 +1429,7 @@ export async function processSingleFileContent(
       return {
         llmContent: 'File size exceeds the 10MB limit.',
         returnDisplay: 'File size exceeds the 10MB limit.',
-        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        error: `File size exceeds the 10MB limit: ${displayPath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
@@ -1396,16 +1500,27 @@ export async function processSingleFileContent(
       }
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently
-        const { content, _meta } = await config
-          .getFileSystemService()
-          .readTextFile({
-            path: filePath,
-            limit: limit ?? config.getTruncateToolOutputLines(),
-            line: offset,
-            maxOutputBytes: getRangeReadByteLimit(config),
-            stats,
-            ...(signal !== undefined ? { signal } : {}),
-          });
+        const fileSystemService = config.getFileSystemService();
+        const maxOutputBytes = getRangeReadByteLimit(config);
+        const readTextFileFromHandle = fileSystemService.readTextFileFromHandle;
+        const { content, _meta } = options.textFileHandle
+          ? await readTextFileFromHandle!.call(fileSystemService, {
+              fileHandle: options.textFileHandle,
+              fileSize: stats.size,
+              limit: limit ?? config.getTruncateToolOutputLines(),
+              line: offset,
+              maxOutputBytes,
+              maxScanBytes: options.textFileMaxScanBytes ?? maxOutputBytes,
+              ...(signal !== undefined ? { signal } : {}),
+            })
+          : await fileSystemService.readTextFile({
+              path: filePath,
+              limit: limit ?? config.getTruncateToolOutputLines(),
+              line: offset,
+              maxOutputBytes,
+              stats,
+              ...(signal !== undefined ? { signal } : {}),
+            });
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
         const startLine = offset || 0;
         const selectedLineCount =
@@ -1528,14 +1643,20 @@ export async function processSingleFileContent(
               filePath,
               signal ?? new AbortController().signal,
             );
+            // CodeModeOnly hides tool_search and binds zoom_image into the
+            // `exec` description, so the discovery step does not exist there.
+            const zoomHint = config.getCodeModeOnly?.()
+              ? `If details are too small, call tools.zoom_image with ` +
+                `coordinates normalized from 0 to 1000.`
+              : `If details are too small, use tool_search for "zoom image", then ` +
+                `call zoom_image with coordinates normalized from 0 to 1000.`;
             return {
               llmContent: [
                 {
                   text:
                     `Image overview: ${view.outputWidth}x${view.outputHeight}; ` +
                     `oriented source: ${view.sourceWidth}x${view.sourceHeight}. ` +
-                    `If details are too small, use tool_search for "zoom image", then ` +
-                    `call zoom_image with coordinates normalized from 0 to 1000.`,
+                    zoomHint,
                 },
                 {
                   inlineData: {
@@ -1550,11 +1671,8 @@ export async function processSingleFileContent(
           } catch (error) {
             signal?.throwIfAborted();
             if (error instanceof ImageViewError) {
-              // Non-size render failures (sharp missing, animated,
-              // unsupported, or corrupt input) fall through to the legacy
-              // inline-bytes branch below rather than hard-failing the read,
-              // matching main's forward-verbatim behaviour. The size codes
-              // stay a hard error because that branch cannot shrink them.
+              // Size failures stay a hard error: the raw-bytes branch below
+              // cannot shrink them either.
               if (
                 error.code === 'source_too_large' ||
                 error.code === 'output_too_large'
@@ -1567,19 +1685,91 @@ export async function processSingleFileContent(
                   errorType: ToolErrorType.FILE_TOO_LARGE,
                 };
               }
+              // Undecodable bytes must NOT fall through to the raw-bytes
+              // branch: forwarding corrupt media lets the provider reject the
+              // whole request with a 400 that aborts the session. Omit the
+              // image and stay in-band instead (#9291).
+              if (
+                (error.code === 'decode_failed' ||
+                  error.code === 'unsupported_image') &&
+                !preserveUnsupportedImage
+              ) {
+                const notice =
+                  `Image ${relativePathForDisplay} could not be decoded ` +
+                  '(corrupt or unsupported encoding), so its data was omitted ' +
+                  'from the model request. Ask the user for a readable PNG, ' +
+                  'JPEG, or WebP version if the image content matters.';
+                return {
+                  llmContent: notice,
+                  returnDisplay: `Omitted undecodable image: ${relativePathForDisplay}`,
+                };
+              }
+              // Remaining non-size failures (renderer unavailable, animated
+              // input) fall through to the legacy inline-bytes branch rather
+              // than hard-failing the read, matching main's forward-verbatim
+              // behaviour.
             } else {
               throw error;
             }
           }
         }
+        if (
+          !PROVIDER_SAFE_IMAGE_MIME_TYPES.has(mediaMimeType) &&
+          !preserveUnsupportedImage
+        ) {
+          // The overview renderer never ran for this MIME, and providers
+          // reject media they cannot consume with a request-validation 400
+          // that aborts the whole session (image/heic on Responses-compatible
+          // routes). Omit the unsafe media and deliver an in-band notice so
+          // the turn continues and the model can explain the gap (#9291).
+          const notice =
+            `Image format ${mediaMimeType} (${relativePathForDisplay}) cannot ` +
+            'be safely sent to the model, so its data was omitted from the ' +
+            'request. Ask the user for a PNG, JPEG, WebP, or GIF version if ' +
+            'the image content matters.';
+          return {
+            llmContent: notice,
+            returnDisplay: `Omitted unsupported image format: ${relativePathForDisplay} (${mediaMimeType})`,
+          };
+        }
         const contentBuffer = await fs.promises.readFile(filePath);
+        if (mediaMimeType === 'image/gif') {
+          // GIFs skip the overview renderer, so nothing has validated the
+          // bytes yet: a corrupt or mislabeled .gif would reach the provider
+          // and trip the same request-validation 400 that aborts the session
+          // (#9291). Validate decodability before forwarding; when sharp is
+          // unavailable, keep the legacy forward-verbatim behaviour.
+          const sharpModule = await import('sharp').catch(() => undefined);
+          if (sharpModule) {
+            try {
+              await sharpModule
+                .default(contentBuffer, {
+                  failOn: 'error',
+                })
+                .metadata();
+            } catch {
+              signal?.throwIfAborted();
+              if (!preserveUnsupportedImage) {
+                const notice =
+                  `Image ${relativePathForDisplay} could not be decoded ` +
+                  '(corrupt or unsupported encoding), so its data was omitted ' +
+                  'from the model request. Ask the user for a readable PNG, ' +
+                  'JPEG, WebP, or GIF version if the image content matters.';
+                return {
+                  llmContent: notice,
+                  returnDisplay: `Omitted undecodable image: ${relativePathForDisplay}`,
+                };
+              }
+            }
+          }
+        }
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
         if (base64SizeInMB > 9.9) {
           return {
             llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
             returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
-            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${displayPath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
             errorType: ToolErrorType.FILE_TOO_LARGE,
           };
         }
@@ -1617,7 +1807,7 @@ export async function processSingleFileContent(
           return {
             llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
             returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
-            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${displayPath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
             errorType: ToolErrorType.FILE_TOO_LARGE,
           };
         }
@@ -1645,7 +1835,7 @@ export async function processSingleFileContent(
             return {
               llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
               returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
-              error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+              error: `File exceeds the 10MB data URI limit after base64 encoding: ${displayPath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
               errorType: ToolErrorType.FILE_TOO_LARGE,
             };
           }
@@ -1942,7 +2132,7 @@ export async function processSingleFileContent(
           return {
             llmContent: `Error parsing notebook ${relativePathForDisplay}: ${msg}`,
             returnDisplay: `Error reading notebook: ${relativePathForDisplay}`,
-            error: `Error parsing notebook ${filePath}: ${msg}`,
+            error: `Error parsing notebook ${displayPath}: ${msg}`,
             errorType: ToolErrorType.READ_CONTENT_FAILURE,
           };
         }
@@ -1953,7 +2143,7 @@ export async function processSingleFileContent(
         return {
           llmContent: `Unhandled file type: ${exhaustiveCheck}`,
           returnDisplay: `Skipped unhandled file type: ${relativePathForDisplay}`,
-          error: `Unhandled file type for ${filePath}`,
+          error: `Unhandled file type for ${displayPath}`,
         };
       }
     }
@@ -1962,22 +2152,19 @@ export async function processSingleFileContent(
       throw error;
     }
     const errorMessage = getErrorMessage(error);
-    const displayPath = path
-      .relative(rootDirectory, filePath)
-      .replace(/\\/g, '/');
     return {
-      llmContent: `Error reading file ${displayPath}: ${errorMessage}`,
-      returnDisplay: `Error reading file ${displayPath}: ${errorMessage}`,
-      error: `Error reading file ${filePath}: ${errorMessage}`,
+      llmContent: `Error reading file ${relativePathForDisplay}: ${errorMessage}`,
+      returnDisplay: `Error reading file ${relativePathForDisplay}: ${errorMessage}`,
+      error: `Error reading file ${relativePathForDisplay}: ${errorMessage}`,
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }
 }
 
-function getRangeReadByteLimit(config: Config): number {
+export function getRangeReadByteLimit(config: Config): number {
   const charLimit = config.getTruncateToolOutputThreshold();
   if (charLimit === Number.POSITIVE_INFINITY) {
-    return Number.POSITIVE_INFINITY;
+    return Number.MAX_SAFE_INTEGER;
   }
   if (!Number.isFinite(charLimit)) {
     return DEFAULT_RANGE_READ_BYTES;

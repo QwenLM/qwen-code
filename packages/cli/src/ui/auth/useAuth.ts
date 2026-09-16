@@ -15,7 +15,7 @@ import {
   type ProviderConfig,
   type ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
@@ -106,6 +106,10 @@ export const useAuthCommand = (
     isAuthenticating,
   );
 
+  // The dialog also auto-opens at startup when unauthenticated; only a
+  // command-opened dialog has an /auth invocation record to pair with.
+  const openedViaCommandRef = useRef(false);
+
   // -- Shared helpers -------------------------------------------------------
 
   const onAuthError = useCallback(
@@ -168,7 +172,13 @@ export const useAuthCommand = (
         setIsAuthenticating(true);
         setAuthError(null);
 
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          settings.merged.modelProviders?.[
+            inputs.protocol ?? providerConfig.protocol
+          ],
+        );
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
@@ -179,36 +189,64 @@ export const useAuthCommand = (
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
 
+        if (!plan.modelSelection && !config.getAuthType()) {
+          setIsAuthenticating(false);
+          setPendingAuthType(undefined);
+          onAuthError(
+            t(
+              'Service models saved. Configure a conversation model to start chatting.',
+            ),
+          );
+          return;
+        }
         completeAuthentication();
 
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: t(
-              'Successfully configured {{provider}}. Use /model to switch models.',
-              { provider: providerConfig.label },
-            ),
-          },
-          Date.now(),
-        );
+        const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+          type: MessageType.INFO,
+          text: !plan.modelSelection
+            ? t('Service models saved.')
+            : t(
+                'Successfully configured {{provider}}. Use /model to switch models.',
+                { provider: providerConfig.label },
+              ),
+        };
+        addItem(feedbackItem, Date.now());
+        if (openedViaCommandRef.current) {
+          openedViaCommandRef.current = false;
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/auth',
+            outputHistoryItems: [feedbackItem],
+          });
+        }
 
-        logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
+        if (plan.modelSelection)
+          logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
       } catch (error) {
         // Pass protocol explicitly so error telemetry is recorded even when
         // a synchronous throw beats the setPendingAuthType state update.
         handleAuthFailure(error, protocol);
       }
     },
-    [settings, config, completeAuthentication, addItem, handleAuthFailure],
+    [
+      settings,
+      config,
+      completeAuthentication,
+      addItem,
+      handleAuthFailure,
+      onAuthError,
+    ],
   );
 
   // -- Dialog open / close / cancel ----------------------------------------
 
   const openAuthDialog = useCallback(() => {
+    openedViaCommandRef.current = true;
     setIsAuthDialogOpen(true);
   }, []);
 
   const closeAuthDialog = useCallback(() => {
+    openedViaCommandRef.current = false;
     setIsAuthDialogOpen(false);
     setAuthError(null);
   }, []);
@@ -233,6 +271,7 @@ export const useAuthCommand = (
     const valid = [
       AuthType.QWEN_OAUTH,
       AuthType.USE_OPENAI,
+      AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
