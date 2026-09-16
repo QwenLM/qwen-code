@@ -995,7 +995,9 @@ export type GoalSnapshotLike = {
     objective?: string;
     status?: string;
     turnCount?: number;
+    turnBudget?: number;
     activeTimeMs?: number;
+    activeTimeBudgetMs?: number;
     tokensUsed?: number;
     tokenBudget?: number;
     checkpointStalls?: number;
