@@ -22,8 +22,13 @@ function git(args: string[], cwd?: string): string {
   return execFileSync(
     'git',
     [
-      '-c',
-      `core.hooksPath=${os.devNull}`,
+      // Windows git rejects the null device as a hooks directory
+      // (fatal: unable to access '\\.\nul': Invalid argument); the
+      // empty template dir and disabled global/system config already keep
+      // hooks out there.
+      ...(process.platform === 'win32'
+        ? []
+        : ['-c', `core.hooksPath=${os.devNull}`]),
       '-c',
       'commit.gpgSign=false',
       '-c',

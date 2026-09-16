@@ -50,6 +50,7 @@ import {
   resolveRequestTimeout,
 } from '../openaiContentGenerator/constants.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
+import { buildSessionAwareFetch } from '../outbound-session-id.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
@@ -591,9 +592,17 @@ export class ResponsesPipeline {
     const baseUrl = normalizeOpenAiWireBaseUrl(this.config.baseUrl);
     const url = `${baseUrl}/v1/responses`;
 
+    const version = this.cliConfig.getCliVersion() || 'unknown';
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       accept: 'text/event-stream',
+      // The same stamp the Chat wire sends (openaiContentGenerator/provider/
+      // default.ts buildHeaders). This wire assembles its request by hand, so
+      // without it the gateway sees the transport's default agent string and
+      // cannot attribute the traffic to Qwen Code (issue #11936). Placed
+      // before the customHeaders merge below so a user-configured
+      // `User-Agent` still overrides it, as it does on every other wire.
+      'user-agent': `QwenCode/${version} (${process.platform}; ${process.arch})`,
     };
 
     const apiKey =
@@ -653,8 +662,20 @@ export class ResponsesPipeline {
     // fetch -- Node's built-in undici can be a different major version than
     // the bundled one, and handing it a foreign dispatcher throws `invalid
     // onError method`.
-    const fetchFn =
+    const pinnedFetch =
       (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ?? fetch;
+    // Wrapped per request rather than once per pipeline, so `${session_id}` in
+    // customHeaders is resolved from live Config state on every send: /new and
+    // /resume rotate it, and with outboundCorrelation.allowDynamicHeaderValues
+    // off the header is dropped instead of reaching the gateway as a literal.
+    // The wrapper also adds the first-party session_id header for the
+    // allowlisted gateways -- the treatment the Chat, Anthropic and Gemini
+    // wires already get and this hand-built one was missing (issue #11936).
+    const fetchFn = buildSessionAwareFetch(
+      pinnedFetch,
+      this.cliConfig,
+      this.config.customHeaders,
+    );
 
     // Connect-phase timeout: fetch() resolves once response headers arrive, so
     // an endpoint that completes TCP/TLS but never sends headers would block

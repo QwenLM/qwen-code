@@ -20,6 +20,7 @@ import {
   ResponsesPipeline,
   normalizeOpenAiWireBaseUrl,
 } from './responses-pipeline.js';
+import { buildSessionAwareFetch } from '../outbound-session-id.js';
 import {
   buildRuntimeFetchOptions,
   redactProxyError,
@@ -82,6 +83,15 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
         ? { defaultHeaders: this.contentGeneratorConfig.customHeaders }
         : {}),
       ...(runtimeOptions || {}),
+      // defaultHeaders above is baked in once, so a `${session_id}` in it
+      // could only reach the wire literally. The wrapper resolves it per
+      // request (and drops it when the consent gate is off), matching what the
+      // Chat wire installs on its own client -- issue #11936.
+      fetch: buildSessionAwareFetch(
+        runtimeOptions?.fetch,
+        this.cliConfig,
+        this.contentGeneratorConfig.customHeaders,
+      ),
     });
     return this.openaiClient;
   }

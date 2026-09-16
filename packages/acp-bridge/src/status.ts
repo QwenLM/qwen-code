@@ -937,6 +937,23 @@ export type ServeWorkflowEvent =
       error: string;
     });
 
+/**
+ * A workflow run's large-run flag: the first threshold it crossed. Mirrors
+ * core's `WorkflowSizeWarning`.
+ */
+export interface ServeWorkflowSizeWarning {
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduledAgents: number;
+  totalTokens: number;
+  projectedTokens: number;
+  agentCap: number;
+  tokenCap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  capFromGuideline: boolean;
+  at: number;
+}
+
 export interface ServeWorkflowCallTrace {
   id: string;
   stepId?: string;
@@ -980,6 +997,11 @@ export interface ServeSessionWorkflowTaskStatus {
    * created before respawns were counted; treat as 0.
    */
   agentsRespawned?: number;
+  /**
+   * Present once the run crossed a large-run threshold; absent while it stays
+   * within bounds and on snapshots created before the flag existed.
+   */
+  sizeWarning?: ServeWorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];

@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs from 'yargs';
 
@@ -291,7 +292,9 @@ describe('qwen sandbox', () => {
 
     await run();
 
-    expect(resolveBwrapWritableRootsMock).toHaveBeenCalledWith(['/extra']);
+    expect(resolveBwrapWritableRootsMock).toHaveBeenCalledWith([
+      path.normalize('/extra'),
+    ]);
   });
 
   it('reports from inside a confinement instead of describing nothing', async () => {

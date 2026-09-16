@@ -1569,6 +1569,11 @@ export default {
   'No tasks currently running': 'Nenhuma tarefa em execução',
   'No entry to show.': 'Nenhuma entrada para mostrar.',
   'needs approval': 'precisa de aprovação',
+  'Large workflow': 'Workflow grande',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow grande: {{agents}} agentes agendados (limite de aviso {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow grande: ~{{tokens}} tokens de saída previstos (limite de aviso {{cap}}).',
   'rejected — edit config to re-approve':
     'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
