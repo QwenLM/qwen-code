@@ -23,7 +23,7 @@ front end do you own?**
 | daemon + self-hosted Web Shell build | the front-end build                          | not built ([#11358](https://github.com/QwenLM/qwen-code/issues/11358))                                                                                                                                     |
 | daemon via SDK `DaemonClient`        | client code, never raw HTTP                  | ships today ([TS](./sdk-typescript.md), [Java](./sdk-java.md)) — the [Python SDK](./sdk-python.md) is process-transport-only and has no daemon client, so a Python integration drives path 2 over raw HTTP |
 | daemon via MCP bridge                | nothing — another agent drives it            | ships as `qwen-serve-mcp` in `@qwen-code/sdk` — see [Drive the daemon through MCP](#drive-the-daemon-through-mcp)                                                                                          |
-| embeddable Web Shell components      | your app and server; QC supplies the chat UI | ships as `@qwen-code/web-shell` — see [Embed the Web Shell](#embed-the-web-shell)                                                                                                                          |
+| embeddable Web Shell components      | your app and server; QC supplies the chat UI | workspace-internal (not yet on npm) — build from the monorepo, see [Embed the Web Shell](#embed-the-web-shell)                                                                                             |
 
 Headless `qwen -p` and ACP over stdio for editors are separate integration
 paths. Channels and extensions can also run through the daemon; see the
@@ -56,23 +56,41 @@ client on Node.js 22 or newer:
 `QWEN_DAEMON_URL` defaults to `http://127.0.0.1:4170`;
 `QWEN_DAEMON_TOKEN` carries the daemon bearer token when authentication is
 enabled; and `QWEN_WORKSPACE_CWD` optionally supplies the default workspace for
-session creation. These names are read by the MCP bridge. Daemon channel and
-TUI adapters instead use `QWEN_DAEMON_WORKSPACE` for their workspace override;
-they also read `QWEN_DAEMON_URL` and `QWEN_DAEMON_TOKEN`.
+session creation — the path must already be registered with the daemon (start
+it with `--workspace <path>`), because the value is forwarded verbatim as
+`POST /session`'s `cwd` and an unregistered path makes every
+session-establishing tool fail with `400 workspace_mismatch`; leave it unset to
+use the primary workspace. These names are read by the MCP bridge. Daemon
+channel and TUI adapters instead use `QWEN_DAEMON_WORKSPACE` for their
+workspace override; they also read `QWEN_DAEMON_URL` and `QWEN_DAEMON_TOKEN`.
 Leave `QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE` unset unless the MCP client is trusted
-to perform restricted global-scope writes such as changing approval mode,
-toggling tools, and restarting MCP servers. Set it to `true` to enable those
-operations. The package's
+to perform restricted writes. Set it to `true` to enable exactly: the
+`auto-edit`, `auto` and `yolo` approval modes plus any `persist: true`
+approval-mode write; workspace tool toggling; MCP server restart; and
+global-scope memory and agent writes. Switching between `plan` and `default`
+and workspace-scope memory writes work without it. The package's
 [bridge README](https://github.com/QwenLM/qwen-code/blob/main/packages/sdk-typescript/src/daemon-mcp/serve-bridge/README.md)
 lists every tool and the programmatic API.
 
 ### Embed the Web Shell
 
 Use `@qwen-code/web-shell` when your React application should own the page and
-server while Qwen Code supplies the chat UI:
+server while Qwen Code supplies the chat UI. The package is workspace-internal
+for now — no release step publishes it to npm yet — so build it from the
+[monorepo](https://github.com/QwenLM/qwen-code) and depend on it by path, the
+same way `packages/web-templates` consumes it:
 
 ```bash
-npm install @qwen-code/web-shell @qwen-code/sdk react react-dom
+cd qwen-code
+npm ci
+npm run build --workspace=@qwen-code/web-shell
+```
+
+Then in your application:
+
+```bash
+npm install @qwen-code/sdk react react-dom
+npm install file:../qwen-code/packages/web-shell
 ```
 
 ```tsx
@@ -89,12 +107,14 @@ import { WebShellWithProviders } from '@qwen-code/web-shell';
 This direct browser connection is suitable only for the trusted,
 single-operator model described below: the `token` grants the browser full
 daemon authority. When the application and daemon use different origins, start
-the daemon with `--allow-origin <application-origin>`. The package also exports
+the daemon with `--allow-origin <application-origin>`; a non-loopback origin
+also requires a bearer token, and the daemon refuses to start without one —
+see [Start the daemon](#start-the-daemon). The package also exports
 providers for sharing one daemon session across several views and a separate
 `@qwen-code/web-shell/transcript` entry point for read-only transcript
 rendering. See the
 [package README](https://github.com/QwenLM/qwen-code/blob/main/packages/web-shell/README.md)
-for those variants and the complete prop contract.
+for those variants and the prop contract.
 
 ## Two things to know before designing
 

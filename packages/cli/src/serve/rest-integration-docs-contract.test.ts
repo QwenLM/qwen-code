@@ -535,6 +535,45 @@ describe('REST integration documentation contract', () => {
     ).toEqual([]);
   });
 
+  it('documents exactly the environment variables the MCP bridge reads', () => {
+    const bridgeBin = readFileSync(
+      path.join(
+        REPO_ROOT,
+        'packages/sdk-typescript/src/daemon-mcp/serve-bridge/bin.ts',
+      ),
+      'utf8',
+    );
+    const bridgeVars = [
+      ...new Set(
+        [...bridgeBin.matchAll(/process\.env\['([A-Z0-9_]+)'\]/g)].map(
+          (match) => match[1],
+        ),
+      ),
+    ];
+    expect(bridgeVars.length).toBeGreaterThan(0);
+
+    const guide = readFileSync(GUIDE, 'utf8');
+    expect(bridgeVars.filter((name) => !guide.includes(`\`${name}\``))).toEqual(
+      [],
+    );
+
+    // The copy-pasteable env block must not name a variable the bridge never
+    // reads.
+    const mcpSection = guide.slice(
+      guide.indexOf('### Drive the daemon through MCP'),
+      guide.indexOf('### Embed the Web Shell'),
+    );
+    const documentedVars = [
+      ...(mcpSection.match(/```json\n([\s\S]*?)```/)?.[1] ?? '').matchAll(
+        /"([A-Z0-9_]+)":/g,
+      ),
+    ].map((match) => match[1]);
+    expect(documentedVars.length).toBeGreaterThan(0);
+    expect(documentedVars.filter((name) => !bridgeVars.includes(name))).toEqual(
+      [],
+    );
+  });
+
   it('gives every supported operation a dedicated protocol heading', () => {
     const headings = new Set(
       [
