@@ -1155,9 +1155,10 @@ export interface WebShellProps {
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
-   * Called when the effective UI language changes without becoming a host
-   * opinion, including settings resolution and optimistic changes or rollbacks.
-   * Hosts may mirror document chrome but must not persist this value.
+   * Called when no `language` prop was provided and the effective UI language
+   * changes without becoming a host opinion, including settings resolution and
+   * optimistic changes or rollbacks. Hosts may mirror document chrome but must
+   * not persist this value.
    */
   onLanguageResolved?: (language: WebShellLanguage) => void;
   /**
@@ -15225,7 +15226,9 @@ export function App({
               // picker treats the identical condition the same way.
               if (commandBlocked) return blockCommand();
               setSelectedLanguage(nextLanguage);
-              onLanguageResolvedRef.current?.(nextLanguage);
+              if (providedLanguage === undefined) {
+                onLanguageResolvedRef.current?.(nextLanguage);
+              }
               {
                 const deferComposerCommit =
                   Boolean(
@@ -15261,7 +15264,9 @@ export function App({
                   .catch((error: unknown) => {
                     if (!owner.current.isCurrent()) return;
                     setSelectedLanguage(previousLanguage);
-                    onLanguageResolvedRef.current?.(previousLanguage);
+                    if (providedLanguage === undefined) {
+                      onLanguageResolvedRef.current?.(previousLanguage);
+                    }
                     reportError(error, 'Failed to sync /language command');
                   });
                 return clearComposerOnPromptStart ? false : true;
@@ -16139,6 +16144,7 @@ export function App({
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
       resumeChatBottomFollow,
+      providedLanguage,
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,

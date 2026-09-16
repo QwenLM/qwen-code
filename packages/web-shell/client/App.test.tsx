@@ -40126,9 +40126,14 @@ describe('settings-derived theme and language (#11955)', () => {
     // theme and report it so document chrome can follow (#11955).
     testState.settings = [themeSetting('Qwen Light')];
     const onThemeResolved = vi.fn();
-    renderApp({ onThemeResolved });
+    const { container } = renderApp({ onThemeResolved });
     await flush();
 
+    expect(
+      container
+        .querySelector('[data-web-shell-root]')
+        ?.classList.contains('dark'),
+    ).toBe(false);
     expect(onThemeResolved).toHaveBeenCalledWith('light');
   });
 
@@ -40146,9 +40151,12 @@ describe('settings-derived theme and language (#11955)', () => {
   it('resolves general.language from settings and normalizes it for the host', async () => {
     testState.settings = [languageSetting('zh')];
     const onLanguageResolved = vi.fn();
-    renderApp({ onLanguageResolved });
+    const { container } = renderApp({ onLanguageResolved });
     await flush();
 
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('zh-CN');
     expect(onLanguageResolved).toHaveBeenCalledWith('zh-CN');
   });
 
@@ -40212,11 +40220,11 @@ describe('settings-derived theme and language (#11955)', () => {
     await clickSubmit(container);
     await flush();
     await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="change-language-workspace"]',
-        )
-        ?.click();
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(button).not.toBeNull();
+      button?.click();
       await Promise.resolve();
     });
     await flush();
@@ -40263,13 +40271,34 @@ describe('settings-derived theme and language (#11955)', () => {
     );
 
     await act(async () => {
+      expect(testState.latestChatEditorProps).toBeDefined();
       testState.latestChatEditorProps?.onSubmit('/language ui en');
       await Promise.resolve();
     });
     await flush();
 
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
     expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
     expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('keeps the resolved channel silent for a host-controlled composer language change', async () => {
+    const onLanguageResolved = vi.fn();
+    renderApp({ language: 'en', onLanguageResolved });
+    await flush();
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new Error('daemon refused'),
+    );
+
+    await act(async () => {
+      expect(testState.latestChatEditorProps).toBeDefined();
+      testState.latestChatEditorProps?.onSubmit('/language ui zh');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(onLanguageResolved).not.toHaveBeenCalled();
   });
 });
 
