@@ -14,18 +14,18 @@ documented in [`.vendored-patches.md`](.vendored-patches.md) and
 macOS and Linux:
 
 ```bash
-CUA_DRIVER_RS_VERSION=0.20.6 \
+CUA_DRIVER_RS_VERSION=0.20.9 \
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:CUA_DRIVER_RS_VERSION = "0.20.6"
+$env:CUA_DRIVER_RS_VERSION = "0.20.9"
 irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
-Expected: qwen-cua-driver 0.20.6.
+Expected: qwen-cua-driver 0.20.9.
 
 The released product uses Qwen-owned identities throughout:
 

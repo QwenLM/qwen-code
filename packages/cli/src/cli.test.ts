@@ -1740,6 +1740,7 @@ describe('bootstrap import boundaries', () => {
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],
       ['reviewCommand', 'review'],
+      ['sandboxCommand', 'sandbox'],
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
       ['updateCommand', 'update'],

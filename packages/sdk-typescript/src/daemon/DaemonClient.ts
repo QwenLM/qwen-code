@@ -443,6 +443,8 @@ function transcriptPageSuffix(
   opts: DaemonSessionTranscriptPageOptions,
 ): string {
   const query = new URLSearchParams();
+  if (opts.compactedReplayMode !== undefined)
+    query.set('compactedReplayMode', opts.compactedReplayMode);
   if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
   if (opts.direction !== undefined) query.set('direction', opts.direction);
   if (opts.atRecordId !== undefined) query.set('atRecordId', opts.atRecordId);
@@ -496,6 +498,20 @@ function stripTrailingSlashes(url: string): string {
   let end = url.length;
   while (end > 0 && url.charCodeAt(end - 1) === 0x2f /* '/' */) end--;
   return end === url.length ? url : url.slice(0, end);
+}
+
+function createStandaloneSessionId(): string {
+  if (typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  // HTTP origins can expose getRandomValues without the secure-context-only randomUUID.
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
@@ -674,6 +690,8 @@ export interface RestoreSessionRequest {
   historyPageSize?: number;
   /** Load-only live-turn replay projection. Omit for the complete journal. */
   liveReplayMode?: 'full' | 'summary';
+  /** Load-only response projection for durable replay; defaults to full. */
+  compactedReplayMode?: 'full' | 'summary';
   /** Restore-time attribution for legacy/unattributed sessions. */
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
@@ -701,6 +719,8 @@ export interface WorktreeResetSessionRequest {
 }
 
 export interface PromptRequest {
+  /** Per-prompt projection for all subscribers and ring replay; defaults to full. */
+  eventDetailMode?: 'full' | 'summary';
   prompt: PromptContentBlock[];
   /** Deliver the successful final answer directly through a channel worker. */
   delivery?: DaemonChannelDelivery;
@@ -2837,7 +2857,7 @@ export class DaemonClient {
     await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
     const { sessionId: requestedSessionId, ...request } = options;
     const sessionId = (
-      requestedSessionId ?? globalThis.crypto.randomUUID()
+      requestedSessionId ?? createStandaloneSessionId()
     ).toLowerCase();
     try {
       const response = await this.jsonRequest<unknown>(
@@ -3910,6 +3930,9 @@ export class DaemonClient {
           ...(action === 'load' && req.historyPageSize !== undefined
             ? { historyPageSize: req.historyPageSize }
             : {}),
+          ...(action === 'load' && req.compactedReplayMode !== undefined
+            ? { compactedReplayMode: req.compactedReplayMode }
+            : {}),
           ...(action === 'load' && req.liveReplayMode !== undefined
             ? { liveReplayMode: req.liveReplayMode }
             : {}),
@@ -4273,6 +4296,7 @@ export class DaemonClient {
     message: string,
     opts?: {
       signal?: AbortSignal;
+      eventDetailMode?: 'full' | 'summary';
       clientId?: string;
       messageId?: string;
       content?: PromptContentBlock[];
@@ -4293,6 +4317,9 @@ export class DaemonClient {
         body: JSON.stringify({
           message,
           messageId: opts?.messageId,
+          ...(opts?.eventDetailMode !== undefined
+            ? { eventDetailMode: opts.eventDetailMode }
+            : {}),
           ...(opts?.content && opts.content.length > 0
             ? { content: opts.content }
             : {}),

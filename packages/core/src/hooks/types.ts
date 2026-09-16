@@ -125,7 +125,8 @@ export type HookExecutionOutcome =
   | 'success' // Hook executed successfully
   | 'blocking' // Hook blocked the operation
   | 'non_blocking_error' // Hook failed but doesn't block
-  | 'cancelled'; // Hook was cancelled/aborted
+  | 'cancelled' // Hook was cancelled/aborted by the caller
+  | 'timeout'; // Hook ran past its timeout; distinct from a user cancel
 
 /**
  * Context provided to function hooks for state access
