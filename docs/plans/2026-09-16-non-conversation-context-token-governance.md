@@ -1,7 +1,8 @@
 # 非对话上下文的 Token 治理
 
 日期：2026-09-16
-跟进 issue：[#12028](https://github.com/QwenLM/qwen-code/issues/12028)（伞）· [#12029](https://github.com/QwenLM/qwen-code/issues/12029) · [#12030](https://github.com/QwenLM/qwen-code/issues/12030) · [#12032](https://github.com/QwenLM/qwen-code/issues/12032) · [#12033](https://github.com/QwenLM/qwen-code/issues/12033)
+跟进 issue：[#12028](https://github.com/QwenLM/qwen-code/issues/12028)（伞）· [#12029](https://github.com/QwenLM/qwen-code/issues/12029) · [#12030](https://github.com/QwenLM/qwen-code/issues/12030) · [#12032](https://github.com/QwenLM/qwen-code/issues/12032) · [#12033](https://github.com/QwenLM/qwen-code/issues/12033) · [#12037](https://github.com/QwenLM/qwen-code/issues/12037)
+配套交接文档（带预期数值的验证步骤、影响面清单、待决策项）：[`docs/verification/context-token-governance/README.md`](../verification/context-token-governance/README.md)
 
 结论先行：**大头是配置和内容组织，不是缺机制。qwen-code 已经有延迟加载、skill 三层渐进披露和四套工具开关；把它们用对，空载成本可以从 47k 降到 15k 以内，不需要新增意图分类器一类的新逻辑。** 需要的代码改动只有两处，都已开 issue。
 
