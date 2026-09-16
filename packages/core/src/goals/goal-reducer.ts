@@ -36,7 +36,12 @@ export function reduceGoalSpend(
   now: number,
 ): GoalRecord {
   if (!Number.isFinite(tokens) || tokens <= 0) return goal;
-  return { ...goal, tokensUsed: goal.tokensUsed + tokens, updatedAt: now };
+  return {
+    ...goal,
+    tokensUsed: goal.tokensUsed + tokens,
+    activeTimeMs: elapsedActiveTime(goal, now),
+    updatedAt: now,
+  };
 }
 
 export interface GoalControlTransition {

@@ -2082,15 +2082,28 @@ describe('turn and active-time budgets', () => {
 });
 
 describe('reduceGoalSpend', () => {
-  it('adds model spend without advancing the turn', () => {
-    const goal = goalRecord({ tokensUsed: 10, turnCount: 2 });
-    expect(reduceGoalSpend(goal, 30, 99)).toEqual({
-      ...goal,
-      tokensUsed: 40,
-      updatedAt: 99,
-    });
-    expect(goal.tokensUsed).toBe(10);
-  });
+  it.each(['active', 'paused'] as const)(
+    'adds model spend without losing elapsed time for a %s Goal',
+    (status) => {
+      const goal = goalRecord({
+        status,
+        tokensUsed: 10,
+        turnCount: 2,
+        activeTimeMs: 500,
+      });
+      expect(reduceGoalSpend(goal, 30, 1_000)).toEqual({
+        ...goal,
+        tokensUsed: 40,
+        activeTimeMs: status === 'active' ? 1_400 : 500,
+        updatedAt: 1_000,
+      });
+      expect(goal).toMatchObject({
+        tokensUsed: 10,
+        activeTimeMs: 500,
+        updatedAt: 100,
+      });
+    },
+  );
   it.each([0, -1, NaN, Infinity])('ignores unusable spend %s', (tokens) => {
     const goal = goalRecord();
     expect(reduceGoalSpend(goal, tokens, 99)).toBe(goal);

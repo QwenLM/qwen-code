@@ -2256,6 +2256,56 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
   });
 
+  it('preserves active time and billed tokens when a metered checkpoint reaches the stall limit', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(1_000);
+      const { journal, host, runtime, checkpointVerifier, setRecords } =
+        stallHarness();
+      checkpointVerifier.mockImplementation(async (input) => {
+        vi.setSystemTime(Date.now() + 60_000);
+        return { ...fullClaims(input), usage: { totalTokenCount: 7 } };
+      });
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+      let records: RuntimeRecord[] = [];
+      for (let stall = 1; stall <= GOAL_CHECKPOINT_STALL_LIMIT; stall++) {
+        records = await runCheckpointTurn(
+          runtime,
+          host,
+          setRecords,
+          records,
+          101,
+          `metered-window-${stall}`,
+        );
+      }
+
+      expect(batchSizes(checkpointVerifier)).toEqual([
+        100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
+      ]);
+      const expectedGoal = {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        activeTimeMs: 600_000,
+        tokensUsed: 70,
+        updatedAt: 601_000,
+      };
+      expect(runtime.getSnapshot().goal).toMatchObject(expectedGoal);
+      expect(journal.appended.at(-1)).toMatchObject({
+        cause: 'usage_limited',
+        snapshot: { goal: expectedGoal },
+      });
+      const restored = createGoalRuntime({ journal: fakeGoalJournal() });
+      vi.setSystemTime(661_000);
+      await restored.restore(journal.records);
+      expect(restored.getSnapshot().goal).toMatchObject(expectedGoal);
+      expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resets the stall streak when a checkpoint finds room to absorb', async () => {
     const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
