@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.23.4",
+  "version": "0.24.0",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -12,6 +12,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./omni": {
+      "types": "./dist/src/omni/index.d.ts",
+      "import": "./dist/src/omni/index.js"
+    },
+    "./omniPolicyCollection": {
+      "types": "./dist/src/omni/policy/model-call-collection.d.ts",
+      "import": "./dist/src/omni/policy/model-call-collection.js"
     },
     "./subagentRuntime": {
       "types": "./dist/src/subagent-runtime.d.ts",
@@ -175,6 +183,7 @@
     "@types/ws": "^8.5.10",
     "@types/yauzl": "^2.9.1",
     "msw": "^2.3.4",
+    "strip-json-comments": "^3.1.1",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"

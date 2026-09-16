@@ -195,6 +195,22 @@ describe('prepareTranscriptRecords', () => {
     expect(prepared.diagnostics).toEqual([]);
   });
 
+  it('accepts Omni recall metadata without marking history incomplete', () => {
+    const prepared = prepareTranscriptRecords([
+      record('recall', null, {
+        type: 'system',
+        subtype: 'omni_recall',
+        message: undefined,
+        systemPayload: {
+          resourceIds: ['media-1'],
+          selectedEntryIds: ['entry-1'],
+        },
+      }),
+      record('root', 'recall'),
+    ]);
+    expect(prepared.diagnostics).toEqual([]);
+  });
+
   it('accepts session source metadata as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('source', null, {
