@@ -29,6 +29,7 @@ import {
   goalActiveTimeBudgetReason,
   goalCheckpointHealthVisible,
   goalTurnBudgetReason,
+  type GoalBroadcastMeta,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -3365,6 +3366,8 @@ describe('goal runtime', () => {
       verifier,
       checkpointVerifier,
     });
+    const causes: Array<GoalStateCause | undefined> = [];
+    runtime.subscribe((_snapshot, cause) => causes.push(cause));
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
     const permit = host.started[0]!;
@@ -3381,6 +3384,13 @@ describe('goal runtime', () => {
 
     await runtime.finishTurn(permit);
 
+    expect(causes).toEqual([
+      'create',
+      undefined,
+      'turn_finished',
+      'verifier_reject',
+      'checkpoint',
+    ]);
     expect(checkpointVerifier).toHaveBeenCalledOnce();
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
@@ -4512,6 +4522,50 @@ describe('goal runtime', () => {
     ]);
 
     expect(observed).toEqual(['pause']);
+  });
+
+  it('marks only the restore broadcast as a replay', async () => {
+    // The restore broadcast carries the persisted record's cause. A subscriber
+    // counting transitions would otherwise count the recovered `pause` again
+    // on every resume, as if the user had just paused.
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(fakeGoalTurnHost());
+    const observed: Array<{
+      cause: GoalStateCause | undefined;
+      meta: GoalBroadcastMeta | undefined;
+    }> = [];
+    runtime.subscribe((_snapshot, cause, meta) =>
+      observed.push({ cause, meta }),
+    );
+
+    await runtime.restore([
+      goalStateRecord({
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-1',
+          revision: 1,
+          objective: 'ship it',
+          status: 'paused',
+          evidenceCursor: { recordId: 'create-record' },
+          turnCount: 2,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      }),
+    ]);
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: 'g-1',
+      expectedRevision: 1,
+    });
+
+    expect(observed[0]).toEqual({ cause: 'pause', meta: { replayed: true } });
+    const live = observed.slice(1);
+    expect(live.map(({ cause }) => cause)).toContain('resume');
+    expect(live.every(({ meta }) => meta === undefined)).toBe(true);
   });
 
   it('resumes an idle stopped goal exactly once', async () => {
