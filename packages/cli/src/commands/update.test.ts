@@ -52,7 +52,10 @@ vi.mock('../utils/installationInfo.js', () => ({
   getInstallationInfo,
   resolveUpdateCommand,
 }));
-vi.mock('../ui/standalone-update.js', () => ({ performStandaloneUpdate }));
+vi.mock('../ui/standalone-update.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ui/standalone-update.js')>()),
+  performStandaloneUpdate,
+}));
 vi.mock('../utils/package.js', () => ({ getPackageJson }));
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLine,
@@ -107,6 +110,54 @@ describe('update command', () => {
       isStandalone: false,
       updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
     });
+  });
+
+  it.each(['1.2.3', 'v1.2.3', '1.2.3-preview.1', '1.2.3-nightly.20260909'])(
+    'installs exact version %s without discovery',
+    async (version) => {
+      getInstallationInfo.mockReturnValue({
+        isStandalone: true,
+        standaloneDir: '/test/qwen',
+      });
+      performStandaloneUpdate.mockResolvedValue('done');
+      await updateCommand.handler({ ...updateArgs, targetVersion: version });
+      expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+      expect(performStandaloneUpdate).toHaveBeenCalledWith(
+        '/test/qwen',
+        version.replace(/^v/, ''),
+      );
+    },
+  );
+
+  it.each([
+    '',
+    'latest',
+    'nightly',
+    '../1.2.3',
+    '1.2',
+    '01.2.3',
+    '1.2.3-01',
+    '1.2.3?x=1',
+  ])(
+    'rejects invalid target %s before discovery or installation',
+    async (targetVersion) => {
+      await updateCommand.handler({ ...updateArgs, targetVersion });
+      expect(process.exitCode).toBe(1);
+      expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+      expect(getInstallationInfo).not.toHaveBeenCalled();
+      expect(performStandaloneUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects an unmanaged exact target without suggesting an unpinned upgrade', async () => {
+    await updateCommand.handler({ ...updateArgs, targetVersion: 'v1.2.3' });
+    expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Install version 1.2.3 manually'),
+    );
+    expect(formatUpdateInstructions).not.toHaveBeenCalled();
+    expect(performStandaloneUpdate).not.toHaveBeenCalled();
   });
 
   it('prints the package-manager update command even when auto-update is disabled', async () => {
