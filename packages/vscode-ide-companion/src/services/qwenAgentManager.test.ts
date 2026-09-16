@@ -17,6 +17,7 @@ import type {
   RequestPermissionRequest,
 } from '@agentclientprotocol/sdk';
 import type { AskUserQuestionRequest } from '../types/acpTypes.js';
+import { decodeSessionListCursor } from '@qwen-code/qwen-code-core';
 
 vi.mock('vscode', () => ({
   window: {
@@ -392,6 +393,72 @@ describe('QwenAgentManager.getSessionListPaged', () => {
       '550e8400-e29b-41d4-a716-446655440000',
     ]);
     expect(page.hasMore).toBe(false);
+  });
+
+  it('advances past an unmintable legacy row at the page boundary without truncating', async () => {
+    // A legacy session-*.json row is displayable, but its basename cannot be
+    // encoded as a core composite cursor. If it lands at the nominal boundary
+    // the fallback must include rows until it reaches a mintable boundary,
+    // report hasMore truthfully, and continue without a duplicate.
+    const manager = new QwenAgentManager();
+    (manager as unknown as { connection: unknown }).connection = {
+      listSessions: vi.fn().mockRejectedValue(new Error('ACP unavailable')),
+    };
+    const row = (sessionId: string, mtimeMs: number, fileName: string) => ({
+      sessionId,
+      projectHash: 'p',
+      startTime: new Date(mtimeMs).toISOString(),
+      lastUpdated: new Date(mtimeMs).toISOString(),
+      mtimeMs,
+      filePath: join('/chats', fileName),
+      messages: [],
+    });
+    const newest = '550e8400-e29b-41d4-a716-446655440001';
+    const legacy = '550e8400-e29b-41d4-a716-446655440002';
+    const boundary = '550e8400-e29b-41d4-a716-446655440003';
+    const oldest = '550e8400-e29b-41d4-a716-446655440004';
+    const stored = [
+      row(newest, 4_000, `${newest}.jsonl`),
+      row(legacy, 3_000, `session-2026-05-17-${legacy}.json`),
+      row(boundary, 2_000, `${boundary}.jsonl`),
+      row(oldest, 1_000, `${oldest}.jsonl`),
+    ];
+    (manager as unknown as { sessionReader: unknown }).sessionReader = {
+      getAllSessions: vi.fn().mockResolvedValue(stored),
+      getSessionTitle: vi.fn().mockReturnValue('t'),
+    };
+
+    const first = await manager.getSessionListPaged({ size: 2 });
+
+    // The nominal boundary is the legacy row, so page one expands by one to
+    // reach the next mintable .jsonl row.
+    expect(first.sessions.map((session) => session.sessionId)).toEqual([
+      newest,
+      legacy,
+      boundary,
+    ]);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBeDefined();
+    expect(decodeSessionListCursor(first.nextCursor!)).toEqual({
+      mtime: 2_000,
+      sessionId: boundary,
+    });
+
+    const second = await manager.getSessionListPaged({
+      cursor: first.nextCursor,
+      size: 2,
+    });
+    expect(second.sessions.map((session) => session.sessionId)).toEqual([
+      oldest,
+    ]);
+    expect(second.hasMore).toBe(false);
+    expect(
+      new Set(
+        [...first.sessions, ...second.sessions].map(
+          (session) => session.sessionId,
+        ),
+      ).size,
+    ).toBe(4);
   });
 
   it('still fails closed on a malformed cursor in the filesystem fallback', async () => {

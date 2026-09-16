@@ -55,6 +55,13 @@ interface FallbackCursor {
   sessionId?: string;
 }
 
+/** Return the id half only when this fallback row can mint a core cursor. */
+function fallbackCursorSessionId(key: string): string | undefined {
+  if (!key.endsWith('.jsonl')) return undefined;
+  const sessionId = key.slice(0, -'.jsonl'.length);
+  return /^[0-9a-fA-F-]{32,36}$/.test(sessionId) ? sessionId : undefined;
+}
+
 /**
  * Parse a session-list cursor for the filesystem fallback via core's
  * authoritative decoder ? the same grammar the daemon mints, including
@@ -715,7 +722,31 @@ export class QwenAgentManager {
                   0
               );
             });
-      const page = filtered.slice(0, size);
+      // A legacy session-*.json row can land exactly at the nominal page
+      // boundary. It is valid to display, but its basename cannot mint a
+      // cursor accepted by core. Advance the boundary until a mintable row
+      // (or exhaustion) instead of conflating "cannot mint here" with
+      // "there is no next page".
+      let pageEnd = Math.min(size, filtered.length);
+      let boundaryRow = pageEnd > 0 ? filtered[pageEnd - 1] : undefined;
+      let mintId = boundaryRow
+        ? fallbackCursorSessionId(boundaryRow.key)
+        : undefined;
+      if (pageEnd < filtered.length && mintId === undefined) {
+        const nominalEnd = pageEnd;
+        while (pageEnd < filtered.length && mintId === undefined) {
+          pageEnd += 1;
+          boundaryRow = filtered[pageEnd - 1];
+          mintId = boundaryRow
+            ? fallbackCursorSessionId(boundaryRow.key)
+            : undefined;
+        }
+        logger.warn(
+          '[QwenAgentManager] Advanced filesystem fallback page past unmintable legacy boundary rows:',
+          pageEnd - nominalEnd,
+        );
+      }
+      const page = filtered.slice(0, pageEnd);
       const sessions = page.map((x) => ({
         id: x.raw.sessionId,
         sessionId: x.raw.sessionId,
@@ -729,17 +760,17 @@ export class QwenAgentManager {
         cwd: x.raw.cwd,
       }));
       const lastRow = page.at(-1);
-      // Mint with core's encoder, and only from a key its decoder accepts —
-      // a cursor this side rejects on the next turn kills pagination.
-      const mintId = lastRow?.key.replace(/\.jsonl$/, '');
+      // Mint with core's encoder, and only from the same file-name key the
+      // sort/filter use. If pageEnd reached exhaustion on legacy-only rows,
+      // there is no next page, so an absent cursor is correct.
       const nextCursorVal =
-        lastRow === undefined || !/^[0-9a-fA-F-]{32,36}$/.test(mintId ?? '')
+        lastRow === undefined || mintId === undefined
           ? undefined
           : encodeSessionListCursor({
               mtime: lastRow.mtime,
-              sessionId: mintId as string,
+              sessionId: mintId,
             });
-      const hasMore = nextCursorVal !== undefined && filtered.length > size;
+      const hasMore = filtered.length > page.length;
       return { sessions, nextCursor: nextCursorVal, hasMore };
     } catch (error) {
       logger.error('[QwenAgentManager] File system paged list failed:', error);
