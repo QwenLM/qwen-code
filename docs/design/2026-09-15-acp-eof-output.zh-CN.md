@@ -51,8 +51,10 @@ EOF 清理错误和输出错误都继续使操作失败，两者同时发生时�
 ## 最终验证结果
 
 实现通过七项真实 Writable 测试、受影响的 ACP/CLI 测试、build、typecheck、lint
-和 bundle 检查。两组已有传输 mock 测试需要在同一边界 mock 新增的私有输出
-所有者；首次失败及调整后四项通过的结果均保留。两轮无问题自审和
+和 bundle 检查。三组已有传输 mock 测试在同一边界 mock 私有输出所有者：
+`acpAgent.test.ts`、`acpAgent.worktree.test.ts` 和 `plan-mode-config.test.ts`。
+第一组已有该 mock 后，为后两组补齐了 mock；后两组的首次失败及调整后四项通过
+结果均保留。两轮无问题自审和
 独立审查未发现未决源码缺陷。
 
 首轮最终组合 bundle 通过两种直接 ACP EOF 场景：收到首个帧片段后 EOF，以及收到

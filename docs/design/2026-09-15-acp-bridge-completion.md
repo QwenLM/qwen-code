@@ -2,8 +2,8 @@
 
 [English](2026-09-15-acp-bridge-completion.md) | [简体中文](2026-09-15-acp-bridge-completion.zh-CN.md)
 
-Status: local implementation and planned verification complete; full-suite
-acceptance remains open, 2026-09-15.
+Status: local implementation complete; verification is recorded per integration.
+Historical full-suite acceptance remains open, 2026-09-16.
 Implements the remaining boundary extraction for
 [#11866](https://github.com/QwenLM/qwen-code/issues/11866) after the four
 [earlier slices](2026-09-14-acp-bridge-control-plane-harness-boundary.md).
@@ -139,9 +139,11 @@ declaration-resolved physical property accesses. A separate
 comparison matches 306 surviving name-keyed control-plane bodies; this is not a
 claim about every function because duplicate local names exist. Eight changed
 wiring bodies were reviewed directly, including synchronous construction, exit,
-cwd, shell and shutdown. The total await count remains 270; the per-body and
-wiring checks establish ordering, rather than the count alone. A mutation that
-removes the required exit order is rejected by the added regression test.
+cwd, shell and shutdown. The historical moved-body inventory contains 270 awaits; it is not a count of
+all await tokens across the final modules. Per-body and wiring checks, rather
+than the count alone, establish ordering. The added regression test rejects
+moving physical-handle removal after the session lifecycle callback; this
+historical mutation did not test all six exit steps.
 
 Build, workspace typecheck, lint, formatting, core subpath exports and the serve
 bundle boundary passed. The complete ACP bridge suite passed 2,092 tests. Two
@@ -300,6 +302,8 @@ directory; source audits and the rebuilt artifact manifest are under
 
 ## Follow-up integration with channel output modes
 
+The evidence in this section was gathered for `f0153063d2`.
+
 After the first publication, main advanced to
 `473ef4b3e474ddc16d7bd6db32fcc86185a9cac6`. Its bridge change conflicted with
 the extraction. The six added lines are preserved at the same synchronous
@@ -353,7 +357,7 @@ even though known owned processes exit 0 and the registry becomes empty.
 
 The full 1,079-file artifact and the separately imported process-registry build
 match before and after E2E; all 34 non-document candidate files also match.
-Current CLI SHA-256 is
+The CLI SHA-256 measured for `f0153063d2` is
 `0d7c5f8757f584b321322da34d1926666b61e6b1b23b57b6a9630c03cda43a69`;
 the full dist tree digest is
 `d6ec947a9fdf9c00e97f086d9c4e0cb6ab4dbeea7949768bdc4ec1ec5639e261`.
@@ -361,5 +365,109 @@ Owned PIDs/process groups and listeners were independently checked after each
 scenario. Public subset comparisons match their original baselines; raw normal
 prompt responses contain no new task-output/task-result/output-mode or
 background-turn metadata. These ordinary fixtures do not exercise authenticated
-per-task background capture or permissions. Latest evidence is indexed by
+per-task background capture or permissions. Evidence for this integration is indexed by
 `latest-main-e2e-manifest.json`; earlier samples and failures remain unchanged.
+
+## Lint-gate integration at `cc0f7c6949`
+
+This merge added main `a98711330c43ba6f434cc9641abda10079bb8b75`, including
+Session Stop-hook changes and the filename allowlist required by the lint
+freshness gate. The preceding `f0153063d2` bundle hashes and eight process E2E
+samples do not describe this integration.
+
+Fresh build, workspace typecheck, bundle, full lint/static checks, core exports,
+serve bundle boundary and runtime critical-dependency checks passed. Focused
+verification passed 1,557 tests: 1,052 CLI, 459 core, 37 Web Shell and nine
+lint-freshness helper tests. The full ACP suite and eight process scenarios
+were not rerun locally for this lint-gate merge. The live GitHub comparison
+reproduced the original freshness failure and passed with this merge.
+
+At the 2026-09-16 review follow-up, this commit's GitHub checks had completed:
+Linux tests, lint/static, no-AK integration, Serve A/B, daemon E2E, desktop
+shells, Web Shell smoke and TUI checks succeeded. The optional macOS/Windows
+Node test lanes and CLI integration lane were skipped; they are not passes.
+These results do not erase the historical full-suite failures recorded above.
+
+## Review follow-up and main integration on 2026-09-16
+
+This candidate merges main `888528dfae9b1dd0ea55ef2bab2e94bfcbaa911d` into
+`cc0f7c6949` and addresses the six review suggestions. The frozen 36-file
+non-document candidate manifest has SHA-256
+`90f2d468919cf77b2016868781994e0ea30b3cc1061ab8d0a4752e8c64e8fc53`.
+Its digest uses sorted repository-relative paths and file SHA-256 values,
+joined as `path + " " + hash` with newlines and no trailing newline.
+
+All 17 upstream bridge patch blocks, containing 78 added and five removed
+lines, were reapplied to the control plane. The entire resulting file matches
+the candidate after only the shared exclusion-type declaration change. Summary
+projection, synchronous validation, queued and mid-turn mode identity,
+dispatch/reset ordering and child-request filtering remain session policy.
+The new process-budget admission retains upstream's shared physical registry,
+typed errors and rollback. The six other overlapping files match independent
+three-way merges. Public package exports are unchanged relative to this main.
+
+The teardown annotation now names the post-split owners and retains the
+physical-membership/attach-availability distinction. A shared type removes the
+duplicated work-exclusion declaration through a type-only import; it does not
+force future implementations to read every new field. Both EOF documents name
+all three mocked suites and distinguish the two suites' historical four-test
+repair from that three-suite inventory.
+
+Fresh build, workspace typecheck, bundle, all 112 consumed core subpath exports
+and the serve bundle boundary passed. The complete ACP bridge suite passed
+2,158 tests in 44 files; 22 affected CLI files passed 2,523 tests; two core files
+passed 97 tests, for 4,778 in these runs. Earlier concurrent verification was
+interrupted by cleaned build outputs and regenerated coverage; those failed
+runs remain separate. The isolated lint environment also needed its installed
+YAML tool on PATH. After document formatting, the complete lint pipeline passed,
+including ESLint, workflow/shell/YAML checks and Prettier.
+
+Three independently observed mutation baselines passed 143 tests. All eight
+single mutations were rejected by the added named assertions: direct settings
+close, direct skill close, each of the five adjacent exit-step swaps, and
+unconditional cancellation of the replacement's idle timer on an old exit.
+They were assertion failures, not collection errors or timeouts. Removing the
+physical handle after the session callback also fails the original replacement
+test. Two limited historical witnesses load only the exact `cc0f7c6949` test
+files over current production dependencies: the old settings test survives
+direct close (46 passed), and the old harness test survives swapping the first
+two exit steps (two passed). These are not whole-commit historical runs.
+
+All 13 valid mutation arms retained identical source, test, real-helper and
+index hashes. The first observer configuration accidentally concatenated the
+package-wide include patterns; it was stopped with exit 130, its original log
+and cleanup of observed ports/processes were retained, and it is excluded from
+the valid baseline/mutation counts. Exact-file filtering and load receipts
+verified each subsequent observation. Evidence is indexed by
+`.qwen/investigations/issue-11866-comments/mutation-summary.json`.
+
+All eight serial process scenarios met their positive or expected-negative
+acceptance conditions on the frozen artifact. Public multi-session lifecycle,
+native watching with 32 skills and active-writer shutdown each measured daemon
+exit 0. Both writer seals match their actual 3,604/3,609-byte transcripts and
+hashes. Both positive EOF cases measured actual ACP exit 0, complete
+524,288-byte fixture content, 1,074,030 stdout bytes and a final newline.
+The complete outputs match after normalizing only exact temporary roots and
+session UUIDs. Against the previous `f0153063d2` samples, the sole changed leaf
+is the bundled workflow-authoring body: 1,668 more UTF-8 bytes, or 1,697 bytes
+in the JSON frame. Its source and copied artifact match incoming main exactly;
+this cross-version mismatch is retained, not normalized away.
+
+The stalled reader measured actual ACP exit 1 after 2,023 ms with the original
+2,000 ms drain error. The closed reader retained EPIPE and actual ACP exit 1.
+Both original harness FAIL/script exit 1 results remain expected negatives,
+with no forced cleanup signal. The process-query timeout sent SIGTERM at
+2,001.07 ms while both pipes remained undestroyed. Timeout and exit-7 queries
+both rejected incomplete cleanup proof even though the known owned processes
+exited 0 and the registry count reached zero. Independent checks found no owned
+PID, process-group or listener residue after any scenario.
+
+All 1,082 artifact files, the separately imported process-registry build and
+all 36 non-document candidate files match before and after process testing.
+The CLI SHA-256 is
+`dc7442c643cc03d8c939bf514d1e4075e70c90f02b9dac401497a1ea133f6074`;
+the full dist tree digest is
+`317c38b5bda31f45b0a924952a78d3516778f4160d1fee64816726d533562ec5`.
+This is evidence for this integration, not a relabeling of earlier artifacts.
+The ordinary-prompt fixtures retain the background/permission and latency
+coverage limits above; historical full-workspace acceptance remains open.

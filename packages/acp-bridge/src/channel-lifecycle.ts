@@ -64,28 +64,23 @@ export interface HarnessChannel {
    * 10s) would attach to a transport about to close, landing the
    * caller with a sessionId that 404s on every follow-up request.
    *
-   * **Set-sites (6)** — any new teardown path MUST call into one of
-   * these or replicate the pattern:
+   * Teardown owners after the split:
    *
-   *   1. `ensureChannel`: `initialize`-failure catch.
-   *   2. `ensureChannel`: late-shutdown re-check (shuttingDown flipped
-   *      during handshake).
-   *   3. `doSpawn`: newSession-failure on an empty channel
-   *      (sessionIds.size === 0).
-   *   4. `killSession` last-session-leaving (sessionIds.size === 0
-   *      after the delete) — indirectly: it schedules the idle policy
-   *      via `startIdleTimer`, and `killChannelWithLog` (immediate at
-   *      a resolved timeout <= 0, or on timer expiry) /
-   *      `reapPendingEmptyChannel` perform the actual set.
-   *   5. `shutdown`: bulk-mark every entry in `aliveChannels`.
-   *   6. `ensureChannel`: a channel-level transport-failure signal.
+   * - `channel-startup.ts`, `start()`: initialize failure, transport failure,
+   *   post-handshake dying/shutdown checks, and runtime-epoch failure.
+   * - `session-control-plane.ts`, `doSpawn()` and `restoreSessionWithReplay()`:
+   *   session-creation failure when the control plane's session/work predicates
+   *   allow the physical channel to be reaped.
+   * - `channel-harness.ts`, `killChannelWithLog()` / `reapPendingEmptyChannel()`:
+   *   immediate or delayed idle cleanup and retirement after session work drains.
+   * - Control-plane `shutdown()` calls harness `markDying()` for its snapshot
+   *   of `ChannelLifecycle.values()` before publishing session removals.
    *
-   * **BkUyD invariant (why we don't clear `channelInfo` here)**:
-   * `killAllSync` must still find the channel during the SIGTERM
-   * grace window to fire SIGKILL on `process.exit(1)`. `aliveChannels`
-   * holds the dying entry until `channel.exited` fires (OS-level
-   * reap); `isDying` is the "available-for-new-spawns" half of the
-   * two-bit (alive, dying) state.
+   * **BkUyD invariant**: keep dying handles in `ChannelLifecycle.values()`
+   * until `channel.exited` removes them. Harness `killAllSync()` must still
+   * reach every child during its SIGTERM grace window, even after a replacement
+   * becomes `ChannelLifecycle.current`. `isDying` controls attach availability;
+   * lifecycle membership controls physical ownership until OS reap.
    */
   isDying: boolean;
   /**

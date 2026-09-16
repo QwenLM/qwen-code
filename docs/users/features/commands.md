@@ -821,14 +821,17 @@ qwen sessions ps --json | jq -r .cwd
 ## 6. Messaging Another Running Session
 
 Two interactive sessions on the same machine can send each other
-messages. The feature is experimental and **off by default**; turn it on
-in `settings.json` and restart:
+messages. The feature is **on by default**: a session is discoverable by
+the other sessions of the same user on the machine, and what they send
+it goes through the review rules below before its model sees any of it.
+To keep a session invisible and unreachable, turn it off in
+`settings.json` and restart:
 
 ```json
-{ "agents": { "crossSessionMessaging": true } }
+{ "agents": { "crossSessionMessaging": false } }
 ```
 
-Once on, the model in one session can discover the others with
+With it on, the model in one session can discover the others with
 `list_agents` — each appears under `sessions` with the `name` that
 `qwen sessions ps --json` records (the table view may truncate long
 names) — and address one with `send_message` using
@@ -860,8 +863,10 @@ A repository can make sessions opened in it more cautious, never less:
 a workspace `.qwen/settings.json` may set `agents.crossSessionInbound`
 to `hold` or `refuse`, or `agents.crossSessionMessaging` to `false`, and
 that value wins over a looser one in your user settings. A workspace
-value that would loosen your setting (`accept`, or `true` for the
-switch) is ignored with a warning, and a value the CLI does not
+value that would loosen an operator-set one (`accept`, or `true` for the
+switch when a user or system scope set it to `false`) is ignored with a
+warning; a workspace `true` where nothing else set the switch merely
+repeats the default and is dropped silently. A value the CLI does not
 recognize holds every message whenever it is the effective value.
 System settings override all of this, as they do for every setting.
 
@@ -1051,8 +1056,8 @@ driven session's behalf; a sender is told at once instead of
 waiting out an expiry. Where a held message should surface for those
 sessions is not settled yet.
 
-A session registers only while its own settings have
-`agents.crossSessionMessaging` on. With it off it stays invisible,
+A session registers unless its own settings turn
+`agents.crossSessionMessaging` off. Turned off, it stays invisible,
 because the only reason to list a session nobody can message would be to
 advertise an address that never answers.
 

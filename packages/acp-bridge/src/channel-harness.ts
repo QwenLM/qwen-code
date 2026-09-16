@@ -28,7 +28,7 @@ import { BridgeTimeoutError, SERVE_CONTROL_EXT_METHODS } from './status.js';
 import { terminateChannel } from './channel-transport.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 
-interface ChannelWorkExclusions {
+export interface ChannelWorkExclusions {
   ignoreCurrentSessionSpawn?: boolean;
   ignoreRestoreId?: string;
 }

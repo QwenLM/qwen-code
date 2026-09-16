@@ -60,6 +60,9 @@ const mockRegisterSession = vi.hoisted(() => {
   });
 });
 const mockPeerMessagingStart = vi.hoisted(() => vi.fn());
+const mockGetLastPeerInboxFailure = vi.hoisted(() =>
+  vi.fn((): { cause: string } | null => null),
+);
 vi.mock('../peerMessaging/peer-messaging.js', () => ({
   PeerMessaging: {
     start: (...args: unknown[]) => mockPeerMessagingStart(...args),
@@ -281,6 +284,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   },
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
   registerSession: mockRegisterSession,
+  getLastPeerInboxFailure: () => mockGetLastPeerInboxFailure(),
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
   parseInvocationContext: vi.fn(
@@ -5025,8 +5029,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   }
 
+  // Messaging is on by default, and on it binds an inbox and registers
+  // every new session through mocks most suites here do not stage. The
+  // default settings turn it off; the daemon-session suite says on or off
+  // explicitly, which is the only place the switch is under test.
   function makeSessionSettings(
-    merged: Record<string, unknown> = { mcpServers: {} },
+    merged: Record<string, unknown> = {
+      mcpServers: {},
+      agents: { crossSessionMessaging: false },
+    },
   ) {
     return {
       merged,
@@ -5295,12 +5306,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   }
 
   describe('daemon-managed sessions in the session registry', () => {
-    /** Settings with cross-session messaging on, which is off by default. */
+    /** Settings with cross-session messaging explicitly on. */
     function messagingOn() {
       return makeSessionSettings({
         mcpServers: {},
         agents: { crossSessionMessaging: true },
       });
+    }
+
+    // Off has to be said: the switch is on by default, so settings that
+    // never mention the key are the *on* case.
+    function messagingOff() {
+      return makeSessionSettings({
+        mcpServers: {},
+        agents: { crossSessionMessaging: false },
+      });
+    }
+
+    // Settings that never mention the switch: the on-by-default case.
+    function messagingUnset() {
+      return makeSessionSettings({ mcpServers: {} });
     }
 
     beforeEach(() => {
@@ -5309,6 +5334,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mockPeerMessagingStart.mockResolvedValue({
         close: vi.fn().mockResolvedValue(undefined),
       });
+      mockGetLastPeerInboxFailure.mockReset();
+      mockGetLastPeerInboxFailure.mockReturnValue(null);
+    });
+
+    // Messaging is on by default, so suites after this one bind an inbox
+    // too; hand them back the bare mock rather than this suite's fake.
+    afterEach(() => {
+      mockPeerMessagingStart.mockReset();
     });
 
     it('gives each hosted session a record of its own, and the shared inbox address', async () => {
@@ -5385,9 +5418,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // A record with no inbox behind it would advertise an address that
       // never answers, which is worse than not being listed at all.
       await setupSessionMocks('hosted-off');
-      const { agent, agentPromise } = await bootInitializedAcpAgent(
-        makeSessionSettings(),
-      );
+      vi.mocked(loadSettings).mockReturnValue(messagingOff());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOff());
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
       expect(mockPeerMessagingStart).not.toHaveBeenCalled();
@@ -5447,6 +5480,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // contract the docs state is about the session, and a session that
       // turned messaging off must not appear in any peer's listing.
       await setupSessionMocks('hosted-off');
+      vi.mocked(loadSettings).mockReturnValue(messagingOff());
       const { agent, agentPromise } =
         await bootInitializedAcpAgent(messagingOn());
       await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -5478,8 +5512,60 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     });
 
+    it('registers a hosted session whose own settings never mention the switch', async () => {
+      // On by default: an explicit true and false read the same through
+      // the old comparison and the helper alike, so only an unset key
+      // pins that a daemon-hosted session joins without a settings edit.
+      // The gate reads the session's settings, so the key is left out of
+      // those too, not only the process's boot settings.
+      await setupSessionMocks('hosted-unset');
+      vi.mocked(loadSettings).mockReturnValue(messagingUnset());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingUnset());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await vi.waitFor(() => expect(mockPeerMessagingStart).toHaveBeenCalled());
+      expect(mockRegisterSession).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'hosted-unset', slot: 'own' }),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('does not retry the bind on a platform with no inbox transport', async () => {
+      // That refusal holds for every candidate path, so a second hosted
+      // session could never succeed where the first did not.
+      mockPeerMessagingStart.mockResolvedValue(null);
+      mockGetLastPeerInboxFailure.mockReturnValue({
+        cause: 'unsupported_platform',
+      });
+      await setupSessionMocks('hosted-platform-a');
+      vi.mocked(loadSettings).mockReturnValue(messagingUnset());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingUnset());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await vi.waitFor(() =>
+        expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1),
+      );
+      // Let the settled null land before the next session asks.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      await setupSessionMocks('hosted-platform-b');
+      vi.mocked(loadSettings).mockReturnValue(messagingUnset());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(mockPeerMessagingStart).toHaveBeenCalledTimes(1);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it('retries the inbox bind for the next session after a failed start', async () => {
       mockPeerMessagingStart.mockResolvedValue(null);
+      // Any cause but a missing transport is worth a retry: a runtime
+      // directory can be fixed, or free up, while the process runs.
+      mockGetLastPeerInboxFailure.mockReturnValue({ cause: 'permission' });
       await setupSessionMocks('hosted-retry-a');
       vi.mocked(loadSettings).mockReturnValue(messagingOn());
       const { agent, agentPromise } =
@@ -10813,6 +10899,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('keeps healthy model previews when another live reasoning declaration is invalid, ignoring bootstrap snapshots', async () => {
+    const models = ['healthy', 'broken'].map((id) => ({
+      id,
+      label: id,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: `https://${id}.example/v1`,
+      capabilities: {
+        reasoning:
+          id === 'healthy'
+            ? {
+                profile: 'openai-effort',
+                efforts: ['low', 'medium'],
+                defaultEffort: 'medium',
+              }
+            : { profile: 'invalid-profile' },
+      },
+    }));
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn(() => '/work/status'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+      getModel: vi.fn(() => 'healthy'),
+      getAllConfiguredModels: vi.fn(() => models),
+      getContentGeneratorConfig: vi.fn(() => ({
+        model: 'healthy',
+        authType: AuthType.USE_OPENAI,
+        reasoningSnapshot: [],
+      })),
+      getResolvedModelConfig: vi.fn((_auth: string, id: string) => ({
+        baseUrl: `https://${id}.example/v1`,
+        generationConfig: {},
+      })),
+    } as unknown as Config;
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    try {
+      const status = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        {},
+      );
+      expect(status['errors']).toBeUndefined();
+      expect(status).toMatchObject({
+        providers: [
+          {
+            models: [
+              {
+                baseModelId: 'healthy',
+                configOptions: [{ currentValue: 'medium' }],
+              },
+              { baseModelId: 'broken' },
+            ],
+          },
+        ],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('uses the target provider raw override for cold reasoning preview', async () => {
     mockConfig = {
       ...mockConfig,
@@ -13075,6 +13231,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
       availableSkills: ['review'],
       workflowsEnabled: true,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: true,
+        workflowStepId: true,
+      },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
         { name: 'release-check', source: 'user' },
@@ -23850,7 +24011,10 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
 
   function makeAcpSettings() {
     return {
-      merged: { mcpServers: {} },
+      // Messaging is on by default, and on it registers every new session
+      // through a config these tests do not stage; this suite is about
+      // session routing, so it turns the switch off.
+      merged: { mcpServers: {}, agents: { crossSessionMessaging: false } },
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -30053,6 +30217,11 @@ describe('sessionLanguage multi-session propagation', () => {
       getModes: vi.fn().mockReturnValue([]),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getSessionId: vi.fn().mockReturnValue('sid'),
+      // Messaging is on by default, so every published session registers
+      // itself through these; the registry itself is mocked at module level.
+      getCliVersion: vi.fn().mockReturnValue('9.9.9'),
+      trackSessionRegistration: vi.fn(),
+      updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({

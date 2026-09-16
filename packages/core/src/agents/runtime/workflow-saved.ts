@@ -31,6 +31,7 @@
  * hands the user a command for a run that is already over.
  */
 
+import { createHash } from 'node:crypto';
 import { promises as fs, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
@@ -72,6 +73,11 @@ export interface SavedWorkflowEntry {
   extensionDisplayName?: string;
   /** `meta.description`, parsed when the extension loaded; extension workflows only. */
   description?: string;
+  /**
+   * `meta.whenToUse`, parsed when the extension loaded; extension workflows
+   * only. When present, the workflow's command is listed for the model.
+   */
+  whenToUse?: string;
 }
 
 /** A resolved saved workflow with its script source loaded. */
@@ -385,6 +391,7 @@ export async function listSavedWorkflows(
         ? { extensionDisplayName: workflow.extensionDisplayName }
         : {}),
       description: workflow.description,
+      ...(workflow.whenToUse ? { whenToUse: workflow.whenToUse } : {}),
     });
   }
   // Iterate user FIRST then project so project entries overwrite (win).
@@ -400,6 +407,22 @@ export async function listSavedWorkflows(
   return Array.from(byName.values()).sort((a, b) =>
     a.name.localeCompare(b.name),
   );
+}
+
+/** Hex characters of the SHA-256 kept by {@link computeWorkflowScriptDigest}. */
+export const WORKFLOW_SCRIPT_DIGEST_CHARS = 16;
+
+/**
+ * Short content digest of a workflow script: the first
+ * {@link WORKFLOW_SCRIPT_DIGEST_CHARS} hex characters of its SHA-256. An
+ * "always allow" grant for a saved or extension workflow and an extension's
+ * install consent both record it, so a change to the script's code asks again.
+ */
+export function computeWorkflowScriptDigest(script: string): string {
+  return createHash('sha256')
+    .update(script, 'utf8')
+    .digest('hex')
+    .slice(0, WORKFLOW_SCRIPT_DIGEST_CHARS);
 }
 
 /**

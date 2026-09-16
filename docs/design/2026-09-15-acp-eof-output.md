@@ -62,9 +62,11 @@ stay in `.qwen/issues/issue-11866-acp-eof-output.md`.
 ## Final verification results
 
 The implementation passed seven real-Writable tests and the affected ACP/CLI
-tests, build, typecheck, lint and bundle checks. Two existing transport-mocked
-tests needed to mock the new private output owner at the same seam; the initial
-failing run and subsequent four passing tests are retained.
+tests, build, typecheck, lint and bundle checks. Three existing transport-mocked
+suites mock the private output owner: `acpAgent.test.ts`,
+`acpAgent.worktree.test.ts` and `plan-mode-config.test.ts`. The latter two needed
+that mock after the first suite already had it; their initial failing run and
+subsequent four passing tests are retained.
 Two clean self-audits and independent review found no outstanding source defect.
 
 The first final combined bundle passed both direct ACP EOF cases: EOF after the first

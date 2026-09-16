@@ -17,10 +17,10 @@ import {
   REASONING_EFFORT_TIERS,
   clampReasoningEffort,
   getGptReasoningCapabilities,
-  parseModelReasoningCapabilities,
   isReasoningEffortPlaceholder,
 } from '../../reasoning-effort.js';
 import { isOpenRouterHostname } from './openrouter.js';
+import { resolveReasoningForModel } from '../../reasoning-overrides.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -148,19 +148,21 @@ export class DefaultOpenAICompatibleProvider
   protected supportedReasoningEffortsFor(
     model: string | undefined,
   ): readonly ReasoningEffort[] {
-    const gpt = getGptReasoningCapabilities(model);
-    if (!gpt) return OPENAI_COMPATIBLE_EFFORTS;
-    const { authType, baseUrl } = this.contentGeneratorConfig;
-    const configured =
-      authType && model
-        ? parseModelReasoningCapabilities(
-            this.cliConfig.getResolvedModelConfig?.(authType, model, baseUrl)
-              ?.capabilities.reasoning,
-          )
-        : undefined;
-    return configured && !configured.toggleOnly
-      ? configured.efforts
-      : gpt.efforts;
+    const configured = this.getReasoningCapabilities(model);
+    if (!configured?.profile && !getGptReasoningCapabilities(model))
+      return OPENAI_COMPATIBLE_EFFORTS;
+    if (configured && !configured.toggleOnly) return configured.efforts;
+    return (
+      getGptReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS
+    );
+  }
+
+  protected getReasoningCapabilities(model?: string) {
+    return resolveReasoningForModel(
+      this.cliConfig,
+      this.contentGeneratorConfig,
+      model,
+    );
   }
 
   /**
@@ -176,7 +178,9 @@ export class DefaultOpenAICompatibleProvider
    */
   protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
     if (
-      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined ||
+      this.getReasoningCapabilities((request as { model?: string }).model)
+        ?.profile
     ) {
       return request;
     }
@@ -223,9 +227,12 @@ export class DefaultOpenAICompatibleProvider
     const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
       this.applyOutputTokenLimit(request),
     );
-    const messages = isQwen3Model(request.model)
-      ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
-      : requestWithTokenLimits.messages;
+    const profile = this.getReasoningCapabilities(request.model)?.profile;
+    const messages =
+      (!profile && isQwen3Model(request.model)) ||
+      profile === 'qwen-chat-template'
+        ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
+        : requestWithTokenLimits.messages;
 
     const result = {
       ...requestWithTokenLimits,
@@ -238,6 +245,8 @@ export class DefaultOpenAICompatibleProvider
 
   protected flattenGptReasoningEffort(body: Record<string, unknown>): void {
     if (
+      this.getReasoningCapabilities(body['model'] as string | undefined)
+        ?.profile ||
       !getGptReasoningCapabilities(body['model'] as string | undefined) ||
       isOpenRouterHostname(this.contentGeneratorConfig) ||
       this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined ||
