@@ -8,6 +8,7 @@
 // Deutsche Übersetzungen für Qwen Code CLI
 
 export default {
+  'Running {{event}} hooks…': '{{event}}-Hooks werden ausgeführt…',
   // ============================================================================
   // Help / UI Components
   // ============================================================================

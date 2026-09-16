@@ -7,6 +7,7 @@
 // Portuguese translations for Qwen Code CLI (pt-BR)
 
 export default {
+  'Running {{event}} hooks…': 'Executando hooks {{event}}…',
   // ============================================================================
   // Help / UI Components
   // ============================================================================

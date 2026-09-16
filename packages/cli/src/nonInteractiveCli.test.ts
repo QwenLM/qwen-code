@@ -1123,13 +1123,16 @@ describe('runNonInteractive', () => {
   );
 
   it.each([
-    [OutputFormat.TEXT, ['timeout', 'timeout'], 1],
-    [OutputFormat.TEXT, ['timeout', 'error'], 2],
-    [OutputFormat.JSON, ['timeout'], 0],
-    [OutputFormat.TEXT, ['success'], 0],
+    [OutputFormat.TEXT, ['timeout', 'timeout'], 1, 'same'],
+    [OutputFormat.TEXT, ['timeout', 'error'], 2, 'same'],
+    [OutputFormat.JSON, ['timeout'], 0, 'same'],
+    [OutputFormat.STREAM_JSON, ['timeout', 'error'], 0, 'same'],
+    [OutputFormat.TEXT, ['success'], 0, 'same'],
+    [OutputFormat.TEXT, ['timeout', 'timeout'], 2, 'hook'],
+    [OutputFormat.TEXT, ['timeout', 'timeout'], 2, 'event'],
   ] as const)(
     'reports hook diagnostics in %s for %j',
-    async (format, outcomes, count) => {
+    async (format, outcomes, count, vary) => {
       setupMetricsMock();
       const bus = new EventEmitter();
       const subscribe = vi.fn(
@@ -1146,12 +1149,15 @@ describe('runNonInteractive', () => {
       } as unknown as ReturnType<Config['getMessageBus']>);
       vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
       mockLlmClient.sendMessageStream.mockImplementation(() => {
-        for (const outcome of outcomes)
+        for (const [index, outcome] of outcomes.entries())
           bus.emit(MessageBusType.HOOK_PROGRESS, {
             type: MessageBusType.HOOK_PROGRESS,
             phase: 'end',
-            eventName: 'PreToolUse',
-            hookName: 'diagnostic-hook',
+            eventName:
+              vary === 'event' && index > 0 ? 'PostToolUse' : 'PreToolUse',
+            hookName:
+              'curl -H Authorization:Bearer:FAKE_SECRET https://example.com' +
+              (vary === 'hook' ? index : ''),
             systemMessage:
               outcome === 'success' ? 'diagnostic-hook information' : undefined,
             hookType: 'command',
@@ -1174,9 +1180,12 @@ describe('runNonInteractive', () => {
         'hook-progress-test',
       );
       const diagnostics = processStderrSpy.mock.calls.filter(([text]) =>
-        String(text).includes('diagnostic-hook'),
+        String(text).includes('Hook command #1'),
       );
       expect(diagnostics).toHaveLength(count);
+      expect(processStderrSpy.mock.calls.flat().join('')).not.toContain(
+        'FAKE_SECRET',
+      );
       if (format === OutputFormat.TEXT)
         expect(unsubscribe).toHaveBeenCalledExactlyOnceWith(
           ...subscribe.mock.calls[0],

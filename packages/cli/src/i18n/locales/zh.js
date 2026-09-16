@@ -7,6 +7,7 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'Running {{event}} hooks…': '正在运行 {{event}} hooks…',
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',

@@ -60,12 +60,14 @@ describe('<LoadingIndicator />', () => {
     const { lastFrame } = renderWithContext(
       <LoadingIndicator
         currentLoadingPhrase="Linting…"
-        elapsedTime={0}
+        elapsedTime={120}
         forceVisible
       />,
       StreamingState.Idle,
     );
     expect(lastFrame()).toContain('Linting…');
+    expect(lastFrame()).not.toContain('esc to cancel');
+    expect(lastFrame()).not.toContain('2m');
   });
 
   it('should not render when streamingState is Idle', () => {

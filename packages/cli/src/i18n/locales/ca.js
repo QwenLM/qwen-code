@@ -7,6 +7,7 @@
 // Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
+  'Running {{event}} hooks…': 'Executant hooks {{event}}…',
   // ============================================================================
   // Ajuda / Components de la interfície
   // ============================================================================

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 // @vitest-environment jsdom
+import { MessageBusType } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
 
 const {
   writeTerminalTitleSpy,
@@ -1335,6 +1336,48 @@ describe('AppContainer State Management', () => {
           ['same warning', 'late memory warning'],
         ),
       ).toEqual(['early warning', 'same warning', 'late memory warning']);
+    });
+
+    it('routes live hook progress into UI state and history', async () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      const bus = mockConfig.getMessageBus()!;
+      const event = {
+        type: MessageBusType.HOOK_PROGRESS,
+        eventName: 'PreToolUse',
+        hookName: 'private-command',
+        hookType: 'command' as const,
+        index: 0,
+        total: 1,
+      };
+      bus.publish({ ...event, phase: 'start' });
+      await vi.waitFor(() =>
+        expect(capturedUIState.hookStatus).toBe('Running PreToolUse hooks…'),
+      );
+      bus.publish({
+        ...event,
+        phase: 'end',
+        outcome: 'timeout',
+        durationMs: 2000,
+      });
+      await vi.waitFor(() => expect(capturedUIState.hookStatus).toBeNull());
+      expect(
+        mockedUseHistory.mock.results[0].value.addItem,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'hook_system_message',
+          level: 'error',
+          text: expect.stringContaining('timed out'),
+        }),
+        expect.any(Number),
+      );
     });
 
     it('provides UIStateContext with state management', () => {

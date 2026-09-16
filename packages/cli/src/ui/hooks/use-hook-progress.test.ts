@@ -71,6 +71,21 @@ describe('useHookProgress', () => {
     send({ phase: 'start', statusMessage: '\x1b[31mLinting…\x1b[0m' });
     expect(result.current).toBe('Linting…');
   });
+  it('keeps overlapping batches visible until their final end', () => {
+    const { result, send } = setup();
+    send({ phase: 'start', statusMessage: 'First batch' });
+    send({ phase: 'start', statusMessage: 'Second batch' });
+    expect(result.current).toBe('First batch');
+    send({});
+    expect(result.current).toBe('First batch');
+    send({});
+    expect(result.current).toBeNull();
+  });
+  it('falls back when the configured status contains only terminal controls', () => {
+    const { result, send } = setup();
+    send({ phase: 'start', statusMessage: '\x1b[31m\x1b[0m' });
+    expect(result.current).toBe('Running PreToolUse hooks…');
+  });
   it('reports outcomes and unsubscribes the exact listener', () => {
     const { bus, onOutcome, send, unmount } = setup();
     send({ outcome: 'timeout', durationMs: 2000 });
@@ -179,7 +194,7 @@ describe('hookProgressToRow', () => {
     [{ outcome: 'success', systemMessage: 'done' }, 'info', 'done'],
     [
       { outcome: 'success', systemMessage: 'warn', level: 'warning' },
-      'warning',
+      'info',
       'warn',
     ],
     [
@@ -201,11 +216,29 @@ describe('hookProgressToRow', () => {
     { outcome: 'cancelled' },
     { outcome: 'error', async: true },
     { outcome: 'blocked', eventName: 'Stop' },
+    { outcome: 'blocked', eventName: 'UserPromptSubmit' },
     { outcome: 'success', eventName: 'Stop', systemMessage: 'stop' },
     { outcome: 'success' },
   ] satisfies Array<Partial<HookProgress>>)('suppresses %j', (msg) => {
     expect(hookProgressToRow(progress(msg))).toBeNull();
   });
+  it.each(['command', 'http'] as const)(
+    'does not expose a credential-bearing %s name in text or metadata',
+    (hookType) => {
+      const row = hookProgressToRow(
+        progress({
+          hookType,
+          hookName: 'https://user:FAKE_SECRET@example.com?token=FAKE_SECRET',
+          outcome: 'error',
+          exitCode: 1,
+          error: 'failed',
+        }),
+      );
+      expect(row).not.toBeNull();
+      expect(JSON.stringify(row)).not.toContain('FAKE_SECRET');
+      expect(row?.text).toContain(hookType);
+    },
+  );
   it('removes terminal escapes, invisible formatting and newlines and bounds output', () => {
     const row = hookProgressToRow(
       progress({

@@ -98,8 +98,6 @@ import { hookProgressToRow } from './ui/hooks/use-hook-progress.js';
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
-  sanitizeForStderr,
-  DENIAL_REASON_ECHO_LIMIT,
   AlreadyReportedError,
   handleError,
   handleToolError,
@@ -939,14 +937,13 @@ export async function runNonInteractive(
     const hookBus =
       outputFormat === OutputFormat.TEXT ? config.getMessageBus() : undefined;
     const onHookProgress = (msg: HookProgress) => {
+      if (msg.eventName === 'PreToolUse' && msg.outcome === 'blocked') return;
       const row = hookProgressToRow(msg);
       if (!row || row.level === 'info') return;
       const key = `${msg.eventName}\0${msg.hookName}\0${msg.outcome}`;
       if (hookWarnings.has(key)) return;
       hookWarnings.add(key);
-      process.stderr.write(
-        sanitizeForStderr(row.text, DENIAL_REASON_ECHO_LIMIT) + '\n\n',
-      );
+      process.stderr.write(row.text + '\n\n');
     };
     // EPIPE: don't process.exit here — that bypasses the caller's
     // runExitCleanup → flush() and drops queued JSONL writes. Destroy

@@ -4023,6 +4023,15 @@ export const AppContainer = (props: AppContainerProps) => {
         stickyTodoMaxVisibleItems,
       )
     : 'hidden';
+  const hookStatus = useHookProgress({
+    config,
+    onOutcome: (row) =>
+      historyManager.addItem(
+        { type: 'hook_system_message', ...row },
+        Date.now(),
+      ),
+  });
+
   const [controlsHeight, setControlsHeight] = useState(0);
 
   // Re-measure the footer whenever the LiveAgentPanel's height can change
@@ -4056,6 +4065,7 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
+    hookStatus,
     // Composer and update notification height also shift with these; without
     // them the footer isn't re-measured during a streaming turn and the VP
     // viewport bottom clips.
@@ -4516,15 +4526,6 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingResponseLengthRef.current,
     hasExecutingTool,
   );
-
-  const hookStatus = useHookProgress({
-    config,
-    onOutcome: (row) =>
-      historyManager.addItem(
-        { type: 'hook_system_message', ...row },
-        Date.now(),
-      ),
-  });
 
   useAttentionNotifications({
     isFocused,

@@ -8,6 +8,7 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'Running {{event}} hooks…': 'Running {{event}} hooks…',
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':

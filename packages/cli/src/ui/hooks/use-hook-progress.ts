@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { t } from '../../i18n/index.js';
+import { formatDuration } from '../utils/formatters.js';
 import { useEffect, useRef, useState } from 'react';
 import {
   MessageBusType,
@@ -26,23 +28,25 @@ export interface HookProgressRow {
 export function hookProgressToRow(msg: HookProgress): HookProgressRow | null {
   if (msg.phase !== 'end' || msg.async || msg.outcome === 'cancelled')
     return null;
+  const hookName = `${msg.hookType} #${msg.index + 1}`;
   let text: string;
   let level: HookProgressRow['level'];
   switch (msg.outcome) {
     case 'timeout':
-      text = `Hook ${msg.hookName} (${msg.eventName}) timed out after ${((msg.durationMs ?? 0) / 1000).toFixed(1)}s — raise the hook's timeout to give it more time.`;
+      text = `Hook ${hookName} (${msg.eventName}) timed out after ${formatDuration(msg.durationMs ?? 0)} — raise the hook's timeout to give it more time.`;
       level = 'error';
       break;
     case 'error':
       text =
         msg.exitCode !== undefined
-          ? `Hook ${msg.hookName} (${msg.eventName}) exited with code ${msg.exitCode}: ${msg.error ?? msg.systemMessage ?? 'no output'}`
-          : `Hook ${msg.hookName} (${msg.eventName}) failed: ${msg.error ?? msg.systemMessage ?? 'no output'}`;
+          ? `Hook ${hookName} (${msg.eventName}) exited with code ${msg.exitCode}: ${msg.error ?? msg.systemMessage ?? 'no output'}`
+          : `Hook ${hookName} (${msg.eventName}) failed: ${msg.error ?? msg.systemMessage ?? 'no output'}`;
       level = msg.exitCode !== undefined ? 'warning' : 'error';
       break;
     case 'blocked':
-      if (msg.eventName === 'Stop') return null;
-      text = `Hook ${msg.hookName} blocked ${msg.eventName}: ${msg.blockedReason ?? 'no reason given'}`;
+      if (msg.eventName === 'Stop' || msg.eventName === 'UserPromptSubmit')
+        return null;
+      text = `Hook ${hookName} blocked ${msg.eventName}: ${msg.blockedReason ?? 'no reason given'}`;
       level = 'warning';
       break;
     case 'success':
@@ -55,9 +59,9 @@ export function hookProgressToRow(msg: HookProgress): HookProgressRow | null {
   }
   return {
     eventName: msg.eventName,
-    hookName: msg.hookName,
+    hookName,
     text: sanitizeForStderr(text, DENIAL_REASON_ECHO_LIMIT),
-    level: msg.level ?? level,
+    level,
   };
 }
 
@@ -72,7 +76,10 @@ export function useHookProgress({
 }: UseHookProgressOptions): string | null {
   const [status, setStatus] = useState<string | null>(null);
   const running = useRef(
-    new Map<string, { eventName: string; statusMessage?: string }>(),
+    new Map<
+      string,
+      { count: number; eventName: string; statusMessage?: string }
+    >(),
   );
   const onOutcomeRef = useRef(onOutcome);
   onOutcomeRef.current = onOutcome;
@@ -82,9 +89,18 @@ export function useHookProgress({
     const active = running.current;
     const listener = (msg: HookProgress) => {
       const key = `${msg.eventName}\0${msg.index}\0${msg.hookName}`;
-      if (msg.phase === 'start') active.set(key, msg);
-      else {
-        active.delete(key);
+      const existing = active.get(key);
+      if (msg.phase === 'start') {
+        if (existing) existing.count++;
+        else
+          active.set(key, {
+            count: 1,
+            eventName: msg.eventName,
+            statusMessage: msg.statusMessage,
+          });
+      } else {
+        if (existing && existing.count > 1) existing.count--;
+        else active.delete(key);
         const row = hookProgressToRow(msg);
         if (row) onOutcomeRef.current(row);
       }
@@ -92,9 +108,9 @@ export function useHookProgress({
       setStatus(
         first
           ? sanitizeForStderr(
-              first.statusMessage ?? `Running ${first.eventName} hooks…`,
+              first.statusMessage ?? '',
               DENIAL_REASON_ECHO_LIMIT,
-            )
+            ) || t('Running {{event}} hooks…', { event: first.eventName })
           : null,
       );
     };

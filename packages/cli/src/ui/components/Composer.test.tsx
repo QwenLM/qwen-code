@@ -243,20 +243,23 @@ describe('Composer', () => {
   });
 
   describe('Loading Indicator', () => {
-    it('prioritizes hook status even with decorative phrases disabled and while idle', () => {
-      const uiState = createMockUIState({
-        streamingState: StreamingState.Idle,
-        hookStatus: 'Linting…',
-        currentLoadingPhrase: 'Analyzing',
-      });
-      const config = createMockConfig({
-        getAccessibility: vi.fn(() => ({ enableLoadingPhrases: false })),
-      });
-      const { lastFrame } = renderComposer(uiState, config);
-      expect(lastFrame()).toContain('LoadingIndicator: Linting…');
-      expect(lastFrame()).toContain(': forced');
-      expect(lastFrame()).not.toContain('Analyzing');
-    });
+    it.each([true, false])(
+      'prioritizes hook status while idle with decorative phrases %s',
+      (enableLoadingPhrases) => {
+        const uiState = createMockUIState({
+          streamingState: StreamingState.Idle,
+          hookStatus: 'Linting…',
+          currentLoadingPhrase: 'Analyzing',
+        });
+        const config = createMockConfig({
+          getAccessibility: vi.fn(() => ({ enableLoadingPhrases })),
+        });
+        const { lastFrame } = renderComposer(uiState, config);
+        expect(lastFrame()).toContain('LoadingIndicator: Linting…');
+        expect(lastFrame()).toContain(': forced');
+        expect(lastFrame()).not.toContain('Analyzing');
+      },
+    );
     it('renders LoadingIndicator with phrase when streaming', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,

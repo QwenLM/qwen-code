@@ -32,9 +32,9 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
 
-When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top. It does not change anything: to add, edit or remove a hook, edit `settings.json`.
+When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top. It does not edit settings files: to add, edit or remove a hook, edit `settings.json`. Opening the browser does reload those definitions, as described below.
 
-Run `/hooks` to browse the configured hooks. Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
+Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
 
 Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
 
@@ -504,7 +504,7 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 | :-------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `0`       | Success. A JSON object in `stdout` controls behavior. Any other `stdout`, including bare JSON values such as `42`, is plain text: it is added to the model context on `SessionStart`, `UserPromptSubmit` and `UserPromptExpansion`, and kept as a system message on other events. Output that looks like a JSON object but does not parse is never added to the model context. |
 | `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model.                                                                                                                                                                                                                                                                                          |
-| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                                                                                                                                                                                    |
+| Other     | Non-blocking error. Ink displays a warning; headless text mode reports it on stderr after initialization. Execution continues.                                                                                                                                                                                                                                                 |
 
 Adding plain text to the model context applies only to a command hook's `stdout`. An HTTP hook's response body is read as JSON only when its `Content-Type` is `application/json`; any other non-empty body becomes a `systemMessage` on every event. An HTTP hook that adds context must return JSON with `hookSpecificOutput.additionalContext`.
 
@@ -1517,9 +1517,9 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 
 ### Seeing what your hooks do
 
-In the Ink UI, the loading line shows `Running <Event> hooks…` while a hook runs, or its configured `statusMessage`. Hook failures, timeouts, non-blocking warnings, and blocks on events other than Stop produce a visible result without enabling debug logging. Timeout messages suggest raising the hook's `timeout`.
+In the Ink UI, the loading line shows `Running <Event> hooks…` while a hook runs, or its configured `statusMessage`. Synchronous hook failures, timeouts, and blocking decisions produce a visible result without enabling debug logging. Stop and UserPromptSubmit blocks keep their existing messages. Successful hook system messages appear as informational text; plain-text stdout from successful command hooks is not a warning. Diagnostics identify hooks by type and position in the event batch, without copying their command or URL. Timeout messages suggest raising the hook's `timeout`.
 
-In headless text mode, the same warnings and errors go to stderr once per event, hook name, and outcome combination. JSON output modes do not emit these diagnostics. Hooks cancelled with Esc do not produce a result message. Async hook output is handled separately; see [Async Hooks](#async-hooks).
+In headless text mode, warnings and errors from hooks fired after initialization go to stderr once per event, hook name, and outcome combination. Startup hooks run before this subscriber attaches. PreToolUse denials keep their existing tool-denial message. JSON output modes do not emit these diagnostics. Hooks cancelled with Esc do not produce a result message. Async hook output is not delivered to the conversation yet; see [Async Hooks](#async-hooks).
 
 ### Async Hooks
 
