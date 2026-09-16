@@ -13050,15 +13050,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
-    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+    async controlSessionWorkflowTask(
+      sessionId,
+      taskId,
+      action,
+      context,
+      input,
+    ) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
 
-      // A workflow action runs a saved workflow, or restarts a live run,
-      // through this session's own tool registry in its cwd — the checkout the
-      // transfer is moving — and sets none of the busy flags the barrier or the
-      // route's quiescence re-check reads.
+      // A workflow action runs a saved workflow, a script the caller supplied,
+      // or restarts a live run, through this session's own tool registry in its
+      // cwd — the checkout the transfer is moving — and sets none of the busy
+      // flags the barrier or the route's quiescence re-check reads.
       assertSessionResetNotPending(sessionId);
       return requestSessionStatus<{
         changed: boolean;
@@ -13067,6 +13073,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
         taskId,
         action,
+        // Forwarded only when present, so a control action's request body
+        // stays byte-identical to what it was before start input existed.
+        ...(input?.args !== undefined ? { args: input.args } : {}),
+        ...(input?.sourceRef !== undefined
+          ? { sourceRef: input.sourceRef }
+          : {}),
+        ...(input?.script !== undefined ? { script: input.script } : {}),
       });
     },
 

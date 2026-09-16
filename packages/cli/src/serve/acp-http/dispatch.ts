@@ -63,6 +63,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
@@ -3911,14 +3912,15 @@ export class AcpDispatcher {
               action !== 'retry' &&
               action !== 'rerun' &&
               action !== 'delete-history' &&
-              action !== 'run-saved'
+              action !== 'run-saved' &&
+              action !== 'run-script'
             ) {
               if (id !== undefined) {
                 conn.sendConn(
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
                   ),
                 );
               }
@@ -3933,6 +3935,7 @@ export class AcpDispatcher {
               taskId,
               action,
               this.sessionCtx(conn, sessionId, loopback),
+              readServeWorkflowActionInput(params),
             );
             this.replyConn(conn, id, result as unknown);
           });
