@@ -2131,7 +2131,10 @@ export class ChatRecordingService {
     turnId: string,
     usage: GenerateContentResponseUsageMetadata,
   ): void {
-    const total = usage.totalTokenCount;
+    this.billGoalTurnTokens(turnId, usage.totalTokenCount ?? 0);
+  }
+
+  billGoalTurnTokens(turnId: string, total: number): void {
     if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
       return;
     }

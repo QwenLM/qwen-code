@@ -30,6 +30,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateRecordPayloadV2,
   reduceGoalControl,
+  reduceGoalSpend,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
 
@@ -2077,5 +2078,21 @@ describe('turn and active-time budgets', () => {
       activeTimeMs: 1_800_100,
       activeTimeBudgetMs: 2_400_100,
     });
+  });
+});
+
+describe('reduceGoalSpend', () => {
+  it('adds model spend without advancing the turn', () => {
+    const goal = goalRecord({ tokensUsed: 10, turnCount: 2 });
+    expect(reduceGoalSpend(goal, 30, 99)).toEqual({
+      ...goal,
+      tokensUsed: 40,
+      updatedAt: 99,
+    });
+    expect(goal.tokensUsed).toBe(10);
+  });
+  it.each([0, -1, NaN, Infinity])('ignores unusable spend %s', (tokens) => {
+    const goal = goalRecord();
+    expect(reduceGoalSpend(goal, tokens, 99)).toBe(goal);
   });
 });
