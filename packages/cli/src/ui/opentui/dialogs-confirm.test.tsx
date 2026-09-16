@@ -622,11 +622,22 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     const expanded = container.textContent ?? '';
     expect(expanded).toContain('TAIL_MARKER');
-    // The expanded tail window (60 rows at height 80) drops the head rows;
-    // the label is their only trace on the alt screen.
-    expect(expanded).toContain('... first 40 lines hidden ...');
+    // The expanded tail window (52 rows at height 80: 80 minus the 23 chrome
+    // rows around the body, the 4 outcome rows, and the label row) drops the
+    // head rows; the label is their only trace on the alt screen.
+    expect(expanded).toContain('... first 48 lines hidden ...');
     expect(expanded).not.toContain('HEAD_MARKER');
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
+    // The approval surface must survive expansion: the windowed body plus the
+    // label row, the dialog chrome (frame 4, title 1, margins 2, question 1,
+    // outcomes 4, footer 2 = 14), and the 13 transcript rows above the dialog
+    // must fit the 80-row viewport — otherwise ctrl-s pushes the question and
+    // the outcome rows off screen while Enter still commits (R7-1).
+    const hidden = Number(/first (\d+) lines hidden/.exec(expanded)?.[1]);
+    const visibleRows = 100 - hidden; // every fixture row is one physical row
+    expect(visibleRows + 1 + 14 + 13).toBeLessThanOrEqual(80);
+    expect(expanded).toContain("Allow execution of: 'ls'?");
+    expect(expanded).toContain('No, suggest changes (esc)');
   });
 
   it('renders a short exec command in full on a short terminal', () => {
