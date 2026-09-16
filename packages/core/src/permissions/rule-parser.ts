@@ -908,15 +908,39 @@ const COMMENT_WORD_BOUNDARIES = [' ', '\t', '\n', ';', '&', '|'];
  * literal — treating it as a comment would swallow the rest of the line and
  * merge a real `;` boundary away, dropping the rule check the following
  * command would have got.
+ *
+ * A `\<newline>` continuation is the one escape that does not keep the `#`
+ * literal: bash deletes the backslash and the newline together, so the
+ * character left adjacent to the `#` is the one before the backslash. Testing
+ * the newline itself read the next line's `#` as mid-word, kept the `;` after
+ * it a boundary, and fired a hard deny on a command bash never runs —
+ * `bash --noprofile --norc -xc $'echo hi \\\n# c ; echo TAIL'` traces only
+ * `+ echo hi`. Unlike `ask`, a deny cannot be approved past.
  */
 function isCommentStart(command: string, index: number): boolean {
   if (index === 0) {
     return true;
   }
-  const previous = command[index - 1]!;
+  // Step back over every `\<newline>` pair bash deletes, so the word test and
+  // its escape parity are both evaluated against the character bash leaves
+  // adjacent to the `#`.
+  let previousIndex = index - 1;
+  while (command[previousIndex] === '\n') {
+    const continuation = precedingBackslashCount(command, previousIndex);
+    if (continuation % 2 === 0) {
+      break;
+    }
+    previousIndex -= continuation + 1;
+  }
+  if (previousIndex < 0) {
+    // The command opens with continuations, so bash sees the `#` at the start
+    // of a word.
+    return true;
+  }
+  const previous = command[previousIndex]!;
   return (
     COMMENT_WORD_BOUNDARIES.includes(previous) &&
-    precedingBackslashCount(command, index - 1) % 2 === 0
+    precedingBackslashCount(command, previousIndex) % 2 === 0
   );
 }
 
@@ -973,6 +997,13 @@ export function splitCompoundCommandSegments(
   // a `#`-comment ends at a backtick rather than at the physical newline, so the
   // skip below consults it.
   let backtickDepth = 0;
+  // Quote state saved by each open `$( … )` / backtick body, restored at its
+  // closer. bash parses a substitution body independently of the quotes around
+  // it, so the body's own quotes must not close an enclosing string: one flat
+  // `inDouble` desynced on `echo "$(printf "a # b")"`, the `#` inside the
+  // nested string then read as word-initial, and the skip folded the real `;`
+  // after the closing quote away, costing the tail command its own rule check.
+  const quoteFrames: Array<[boolean, boolean]> = [];
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -983,6 +1014,35 @@ export function splitCompoundCommandSegments(
     }
     if (ch === '\\') {
       escaped = true;
+      continue;
+    }
+    // Substitution openers are matched before the quote state is consulted: a
+    // `$( … )` or backtick body inside a double-quoted string is still a
+    // substitution, and its body is scanned with its own quote state. Inside a
+    // single-quoted string both are literal text, so that case falls through to
+    // the quote skip below. `$((` is arithmetic, not a substitution, and stays
+    // with the arithmetic tracking further down.
+    if (
+      !inSingle &&
+      ((ch === '$' && command[i + 1] === '(' && command[i + 2] !== '(') ||
+        (ch === '`' && backtickDepth === 0))
+    ) {
+      quoteFrames.push([inSingle, inDouble]);
+      inSingle = false;
+      inDouble = false;
+      if (ch === '`') {
+        backtickDepth = 1;
+      } else {
+        commandSubDepth++;
+      }
+      continue;
+    }
+    if (!inSingle && ch === '`') {
+      backtickDepth = 0;
+      const frame = quoteFrames.pop();
+      if (frame) {
+        [inSingle, inDouble] = frame;
+      }
       continue;
     }
     if (ch === "'" && !inDouble) {
@@ -1004,12 +1064,6 @@ export function splitCompoundCommandSegments(
       i++; // -1 +1: step onto the `{`
       continue;
     }
-    // `$((` is arithmetic, tracked below, and no substitution at all. The `(`
-    // is left to the operator scan so the matching `)` decrements this.
-    if (ch === '$' && command[i + 1] === '(' && command[i + 2] !== '(') {
-      commandSubDepth++;
-      continue;
-    }
     // Arithmetic's own closers are consumed below as the `))` pair, so a `)`
     // reached while `arithmeticDepth` is above zero is never the `)` that
     // closes a `$( … )`. Charging it here zeroed the depth on the first half of
@@ -1021,12 +1075,13 @@ export function splitCompoundCommandSegments(
     // one allow-covered segment (#11815).
     if (ch === ')' && arithmeticDepth === 0 && commandSubDepth > 0) {
       commandSubDepth--;
-    }
-    // An unescaped backtick outside quotes opens or closes a body; quotes and
-    // backslashes were handled above, so this only sees a live delimiter.
-    if (ch === '`') {
-      backtickDepth = backtickDepth === 0 ? 1 : 0;
-      continue;
+      // The body ended, so the quotes around it are live again: the `"` that
+      // follows the closer of `"$(…)"` closes the outer string, and an operator
+      // after that is a real boundary.
+      const frame = quoteFrames.pop();
+      if (frame) {
+        [inSingle, inDouble] = frame;
+      }
     }
     if (
       ch === '}' &&

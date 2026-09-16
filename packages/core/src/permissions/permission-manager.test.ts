@@ -816,6 +816,18 @@ describe('splitCompoundCommand', () => {
     ]);
   });
 
+  // …and the same holds for a `#` inside a *nested* quoted string in a
+  // substitution body. bash parses that body independently of the quotes around
+  // it — `bash --noprofile --norc -xc 'echo "$(printf "a # b")" ; echo TAIL'`
+  // traces `+ echo 'a # b'` and then `+ echo TAIL` — so one flat quote flag
+  // desyncs: the inner `"` cleared the outer string state, the `#` read as
+  // word-initial, and the skip folded the real `;` away.
+  it('does not treat a # inside a nested quoted substitution as a comment', async () => {
+    expect(
+      splitCompoundCommand('echo "$(printf "a # b")" ; rm -rf /tmp/x'),
+    ).toEqual(['echo "$(printf "a # b")"', 'rm -rf /tmp/x']);
+  });
+
   // The row above pins nothing about branch *order*: its `#` is preceded by `'`,
   // which is not a word boundary, so `isCommentStart` returns false there no
   // matter where the comment block sits. A quoted `#` preceded by a space stays
@@ -890,6 +902,19 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('echo hi # foo \\\nrm -rf /tmp/x')).toEqual([
       'echo hi # foo \\',
       'rm -rf /tmp/x',
+    ]);
+  });
+
+  // The mirror image of the row above, and the one the escape-parity check got
+  // backwards: outside a comment bash deletes a `\<newline>` pair outright, so
+  // the `#` on the next line is word-initial after all and the tail is comment
+  // text — `bash --noprofile --norc -xc $'echo hi \\\n# c ; echo TAIL'` traces
+  // only `+ echo hi`. Keeping that `#` literal left the `;` after it a real
+  // boundary, so a configured deny fired on an `rm` bash never runs, and a deny
+  // cannot be approved past the way an ask can.
+  it('reads a # after a line continuation as a comment', async () => {
+    expect(splitCompoundCommand('echo hi \\\n# c ; rm -rf /tmp/x')).toEqual([
+      'echo hi \\\n# c ; rm -rf /tmp/x',
     ]);
   });
 
@@ -3118,6 +3143,42 @@ describe('PermissionManager', () => {
           command: 'echo a # c && rm -rf poc.flag',
         }),
       ).toBe('allow');
+    });
+
+    // The nested-quote desync measured at the verdict, not only at the split:
+    // bash runs the `rm` after the closing quote, so folding it under
+    // `Bash(echo *)` turned a configured deny into an allow.
+    it('a # inside a nested quoted substitution: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo "$(printf "a # b")" ; rm -rf /tmp/x',
+        }),
+      ).toBe('deny');
+    });
+
+    // The mirror image: bash deletes the `\<newline>` pair, so the tail is
+    // comment text bash never runs and a hard deny on it is a false positive
+    // that cannot be approved past. No allow rule covers the line, so it stays
+    // a prompt.
+    it('a # after a line continuation: ask, not a deny bash never earns', async () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hi \\\n# c ; rm -rf /tmp/x',
+        }),
+      ).toBe('ask');
     });
   });
 
