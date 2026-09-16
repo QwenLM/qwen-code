@@ -7101,13 +7101,20 @@ describe('review supersede salvage (#10110)', () => {
     }
   }
 
+  // The armed block also retracts `unchanged_diff` (R4-2): this is the third
+  // post-agent route to a stamp and the only one that falls through to
+  // `review_completed=true` instead of exiting, so the gate's first arm is
+  // false by construction here and its second must not be left holding
+  // whatever the agent wrote. `review_completed` itself stays honest — the
+  // review did complete, only its verdict was drift-capped.
   it('writes the salvage outputs only for an armed marker and a real move (replayed block)', () => {
     const sha = 'b'.repeat(40);
     expect(runSalvageOutputs({ movedTo: sha })).toEqual([
       'salvaged=true',
       `salvage_moved_to=${sha}`,
+      'unchanged_diff=false',
     ]);
-    // No marker: an ordinary run emits neither output (a flipped condition
+    // No marker: an ordinary run emits no output at all (a flipped condition
     // would post the historical-head note on every run).
     expect(runSalvageOutputs({ marker: null })).toEqual([]);
     // Explicit runs (/review, review_requested, dispatch) arm no watcher,
@@ -7119,6 +7126,7 @@ describe('review supersede salvage (#10110)', () => {
     expect(runSalvageOutputs({})).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
+      'unchanged_diff=false',
     ]);
     // Forged marker, head NEVER moved: the outputs block follows the cede
     // sites' live-head re-check — no outputs, and the historical-head
@@ -7136,6 +7144,7 @@ describe('review supersede salvage (#10110)', () => {
       expect(runSalvageOutputs({ movedToFifo: true })).toEqual([
         'salvaged=true',
         'salvage_moved_to=unknown',
+        'unchanged_diff=false',
       ]);
     },
   );
@@ -7148,10 +7157,12 @@ describe('review supersede salvage (#10110)', () => {
     expect(runSalvageOutputs({ movedTo: forged })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
+      'unchanged_diff=false',
     ]);
     expect(runSalvageOutputs({ movedTo: 'a'.repeat(41) })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
+      'unchanged_diff=false',
     ]);
   });
 
@@ -7166,7 +7177,11 @@ describe('review supersede salvage (#10110)', () => {
           movedTo: 'b'.repeat(40),
           movedToSwapOnRead: true,
         }),
-      ).toEqual(['salvaged=true', 'salvage_moved_to=unknown']);
+      ).toEqual([
+        'salvaged=true',
+        'salvage_moved_to=unknown',
+        'unchanged_diff=false',
+      ]);
     },
   );
 
@@ -7177,6 +7192,7 @@ describe('review supersede salvage (#10110)', () => {
     expect(runSalvageOutputs({ movedToHuge: true })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
+      'unchanged_diff=false',
     ]);
   });
 
@@ -7550,7 +7566,11 @@ describe('qwen pr review unchanged-diff anchor', () => {
   // ceded — and on a salvaged head, defeating the salvage exclusion. Every
   // post-agent cede must overwrite a planted value last in each arm: a false
   // write can only suppress a stamp, never enable one.
-  it('overwrites every planted stamp-gate input on each post-agent cede', () => {
+  // R4-2. The cedes are not the whole enumeration. A third post-agent route
+  // reaches the gate without ever exiting — the salvage-COMPLETION arm falls
+  // through to `review_completed=true` at the end of the step — so a defence
+  // listed per `exit 0` site was green while that route stayed open.
+  it('overwrites every planted stamp-gate input per post-agent route', () => {
     const run = anchorDoc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Run review',
     ).run;
@@ -7588,6 +7608,27 @@ describe('qwen pr review unchanged-diff anchor', () => {
         );
       }
     }
+    // R4-2, the route with no `exit 0` to order against: the
+    // salvage-COMPLETION arm writes `salvaged=true`, falls through the
+    // docs-only block and lands on `review_completed=true` at the end of the
+    // step. Arm 1 is then false by construction, so arm 2 fires on whatever
+    // `unchanged_diff` the agent left in the output file — and the stamp is
+    // permanent, becoming the anchor every later diff-identical push skips
+    // on. Pin the retraction to the arm that emits `salvaged=true`.
+    const salvageCompletion =
+      run.match(/echo "salvaged=true"[\s\S]*?\} >> "\$GITHUB_OUTPUT"/)?.[0] ??
+      '';
+    expect(salvageCompletion).not.toBe('');
+    expect(salvageCompletion).toContain('echo "unchanged_diff=false"');
+    // Only arm 2 is retracted there. `review_completed=true` stays honest —
+    // the review ran to completion, only its verdict was drift-capped — and
+    // the historical-head note's two gates plus the relay's env all read it,
+    // so a "clear both on every route" edit would silently kill them. Pin
+    // that the completion write survives, after the arm that caps it.
+    expect(run).toContain('echo "review_completed=true" >> "$GITHUB_OUTPUT"');
+    expect(run.indexOf('echo "salvaged=true"')).toBeLessThan(
+      run.indexOf('echo "review_completed=true" >> "$GITHUB_OUTPUT"'),
+    );
     // The honest writer of unchanged_diff sits in the skip branch, which
     // exits before the agent runs — so no cede can be reached with a true
     // value this step wrote itself.

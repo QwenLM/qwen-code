@@ -2458,6 +2458,17 @@ jobs:
             {
               echo "salvaged=true"
               echo "salvage_moved_to=$salvage_moved_to"
+              # A third post-agent route to a stamp, and the only one that
+              # falls through instead of exiting: `salvaged=true` makes the
+              # gate's first arm false by construction, which leaves
+              # `unchanged_diff` as the one input that can still fire it —
+              # on whatever the agent left in the output file. The
+              # `review_completed=true` below IS earned here (the review ran
+              # to completion; only its verdict was drift-capped), so this
+              # arm retracts the one input it did not earn: the skip branch
+              # declined far above, and a false write is inert on every
+              # honest path.
+              echo "unchanged_diff=false"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -3122,8 +3133,11 @@ jobs:
 
   # The anchor the unchanged-diff skip in review-pr's "Run review" looks
   # for: a `qwen-review/reviewed` success status on a head whose diff received
-  # an uncapped review (or, on a skip, was identical to a reviewed one —
-  # stamping it too keeps the next merge's lookup one commit deep). A job of
+  # a completed, non-salvaged review (or, on a skip, was identical to a
+  # reviewed one — stamping it too keeps the next merge's lookup one commit
+  # deep). Those two are what the gate below can actually read: the CLI caps
+  # a verdict out of APPROVE for several more reasons than salvage, and none
+  # of the others is a job output. A job of
   # its own so
   # review-pr holds no statuses permission: its checkout persists the job's
   # GITHUB_TOKEN where the reviewed agent can read it. The sha is the
@@ -3131,7 +3145,11 @@ jobs:
   # mark the head it was reviewing — no more than posting a clean review,
   # which it can already do. BOTH stamp inputs in the gate below —
   # review_completed and unchanged_diff — ARE outputs of the agent's own
-  # step, though, so every post-agent cede there writes both false last: a
+  # step, though, so all three post-agent routes out of that step retract
+  # them: the two cedes write both false before their `exit 0`, and the
+  # salvage-completion arm — which falls through to `review_completed=true`
+  # instead of exiting — writes `unchanged_diff=false` beside
+  # `salvaged=true`, leaving the gate's first arm false by construction. A
   # planted value may suppress a stamp, never enable one. The skip script
   # trusts only statuses created by
   # github-actions[bot], so one written with CI_BOT_PAT (also within the

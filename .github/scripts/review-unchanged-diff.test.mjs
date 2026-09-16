@@ -479,4 +479,75 @@ describe('review-unchanged-diff', () => {
       git(ci, 'update-ref', '-d', plantRef);
     }
   });
+
+  it('names the anchor when its own merge base is ambiguous', () => {
+    // R3-3. The criss-cross case above fails at `head_fp`, before the walk
+    // ever reaches an anchor, so the anchor-side arms of the same rc-2
+    // refusal were dead to this suite: dropping
+    // `2) verdict "changed anchor-ambiguous-merge-base"` left every case
+    // green, and a `log` added to debug the block would clobber `$?` and
+    // silently fold the arm into `*)` — reporting every ambiguous ANCHOR as
+    // `anchor-no-merge-base`, the wrong-mechanism misreport rc 2 exists to
+    // prevent. Mirror the head-side fixture: the head's own base is unique
+    // because it merges main, while the stamped ancestor one first-parent
+    // step below it is the criss-cross commit with two.
+    const base = git(work, 'rev-parse', 'main');
+    git(work, 'checkout', '-q', '-b', 'cc-anchor', base);
+    const prSide = commit(work, 'ca-pr.txt', 'pr side\n', 'ca: pr side');
+    git(work, 'checkout', '-q', 'main');
+    const mainSide = commit(
+      work,
+      'ca-main.txt',
+      'main side\n',
+      'ca: main side',
+    );
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', prSide);
+    git(work, 'push', '-q', 'origin', 'main');
+    git(work, 'checkout', '-q', 'cc-anchor');
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', mainSide);
+    const anchor = git(work, 'rev-parse', 'HEAD');
+    markReviewed(anchor);
+    // A real change on top, so the head's own fingerprint is non-degenerate
+    // and the walk has to step past an unstamped commit to reach the anchor.
+    commit(work, 'ca-head.txt', 'head change\n', 'ca: head change');
+    // Merging main back makes the main tip an ancestor of the head, so
+    // `merge-base --all` resolves it to exactly one commit and `head_fp`
+    // succeeds — the walk then reaches the anchor and refuses THERE.
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
+    const head = git(work, 'rev-parse', 'HEAD');
+    git(work, 'push', '-q', '--force', 'origin', `HEAD:refs/pull/${PR}/head`);
+    const { verdict } = run(head);
+    assert.equal(verdict, 'changed anchor-ambiguous-merge-base');
+  });
+
+  it('names the anchor when it has no merge base at all', () => {
+    // R3-3, the other arm: `fingerprint` returns 1 when `merge-base --all`
+    // finds no common ancestor, and the anchor-side `*)` arm has to name the
+    // ANCHOR rather than reuse the head-side `changed no-merge-base` the
+    // block above it reports. An orphan root on the PR's first-parent line
+    // is the shape — the head still has a base because it merges main, while
+    // the stamped ancestor below it shares no history with main at all.
+    git(work, 'checkout', '-q', 'pr');
+    git(work, 'checkout', '-q', '--orphan', 'orphan-anchor');
+    const anchor = commit(work, 'orphan.txt', 'orphan root\n', 'O: root');
+    markReviewed(anchor);
+    // `-X ours`: with no merge base, every file both trees carry is an
+    // add/add conflict, and the resolution is irrelevant here — the anchor's
+    // fingerprint fails at `merge-base` before any diff is taken.
+    git(
+      work,
+      'merge',
+      '-q',
+      '--no-edit',
+      '--no-ff',
+      '-X',
+      'ours',
+      '--allow-unrelated-histories',
+      'main',
+    );
+    const head = git(work, 'rev-parse', 'HEAD');
+    git(work, 'push', '-q', '--force', 'origin', `HEAD:refs/pull/${PR}/head`);
+    const { verdict } = run(head);
+    assert.equal(verdict, 'changed anchor-no-merge-base');
+  });
 });
