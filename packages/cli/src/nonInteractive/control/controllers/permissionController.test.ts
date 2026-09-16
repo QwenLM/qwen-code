@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ApprovalMode,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   InputFormat,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -185,6 +186,46 @@ describe('PermissionController', () => {
       'wf_2',
       'wfap_2',
       ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
+    );
+  });
+
+  it('cancels workflow approval with an explanation when approval is already aborted', async () => {
+    const context = createContext();
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const approvalAbort = new AbortController();
+    approvalAbort.abort();
+
+    await controller.handleWorkflowApproval(
+      'wf_aborted',
+      {
+        approvalId: 'wfap_aborted',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      approvalAbort.signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_aborted',
+      'wfap_aborted',
+      ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
     );
   });
 
@@ -318,6 +359,45 @@ describe('PermissionController', () => {
       'wf_cleared',
       'wfap_cleared',
       ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
+    );
+  });
+
+  it('cancels workflow approval with an explanation when stream-json is unavailable', async () => {
+    const context = createContext();
+    vi.mocked(context.config.getInputFormat).mockReturnValue(InputFormat.TEXT);
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+
+    await controller.handleWorkflowApproval(
+      'wf_text',
+      {
+        approvalId: 'wfap_text',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      new AbortController().signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_text',
+      'wfap_text',
+      ToolConfirmationOutcome.Cancel,
+      AUTO_REJECT_APPROVAL_PAYLOAD,
     );
   });
 
@@ -441,6 +521,102 @@ describe('PermissionController', () => {
       expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
         cancelMessage:
           'The host could not present the required approval for "ask_user_question".',
+      });
+    });
+  });
+
+  it('reports an aborted turn without blaming host interaction support', async () => {
+    const context = {
+      ...createContext(),
+      abortSignal: AbortSignal.abort(),
+    };
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const sendControlRequest = vi.spyOn(controller, 'sendControlRequest');
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-question-aborted',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        invocation: {
+          requiresUserInteraction: () => true,
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      } as never,
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage:
+          'The turn was cancelled before the approval could be answered.',
+      });
+    });
+    expect(sendControlRequest).not.toHaveBeenCalled();
+  });
+
+  it('reports an in-flight aborted turn without blaming host interaction support', async () => {
+    const abortController = new AbortController();
+    const context = {
+      ...createContext(),
+      abortSignal: abortController.signal,
+    };
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const sendControlRequest = vi
+      .spyOn(controller, 'sendControlRequest')
+      .mockImplementation(
+        (_payload, _timeout, signal) =>
+          new Promise((_, reject) => {
+            expect(signal?.aborted).toBe(false);
+            signal?.addEventListener(
+              'abort',
+              () => reject(new Error('Request aborted')),
+              { once: true },
+            );
+          }),
+      );
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-question-in-flight-abort',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        invocation: {
+          requiresUserInteraction: () => true,
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      } as never,
+    ]);
+
+    await vi.waitFor(() => expect(sendControlRequest).toHaveBeenCalled());
+    abortController.abort();
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage:
+          'The turn was cancelled before the approval could be answered.',
       });
     });
   });
