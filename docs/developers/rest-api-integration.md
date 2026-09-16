@@ -40,6 +40,7 @@ client on Node.js 22 or newer:
 {
   "mcpServers": {
     "qwen-serve-bridge": {
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "-p", "@qwen-code/sdk", "qwen-serve-mcp"],
       "env": {
@@ -55,7 +56,9 @@ client on Node.js 22 or newer:
 `QWEN_DAEMON_URL` defaults to `http://127.0.0.1:4170`;
 `QWEN_DAEMON_TOKEN` carries the daemon bearer token when authentication is
 enabled; and `QWEN_WORKSPACE_CWD` optionally supplies the default workspace for
-session creation.
+session creation. These names are read by the MCP bridge. Daemon channel and
+TUI adapters instead use `QWEN_DAEMON_WORKSPACE` for their workspace override;
+they also read `QWEN_DAEMON_URL` and `QWEN_DAEMON_TOKEN`.
 Leave `QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE` unset unless the MCP client is trusted
 to perform restricted global-scope writes such as changing approval mode,
 toggling tools, and restarting MCP servers. Set it to `true` to enable those
