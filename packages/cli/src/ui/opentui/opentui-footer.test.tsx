@@ -142,9 +142,9 @@ describe('OpenTuiLoadingIndicator', () => {
   });
 
   it("holds ink's static frame once a call is parked on a confirmation", () => {
-    const { container } = render(
-      <OpenTuiLoadingIndicator streaming={false} waiting />,
-    );
+    // Parked, not idle: the shell renders this row with the turn still in
+    // flight, so every tick source has to be off on `waiting` alone.
+    const { container } = render(<OpenTuiLoadingIndicator streaming waiting />);
     // The frame stays put because no tick exists to move it, not because the
     // next tick happens to draw the same glyph.
     expect(vi.getTimerCount()).toBe(0);
@@ -157,11 +157,33 @@ describe('OpenTuiLoadingIndicator', () => {
     expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
   });
 
+  it('resumes the elapsed counter a parked call paused instead of restarting it', () => {
+    const { container, rerender } = render(
+      <OpenTuiLoadingIndicator streaming />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(container.textContent).toContain('(3s');
+    rerender(<OpenTuiLoadingIndicator streaming waiting />);
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    rerender(<OpenTuiLoadingIndicator streaming />);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    // Four, not one: a pause that read as "inactive" would reset the accumulated
+    // elapsed on the way back, and the row would report a turn that has been
+    // running for half a minute as four seconds old.
+    expect(container.textContent).toContain('(4s');
+  });
+
   it('keeps the waiting row but loses its phrase when loading phrases are off', () => {
     // ui.accessibility.enableLoadingPhrases: ink's Composer passes no phrase,
     // and the row stays so the waiting-row sequence is unchanged.
     const { container } = render(
-      <OpenTuiLoadingIndicator streaming={false} waiting showPhrase={false} />,
+      <OpenTuiLoadingIndicator streaming waiting showPhrase={false} />,
     );
     expect(container.textContent).not.toContain(
       'Waiting for user confirmation',

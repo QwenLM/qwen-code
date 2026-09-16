@@ -106,7 +106,10 @@ export function OpenTuiLoadingIndicator({
   // The shared cycler resolves the phrase list for all nine locales and owns
   // the 15s rotation, so this renderer cannot drift from ink's.
   const phrase = usePhraseCycler(streaming, waiting);
-  const elapsedTime = useTimer(streaming, 0);
+  // Paused rather than deactivated while a call is parked: useTimer zeroes its
+  // accumulated elapsed on a false-to-true edge, so dropping `waiting` out of
+  // `isActive` would restart the counter when the parked call resumes.
+  const elapsedTime = useTimer(streaming, 0, waiting);
   const fallbackRef = useRef(0);
   const animatedChars = useAnimationFrame(
     streamingCharsRef ?? fallbackRef,
