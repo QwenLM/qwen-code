@@ -227,6 +227,7 @@ export type RestoreStandaloneSessionOptions = Pick<
   | 'clientId'
   | 'historyPageSize'
   | 'liveReplayMode'
+  | 'compactedReplayMode'
   | 'hideInheritedHistory'
   | 'approvalMode'
 >;
@@ -2335,6 +2336,9 @@ export class StandaloneSessionService {
                 : {}),
               ...(action === 'load' && options.historyPageSize !== undefined
                 ? { historyPageSize: options.historyPageSize }
+                : {}),
+              ...(action === 'load' && options.compactedReplayMode !== undefined
+                ? { compactedReplayMode: options.compactedReplayMode }
                 : {}),
               ...(action === 'load' && options.liveReplayMode !== undefined
                 ? { liveReplayMode: options.liveReplayMode }

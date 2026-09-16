@@ -1958,122 +1958,135 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    it('re-attaches the journaled envelope when retrying an accepted round that failed terminally before content (Ctrl+Y)', async () => {
-      // Regression pin for the accepted-then-failed-BEFORE-content corner:
-      // the accept branch strips the envelope parts from the stored retry
-      // payload (the push put them in the session history), but the round
-      // can still fail terminally before any content (a 503 after
-      // exhausted retries — the exact shape modeled below). The pushed
-      // entry is then the trailing orphan the Retry path pops before
-      // re-pushing the payload, and a landing push suppresses the
-      // restore. A payload still missing the envelope would silently lose
-      // it while the delivery journal claims delivered — so the retry
-      // must re-attach it, leaving exactly one envelope copy after the
-      // pop+push replacement.
-      const recordNotification = vi.fn();
-      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
-        recordThought: vi.fn(),
-        initialize: vi.fn(),
-        recordMessage: vi.fn(),
-        recordMessageTokens: vi.fn(),
-        recordToolCalls: vi.fn(),
-        getConversationFile: vi.fn(),
-        recordNotification,
-      });
+    it.each([false, true])(
+      'respects the completed-turn recovery boundary when retrying an accepted round (boundary: %s)',
+      async (hasCompletedBoundary) => {
+        // Regression pin for the accepted-then-failed-BEFORE-content corner:
+        // the accept branch strips the envelope parts from the stored retry
+        // payload (the push put them in the session history), but the round
+        // can still fail terminally before any content (a 503 after
+        // exhausted retries — the exact shape modeled below). The pushed
+        // entry is then the trailing orphan the Retry path pops before
+        // re-pushing the payload, and a landing push suppresses the
+        // restore. A payload still missing the envelope would silently lose
+        // it while the delivery journal claims delivered — so the retry
+        // must re-attach it, leaving exactly one envelope copy after the
+        // pop+push replacement.
+        const recordNotification = vi.fn();
+        mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+          recordThought: vi.fn(),
+          initialize: vi.fn(),
+          recordMessage: vi.fn(),
+          recordMessageTokens: vi.fn(),
+          recordToolCalls: vi.fn(),
+          getConversationFile: vi.fn(),
+          recordNotification,
+        });
 
-      const {
-        result,
-        rerenderWithToolCalls,
-        leaderCallback,
-        completeToolRound,
-        client,
-      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+        const {
+          result,
+          rerenderWithToolCalls,
+          leaderCallback,
+          completeToolRound,
+          client,
+        } = renderBusyMultiRoundTask([createExecutingToolCall()]);
 
-      act(() => {
-        leaderCallback()(teammateModelText, teammateDisplay);
-      });
+        act(() => {
+          leaderCallback()(teammateModelText, teammateDisplay);
+        });
 
-      // Same shape as the test above: the settlement shim accepts after
-      // the first event, then a terminal error event ends the stream,
-      // setting lastPromptErroredRef and making Ctrl+Y admissible.
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.Error,
-            value: { error: { message: 'model overloaded' } },
-          };
-          yield {
-            type: ServerLlmEventType.Finished,
-            value: { reason: 'STOP', usageMetadata: undefined },
-          };
-        })(),
-      );
+        // Same shape as the test above: the settlement shim accepts after
+        // the first event, then a terminal error event ends the stream,
+        // setting lastPromptErroredRef and making Ctrl+Y admissible.
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.Error,
+              value: { error: { message: 'model overloaded' } },
+            };
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
 
-      const completed = createCompletedToolCall();
-      rerenderWithToolCalls([completed]);
-      await completeToolRound([completed]);
+        const completed = createCompletedToolCall();
+        rerenderWithToolCalls([completed]);
+        await completeToolRound([completed]);
 
-      await waitFor(() => {
+        await waitFor(() => {
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        });
+        // The accepted boundary submission carried the envelope ...
+        expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
+          ...completed.response.responseParts,
+          { text: teammateModelText },
+        ]);
+        // ... and its delivery was journaled exactly once.
+        expect(recordNotification).toHaveBeenCalledTimes(1);
+        expect(recordNotification).toHaveBeenCalledWith(
+          [{ text: teammateModelText }],
+          teammateDisplay,
+          undefined,
+          undefined,
+        );
+
+        // Settle to Idle. The envelope was accepted (journaled, NOT
+        // requeued), so the Idle fallback has nothing left to deliver.
+        rerenderWithToolCalls([]);
+        await waitFor(() => {
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+        });
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-      });
-      // The accepted boundary submission carried the envelope ...
-      expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
-        ...completed.response.responseParts,
-        { text: teammateModelText },
-      ]);
-      // ... and its delivery was journaled exactly once.
-      expect(recordNotification).toHaveBeenCalledTimes(1);
-      expect(recordNotification).toHaveBeenCalledWith(
-        [{ text: teammateModelText }],
-        teammateDisplay,
-        undefined,
-        undefined,
-      );
 
-      // Settle to Idle. The envelope was accepted (journaled, NOT
-      // requeued), so the Idle fallback has nothing left to deliver.
-      rerenderWithToolCalls([]);
-      await waitFor(() => {
-        expect(result.current.streamingState).toBe(StreamingState.Idle);
-      });
-      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        // The accepted push landed but the round produced no content, so
+        // the session history ends with the pushed entry as a trailing
+        // orphan — exactly the entry the Retry path pops.
+        client.getHistoryShallow = vi.fn().mockReturnValue([
+          {
+            role: 'model',
+            parts: [{ functionCall: { name: 'run_shell_command', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              ...completed.response.responseParts,
+              { text: teammateModelText },
+            ],
+          },
+        ]);
 
-      // The accepted push landed but the round produced no content, so
-      // the session history ends with the pushed entry as a trailing
-      // orphan — exactly the entry the Retry path pops.
-      client.getHistoryShallow = vi.fn().mockReturnValue([
-        {
-          role: 'model',
-          parts: [{ functionCall: { name: 'run_shell_command', args: {} } }],
-        },
-        {
-          role: 'user',
-          parts: [
-            ...completed.response.responseParts,
-            { text: teammateModelText },
-          ],
-        },
-      ]);
+        // The full history still matches the debt, but recovery cannot pop
+        // the entry below a completed Goal turn boundary.
+        const getHistoryForRecovery = vi.fn().mockReturnValue([]);
+        if (hasCompletedBoundary) {
+          client.getChat = vi.fn().mockReturnValue({ getHistoryForRecovery });
+        }
 
-      // Ctrl+Y retry of the failed round: the payload must carry the
-      // envelope again — the orphan pop drops the only history copy, so
-      // the re-pushed payload is the replacement that keeps exactly one.
-      await act(async () => {
-        await result.current.retryLastPrompt();
-      });
-      await waitFor(() => {
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
-      });
-      expect(mockSendMessageStream.mock.calls[1][0]).toEqual([
-        ...completed.response.responseParts,
-        { text: teammateModelText },
-      ]);
-      expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
-        expect.objectContaining({ type: SendMessageType.Retry }),
-      );
-      // Still exactly one journaled delivery.
-      expect(recordNotification).toHaveBeenCalledTimes(1);
-    });
+        // Without a completed boundary, retry pops the orphan and must
+        // re-attach its envelope. With a boundary, the history copy stays.
+        await act(async () => {
+          await result.current.retryLastPrompt();
+        });
+        await waitFor(() => {
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        });
+        expect(mockSendMessageStream.mock.calls[1][0]).toEqual([
+          ...completed.response.responseParts,
+          ...(hasCompletedBoundary ? [] : [{ text: teammateModelText }]),
+        ]);
+        if (hasCompletedBoundary) {
+          expect(getHistoryForRecovery).toHaveBeenCalledOnce();
+          expect(client.getHistoryShallow).not.toHaveBeenCalled();
+        }
+        expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
+          expect.objectContaining({ type: SendMessageType.Retry }),
+        );
+        // Still exactly one journaled delivery.
+        expect(recordNotification).toHaveBeenCalledTimes(1);
+      },
+    );
 
     it('still strips the journaled envelope when retrying an accepted round that failed after content (Ctrl+Y)', async () => {
       // Paired pin: when the accepted round produced content before
