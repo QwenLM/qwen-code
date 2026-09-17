@@ -6909,6 +6909,7 @@ export class Session implements SessionContext {
                   if (
                     await this.#endTurnAfterToolRun(
                       toolRun,
+                      goalTurn,
                       channelTurn,
                       responseCapture.channelDelivery !== undefined,
                     )
@@ -8053,6 +8054,7 @@ export class Session implements SessionContext {
         if (
           await this.#endTurnAfterToolRun(
             toolRun,
+            options.goalTurn,
             options.channelTurn ?? false,
             options.responseCapture?.channelDelivery !== undefined,
           )
@@ -8797,6 +8799,7 @@ export class Session implements SessionContext {
    */
   async #endTurnAfterToolRun(
     toolRun: RunToolResult,
+    goalTurn: AcpGoalTurn | undefined,
     channelTurn: boolean,
     hasChannelDelivery: boolean,
   ): Promise<boolean> {
@@ -8816,9 +8819,11 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
-    goalTurn.endingToolCallId = toolRun.parts.findLast(
-      (part) => part.functionResponse?.id,
-    )?.functionResponse?.id;
+    if (goalTurn) {
+      goalTurn.endingToolCallId = toolRun.parts.findLast(
+        (part) => part.functionResponse?.id,
+      )?.functionResponse?.id;
+    }
     return true;
   }
 
