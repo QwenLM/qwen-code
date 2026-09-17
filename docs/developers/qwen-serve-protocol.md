@@ -2,6 +2,14 @@
 
 Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/issues/3803). All routes live under the daemon's base URL (default `http://127.0.0.1:4170`).
 
+This reference describes HTTP routes and SSE framing. Read it together with
+the [typed event schema](./daemon/09-event-schema.md) for payload contracts,
+resync reasons, and history anchors, the
+[event bus and replay guide](./daemon/10-event-bus.md) for delivery and
+backpressure, and [capabilities and versioning](./daemon/11-capabilities-versioning.md)
+for the existing `v1` protocol and compatibility rules. The
+[daemon documentation index](./daemon/00-index.md) links the full contract set.
+
 ## Authentication
 
 When the daemon was started with `--token` or `QWEN_SERVER_TOKEN` — or bound non-loopback with neither, which generates an ephemeral bearer and prints it once at startup — **every normal API route except `/health` on ordinary loopback binds** must carry:
@@ -2240,6 +2248,66 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+### `POST /session/:id/tasks/:taskId/workflow-action`
+
+Controls a workflow run, or starts a new one. The ACP method is
+`_qwen/session/tasks/workflow_action`.
+
+```json
+{
+  "action": "run-script",
+  "script": "export const meta = { name: 'daily-audit', description: 'Audits yesterday' }\nreturn await agent(args.question)",
+  "args": { "question": "which tables grew?" },
+  "sourceRef": { "id": "definition-7", "revision": "rev-3" }
+}
+```
+
+What `taskId` names depends on the action:
+
+| `action`                            | `taskId`                                                           | Starts a run           |
+| ----------------------------------- | ------------------------------------------------------------------ | ---------------------- |
+| `pause`, `resume`, `retry`, `rerun` | the run id                                                         | `retry` and `rerun` do |
+| `delete-history`                    | the run id                                                         | no                     |
+| `run-saved`                         | the saved workflow's name, `<extension>:<name>` for an extension's | yes                    |
+| `run-script`                        | a start key the caller chooses                                     | yes                    |
+
+`args`, `sourceRef` and `script` are read by `run-saved` and `run-script`
+only. `args` is bound to the script's `args` global and may be any JSON value;
+`sourceRef` is the caller's own `{id, revision}`, recorded on the run, its
+journal and its snapshot; `script` is the source `run-script` runs and is
+required by it. A retry or rerun replays the original run's own `args` and
+`sourceRef` — that is what makes it the same run — so those fields are ignored
+alongside the control actions.
+
+A started run is session-owned: it runs in the background without an approval
+prompt, and its completion reaches the session's completion channel. It is a
+`retry`/`rerun` target afterwards like any other run. `run-script` passes no
+definition name, so the run is labelled by the script's own
+`export const meta` — a compiled script should declare one, or the run shows
+only its id.
+
+The response is `{"changed": true, "status": "running", "taskId": "<runId>"}`
+for a started run, `{"changed": true, "status": "<status>"}` for a control
+action that took effect, and `{"changed": false}` when nothing happened:
+Workflow is unavailable for the session (disabled, bare mode, untrusted
+folder), the workspace is untrusted, the saved workflow name is unknown, the
+run id is unknown, or another start is already in flight under the same
+`taskId`. Only overlapping starts are deduplicated: two concurrent
+`run-script` calls under one `taskId` start one run. Once that start returns,
+the key is released; submitting it again can start another run, even if the
+first run is still active. The key does not provide retry idempotency after
+a lost response.
+
+A rejected parameter is a `400` (`-32602` over ACP), not a started run: an
+unknown `action`, a `run-script` with no `script`, a `sourceRef` that is not
+`{id, revision}` of non-empty strings, or a script rejected before launch
+because of invalid syntax or a determinism violation. Workflow start input
+errors carry `workflow_invalid_params` and retain the rejection message.
+
+`workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
+`runSavedArgs` and `runScript`; a daemon without them accepts neither the start
+input nor the `run-script` action.
+
 ### `GET /session/:id/lsp`
 
 ```json
@@ -2663,7 +2731,7 @@ On success the route returns `200` with the replacement session's create-shape r
 
 This route never reads `X-Qwen-Client-Id`, so the replacement spawns unattached — but the success response is not registration-free. A fresh transfer mints an owner-style `clientId` for that spawn, registers it on the replacement, and reports it in the body; an idempotent resume of a committed transfer reports none. The minted id is not an attachment (the replacement's attach count is unchanged, so `killSession` with `requireZeroAttaches` still sees it as unattached), but a live client registration is exactly what holds the daemon's idle cleanup off: detach an id you do not keep using, or the replacement stays live indefinitely — and a replacement that is still live with no marker is the shape a later reset refuses to dismantle. Treat the response as the replacement's identity, and attach it through the normal `POST /session/:id/load` or `/resume` surface when a registered client is required.
 
-The transfer is serialized per checkout against worktree restores and other resets, refuses to run while either session is busy (prompt in flight or a pending interaction), and arms an admission barrier on the superseded session: while it is armed, exactly eight writers are refused with `worktree_reset_active` at admission — `POST /session/:id/prompt`, `/rewind`, `/cd`, `/branch`, `/fork`, `/shell`, `/goal`, and `/tasks/:taskId/workflow-action`. The other seven are fenced because each moves the session cwd or starts work in it without passing prompt admission: a shell command runs in the session's effective cwd, which for a relocated worktree session is the checkout itself; a fork agent runs its tools in that cwd; a rewind restores files relative to it; a cd moves it, including into a subdir of the checkout; a branch mutates the superseded session's persisted history and spawns a derivative session while ownership is in flux; a goal `resume` promotes a queued turn and queues a continuation; and a workflow action runs a saved workflow, or restarts a live run, through the session's own tool registry. `POST /session/:id/continue` is not a ninth gate: it drives an accepted continuation through the fenced prompt admission and is refused there. That list is the whole fence, and the fence is not everything that reaches the child — the release and stop paths stay usable mid-transfer by design (cancelling a task, clearing a goal, detaching a client, killing the session), and the daemon-internal background-notification enqueue — a sub-session's completion acknowledgement to its parent, which no HTTP route calls — is unfenced as well, because it enqueues a notification rather than starting a turn. The transfer's last step severs the superseded session's client registrations, clears its in-memory worktree association, and reports whether the superseded session is actually gone. A survivor — a child that still holds background work, so the idle close the last detach triggers is refused and deferred — is surfaced rather than papered over: the daemon logs it, the barrier stays armed on that entry as the only fence left, and the `200` body carries `supersededSessionLive: true` so the caller knows the superseded id is still live and re-attachable inside the checkout whose ownership just moved. Crash safety is per window, and the write order defines the windows: the old sidecar's `supersededBy` link is written first, then the replacement's sidecar carrying `supersedes`, and the marker flips last. A crash before the flip therefore leaves the old session authoritative in one of three shapes a retry tells apart — no links at all (the replacement is an ordinary orphan and a retry simply starts a fresh transfer), the backward link alone with the replacement's sidecar missing (a retry fails closed with `worktree_reset_invalid_state` and leaves the interrupted state untouched for operator repair), or both links present (a retry rolls the partial transfer back and completes a fresh one — unless the interrupted replacement cannot be removed because a client is still attached to it, in which case the rollback fails closed with `worktree_reset_invalid_state` and keeps both links, so a later retry converges once that client is gone). A crash after the flip leaves the replacement authoritative and a retry resumes as a no-op. The old session is never deleted and the worktree checkout is never removed by reset.
+The transfer is serialized per checkout against worktree restores and other resets, refuses to run while either session is busy (prompt in flight or a pending interaction), and arms an admission barrier on the superseded session: while it is armed, exactly eight writers are refused with `worktree_reset_active` at admission — `POST /session/:id/prompt`, `/rewind`, `/cd`, `/branch`, `/fork`, `/shell`, `/goal`, and `/tasks/:taskId/workflow-action`. The other seven are fenced because each moves the session cwd or starts work in it without passing prompt admission: a shell command runs in the session's effective cwd, which for a relocated worktree session is the checkout itself; a fork agent runs its tools in that cwd; a rewind restores files relative to it; a cd moves it, including into a subdir of the checkout; a branch mutates the superseded session's persisted history and spawns a derivative session while ownership is in flux; a goal `resume` promotes a queued turn and queues a continuation; and a workflow action runs a saved workflow or a caller-supplied script, or restarts a live run, through the session's own tool registry. `POST /session/:id/continue` is not a ninth gate: it drives an accepted continuation through the fenced prompt admission and is refused there. That list is the whole fence, and the fence is not everything that reaches the child — the release and stop paths stay usable mid-transfer by design (cancelling a task, clearing a goal, detaching a client, killing the session), and the daemon-internal background-notification enqueue — a sub-session's completion acknowledgement to its parent, which no HTTP route calls — is unfenced as well, because it enqueues a notification rather than starting a turn. The transfer's last step severs the superseded session's client registrations, clears its in-memory worktree association, and reports whether the superseded session is actually gone. A survivor — a child that still holds background work, so the idle close the last detach triggers is refused and deferred — is surfaced rather than papered over: the daemon logs it, the barrier stays armed on that entry as the only fence left, and the `200` body carries `supersededSessionLive: true` so the caller knows the superseded id is still live and re-attachable inside the checkout whose ownership just moved. Crash safety is per window, and the write order defines the windows: the old sidecar's `supersededBy` link is written first, then the replacement's sidecar carrying `supersedes`, and the marker flips last. A crash before the flip therefore leaves the old session authoritative in one of three shapes a retry tells apart — no links at all (the replacement is an ordinary orphan and a retry simply starts a fresh transfer), the backward link alone with the replacement's sidecar missing (a retry fails closed with `worktree_reset_invalid_state` and leaves the interrupted state untouched for operator repair), or both links present (a retry rolls the partial transfer back and completes a fresh one — unless the interrupted replacement cannot be removed because a client is still attached to it, in which case the rollback fails closed with `worktree_reset_invalid_state` and keeps both links, so a later retry converges once that client is gone). A crash after the flip leaves the replacement authoritative and a retry resumes as a no-op. The old session is never deleted and the worktree checkout is never removed by reset.
 
 **Errors:**
 
@@ -3680,9 +3748,10 @@ The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` f
 Reconnect semantics:
 
 - Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`).
-- **Gap detection:** if `<n>` predates the oldest event still in the ring, the daemon emits an id-less `state_resync_required` frame before replaying the surviving suffix. The SDK latches `awaitingResync`; clients should call `POST /session/:id/load` and rebuild from the current bounded replay snapshot window. That snapshot may itself start with `history_truncated` when older in-memory replay entries were dropped; this marker is informational and must not start another resync loop.
-- IDs are monotonic per session, starting at 1
-- Synthetic frames (`client_evicted`, `slow_client_warning`, `stream_error`) intentionally omit `id` so they don't burn a sequence slot for other subscribers
+- **Gap detection:** within the same epoch, if the first retained ring id is greater than `<n> + 1`, the daemon emits an id-less `state_resync_required` frame with `reason: 'ring_evicted'` before replaying the surviving suffix. The other reasons are `epoch_reset`, `seeded_replay_not_in_ring`, and `replay_budget_exceeded`; the budget signal follows the delivered replay prefix. See [resync reasons and ordering](./daemon/09-event-schema.md#resync-reasons-and-ordering) for their triggers, cursor fields, and recovery rules.
+- The SDK latches `awaitingResync`; clients should call `POST /session/:id/load` and rebuild from the current bounded replay snapshot window. That snapshot may itself start with `history_truncated` when older in-memory replay entries were dropped; this marker is informational and must not start another resync loop. Its optional pagination anchor is [frozen at replay-window eviction](./daemon/09-event-schema.md#history-truncation-anchor).
+- IDs are monotonic within a session's event-bus epoch, starting at 1. A rejected publish must not consume an id; see [event sequence invariants](./daemon/09-event-schema.md#state-and-forward-compatibility).
+- Synthetic frames (`client_evicted`, `slow_client_warning`, `stream_error`, `state_resync_required`, `replay_complete`) intentionally omit `id` so they don't burn a sequence slot for other subscribers. `replay_complete` marks the end of replay, including empty or incomplete replay; it does not mean resync has completed.
 
 Backpressure:
 

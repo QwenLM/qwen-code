@@ -207,7 +207,10 @@ budget. Neither filters by role or cursor style: those hints cannot reliably
 distinguish clickable elements from static content. The snapshot therefore
 includes static text and containers alongside controls. A ref identifies a
 node, not a guarantee that clicking it performs an action. DOM CUA actions
-resolve these ids through Playwright's `aria-ref` locator. The adapter and its
+resolve these ids through Playwright's `aria-ref` locator. A ref resolves only
+while the snapshot that emitted it is current: Playwright restarts ref
+numbering on every new document, so a main-frame navigation invalidates the
+refs of earlier snapshots. The adapter and its
 tests are pinned to the same Playwright version because the snapshot text
 format is version-sensitive.
 
@@ -442,7 +445,8 @@ For the first release:
 - installing the Qwen Chrome extension authorizes Browser Use;
 - first use on macOS or Linux automatically registers the Native Host without
   a separate prompt;
-- Browser Use may enumerate and claim top-level HTTP(S) tabs by default;
+- Browser Use may enumerate and claim top-level HTTP(S) tabs by default, and
+  `tab.goto` navigates claimed tabs to http(s) URLs only;
 - History is declared with the other required extension permissions; there is
   no Browser Use permission-management UI;
 - there is no Browser Use-specific origin allowlist, upload-root allowlist, or
@@ -487,7 +491,13 @@ outside the SDK. Playwright hands a dialog over on a later turn than the
 bridge reports its CDP events, so the runtime traces each tab's dialog
 openings and closes in bridge order and drops a delivered dialog the bridge
 has already reported closed; a close with no traced opening (a dialog open
-before the tab was attached) is never charged to a later dialog. An
+before the tab was attached) is never charged to a later dialog. An opening
+Playwright never delivers is retired once its delivery turn has passed, so it
+cannot swallow a later dialog's charge. A dialog already open when the tab is
+claimed emits no opening event at all; the runtime probes the renderer at
+attach and, when the probe goes unanswered, gates the tab with `DIALOG_OPEN`,
+with `getJsDialog` reporting it under a stable handle whose accept and dismiss
+run over CDP. An
 `expectNavigation` waiter
 is released when either its action or its wait fails, including rejection by
 the dialog gate before the wait implementation runs.

@@ -130,7 +130,7 @@ export async function executeCuaOperation(
 }
 
 async function domCuaLocator(tab: TabState, args: Args) {
-  return await snapshotRefLocator(tab.page, stringArg(args, 'node_id'));
+  return await snapshotRefLocator(tab, stringArg(args, 'node_id'));
 }
 
 async function dispatchAuxiliaryClick(

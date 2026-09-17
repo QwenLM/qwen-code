@@ -5,6 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { SettingsWatcher } from './settingsWatcher.js';
 import {
   SettingScope,
@@ -153,6 +154,41 @@ describe('SettingsWatcher', () => {
   });
 
   describe('lifecycle', () => {
+    it('detaches settings events without native close during macOS process exit', async () => {
+      vi.resetModules();
+      const { SettingsWatcher: FreshSettingsWatcher } = await import(
+        './settingsWatcher.js'
+      );
+      const { prepareFileWatchersForProcessExit } = await import(
+        '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js'
+      );
+      const platform = process.platform;
+      const nativeWatcher = Object.assign(new EventEmitter(), {
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      mockWatch.mockReturnValueOnce(nativeWatcher);
+      const freshWatcher = new FreshSettingsWatcher(
+        makeLoadedSettings({ workspaceSettingsActive: false }),
+      );
+      try {
+        freshWatcher.startWatching();
+        expect(nativeWatcher.listenerCount('all')).toBe(1);
+        expect(nativeWatcher.listenerCount('error')).toBe(1);
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        prepareFileWatchersForProcessExit();
+
+        freshWatcher.stopWatching();
+
+        expect(nativeWatcher.close).not.toHaveBeenCalled();
+        expect(nativeWatcher.listenerCount('all')).toBe(0);
+        expect(nativeWatcher.listenerCount('error')).toBe(1);
+      } finally {
+        freshWatcher.stopWatching();
+        Object.defineProperty(process, 'platform', { value: platform });
+        vi.resetModules();
+      }
+    });
+
     it('should create chokidar watchers for user and workspace directories', () => {
       watcher.startWatching();
 

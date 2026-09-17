@@ -60,6 +60,9 @@ import { PlaywrightSession } from './playwright-session.js';
 import { snapshotTab } from './snapshot.js';
 
 const BROWSER_ID = 'chrome';
+// The stable id tab.getJsDialog reports for a dialog that was already open
+// when the tab was claimed; it has no Playwright handle to key on.
+const ATTACH_TIME_DIALOG_ID = 'dialog-open-at-attach';
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_PENDING_TAB_RESOURCES = 100;
 const INPUT_DRAIN_TIMEOUT_MS = 250;
@@ -216,6 +219,14 @@ export class PlaywrightRuntime {
       case 'tab.goto': {
         const tab = this.tab(args);
         const url = stringArg(args, 'url');
+        // Navigating the user's real Chrome to a file:// or chrome:// URL
+        // would hand local file and browser-internal content to the page
+        // reads on this tab. Redirects stay the browser's business.
+        if (!/^https?:/i.test(url))
+          throw new BrowserRuntimeError(
+            'INVALID_ARGUMENT',
+            'Only http(s) URLs can be navigated',
+          );
         await tab.page.goto(url);
         return null;
       }
@@ -244,18 +255,35 @@ export class PlaywrightRuntime {
       case 'tab.screenshot':
         return await captureTabScreenshot(this.tab(args), args, this.bridge);
       case 'tab.getJsDialog': {
-        const dialog = this.tab(args).dialog;
-        return dialog === undefined
-          ? null
-          : {
-              dialogId: this.dialogId(dialog),
-              type: dialog.type(),
-              message: dialog.message(),
-              defaultPrompt: dialog.defaultValue(),
-            };
+        const tab = this.tab(args);
+        const dialog = tab.dialog;
+        if (dialog !== undefined)
+          return {
+            dialogId: this.dialogId(dialog),
+            type: dialog.type(),
+            message: dialog.message(),
+            defaultPrompt: dialog.defaultValue(),
+          };
+        // A dialog already open when the tab was claimed is known only
+        // through the blocked renderer: Chrome replays neither its opening
+        // event nor its text. Serve a handle so the tab is not stuck behind
+        // DIALOG_OPEN; the runtime reports it as an alert with an empty
+        // message and resolves it through CDP.
+        if (tab.dialogBlocked === true)
+          return {
+            dialogId: ATTACH_TIME_DIALOG_ID,
+            type: 'alert',
+            message: '',
+            defaultPrompt: '',
+          };
+        return null;
       }
       case 'tab.dialog.accept': {
         const tab = this.tab(args);
+        if (tab.dialog === undefined && tab.dialogBlocked === true) {
+          await this.handleAttachTimeDialog(tab, args, true);
+          return null;
+        }
         const dialog = this.requireDialog(tab, args);
         try {
           await dialog.accept(
@@ -265,17 +293,27 @@ export class PlaywrightRuntime {
           // A rejection means the dialog is already gone (handled in Chrome
           // or resolved by navigation), so the cached dialog must be
           // cleared either way — but only while it still names this dialog.
-          if (tab.dialog === dialog) tab.dialog = undefined;
+          if (tab.dialog === dialog) {
+            tab.dialog = undefined;
+            tab.dialogBlocked = false;
+          }
         }
         return null;
       }
       case 'tab.dialog.dismiss': {
         const tab = this.tab(args);
+        if (tab.dialog === undefined && tab.dialogBlocked === true) {
+          await this.handleAttachTimeDialog(tab, args, false);
+          return null;
+        }
         const dialog = this.requireDialog(tab, args);
         try {
           await dialog.dismiss();
         } finally {
-          if (tab.dialog === dialog) tab.dialog = undefined;
+          if (tab.dialog === dialog) {
+            tab.dialog = undefined;
+            tab.dialogBlocked = false;
+          }
         }
         return null;
       }
@@ -431,6 +469,35 @@ export class PlaywrightRuntime {
     return id;
   }
 
+  // A dialog known only through the attach-time probe has no Playwright
+  // handle; accept or dismiss it over CDP and release the gate either way —
+  // a failure means the modal is already gone.
+  private async handleAttachTimeDialog(
+    tab: TabState,
+    args: Args,
+    accept: boolean,
+  ): Promise<void> {
+    if (stringArg(args, 'dialogId') !== ATTACH_TIME_DIALOG_ID)
+      throw new BrowserRuntimeError(
+        'NOT_FOUND',
+        'The JavaScript dialog is stale or unknown',
+      );
+    try {
+      await this.bridge.request('cdp.send', {
+        tabId: tab.providerTabId,
+        method: 'Page.handleJavaScriptDialog',
+        params: {
+          accept,
+          ...(typeof args.promptText === 'string'
+            ? { promptText: args.promptText }
+            : {}),
+        },
+      });
+    } finally {
+      tab.dialogBlocked = false;
+    }
+  }
+
   private requireDialog(tab: TabState, args: Args): Dialog {
     if (
       tab.dialog !== undefined &&
@@ -577,7 +644,7 @@ export class PlaywrightRuntime {
 
 function assertDialogAllows(method: string, tab: TabState): void {
   if (
-    tab.dialog === undefined ||
+    (tab.dialog === undefined && tab.dialogBlocked !== true) ||
     method === 'tabs.get' ||
     method === 'tab.getJsDialog' ||
     method === 'tab.dialog.accept' ||

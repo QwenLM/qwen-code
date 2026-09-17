@@ -94,7 +94,7 @@ Locator plan 的每个数组最多包含 32 步，最多嵌套 32 层，顶层�
 
 输入操作与导航等待使用独立超时。Locator 点击、按键和 DOM CUA 点击关闭 Playwright 隐式的操作后导航等待。操作超时覆盖输入执行；`expectNavigation()` 在操作前注册监听器，并使用自己的超时等待请求的导航状态。输入成功不代表目标页面已加载。短暂且有上限的 renderer drain 允许排队的输入处理器运行，而不等待新的页面上下文。
 
-`tab.playwright.domSnapshot()` 和 `tab.dom_cua.get_visible_dom()` 返回相同的 Playwright AI 无障碍快照，仍受现有 20,000 字符预算约束。两者都不按角色或光标样式过滤，因为这些提示无法可靠地区分可点击元素与静态内容。因此快照除控件外也包含静态文本和容器。ref 用于标识节点，并不保证点击该节点会产生动作。DOM CUA 操作通过 Playwright 的 `aria-ref` locator 解析这些 id。由于快照文本格式与版本有关，适配器及其测试固定使用同一 Playwright 版本。
+`tab.playwright.domSnapshot()` 和 `tab.dom_cua.get_visible_dom()` 返回相同的 Playwright AI 无障碍快照，仍受现有 20,000 字符预算约束。两者都不按角色或光标样式过滤，因为这些提示无法可靠地区分可点击元素与静态内容。因此快照除控件外也包含静态文本和容器。ref 用于标识节点，并不保证点击该节点会产生动作。DOM CUA 操作通过 Playwright 的 `aria-ref` locator 解析这些 id。ref 仅在签发它的快照仍然有效时可解析：Playwright 在每个新文档上重新从 e1 开始编号 ref，因此主 frame 导航会使更早快照的 ref 失效。由于快照文本格式与版本有关，适配器及其测试固定使用同一 Playwright 版本。
 
 Playwright 公共 CDP session API 提供坐标 CUA 的按钮 4（后退）和 5（前进）；较高层的 Playwright mouse API 不暴露它们。快照截断、截图编码和预算、会话失效检测及 JSON 传输封装属于运行时实现细节，不作为面向模型的选项。
 
@@ -180,7 +180,7 @@ Managed preflight 验证截图 MIME 类型及 JPEG 解码后的 clip 尺寸。Sa
 
 - 安装 Qwen Chrome 扩展即授权 Browser Use；
 - macOS 和 Linux 首次使用时自动注册 Native Host，无需单独提示；
-- Browser Use 默认可以枚举和认领顶层 HTTP(S) 标签页；
+- Browser Use 默认可以枚举和认领顶层 HTTP(S) 标签页，`tab.goto` 只允许把已认领标签页导航到 http(s) URL；
 - History 与其他必需扩展权限一起声明，不提供 Browser Use 权限管理 UI；
 - 不提供 Browser Use 专用 origin allowlist、上传根目录 allowlist 或快照脱敏；
 - 保留现有 Qwen 工具栏操作和侧边栏；
@@ -199,7 +199,7 @@ Managed preflight 验证截图 MIME 类型及 JPEG 解码后的 clip 尺寸。Sa
 
 对话框句柄标识 `getJsDialog` 返回的具体对话框实例。Accept 或 dismiss 已过期句柄以 `NOT_FOUND` 失败，不能作用于替代对话框。Dialog id 属于 SDK 内部协议；公共句柄只保留其支持的操作。Before-unload 对话框支持接受导航和取消导航。
 
-Chrome 的 dialog-close 事件清理运行时缓存，包括 SDK 之外的用户操作。Playwright 交付对话框的时机晚于 bridge 上报其 CDP 事件的轮次，因此运行时按 bridge 顺序记录每个标签页的对话框打开与关闭事件，并丢弃 bridge 已报告关闭的对话框；没有对应打开记录的关闭事件（标签页附着前就已打开的对话框）不会被记到后续对话框头上。`expectNavigation` waiter 在 action 或等待失败时释放，包括在等待实现运行前被 dialog gate 拒绝的情况。
+Chrome 的 dialog-close 事件清理运行时缓存，包括 SDK 之外的用户操作。Playwright 交付对话框的时机晚于 bridge 上报其 CDP 事件的轮次，因此运行时按 bridge 顺序记录每个标签页的对话框打开与关闭事件，并丢弃 bridge 已报告关闭的对话框；没有对应打开记录的关闭事件（标签页附着前就已打开的对话框）不会被记到后续对话框头上。Playwright 从未交付的打开记录会在其交付轮次过后被回收，不会再吞掉后续对话框的配对。附着时就已经打开的对话框完全不会产生打开事件；运行时在附着时探测渲染进程，探测无应答时以 `DIALOG_OPEN` 门控该标签页，`getJsDialog` 以稳定句柄报告该对话框，其 accept 与 dismiss 通过 CDP 执行。`expectNavigation` waiter 在 action 或等待失败时释放，包括在等待实现运行前被 dialog gate 拒绝的情况。
 
 ## 输入完成
 

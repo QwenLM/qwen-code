@@ -40,8 +40,20 @@ export interface TabState {
   stale: false | 'tab' | 'session';
   logs: LogEntry[];
   dialog?: Dialog;
+  /**
+   * True when the attach-time probe found the renderer already blocked: a
+   * dialog open before attach is replayed by neither Chrome nor Playwright,
+   * so this is the only signal the dialog gate can honour for it.
+   */
+  dialogBlocked?: boolean;
   dialogTrace: DialogTraceEntry[];
   fileChoosers: Map<string, FileChooser>;
   navigationWaiters: Map<string, Promise<unknown>>;
   ownership: 'created' | 'claimed';
+  /**
+   * Refs the latest snapshot on this tab actually emitted. Playwright
+   * restarts ref numbering on every new document, so a ref is valid only
+   * while the snapshot that issued it is current; navigation clears the set.
+   */
+  snapshotRefs?: ReadonlySet<string>;
 }

@@ -1025,6 +1025,9 @@ importers:
       msw:
         specifier: ^2.3.4
         version: 2.10.4(@types/node@20.19.1)(typescript@5.8.3)
+      strip-json-comments:
+        specifier: ^3.1.1
+        version: 3.1.1
       tree-sitter-wasms:
         specifier: ^0.1.13
         version: 0.1.13
