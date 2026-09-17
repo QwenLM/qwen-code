@@ -71,8 +71,23 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
   allow: 0,
 };
 
-function splitCommandForRules(command: string): string[] {
+/**
+ * Split a command for `Bash(...)` rule matching, recognising a trailing Bash
+ * comment when it is safe to do so (#11815).
+ *
+ * The comment fast path requires that `command` is literally the text the
+ * shell will execute. That holds for `run_shell_command` only: for `monitor`,
+ * `normalizePermissionContext()` substitutes the quote-stripped
+ * `normalizeMonitorCommand().safetyCommand` reconstruction while monitor
+ * spawns `spawnCommand`, so a `#` that the spawned shell sees inside the
+ * wrapper's inner quotes would be scanned here as an unquoted comment start
+ * and swallow a separator the spawned command really executes. Monitor
+ * therefore keeps the conservative splitter, and stays covered by `Bash(...)`
+ * rules through it.
+ */
+function splitCommandForRules(command: string, toolName: string): string[] {
   if (
+    toolName !== 'run_shell_command' ||
     getShellConfiguration().shell !== 'bash' ||
     command.includes('\n') ||
     command.includes('\r')
@@ -95,8 +110,11 @@ function splitCommandForRules(command: string): string[] {
       ch === '#' &&
       !inSingle &&
       !inDouble &&
-      // Bash only treats ASCII space and tab as word boundaries here.
-      (i === 0 || command[i - 1] === ' ' || command[i - 1] === '\t')
+      // Bash only treats ASCII space and tab as word boundaries here. A
+      // leading `#` is deliberately not collapsed: the whole segment would
+      // start with `#`, so no `Bash(...)` rule could match it any more and an
+      // explicit user rule would silently stop applying.
+      (command[i - 1] === ' ' || command[i - 1] === '\t')
     ) {
       return [command];
     }
@@ -370,7 +388,7 @@ export class PermissionManager {
     // most restrictive result. Priority: deny > ask > allow.
     let bashDecision: PermissionDecision;
     if (command !== undefined) {
-      const subCommands = splitCommandForRules(command);
+      const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
         bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
       } else {
@@ -990,7 +1008,7 @@ export class PermissionManager {
     // rule matching any segment is the deciding rule. Recurse per segment so
     // nested compounds and per-segment virtual ops are covered.
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
-      const subCommands = splitCommandForRules(command);
+      const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
         for (const subCmd of subCommands) {
           const rule = this.findMatchingDenyRule({ ...ctx, command: subCmd });
@@ -1146,7 +1164,7 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCommandForRules(command);
+      const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
           this.hasRelevantRules({ ...ctx, command: subCmd }),
@@ -1244,7 +1262,7 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCommandForRules(command);
+      const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
           this.hasMatchingAskRule({ ...ctx, command: subCmd }),

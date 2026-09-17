@@ -2375,6 +2375,13 @@ describe('PermissionManager', () => {
       ['bash', 'echo hi ; rm -rf /tmp/x # comment ; echo ignored', 'deny'],
       ['bash', 'echo a#b ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo a\v# comment ; rm -rf /tmp/x', 'deny'],
+      ['bash', '# noop ; rm -rf /tmp/x', 'deny'],
+      ['bash', "echo 'a # b' ; rm -rf /tmp/x", 'deny'],
+      ['bash', 'echo "a # b" ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi > /tmp/o # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi | tee /tmp/o # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi # c\r; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi\t# comment ; rm -rf /tmp/x', 'allow'],
     ] as const)(
       'handles comments conservatively for %s',
       async (shell, command, expected) => {
@@ -2392,6 +2399,36 @@ describe('PermissionManager', () => {
             command,
           }),
         ).toBe(expected);
+      },
+    );
+
+    // The comment fast path is only sound when the scanned string is literally
+    // what the shell executes. That holds for run_shell_command, but not for
+    // monitor: normalizePermissionContext() analyses the quote-stripped
+    // `safetyCommand` reconstruction while monitor spawns `spawnCommand`, so a
+    // `#` that only exists inside the wrapper's inner quotes would swallow a
+    // separator the spawned command really runs.
+    it.each([
+      [
+        "bash -c 'echo hi # done' ; rm -rf /tmp/x",
+        ['Bash(echo *)'],
+        ['Bash(rm *)'],
+      ],
+      ['cmd /c "dir # & del C:\\temp\\x"', ['Bash(dir *)'], ['Bash(del *)']],
+    ] as const)(
+      'keeps splitting monitor commands whose comment is only apparent: %s',
+      async (command, permissionsAllow, permissionsDeny) => {
+        shellTypeMock.value = 'bash';
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: [...permissionsAllow],
+            permissionsDeny: [...permissionsDeny],
+          }),
+        );
+        pm.initialize();
+        expect(await pm.evaluate({ toolName: 'monitor', command })).toBe(
+          'deny',
+        );
       },
     );
 
