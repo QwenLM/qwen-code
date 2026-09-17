@@ -42,6 +42,10 @@
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
+  /* Keep focus-scrolled controls clear of the remotes view's sticky
+     header and add form, which pin opaque chrome over the scrollport's
+     edges (scroll-padding applies to every scroll-into-view inside). */
+  scroll-padding-block: 30px 44px;
 }
 
 .section {
@@ -359,4 +363,172 @@
 
 .actionHint[data-tone='warning'] {
   color: var(--warning-color, #f59e0b);
+}
+
+.remotesHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 4px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  margin-bottom: 2px;
+  /* Pinned chrome inside the scrolling list: with many remotes the back
+     button must stay reachable. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--popover, var(--background, #1c1c1c));
+}
+
+.backButton {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  color: var(--muted-foreground, #888);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.backButton:hover,
+.backButton:focus-visible {
+  color: var(--foreground, #e0e0e0);
+  outline: none;
+}
+
+.remotesTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.remoteRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px 5px 20px;
+  font-size: 13px;
+  color: var(--foreground, #e0e0e0);
+}
+
+.remoteName {
+  /* Shrinkable with an ellipsis: a long config-held name must not push the
+     two-click Remove control past the popover's clip. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.remoteBadge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 0 4px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 3px;
+  color: var(--warning-color, #f59e0b);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remoteUrl {
+  /* A floor, not a zero basis: with `flex: 1 1 0%` an overflowing row
+     spends every pixel of negative space on the name and lays the URL out
+     at 0px wide — invisible and unhoverable, tooltip included. */
+  flex: 1 1 8ch;
+  min-width: 8ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted-foreground, #888);
+}
+
+.remoteRemove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  color: var(--muted-foreground, #888);
+  cursor: pointer;
+  padding: 2px;
+  font-size: 11px;
+}
+
+.remoteRemove:hover,
+.remoteRemove:focus-visible {
+  color: var(--destructive, #ef4444);
+  outline: none;
+}
+
+.remoteRemove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.remoteRemoveConfirm {
+  color: var(--destructive, #ef4444);
+  border: 1px solid
+    color-mix(in srgb, var(--destructive, #ef4444) 40%, transparent);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+/* The armed step is destructive: focus must stay visible on it (the base
+   rule's color change is already spent by the armed state). */
+.remoteRemoveConfirm:focus-visible {
+  background: color-mix(in srgb, var(--destructive, #ef4444) 18%, transparent);
+  outline: 1px solid var(--destructive, #ef4444);
+}
+
+.addRemoteForm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 6px 20px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  /* Wrap instead of overflowing the fixed-width popover, and stay pinned
+     so the Add control is reachable with many remotes. */
+  flex-wrap: wrap;
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--popover, var(--background, #1c1c1c));
+}
+
+.addRemoteForm .inlineInputField {
+  min-width: 0;
+}
+
+.addRemoteButton {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.addRemoteButton:hover,
+.addRemoteButton:focus-visible {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+  outline: none;
+}
+
+.addRemoteButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
