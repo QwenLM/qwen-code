@@ -5097,7 +5097,12 @@ describe('HookEventHandler', () => {
         await hookEventHandler.fireUserPromptSubmitEvent('hi');
         const explicit = progress().find((m) => m['phase'] === 'end');
 
-        expect(explicit).toEqual(implicit);
+        // The invocation serial is module-level, so the two runs can never
+        // share an invocationId; every other field must match exactly.
+        expect(explicit).toEqual({
+          ...implicit,
+          invocationId: expect.stringMatching(/^hook-\d+$/),
+        });
       },
     );
   });
