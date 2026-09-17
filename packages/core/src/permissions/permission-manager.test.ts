@@ -4203,6 +4203,9 @@ describe('PermissionManager — compound shell write attribution', () => {
   // and the write disappeared from a verdict that was a `deny`.
   it('attributes a write whose whole target is an invisible character', () => {
     expect(
+      extractShellOperationsAcrossCommand('echo x >\r& echo y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+    expect(
       extractShellOperationsAcrossCommand('echo x >\u00a0& echo y', '/project'),
     ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
   });
