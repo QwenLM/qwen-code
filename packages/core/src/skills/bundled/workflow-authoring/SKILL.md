@@ -309,7 +309,9 @@ not the project tree); any other path is refused. A bare string is always a name
 as an invalid workflow name. At the top level that rejection ends the run;
 inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
 other thunk rejection — with no agent dispatched and nothing in the failures
-list — so null-check a `workflow()` result too.
+list — so null-check a `workflow()` result too. In a session that runs named
+workflows only (`tools.workflowNameOnly`), `workflow({ scriptPath })` throws the
+same way; nest by name.
 
 Use the `workflow-creator` skill to create or edit saved workflows.
 
