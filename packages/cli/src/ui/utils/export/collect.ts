@@ -465,7 +465,8 @@ class ExportSessionContext implements SessionContext {
     type: 'user' | 'assistant';
     role: 'user' | 'assistant' | 'thinking';
     parts: Array<{ text: string }>;
-    timestamp: number;
+    sourceUuid?: string;
+    sourceTimestamp?: string;
     usageMetadata?: GenerateContentResponseUsageMetadata;
   } | null = null;
   private activeRecordId: string | null = null;
@@ -618,7 +619,8 @@ class ExportSessionContext implements SessionContext {
         type: role,
         role: messageRole,
         parts: [{ text: content.text }],
-        timestamp: Date.now(),
+        sourceUuid: this.activeRecordId ?? undefined,
+        sourceTimestamp: this.activeRecordTimestamp ?? undefined,
         ...(usageMetadata && role === 'assistant' ? { usageMetadata } : {}),
       };
     }
@@ -720,11 +722,22 @@ class ExportSessionContext implements SessionContext {
   private flushCurrentMessage(freshUuid = false): void {
     if (!this.currentMessage) return;
 
-    const uuid = freshUuid ? randomUUID() : this.getMessageUuid();
+    // Identity belongs to the record the message was buffered from, captured
+    // when the buffer was created: resolving it here would read whichever
+    // record is active by the time the buffer is flushed. A Goal transition is
+    // the exception: text replayed from the transition's own record keeps that
+    // record's timestamp but not its uuid, so a snapshot's record references
+    // resolve to the transition alone.
+    const uuid = freshUuid
+      ? randomUUID()
+      : (this.currentMessage.sourceUuid ?? this.getMessageUuid());
+    const timestamp = freshUuid
+      ? this.getMessageTimestamp()
+      : (this.currentMessage.sourceTimestamp ?? this.getMessageTimestamp());
     const exportMessage: ExportMessage = {
       uuid,
       sessionId: this.sessionId,
-      timestamp: this.getMessageTimestamp(),
+      timestamp,
       type: this.currentMessage.type,
       message: {
         role: this.currentMessage.role,

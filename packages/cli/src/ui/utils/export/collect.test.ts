@@ -445,6 +445,117 @@ describe('collectSessionData', () => {
     });
   });
 
+  it('keeps every exported message on its source record identity', async () => {
+    const records: ChatRecord[] = [
+      {
+        uuid: 'user-1',
+        parentUuid: null,
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:52:44.524Z',
+        type: 'user',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'first question' }] },
+      },
+      {
+        uuid: 'assistant-1',
+        parentUuid: 'user-1',
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:52:48.291Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'thinking about it', thought: true },
+            { text: 'first answer' },
+          ],
+        },
+      },
+      {
+        uuid: 'user-2',
+        parentUuid: 'assistant-1',
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:53:10.000Z',
+        type: 'user',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'second question' }] },
+      },
+      {
+        uuid: 'assistant-2',
+        parentUuid: 'user-2',
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:53:14.500Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'model', parts: [{ text: 'second answer' }] },
+      },
+    ];
+
+    const data = await collectSessionData(
+      {
+        sessionId: 'session-identity',
+        startTime: '2026-09-17T15:52:44.524Z',
+        messages: records,
+      },
+      config,
+    );
+
+    // Identity is a provenance invariant: a message's uuid/timestamp identify
+    // the record it came from. A single record may legitimately yield several
+    // messages (its thought and text parts), so uuid is not unique per message.
+    expect(
+      data.messages.map((message) => [
+        message.message?.role,
+        message.uuid,
+        message.timestamp,
+      ]),
+    ).toEqual([
+      ['user', 'user-1', '2026-09-17T15:52:44.524Z'],
+      ['thinking', 'assistant-1', '2026-09-17T15:52:48.291Z'],
+      ['assistant', 'assistant-1', '2026-09-17T15:52:48.291Z'],
+      ['user', 'user-2', '2026-09-17T15:53:10.000Z'],
+      ['assistant', 'assistant-2', '2026-09-17T15:53:14.500Z'],
+    ]);
+  });
+
+  it('merges the text chunks of one record into a single message', async () => {
+    const records: ChatRecord[] = [
+      {
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: 'session-chunks',
+        timestamp: '2026-09-17T15:52:48.291Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [{ text: 'first chunk ' }, { text: 'second chunk' }],
+        },
+      },
+    ];
+
+    const data = await collectSessionData(
+      {
+        sessionId: 'session-chunks',
+        startTime: '2026-09-17T15:52:48.291Z',
+        messages: records,
+      },
+      config,
+    );
+
+    expect(data.messages).toHaveLength(1);
+    expect(data.messages[0]?.uuid).toBe('assistant-1');
+    expect(data.messages[0]?.timestamp).toBe('2026-09-17T15:52:48.291Z');
+    expect(
+      data.messages[0]?.message?.parts?.map((part) => part.text).join(''),
+    ).toBe('first chunk second chunk');
+  });
+
   it('replays tool calls when daemon export config has no tool registry', async () => {
     const minimalConfig: ExportConfig = {};
 
