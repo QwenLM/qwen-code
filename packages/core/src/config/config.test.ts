@@ -5269,6 +5269,67 @@ describe('Server Config (config.ts)', () => {
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  describe('isWorkflowNameOnly', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('is off by default, and on from the setting or the environment', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: true,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(true);
+      // The environment only turns the lock on.
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: false,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+    });
+
+    // Notifications read the lock from the registry the config owns, so the
+    // two cannot disagree about which resume call to offer.
+    it('hands the lock to its workflow run registry', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      for (const workflowNameOnly of [true, false]) {
+        const registry = new Config({
+          ...baseParams,
+          workflowNameOnly,
+        }).getWorkflowRunRegistry();
+        const completion = vi.fn();
+        registry.setCompletionCallback(completion);
+        const entry = registry.register({
+          runId: 'wf_lock',
+          meta: null,
+          status: 'running',
+          startTime: 1,
+          outputFile: '',
+          abortController: new AbortController(),
+          isBackgrounded: true,
+          scriptPath: '/runtime/workflows/generated/inline/wf_lock.js',
+        } as never);
+        registry.fail(entry.runId, 'boom', 2);
+        const text = completion.mock.calls[0][1] as string;
+        expect(text.includes('only whoever started it')).toBe(workflowNameOnly);
+        expect(text.includes('Workflow({ scriptPath')).toBe(!workflowNameOnly);
+      }
+    });
+
+    it('is decided when the session starts', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      const config = new Config(baseParams);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(config.isWorkflowNameOnly()).toBe(false);
+    });
+  });
+
   it('keeps project-derived features disabled for a provisional workspace', () => {
     const config = new Config({
       ...baseParams,

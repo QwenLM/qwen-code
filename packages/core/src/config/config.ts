@@ -1260,6 +1260,12 @@ export interface ConfigParameters {
    * (`tools.workflowSizeGuideline`). Unset or unrecognised means the default.
    */
   workflowSizeGuideline?: string;
+  /**
+   * Restrict the model's Workflow calls to named workflows
+   * (`tools.workflowNameOnly`). `QWEN_CODE_WORKFLOW_NAME_ONLY=1` turns it on
+   * too.
+   */
+  workflowNameOnly?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -2922,6 +2928,7 @@ export class Config {
   private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
+  private readonly workflowNameOnly: boolean;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -3307,6 +3314,13 @@ export class Config {
     )
       ? params.workflowSizeGuideline
       : undefined;
+    // Decided once: the Workflow tool builds its description and schema from
+    // it at startup, and a lock that changed under them would leave the model
+    // holding a contract the tool no longer honours.
+    this.workflowNameOnly =
+      params.workflowNameOnly === true ||
+      process.env['QWEN_CODE_WORKFLOW_NAME_ONLY'] === '1';
+    this.workflowRunRegistry.setNameOnly(this.workflowNameOnly);
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -9286,6 +9300,17 @@ export class Config {
    */
   getWorkflowSizeGuideline(): WorkflowSizeGuidelineSetting {
     return resolveWorkflowSizeGuidelineSetting(this.workflowSizeGuideline);
+  }
+
+  /**
+   * Whether the model may run only named workflows: its Workflow calls with an
+   * inline `script` or a `scriptPath` are refused, and a script cannot nest
+   * `workflow({scriptPath})`. Runs the host starts itself (ACP `run-saved`,
+   * `run-script`, retry, rerun) are not the model's and are not restricted.
+   * Fixed for the life of the session.
+   */
+  isWorkflowNameOnly(): boolean {
+    return this.workflowNameOnly;
   }
 
   /**

@@ -3806,6 +3806,125 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('named-workflows-only lock scope handling', () => {
+    it('honors a workspace that turns the lock on', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowNameOnly: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(false);
+    });
+
+    it('drops, with a warning, a workspace that would turn an operator lock off', () => {
+      // A cloned repository must not let the model run scripts in a session
+      // its operator locked to named workflows.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowNameOnly: true } });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              tools: { workflowNameOnly: false, useRipgrep: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      // ...while other workspace tool settings still merge.
+      expect(settings.merged.tools?.useRipgrep).toBe(false);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  // The workspace is compared against the value in force without it. User
+  // overrides SystemDefaults in the merge, so a User value that loosened a
+  // SystemDefaults one is the baseline, and a workspace may tighten it back.
+  describe('tighten-only baseline when User loosens SystemDefaults', () => {
+    function mockScopes(
+      systemDefaults: object,
+      user: object,
+      workspace: object,
+    ): void {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify(systemDefaults);
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(user);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspace);
+          return '{}';
+        },
+      );
+    }
+
+    it('keeps a workspace lock over a User value that turned the SystemDefaults lock off', () => {
+      mockScopes(
+        { tools: { workflowNameOnly: true } },
+        { tools: { workflowNameOnly: false } },
+        { tools: { workflowNameOnly: true } },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(false);
+    });
+
+    it('keeps a workspace hold over a User accept that loosened a SystemDefaults refuse', () => {
+      mockScopes(
+        { agents: { crossSessionInbound: 'refuse' } },
+        { agents: { crossSessionInbound: 'accept' } },
+        { agents: { crossSessionInbound: 'hold' } },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('hold');
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('agents.crossSessionInbound'),
+        ),
+      ).toBe(false);
+    });
+
+    it('still drops, with a warning, a workspace value looser than User', () => {
+      mockScopes(
+        { agents: { crossSessionInbound: 'accept' } },
+        { agents: { crossSessionInbound: 'refuse' } },
+        { agents: { crossSessionInbound: 'hold' } },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('refuse');
+      expect(
+        getSettingsWarnings(settings).find((w) =>
+          w.includes('agents.crossSessionInbound'),
+        ),
+      ).toContain('would loosen the User value');
+    });
+  });
+
   describe('cross-session settings scope handling', () => {
     it('should honor the cross-session keys from user scope', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
