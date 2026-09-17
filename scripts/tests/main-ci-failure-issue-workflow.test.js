@@ -315,6 +315,23 @@ describe('main CI failure issue workflow', () => {
     expect(planRun).toContain(
       'echo "never_started=$(jq -r \'.neverStarted // false\' "${analysis}")" >> "${GITHUB_OUTPUT}"',
     );
+    // The route stand-down is the stricter flag, produced and consumed with
+    // the same wiring discipline: a setup death keeps the autofix route.
+    expect(jobs.analyze.outputs.stand_down).toBe(
+      '${{ steps.plan.outputs.stand_down }}',
+    );
+    expect(planRun).toContain(
+      'echo "stand_down=$(jq -r \'.standDown // false\' "${analysis}")" >> "${GITHUB_OUTPUT}"',
+    );
+    // file_issue re-runs the dedupe lookup on this marker right before
+    // creating (see below); cutting either link silently re-opens the
+    // two-watchers-one-commit duplicate.
+    expect(jobs.analyze.outputs.search_marker).toBe(
+      '${{ steps.plan.outputs.search_marker }}',
+    );
+    expect(planRun).toContain(
+      'echo "search_marker=$(jq -r \'.searchMarkers[0]\' "${plan}")" >> "${GITHUB_OUTPUT}"',
+    );
     expect(String(rerun.if)).toContain(
       "needs.analyze.outputs.never_started == 'true'",
     );
@@ -324,6 +341,11 @@ describe('main CI failure issue workflow', () => {
     // The re-run needs actions:write, and it must not live on the job holding
     // the bot PAT — that job's { issues: write } scope is pinned below.
     expect(rerun.permissions).toEqual({ actions: 'write' });
+    // Deliberately hosted, NOT the ECS pool: the class this job exists for
+    // is a dead pool runner, so queueing the re-run behind that pool would
+    // turn the feature off exactly when it is needed.
+    expect(rerun['runs-on']).toBe('ubuntu-latest');
+    expect(jobs.file_issue['runs-on']).toBe('ubuntu-latest');
     expect(JSON.stringify(rerun)).not.toContain('CI_DEV_BOT_PAT');
     expect(JSON.stringify(rerun)).not.toContain('actions/checkout');
     expect(JSON.stringify(rerun)).toContain(
@@ -337,17 +359,54 @@ describe('main CI failure issue workflow', () => {
     expect(rerun.steps[0].env.WORKFLOW_RUN_ID).toBe(
       '${{ github.event.workflow_run.id }}',
     );
+    // The URL fills from REPO and every call authenticates with GH_TOKEN:
+    // dropping either line fails the step at its first gh call behind a
+    // green suite.
+    expect(rerun.steps[0].env.REPO).toBe('${{ github.repository }}');
+    expect(rerun.steps[0].env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
     expect(String(rerun.steps[0].run)).toContain(
       'gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"',
     );
-    // The one decision in the workflow that suppresses a filing must announce
-    // itself: once the re-run absorbs the flake, the notice and the step
-    // summary are the only record the suppression ever happened.
+    // The supersession check is a pre-POST snapshot; a run created inside
+    // the gap is displaced with no record. The same query runs again AFTER
+    // the POST and annotates the race, so a displaced commit is traceable.
+    expect(
+      (
+        String(rerun.steps[0].run).match(
+          /actions\/workflows\/\$\{WORKFLOW_ID\}\/runs\?branch=main/g,
+        ) ?? []
+      ).length,
+    ).toBe(2);
+    expect(String(rerun.steps[0].run)).toMatch(
+      /gh api -X POST[\s\S]*?::warning::/,
+    );
     expect(rerun.steps[0].env.WORKFLOW_RUN_URL).toBe(
       '${{ github.event.workflow_run.html_url }}',
     );
+    // The one decision in the workflow that suppresses a filing must announce
+    // itself — once the re-run absorbs the flake, the notice and the step
+    // summary are the only record the suppression ever happened.
     expect(String(rerun.steps[0].run)).toContain('::notice::');
     expect(String(rerun.steps[0].run)).toContain('GITHUB_STEP_SUMMARY');
+    // The step holds TWO notice/summary pairs, so the load-bearing pins are
+    // scoped to their branch: the superseded branch's copy must not satisfy
+    // the absorbed-flake branch's pin.
+    const branchOf = (marker) =>
+      String(rerun.steps[0].run).match(
+        new RegExp(
+          `if \\[\\[ "\\$\\{${marker}\\}"[^;]*; then(?<block>[\\s\\S]*?)\\n\\s*fi`,
+        ),
+      )?.groups?.block;
+    const supersededBlock = branchOf('superseded');
+    expect(supersededBlock).toBeDefined();
+    expect(supersededBlock).toContain('::notice::');
+    expect(supersededBlock).toContain('GITHUB_STEP_SUMMARY');
+    expect(supersededBlock).toContain('exit 0');
+    const successBlock = branchOf('conclusion');
+    expect(successBlock).toBeDefined();
+    expect(successBlock).toContain('::notice::');
+    expect(successBlock).toContain('GITHUB_STEP_SUMMARY');
+    expect(successBlock).toContain('exit 0');
 
     // A re-run re-enters the watched workflow's concurrency group as the
     // newest pending entry, and GitHub keeps at most one pending run per
@@ -366,7 +425,9 @@ describe('main CI failure issue workflow', () => {
     expect(rerunRun).toContain(
       'gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&per_page=10"',
     );
-    expect(rerunRun).toContain('superseded=true');
+    expect(rerunRun).toContain(
+      'echo \'superseded=true\' >> "${GITHUB_OUTPUT}"',
+    );
     expect(rerunRun).toMatch(
       /if \[\[ "\$\{superseded\}" != "0" \]\]; then[\s\S]*?exit 0\n[\s\S]*?fi\n[\s\S]*?gh api -X POST/,
     );
@@ -385,6 +446,13 @@ describe('main CI failure issue workflow', () => {
     expect(rerunRun).toContain('--arg event "${WORKFLOW_RUN_EVENT}"');
     expect(rerunRun).toContain('.status == "queued"');
     expect(rerunRun).toContain('.event == $event');
+    // …and the predicate pinned as ONE conjunction: an `and` -> `or` flip, a
+    // dropped recency term, or a dropped binding each leave the term pins
+    // green while inverting what the guard counts.
+    expect(rerunRun).toContain('--arg created "${WORKFLOW_RUN_CREATED_AT}"');
+    expect(rerunRun).toContain(
+      'select((.id | tostring) != $id and .created_at > $created and .status == "queued" and .event == $event)',
+    );
     // A skipped-as-superseded re-run must still file the fleet issue (the
     // failure is real; only the re-run would be harmful), so the skip rides
     // an output file_issue's gate admits.
@@ -409,6 +477,25 @@ describe('main CI failure issue workflow', () => {
       /if \[\[ "\$\{conclusion\}" == 'success' \]\]; then/,
     );
     expect(Number(rerun['timeout-minutes'])).toBeGreaterThanOrEqual(45);
+    // The break must read attempt 2's record, not attempt 1's: the first
+    // poll runs right after the POST, and `-ge 1` would report the
+    // already-completed first attempt as the re-run's outcome.
+    expect(rerunRun).toContain(
+      '"${attempt}" -ge 2 && "${status}" == \'completed\'',
+    );
+    // The poll's total wait derives from the script, not a hardcoded guess:
+    // widening the loop past the job's ceiling lets the platform kill it
+    // mid-poll; shrinking either turns the absorb path into always-file.
+    const iterations = Number(rerunRun.match(/seq 1 (\d+)/)?.[1]);
+    const sleepSeconds = Number(rerunRun.match(/sleep (\d+)/)?.[1]);
+    expect(iterations * sleepSeconds).toBeGreaterThanOrEqual(45 * 60);
+    expect(iterations * sleepSeconds).toBeLessThan(
+      Number(rerun['timeout-minutes']) * 60,
+    );
+    // The fail-closed tail is the behaviour the design rests on: with
+    // `exit 0` the job reads success and file_issue is skipped, silently
+    // dropping a main failure whose re-run did not pass.
+    expect(rerunRun.trimEnd().endsWith('exit 1')).toBe(true);
 
     // file_issue files unless the re-run actually started: a skipped rerun
     // job (ordinary failure with steps) and a failed one (the API call
@@ -432,20 +519,20 @@ describe('main CI failure issue workflow', () => {
     // commit can make. The decision stays in analyze and crosses
     // over as a plain string; file_issue only gates the route on it — no new
     // checkout, helper call, or scope for the job holding the bot PAT.
-    expect(jobs.file_issue.steps[0].env.NEVER_STARTED).toBe(
-      '${{ needs.analyze.outputs.never_started }}',
+    expect(jobs.file_issue.steps[0].env.STAND_DOWN).toBe(
+      '${{ needs.analyze.outputs.stand_down }}',
     );
     expect(String(jobs.file_issue.if)).toContain(
       "needs.rerun_never_started.outputs.superseded == 'true'",
     );
     const routeRun = String(jobs.file_issue.steps[0].run);
-    expect(routeRun).toContain('if [[ "${NEVER_STARTED}" == \'true\' ]]; then');
+    expect(routeRun).toContain('if [[ "${STAND_DOWN}" == \'true\' ]]; then');
     // The guard must actually short-circuit the route, not just name its
     // condition: the block — echo, label correction, `return 0` — sits
     // BEFORE the route's edit call, so deleting `return 0` or moving the
     // guard below the route call reds this pin.
     expect(routeRun).toMatch(
-      /if \[\[ "\$\{NEVER_STARTED\}" == 'true' \]\]; then[\s\S]*?return 0[\s\S]*?\n\s+fi\n[\s\S]*?gh issue edit "\$1"/,
+      /if \[\[ "\$\{STAND_DOWN\}" == 'true' \]\]; then[\s\S]*?return 0[\s\S]*?\n\s+fi\n[\s\S]*?gh issue edit "\$1"/,
     );
     // ...and the fleet branch keeps the issue human-findable WITHOUT
     // borrowing the human-owned opt-out: it adds type/bug alone and strips
@@ -463,7 +550,7 @@ describe('main CI failure issue workflow', () => {
     );
     expect(jobs.file_issue.steps[0].env.AUTOFIX_SKIP_LABEL).toBeUndefined();
     const guard = routeRun.match(
-      /if \[\[ "\$\{NEVER_STARTED\}" == 'true' \]\]; then(?<block>[\s\S]*?)\n\s+fi/,
+      /if \[\[ "\$\{STAND_DOWN\}" == 'true' \]\]; then(?<block>[\s\S]*?)\n\s+fi/,
     )?.groups?.block;
     expect(guard).toBeDefined();
     expect(guard).toContain('--add-label "${BUG_LABEL}"');
@@ -483,10 +570,42 @@ describe('main CI failure issue workflow', () => {
     // existing issue can belong to the OTHER failure class of this commit —
     // the body is re-rendered for the current class and the title must
     // follow it, or the issue keeps the first filer's workflow name over
-    // prose describing another failure.
+    // prose describing another failure. The pin is scoped to the branch: the
+    // step's later `gh issue create` carries the same two tokens in the same
+    // order, so a whole-script pin stays green when the EDIT call loses them.
+    // The branch's closing `fi` sits at column 0 in the parsed block scalar.
     const routeRun = String(jobs.file_issue.steps[0].run);
     expect(routeRun).toMatch(
       /gh issue edit "\$\{EXISTING_ISSUE\}"[\s\S]*?--title "\$\{ISSUE_TITLE\}"[\s\S]*?--body-file "\$\{body_file\}"/,
+    );
+    const existingBranch = routeRun.match(
+      /if \[\[ -n "\$\{EXISTING_ISSUE\}" \]\]; then(?<branch>[\s\S]*?)\nfi/,
+    )?.groups?.branch;
+    expect(existingBranch).toBeDefined();
+    expect(existingBranch).toContain('gh issue edit "${EXISTING_ISSUE}"');
+    expect(existingBranch).toContain('--title "${ISSUE_TITLE}"');
+    expect(existingBranch).toContain('--body-file "${body_file}"');
+  });
+
+  it('re-runs the dedupe lookup right before creating, after the re-run poll', () => {
+    // analyze's EXISTING_ISSUE snapshot predates rerun_never_started's poll
+    // (up to ~45 minutes), so a second watcher on the same commit can file
+    // first; without a fresh lookup the commit's record splits across two
+    // issues and the cross-class merge never runs.
+    expect(jobs.file_issue.steps[0].env.SEARCH_MARKER).toBe(
+      '${{ needs.analyze.outputs.search_marker }}',
+    );
+    const routeRun = String(jobs.file_issue.steps[0].run);
+    const lookup = routeRun.match(
+      /if \[\[ -z "\$\{EXISTING_ISSUE\}" \]\]; then(?<branch>[\s\S]*?)\nfi/,
+    )?.groups?.branch;
+    expect(lookup).toBeDefined();
+    expect(lookup).toContain('gh issue list');
+    expect(lookup).toContain('--search "${SEARCH_MARKER} in:body"');
+    // The fresh lookup feeds the same EXISTING_ISSUE the update branch reads
+    // and must precede the create call.
+    expect(routeRun.indexOf('if [[ -z "${EXISTING_ISSUE}" ]]')).toBeLessThan(
+      routeRun.indexOf('gh issue create'),
     );
   });
 

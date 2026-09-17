@@ -687,6 +687,7 @@ test('flags the never-started class: every failed job ran zero steps', () => {
     [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
   );
   assert.equal(analysis.neverStarted, true);
+  assert.equal(analysis.standDown, true);
 });
 
 test('a failed job with executed steps is not the never-started class', () => {
@@ -713,12 +714,21 @@ test('a filed never-started run reads as a fleet failure, off the autofix route'
   // The body is rendered before the re-run's outcome is known, and it is
   // filed on every path — recurrence after a real re-run, a re-run request
   // that itself failed, a re-run skipped as superseded, a human's re-run —
-  // so it must not claim a completed automatic re-run on any of them.
+  // so it must not claim a completed automatic re-run on any of them. The
+  // fixture is the motivating incident's shape: a runner accepted the job
+  // and died before its first step, which no commit can have caused — the
+  // one arm allowed to say so.
   const analysis = analyzeLogs(
     'E2E Tests',
     [],
     [],
-    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+    [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        steps: 0,
+        runner_name: 'ecs-qwen-hk4-30',
+      },
+    ],
   );
   const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
 
@@ -730,6 +740,12 @@ test('a filed never-started run reads as a fleet failure, off the autofix route'
   assert.ok(body.includes('no automatic re-run cleared it'));
   assert.ok(!body.includes('one automatic re-run'));
   assert.ok(!body.includes('labeled for autofix'));
+  // The absolute claim is wrapped across two rendered lines, so match it on
+  // the whitespace-normalized body or the assertion cannot fire.
+  assert.ok(
+    body.replace(/\n/g, ' ').includes('No commit can have caused this'),
+  );
+  assert.equal(analysis.standDown, true);
 });
 
 test('a run whose failed jobs executed steps keeps the autofix pitch', () => {
@@ -805,12 +821,121 @@ test('a setup-death fleet body names the failed step without contradicting itsel
     [{ name: 'Build for E2E', steps: 0, runner_name: 'ecs-qwen-hk4-9' }],
   );
   assert.equal(analysis.neverStarted, true);
+  // A commit CAN break setup, so this arm stays on the autofix route.
+  assert.equal(analysis.standDown, false);
 
   const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
-  assert.ok(body.includes('failed in step `Set up job`'));
+  assert.ok(
+    body.includes(
+      '`Build for E2E` on `ecs-qwen-hk4-9` — failed in step `Set up job`',
+    ),
+  );
   assert.ok(!body.includes('no step of any failed job'));
-  assert.ok(!body.includes('No commit can have caused this'));
+  // The absolute claim must stay out of this arm in ANY wrapping: the flat
+  // prose breaks it across lines, so assert on the normalized body.
+  assert.ok(
+    !body.replace(/\n/g, ' ').includes('No commit can have caused this'),
+  );
   assert.ok(body.includes('runner setup'));
+  assert.ok(body.includes('labeled for autofix'));
+});
+
+test('a fleet run no runner accepted does not absolve the commit', () => {
+  // Zero counted steps is also what a job NO runner ever accepted produces
+  // (GitHub leaves its step list empty and its runner_name null, and the job
+  // concludes cancelled, so the failure-only TSV names nothing) — and that is
+  // the one never-started shape a commit CAN cause, because the runner
+  // selector is repository configuration. The body must name the shape and
+  // the job without borrowing the pool-death arm's absolute claim.
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [],
+    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+  );
+  assert.equal(analysis.neverStarted, true);
+  assert.equal(analysis.standDown, true);
+
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  const flat = body.replace(/\n/g, ' ');
+  assert.ok(!flat.includes('No commit can have'));
+  assert.ok(!flat.includes('the runner accepted each job'));
+  assert.ok(body.includes('no runner ever accepted'));
+  // The failure-only TSV is empty for this shape, so the job list rides the
+  // meta population the class was computed over.
+  assert.ok(body.includes('`E2E Test (Linux) - sandbox:docker - shard 1/1`'));
+  assert.ok(!body.includes('labeled for autofix'));
+});
+
+test('a fleet run where only some failed jobs name a step stays qualified', () => {
+  // The arm switch keys on SOME failed job naming a step: a mixed run — one
+  // lane dead in setup, one lane dead before any step — must keep the
+  // qualified prose, because a commit can have caused the setup death.
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [
+      { name: 'Build for E2E', steps: ['Set up job'] },
+      { name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: [] },
+    ],
+    [
+      { name: 'Build for E2E', steps: 0, runner_name: 'ecs-qwen-hk4-9' },
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        steps: 0,
+        runner_name: 'ecs-qwen-hk4-30',
+      },
+    ],
+  );
+  assert.equal(analysis.neverStarted, true);
+  assert.equal(analysis.standDown, false);
+
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(body.includes('died during runner setup'));
+  assert.ok(!body.includes('the runner accepted each job'));
+  assert.ok(
+    !body.replace(/\n/g, ' ').includes('No commit can have caused this'),
+  );
+});
+
+test('an existing pool-death fleet body is re-rendered when this run died in setup', () => {
+  // The same-class early return keys on the ARM, not only the class: a
+  // pool-death body frozen over a setup-death recurrence would keep
+  // asserting no commit can have caused a failure a commit can cause. The
+  // displaced body is preserved, so the absolute claim survives only inside
+  // the collapsed block.
+  const poolBody = renderIssueBody({
+    analysis: analyzeLogs(
+      'E2E Tests',
+      [],
+      [],
+      [
+        {
+          name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+          steps: 0,
+          runner_name: 'ecs-qwen-hk4-30',
+        },
+      ],
+    ),
+    occurrence: OCCURRENCE,
+  });
+  const setup = analyzeLogs(
+    'E2E Tests',
+    [],
+    [{ name: 'Build for E2E', steps: ['Set up job'] }],
+    [{ name: 'Build for E2E', steps: 0, runner_name: 'ecs-qwen-hk4-9' }],
+  );
+  const body = renderIssueBody({
+    analysis: setup,
+    occurrence: OCCURRENCE,
+    existingBody: poolBody,
+  });
+
+  const fresh = body.slice(0, body.indexOf('<details>'));
+  assert.ok(fresh.includes('failed in step `Set up job`'));
+  assert.ok(!fresh.replace(/\n/g, ' ').includes('No commit can have'));
+  assert.ok(body.includes('<details>'));
+  assert.ok(body.includes(poolBody.trim()));
 });
 
 test('an existing fleet body is re-rendered when this run is ordinary, and preserved', () => {

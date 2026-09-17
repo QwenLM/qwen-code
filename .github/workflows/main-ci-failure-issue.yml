@@ -46,6 +46,8 @@ jobs:
       title: '${{ steps.plan.outputs.title }}'
       body: '${{ steps.plan.outputs.body }}'
       never_started: '${{ steps.plan.outputs.never_started }}'
+      stand_down: '${{ steps.plan.outputs.stand_down }}'
+      search_marker: '${{ steps.plan.outputs.search_marker }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -180,6 +182,13 @@ jobs:
           fi
 
           echo "never_started=$(jq -r '.neverStarted // false' "${analysis}")" >> "${GITHUB_OUTPUT}"
+          # The route stand-down is the stricter flag: a job that named its
+          # failed step died in runner setup, which runs repository
+          # configuration, so that shape stays on the autofix route.
+          echo "stand_down=$(jq -r '.standDown // false' "${analysis}")" >> "${GITHUB_OUTPUT}"
+          # file_issue re-runs the dedupe lookup on this marker right before
+          # creating: its snapshot here predates the re-run poll.
+          echo "search_marker=$(jq -r '.searchMarkers[0]' "${plan}")" >> "${GITHUB_OUTPUT}"
 
           # A random delimiter keeps issue-body prose from ending the heredoc
           # early and injecting fresh outputs (GitHub's own hardening guidance).
@@ -264,6 +273,18 @@ jobs:
             exit 0
           fi
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
+          # The supersession check above is a pre-request snapshot; a run
+          # created inside the check-to-POST gap is displaced by this re-run
+          # and its `cancelled` conclusion never passes analyze's gate.
+          # Re-check after the POST so a displacement at least names the run.
+          displaced="$(
+            gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&per_page=10" \
+              | jq --arg id "${WORKFLOW_RUN_ID}" --arg created "${WORKFLOW_RUN_CREATED_AT}" --arg event "${WORKFLOW_RUN_EVENT}" \
+                '[.workflow_runs[] | select((.id | tostring) != $id and .created_at > $created and .status == "queued" and .event == $event)] | length'
+          )"
+          if [[ "${displaced}" != "0" ]]; then
+            echo "::warning::The re-run of ${WORKFLOW_RUN_URL} may have displaced a newer main run that queued in its concurrency group after the supersession check — check the workflow's pending queue"
+          fi
           # Suppress the filing on the re-run's observed OUTCOME, never on the
           # request: a re-run cancelled before it starts never passes
           # analyze's failure-only gate, so keying on the request drops main's
@@ -333,7 +354,8 @@ jobs:
           EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'
           ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
           ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
-          NEVER_STARTED: '${{ needs.analyze.outputs.never_started }}'
+          STAND_DOWN: '${{ needs.analyze.outputs.stand_down }}'
+          SEARCH_MARKER: '${{ needs.analyze.outputs.search_marker }}'
           AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
@@ -341,11 +363,13 @@ jobs:
           AUTOFIX_IN_PROGRESS_LABEL: 'autofix/in-progress'
         run: |-
           apply_autofix_route() {
-            # A run whose failed jobs all executed zero repository steps ran
-            # no repository code, so there is no repair for the agent to
-            # make: the issue records the fleet failure for a human instead.
-            if [[ "${NEVER_STARTED}" == 'true' ]]; then
-              echo "Leaving the issue off the autofix route: no failed job executed a step."
+            # The stand-down covers only the fleet shapes no commit can
+            # repair — a runner that died before its first step, or a job no
+            # runner ever accepted. A job that named its failed step died
+            # during runner setup, which runs repository configuration, so
+            # that shape stays on the route for the agent to repair.
+            if [[ "${STAND_DOWN}" == 'true' ]]; then
+              echo "Leaving the issue off the autofix route: no failed job executed a repository step."
               # type/bug is pure taxonomy here: no routing automation picks
               # up a bot-authored issue (triage skips it by authorship, owner
               # assignment needs labels this branch does not apply), so the
@@ -376,6 +400,21 @@ jobs:
 
           body_file="${RUNNER_TEMP}/issue-body.md"
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
+
+          if [[ -z "${EXISTING_ISSUE}" ]]; then
+            # analyze's dedupe snapshot predates the re-run poll (up to the
+            # poll's length), so a second watcher on this commit can have
+            # filed since; re-check now or the commit's record splits across
+            # two issues.
+            EXISTING_ISSUE="$(
+              gh issue list \
+                --repo "${REPO}" \
+                --state open \
+                --search "${SEARCH_MARKER} in:body" \
+                --json number \
+                --jq '.[0].number // ""'
+            )"
+          fi
 
           if [[ -n "${EXISTING_ISSUE}" ]]; then
             # The title follows the CURRENT run's class and workflow: a class

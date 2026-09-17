@@ -24,6 +24,14 @@ export const SIGNATURE_MARKER_PREFIX = 'qwen-main-ci-failure-sig:';
  * the OTHER failure class on the same commit re-renders the prose instead of
  * echoing it — the issue's labels follow the current run's class. */
 export const FLEET_BODY_MARKER = 'qwen-main-ci-failure-fleet';
+/** The fleet body's third line marks its ARM, so a same-class recurrence in
+ * another arm re-renders instead of freezing the first body's causal claim
+ * over a shape it does not describe (see renderIssueBody). */
+export const FLEET_ARM_MARKERS = {
+  setup: 'qwen-main-ci-failure-fleet-setup',
+  pool: 'qwen-main-ci-failure-fleet-pool',
+  unassigned: 'qwen-main-ci-failure-fleet-unassigned',
+};
 export const OCCURRENCE_MARKER = '<!-- qwen-main-ci-failure-occurrences -->';
 export const MAX_OCCURRENCES = 10;
 
@@ -160,6 +168,25 @@ export function isNeverStartedRun(failedJobsMeta) {
 }
 
 /**
+ * The three shapes of the never-started class, keyed off the failed jobs.
+ * They share zero executed repository steps but carry different causal
+ * licences, so the body's claims and the route decision key on the arm:
+ * - 'setup' — a job names the runner-internal step that killed it ('Set up
+ *   job'). Setup runs repository configuration, so a commit CAN cause this
+ *   shape and the issue stays on the autofix route.
+ * - 'pool' — a runner accepted a failed job and died before its first step
+ *   (observed 2026-09-16, E2E run 35051269368). No commit can cause that.
+ * - 'unassigned' — no failed job names a runner at all: no runner ever
+ *   accepted the job. The runner selector is repository configuration, so a
+ *   commit can produce this shape too and the claim must stay qualified.
+ */
+export function fleetArm(failedJobs) {
+  if (failedJobs.some((job) => job.steps.length > 0)) return 'setup';
+  if (failedJobs.some((job) => job.runner_name)) return 'pool';
+  return 'unassigned';
+}
+
+/**
  * A signature over the whole failure set, recorded in the body for humans
  * comparing two issues. Matching is done with the per-test markers, which
  * tolerate a failure set that grows or shrinks between runs.
@@ -211,13 +238,25 @@ export function analyzeLogs(
       .filter((entry) => entry.runner_name)
       .map((entry) => [entry.name, entry.runner_name]),
   );
+  // The failure-only TSV names nothing when every non-passing job was
+  // cancelled before a runner took it (a never-assigned job concludes
+  // cancelled, not failure); the fleet body lists the jobs the class was
+  // computed over instead, so the issue still names its dead lanes.
+  const namedJobs =
+    neverStarted && failedJobs.length === 0
+      ? failedJobsMeta.map((entry) => ({ name: entry.name, steps: [] }))
+      : failedJobs;
   const jobs = neverStarted
-    ? failedJobs.map((job) =>
+    ? namedJobs.map((job) =>
         runners.has(job.name)
           ? { ...job, runner_name: runners.get(job.name) }
           : job,
       )
     : failedJobs;
+  // The route stand-down covers only the fleet shapes no commit can repair;
+  // a job that names its failed step died during runner setup, and setup runs
+  // repository configuration, so that shape stays on the autofix route.
+  const standDown = neverStarted && !jobs.some((job) => job.steps.length > 0);
 
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
   return {
@@ -225,6 +264,7 @@ export function analyzeLogs(
     tests,
     failedJobs: jobs,
     neverStarted,
+    standDown,
     signature: tests.length
       ? failureSignature(
           workflowName,
@@ -303,34 +343,59 @@ function renderPerCommitBody({ analysis, occurrence }) {
   // the fleet failure and the workflow keeps the issue off the agent's
   // route, both keying on the same flag.
   if (analysis.neverStarted) {
-    // A job that died during runner setup still NAMES its failed step — the
-    // workflow's jobs projection keeps the runner-internal 'Set up job' the
-    // meta projection discounts — and a commit can break setup (e2e.yml
-    // consumes the repo-local composite action and computes runs-on from a
-    // label expression), so only the shape where no failed job names a step
-    // may assert that no commit caused it.
-    const namesFailedStep = analysis.failedJobs.some(
-      (job) => job.steps.length > 0,
-    );
+    // The arm marker rides the body's third line: the same-class early
+    // return in renderIssueBody reads it from that opening window, so a
+    // recurrence in ANOTHER arm re-renders instead of freezing this body's
+    // causal claim over a shape it does not describe.
+    const arm = fleetArm(analysis.failedJobs);
+    const head = {
+      setup: [
+        'A main-branch CI run failed on `main` with no repository step of',
+        'any failed job executed — a failed job died during runner setup,',
+        'before its first repository step — and no automatic re-run',
+        'cleared it, so the issue is tracked per commit as a runner-fleet',
+        'failure.',
+      ],
+      pool: [
+        'A main-branch CI run failed on `main` with no step of any failed job',
+        'executed — the runner accepted each job and died before its first',
+        'step — and no automatic re-run cleared it. No commit can have',
+        'caused this, so the issue is tracked per commit as a runner-fleet',
+        'failure.',
+      ],
+      unassigned: [
+        'A main-branch CI run failed on `main` with no step of any failed job',
+        'executed — no runner ever accepted the jobs — and no automatic',
+        're-run cleared it, so the issue is tracked per commit as a',
+        'runner-fleet failure.',
+      ],
+    }[arm];
+    const tail = {
+      setup: [
+        'This issue is labeled for autofix so the existing agent can create a',
+        'repair PR. No repository step ran, so there is no test failure to',
+        'triage — but setup runs repository configuration, and a commit can',
+        'have broken it.',
+      ],
+      pool: [
+        'This issue is deliberately not routed to the autofix agent: no code',
+        'change can fix a job that never started. It needs a human to look at',
+        'the runner fleet.',
+      ],
+      unassigned: [
+        'This issue is deliberately not routed to the autofix agent: no',
+        'repository step ran, so there is no repair for it to make. The',
+        'runner selector and its gate are repository configuration, so a',
+        'commit can produce this shape too — it needs a human to check both',
+        'the runner fleet and that selector.',
+      ],
+    }[arm];
     return [
       `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
       `<!-- ${FLEET_BODY_MARKER} -->`,
+      `<!-- ${FLEET_ARM_MARKERS[arm]} -->`,
       '',
-      ...(namesFailedStep
-        ? [
-            'A main-branch CI run failed on `main` with no repository step of',
-            'any failed job executed — each failed job died during runner',
-            'setup, before its first repository step — and no automatic',
-            're-run cleared it, so the issue is tracked per commit as a',
-            'runner-fleet failure.',
-          ]
-        : [
-            'A main-branch CI run failed on `main` with no step of any failed job',
-            'executed — the runner accepted each job and died before its first',
-            'step — and no automatic re-run cleared it. No commit can have',
-            'caused this, so the issue is tracked per commit as a runner-fleet',
-            'failure.',
-          ]),
+      ...head,
       '',
       `- Workflow: ${analysis.workflow}`,
       ...(analysis.failedJobs.length
@@ -340,19 +405,7 @@ function renderPerCommitBody({ analysis, occurrence }) {
       `- Run ID: ${occurrence.runId}`,
       `- Commit: ${occurrence.sha}`,
       '',
-      ...(namesFailedStep
-        ? [
-            'This issue is deliberately not routed to the autofix agent: no',
-            'repository step ran, so there is no test failure to repair. It',
-            'needs a human to look at the runner setup named above — and',
-            'because setup runs repository configuration, a commit can have',
-            'caused it.',
-          ]
-        : [
-            'This issue is deliberately not routed to the autofix agent: no code',
-            'change can fix a job that never started. It needs a human to look at',
-            'the runner fleet.',
-          ]),
+      ...tail,
       '',
     ].join('\n');
   }
@@ -407,14 +460,30 @@ function existingBodyIsFleet(existingBody) {
 }
 
 /**
+ * The arm of an existing fleet body, read from the same opening window as the
+ * class marker: a preserved block carries the displaced body's markers deeper
+ * in the body, so only the first lines are safe to read. An ordinary body —
+ * or a fleet body older than the arm markers — reads as null and re-renders
+ * once, with the displaced prose preserved.
+ */
+function existingBodyFleetArm(existingBody) {
+  const opening = existingBody.split('\n').slice(0, 3);
+  for (const [arm, marker] of Object.entries(FLEET_ARM_MARKERS)) {
+    if (opening.some((line) => line.includes(marker))) return arm;
+  }
+  return null;
+}
+
+/**
  * Build the issue body: the create path when `existingBody` is empty, otherwise
  * a merge that keeps the existing prose (an agent's or a human's notes live
  * there) and only refreshes the machine-owned trailer. One exception: on the
- * per-commit path an existing body of the OTHER failure class is re-rendered,
- * because the issue's labels follow the current run's class and the two must
- * not disagree — and the displaced body is preserved verbatim in a collapsed
- * block, because it names the other failure's job, step and run and carries
- * any triage notes a human wrote below the machine block.
+ * per-commit path an existing body of the OTHER failure class — or of another
+ * fleet arm, whose causal claim differs — is re-rendered, because the issue's
+ * labels and prose follow the current run and both must not disagree with the
+ * record. The displaced body is preserved verbatim in a collapsed block,
+ * because it names the other failure's job, step and run and carries any
+ * triage notes a human wrote below the machine block.
  */
 export function renderIssueBody({
   analysis,
@@ -428,11 +497,19 @@ export function renderIssueBody({
     // to the OTHER failure class of this commit. The route labels follow the
     // class of THIS analysis, so the prose must too: echoing a stale fleet
     // body would pitch the agent under a stand-down notice, and echoing a
-    // stale autofix pitch would hide a fleet failure. Only a same-class body
-    // is kept verbatim — that is where an agent's or a human's notes live.
+    // stale autofix pitch would hide a fleet failure.
     if (existingBody.trim()) {
-      if (existingBodyIsFleet(existingBody) === Boolean(analysis.neverStarted))
-        return existingBody;
+      // Only a same-class, same-arm body is kept verbatim — that is where an
+      // agent's or a human's notes live. A class flip re-renders because the
+      // route labels follow this run's class; an arm flip re-renders because
+      // a frozen body would keep asserting the FIRST arm's causal claim over
+      // a recurrence that arm does not describe.
+      const sameClass =
+        existingBodyIsFleet(existingBody) === Boolean(analysis.neverStarted);
+      const sameArm =
+        existingBodyFleetArm(existingBody) ===
+        (analysis.neverStarted ? fleetArm(analysis.failedJobs) : null);
+      if (sameClass && sameArm) return existingBody;
       const fresh = renderPerCommitBody({ analysis, occurrence });
       return [
         fresh.trimEnd(),
