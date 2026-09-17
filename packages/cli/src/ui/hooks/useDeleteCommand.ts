@@ -59,10 +59,12 @@ export function useDeleteCommand(
       // One call for the whole batch: per-id purges each rewrite the entire
       // project-shared `logs.json` and queue behind one another, and each would
       // adopt a disk snapshot that still holds the rows the later ones dropped.
-      void logger?.removeSessionsMessages(sessionIds).catch((error: unknown) => {
-        // eslint-disable-next-line no-console
-        console.error('Failed to purge deleted sessions from log:', error);
-      });
+      void logger
+        ?.removeSessionsMessages(sessionIds)
+        .catch((error: unknown) => {
+          // eslint-disable-next-line no-console
+          console.error('Failed to purge deleted sessions from log:', error);
+        });
     },
     [logger],
   );

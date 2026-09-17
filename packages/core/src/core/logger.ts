@@ -603,7 +603,11 @@ export class Logger {
     const logFilePath = this.logFilePath;
     return this.serialize(async () => {
       try {
-        return await this.purgeFromDisk(logFilePath, belongsToSession, restoreOptimistic);
+        return await this.purgeFromDisk(
+          logFilePath,
+          belongsToSession,
+          restoreOptimistic,
+        );
       } finally {
         for (const id of doomed) this.pendingPurgeSessions.delete(id);
       }
