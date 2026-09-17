@@ -2644,6 +2644,8 @@ export class Config {
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
+  private readonly initialAuthType?: AuthType;
+  private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
@@ -3041,6 +3043,7 @@ export class Config {
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
@@ -3472,8 +3475,9 @@ export class Config {
     // Prefer params.authType over generationConfig.authType because:
     // - params.authType preserves undefined (user hasn't selected yet)
     // - generationConfig.authType may have a default value from resolvers
+    this.initialAuthType = params.authType ?? params.generationConfig?.authType;
     this.modelsConfig = new ModelsConfig({
-      initialAuthType: params.authType ?? params.generationConfig?.authType,
+      initialAuthType: this.initialAuthType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
@@ -3485,6 +3489,7 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+    this.initialResolvedAuthType = this.modelsConfig.getCurrentAuthType();
 
     // Publish the active model id for shell subprocesses. Every Config
     // publishes its own session's model — publishModelEnv registers it per
@@ -4158,6 +4163,9 @@ export class Config {
         },
       );
 
+      // Announce only now that the HOOK_EXECUTION_REQUEST subscription is in
+      // place: an observer that receives a bus must be able to run hooks on it.
+      this.announceMessageBus(this.messageBus);
       this.debugLogger.debug('MessageBus initialized with hook subscription');
     } else {
       this.debugLogger.debug('Hook system disabled, skipping initialization');
@@ -5136,10 +5144,22 @@ export class Config {
     return this.modelsConfig.getProviderProtocolConfig();
   }
 
+  syncModelSelection(
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ): void {
+    this.modelsConfig.syncAfterAuthRefresh(authType, modelId, baseUrl);
+    this.initialResolvedAuthType = undefined;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    if (!this.contentGenerator && authMethod === this.initialAuthType) {
+      authMethod = this.initialResolvedAuthType ?? authMethod;
+    }
     // The global reasoning effort (settings.model.reasoningEffort, seeded into
     // the generation config by the CLI) is NOT a provider field, but
     // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
@@ -5154,7 +5174,7 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
-    // Sync modelsConfig state for this auth refresh
+    // Sync modelsConfig state for this auth refresh.
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
@@ -6357,6 +6377,7 @@ export class Config {
     authType: AuthType,
     requiresRefresh: boolean,
   ): Promise<void> {
+    this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
       return;
     }
@@ -9716,10 +9737,61 @@ export class Config {
 
   /**
    * Set the message bus instance.
-   * This is called by the CLI layer to inject the MessageBus.
+   * This is called by the CLI layer to inject the MessageBus. The caller must
+   * install the bus's HOOK_EXECUTION_REQUEST subscription BEFORE calling this,
+   * because observers registered with {@link onMessageBusChange} are notified
+   * here and may use the bus right away.
    */
   setMessageBus(messageBus: MessageBus): void {
+    if (this.messageBus === messageBus) {
+      return;
+    }
     this.messageBus = messageBus;
+    this.announceMessageBus(messageBus);
+  }
+
+  /**
+   * Observes the hook MessageBus. The listener is called immediately when a
+   * bus already exists, and again whenever a different bus replaces it.
+   *
+   * A bus is only ever announced AFTER its HOOK_EXECUTION_REQUEST subscription
+   * is installed, so "I have a bus" always implies "this bus can run hooks".
+   * Returns a disposer; a throwing listener is logged and ignored, because a
+   * progress observer must never break hook initialization.
+   */
+  onMessageBusChange(listener: (bus: MessageBus) => void): () => void {
+    this.messageBusListeners.add(listener);
+    if (this.messageBus) {
+      this.notifyMessageBusListener(listener, this.messageBus);
+    }
+    return () => {
+      this.messageBusListeners.delete(listener);
+    };
+  }
+
+  private notifyMessageBusListener(
+    listener: (bus: MessageBus) => void,
+    bus: MessageBus,
+  ): void {
+    try {
+      // An async function is assignable to this listener type, and it runs
+      // from inside initialize(), so a rejection must be handled here too.
+      const result: unknown = listener(bus);
+      if (result instanceof Promise) {
+        result.catch((error: unknown) => {
+          this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+        });
+      }
+    } catch (error) {
+      this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+    }
+  }
+
+  private announceMessageBus(bus: MessageBus): void {
+    // Copy first: a listener may dispose itself (or another) while notified.
+    for (const listener of [...this.messageBusListeners]) {
+      this.notifyMessageBusListener(listener, bus);
+    }
   }
 
   /**

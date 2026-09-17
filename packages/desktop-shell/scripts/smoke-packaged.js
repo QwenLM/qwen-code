@@ -56,6 +56,12 @@ const child = spawn(executable, [], {
     QWEN_DESKTOP_WORKSPACE: workspace,
     QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
     HOME: isolatedHome,
+    // Windows has no HOME: os.homedir() reads USERPROFILE, so the runtime's
+    // global dir — the daemon log teardown reads pids from — would land in the
+    // real profile, out of reach of the workspace cleanup. QWEN_HOME pins it
+    // inside the workspace on every platform (it resolves to the same
+    // `<home>/.qwen` the HOME-derived default already picks elsewhere).
+    QWEN_HOME: path.join(isolatedHome, '.qwen'),
     XDG_STATE_HOME: isolatedState,
     XDG_DATA_HOME: isolatedState,
     ...(process.platform === 'linux'
@@ -78,13 +84,21 @@ const child = spawn(executable, [], {
 });
 let processOutput = '';
 let completed = false;
+let childExited = false;
 let exitFailure;
 captureProcessOutput(child.stdout, 'stdout');
 captureProcessOutput(child.stderr, 'stderr');
 child.on('exit', (code, signal) => {
+  childExited = true;
   processOutput += `[exit] code=${code ?? 'null'} signal=${signal ?? 'null'}\n`;
   exitFailure = new Error(
-    `Packaged desktop runtime exited before readiness (code ${code ?? 'null'}, signal ${signal ?? 'null'})`,
+    `Packaged desktop runtime exited before readiness (code ${code ?? 'null'}, signal ${signal ?? 'null'})\nSmoke workspace: ${workspace}`,
+  );
+});
+child.on('error', (error) => {
+  childExited = true;
+  exitFailure = new Error(
+    `Packaged desktop runtime failed to start: ${error.message}`,
   );
 });
 child.unref();
@@ -94,8 +108,7 @@ try {
   completed = true;
   console.log(`Packaged desktop runtime ready: ${executable}`);
 } finally {
-  terminate(child.pid);
-  if (completed) fs.rmSync(workspace, { recursive: true, force: true });
+  await teardown(child, completed);
 }
 
 function captureProcessOutput(stream, name) {
@@ -196,15 +209,126 @@ function smokeError(message, contents) {
   );
 }
 
-function terminate(pid) {
+// The launched app spawns its runtime through command_group's `group_spawn`
+// (src-tauri/src/runtime.rs), so the daemon leads a process group the app's own
+// SIGTERM never reaches: left alive it keeps appending under the workspace,
+// recreates entries in directories the delete already emptied (ENOTEMPTY on
+// macOS, EBUSY on Windows), and outlives the job. Wait out a bounded drain,
+// take down both groups, and only then delete the tree. Waiting on the app
+// alone cannot help — it exits on SIGTERM without draining the runtime it owns.
+async function teardown(child, removeWorkspace) {
+  terminate(child.pid);
+  const drainDeadline = Date.now() + 5_000;
+  while (!childExited && Date.now() < drainDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!childExited) terminate(child.pid, 'SIGKILL');
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  // The daemon logs under the smoke's isolated HOME, so read the pids it
+  // recorded before the tree they live in is deleted.
+  const daemons = readDaemonPids();
+  for (const pid of daemons) terminate(pid);
+  let stragglers = await waitForExit(daemons, 5_000);
+  for (const pid of stragglers) terminate(pid, 'SIGKILL');
+  stragglers = await waitForExit(stragglers, 2_000);
+  if (stragglers.length > 0) {
+    // A runtime we could not stop is a leak, not a filesystem race: fail the
+    // check instead of hiding it behind the delete retries below.
+    const message = `smoke: the packaged runtime survived teardown (pid ${stragglers.join(', ')})`;
+    if (removeWorkspace) {
+      throw new Error(`${message}\nSmoke workspace: ${workspace}`);
+    }
+    console.warn(message);
+  }
+  if (!removeWorkspace) return;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= 5) {
+        console.warn(
+          `smoke: teardown left the workspace behind (${error.code}): ${workspace}`,
+        );
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
+
+// Every daemon record carries the pid that owns its group, which is the only
+// handle on the runtime from outside the app. Records land in the stable
+// `<debug dir>/daemon/daemon.log` family, or in a `runs/<id>/` fallback one
+// when a second daemon contends for the log.
+function readDaemonPids() {
+  const daemonDir = path.join(isolatedHome, '.qwen', 'debug', 'daemon');
+  const runsDir = path.join(daemonDir, 'runs');
+  const logs = [path.join(daemonDir, 'daemon.log')];
+  try {
+    for (const run of fs.readdirSync(runsDir)) {
+      logs.push(path.join(runsDir, run, 'daemon.log'));
+    }
+  } catch {
+    // No fallback family to read.
+  }
+  const pids = new Set();
+  for (const log of logs) {
+    let contents;
+    try {
+      contents = fs.readFileSync(log, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const record of contents.matchAll(/\[DAEMON\][^\n]*\bpid=(\d+)/g)) {
+      const pid = Number(record[1]);
+      if (isAlive(pid)) pids.add(pid);
+    }
+  }
+  if (pids.size === 0 && fs.existsSync(daemonDir)) {
+    // QWEN_HOME pins the daemon log inside the isolated workspace on every
+    // platform, so this fires only when the log dir exists but yielded no
+    // pid line — the teardown then falls back to the delete retries.
+    console.warn(`smoke: no packaged runtime pid found in ${daemonDir}`);
+  }
+  return [...pids];
+}
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but belongs to another user.
+    return error.code === 'EPERM';
+  }
+}
+
+async function waitForExit(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const alive = pids.filter(isAlive);
+    if (alive.length === 0 || Date.now() >= deadline) return alive;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+function terminate(pid, signal = 'SIGTERM') {
   if (!pid) return;
   try {
     if (process.platform === 'win32') {
       execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
         stdio: 'ignore',
       });
-    } else {
-      process.kill(-pid, 'SIGTERM');
+      return;
+    }
+    try {
+      // App and runtime each lead their own group, so signalling the pid alone
+      // would leave the group's children — including the runtime — running.
+      process.kill(-pid, signal);
+    } catch {
+      process.kill(pid, signal);
     }
   } catch {
     // The process may already have exited after the smoke succeeded or failed.

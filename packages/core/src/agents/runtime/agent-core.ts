@@ -110,7 +110,7 @@ import type {
 } from './agent-events.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
@@ -724,9 +724,7 @@ export class AgentCore {
 
     const isDisallowed = (name: string): boolean =>
       this.toolConfig?.disallowedTools?.some((pattern) =>
-        name.startsWith('mcp__')
-          ? matchesMcpPattern(pattern, name)
-          : pattern === name,
+        matchesToolPattern(pattern, name),
       ) === true;
 
     if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
@@ -862,9 +860,7 @@ export class AgentCore {
       return toolsList.filter((t) => {
         if (!t.name) return true;
         return !disallowed.some((pattern) =>
-          t.name!.startsWith('mcp__')
-            ? matchesMcpPattern(pattern, t.name!)
-            : pattern === t.name,
+          matchesToolPattern(pattern, t.name!),
         );
       });
     }

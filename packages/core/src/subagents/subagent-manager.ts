@@ -1599,13 +1599,13 @@ export class SubagentManager {
       // for. Deliberate: this supersedes the earlier compatibility fallback
       // for converted Claude agents.
       const toolNames = config.tools
-        ? await this.transformToToolNames(config.tools)
+        ? await this.resolveToolNames(config.tools)
         : ['*'];
       toolConfig = {
         tools: toolNames,
         ...(config.disallowedTools && config.disallowedTools.length > 0
           ? {
-              disallowedTools: await this.transformToToolNames(
+              disallowedTools: await this.resolveToolNames(
                 config.disallowedTools,
               ),
             }
@@ -1622,17 +1622,25 @@ export class SubagentManager {
   }
 
   /**
-   * The entries of a deny list that can deny nothing: not an `mcp__` pattern
-   * (those match by pattern at run time), not a built-in tool by tool name,
-   * display name or legacy alias (registered in this session or not), and not
-   * the name or display name of any registered tool. A deny that matches
-   * nothing silently leaves the agent the tool the caller meant to take away,
-   * so callers refuse these instead of forwarding them.
+   * The entries of a tool list that name no tool: not a built-in tool by tool
+   * name, display name or legacy alias (registered in this session or not),
+   * and not the name or display name of any registered tool. A deny that
+   * matches nothing silently leaves the agent the tool the caller meant to take
+   * away, and an allow that matches nothing silently takes away a tool the
+   * caller meant to keep, so callers refuse these instead of forwarding them.
+   *
+   * `mcp__` entries are exempt by default: a deny list holds MCP patterns,
+   * which match by pattern at run time. An allow list holds exact names, so its
+   * caller passes `checkMcpNames` to look those up like any other name.
    */
-  async findUnmatchedToolNames(tools: string[]): Promise<string[]> {
+  async findUnmatchedToolNames(
+    tools: string[],
+    options: { checkMcpNames?: boolean } = {},
+  ): Promise<string[]> {
     const candidates = tools.filter(
       (name) =>
-        !name.startsWith('mcp__') && resolveBuiltinToolName(name) === undefined,
+        (options.checkMcpNames === true || !name.startsWith('mcp__')) &&
+        resolveBuiltinToolName(name) === undefined,
     );
     if (candidates.length === 0) return [];
     const toolRegistry = this.config.getToolRegistry();
@@ -1647,14 +1655,17 @@ export class SubagentManager {
   }
 
   /**
-   * Transforms a tools array that may contain tool names or display names
-   * into an array containing only tool names.
+   * Maps a tool list that may contain tool names or display names to tool
+   * names, by the session's registry: an exact tool name first, then a display
+   * name (including a legacy display name). An entry that matches neither — an
+   * MCP pattern, or a tool not registered in this session — comes back as
+   * given. Callers that narrow a tool pool resolve their lists through this so
+   * they compare names exactly the way the subagent's own config does.
    *
    * @param tools - Array of tool names or display names
    * @returns Array of tool names
-   * @private
    */
-  private async transformToToolNames(tools: string[]): Promise<string[]> {
+  async resolveToolNames(tools: string[]): Promise<string[]> {
     const toolRegistry = this.config.getToolRegistry();
     if (!toolRegistry) {
       return tools;

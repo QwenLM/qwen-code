@@ -3654,6 +3654,52 @@ bad`);
         ).resolves.toEqual(['Bash', 'run_shell']);
       });
 
+      // An allowlist holds exact names, so its caller asks for mcp__ entries
+      // to be looked up too rather than waved through as patterns.
+      it('looks up mcp__ entries when asked to check MCP names', async () => {
+        vi.mocked(mockToolRegistry.getAllTools).mockReturnValue([
+          { name: 'read_file', displayName: 'Read File' },
+          {
+            name: 'mcp__warehouse__query',
+            displayName: 'query (warehouse MCP Server)',
+          },
+        ] as unknown as ReturnType<ToolRegistry['getAllTools']>);
+
+        await expect(
+          manager.findUnmatchedToolNames(
+            [
+              'mcp__warehouse__query',
+              'query (warehouse MCP Server)',
+              'mcp__warehouse__drop',
+              'Shell',
+            ],
+            { checkMcpNames: true },
+          ),
+        ).resolves.toEqual(['mcp__warehouse__drop']);
+        await expect(
+          manager.findUnmatchedToolNames(['mcp__warehouse__drop']),
+        ).resolves.toEqual([]);
+      });
+
+      // Callers that narrow a pool resolve their lists the way the agent's own
+      // config does: tool name first, then display name, anything else as given.
+      it('resolves tool and display names to tool names and keeps the rest', async () => {
+        await expect(
+          manager.resolveToolNames([
+            'read_file',
+            'Write File',
+            'mcp__github__*',
+            'Bash',
+          ]),
+        ).resolves.toEqual([
+          'read_file',
+          'write_file',
+          'mcp__github__*',
+          'Bash',
+        ]);
+        expect(mockToolRegistry.warmAll).toHaveBeenCalled();
+      });
+
       it('should pass the agent runtimeView to AgentHeadless.create', async () => {
         const config = { ...agentConfig, model: 'custom-model' };
         const fakeGenerator = { generateContentStream: vi.fn() };

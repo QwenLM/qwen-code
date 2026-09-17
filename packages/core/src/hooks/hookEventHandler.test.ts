@@ -6,6 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { HookEventHandler } from './hookEventHandler.js';
+import { HookRunner as RealHookRunner } from './hookRunner.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
+import { MessageBusType } from '../confirmation-bus/types.js';
+import type { HookProgress } from '../confirmation-bus/types.js';
 import {
   HookEventName,
   HookType,
@@ -4555,6 +4559,7 @@ describe('HookEventHandler', () => {
           eventName: HookEventName.UserPromptSubmit,
           hookName: 'first',
           hookType: 'command',
+          invocationId: expect.stringMatching(/^hook-\d+$/),
           index: 0,
           total: 2,
         },
@@ -4564,6 +4569,7 @@ describe('HookEventHandler', () => {
           eventName: HookEventName.UserPromptSubmit,
           hookName: 'second',
           hookType: 'command',
+          invocationId: expect.stringMatching(/^hook-\d+$/),
           index: 1,
           total: 2,
         },
@@ -4808,6 +4814,158 @@ describe('HookEventHandler', () => {
         `${HookEventName.Notification}:start`,
         `${HookEventName.Notification}:end`,
       ]);
+    });
+  });
+  describe('hook invocation identity in progress events', () => {
+    let bus: MessageBus;
+    let events: HookProgress[];
+    let handler: HookEventHandler;
+
+    beforeEach(() => {
+      bus = new MessageBus();
+      events = [];
+      bus.subscribe<HookProgress>(MessageBusType.HOOK_PROGRESS, (message) => {
+        events.push(message);
+      });
+      Object.assign(mockConfig, { getMessageBus: () => bus });
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      // The real runner, so start/end come from executeHooksParallel exactly
+      // as in production.
+      handler = new HookEventHandler(
+        mockConfig,
+        mockHookPlanner,
+        new RealHookRunner(),
+        mockHookAggregator,
+        mockSessionHooksManager,
+      );
+    });
+
+    const functionHook = (
+      id: string,
+      callback: () => Promise<HookOutput | undefined> = async () => undefined,
+    ): HookConfig =>
+      ({
+        type: HookType.Function,
+        id,
+        callback,
+        errorMessage: `${id} failed`,
+        source: HooksConfigSource.Session,
+      }) as unknown as HookConfig;
+
+    const planWith = (configs: HookConfig[]) => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan(configs, false),
+      );
+    };
+
+    const ofPhase = (phase: 'start' | 'end') =>
+      events.filter((event) => event.phase === phase);
+
+    it('gives a hook the same invocationId on start and end', async () => {
+      planWith([functionHook('solo')]);
+
+      await handler.fireUserPromptSubmitEvent('hi');
+
+      expect(events).toHaveLength(2);
+      const [start, end] = events;
+      expect(start.invocationId).toMatch(/^hook-\d+$/);
+      expect(end.invocationId).toBe(start.invocationId);
+    });
+
+    it('gives each hook in one batch its own invocationId', async () => {
+      planWith([functionHook('first'), functionHook('second')]);
+
+      await handler.fireUserPromptSubmitEvent('hi');
+
+      const starts = ofPhase('start');
+      expect(starts.map((event) => event.index)).toEqual([0, 1]);
+      expect(starts[0].invocationId).not.toBe(starts[1].invocationId);
+    });
+
+    it('pairs start and end by invocationId when batches of one event overlap', async () => {
+      const releases: Array<() => void> = [];
+      const gated = functionHook(
+        'gated',
+        () =>
+          new Promise<undefined>((resolve) => {
+            releases.push(() => resolve(undefined));
+          }),
+      );
+      planWith([gated]);
+
+      const first = handler.fireUserPromptSubmitEvent('one');
+      const second = handler.fireUserPromptSubmitEvent('two');
+      await vi.waitFor(() => expect(releases).toHaveLength(2));
+      // The first batch ends only after the second batch started.
+      releases[0]();
+      await first;
+      releases[1]();
+      await second;
+
+      expect(events.map((event) => `${event.phase}:${event.index}`)).toEqual([
+        'start:0',
+        'start:0',
+        'end:0',
+        'end:0',
+      ]);
+      const [firstStart, secondStart, firstEnd, secondEnd] = events;
+      expect(firstStart.invocationId).not.toBe(secondStart.invocationId);
+      expect(firstEnd.invocationId).toBe(firstStart.invocationId);
+      expect(secondEnd.invocationId).toBe(secondStart.invocationId);
+    });
+
+    it('tags both phases with the agent that ran the hook', async () => {
+      planWith([functionHook('in-agent')]);
+
+      await runWithAgentContext('agent-1', () =>
+        handler.fireUserPromptSubmitEvent('hi'),
+      );
+
+      expect(events.map((event) => event.agentId)).toEqual([
+        'agent-1',
+        'agent-1',
+      ]);
+    });
+
+    it('omits agentId outside an agent context', async () => {
+      planWith([functionHook('main')]);
+
+      await handler.fireUserPromptSubmitEvent('hi');
+
+      expect(events).toHaveLength(2);
+      for (const event of events) {
+        expect('agentId' in event).toBe(false);
+      }
+    });
+
+    it('keeps the agentId read at batch start when the end runs elsewhere', async () => {
+      let release: (() => void) | undefined;
+      planWith([
+        functionHook(
+          'crossing',
+          () =>
+            new Promise<undefined>((resolve) => {
+              release = () => resolve(undefined);
+            }),
+        ),
+      ]);
+
+      const run = runWithAgentContext('agent-2', () =>
+        handler.fireUserPromptSubmitEvent('hi'),
+      );
+      await vi.waitFor(() => expect(release).toBeDefined());
+      // Settle the hook from a different agent frame.
+      await runWithAgentContext('agent-other', async () => {
+        release!();
+      });
+      await run;
+
+      const [start, end] = events;
+      expect(end.invocationId).toBe(start.invocationId);
+      expect(start.agentId).toBe('agent-2');
+      expect(end.agentId).toBe(start.agentId);
     });
   });
 });
