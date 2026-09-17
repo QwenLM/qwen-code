@@ -3639,6 +3639,32 @@ describe('ChatRecordingService', () => {
 });
 
 describe('Goal turn token ledger', () => {
+  it('shares external spend with assistant usage and consumes each turn once', () => {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'assistant' }),
+      appendRecord: () => {},
+      maybeTriggerAutoTitle: () => {},
+    });
+    service.billGoalTurnTokens('turn-1', 30);
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 70 },
+      goalContext: { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
+    });
+    for (const tokens of [NaN, Infinity, -1, 0])
+      service.billGoalTurnTokens('turn-2', tokens);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(100);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    service.billGoalTurnTokens('turn-1', 10);
+    service.billGoalTurnTokens('turn-2', 20);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(20);
+  });
+
   it('bills a Goal turn from the assistant records it produced', () => {
     // The wiring that matters: recordAssistantTurn must feed the ledger. A
     // ledger that is never fed reports every Goal turn as free.

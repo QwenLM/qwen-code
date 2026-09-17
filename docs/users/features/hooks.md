@@ -32,7 +32,11 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
 
-When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top. It does not change anything: to add, edit or remove a hook, edit `settings.json`.
+The browser never edits your configuration: to add, change or remove a hook, edit `settings.json`. It does re-read it. Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree, so definitions you added, changed or removed since the session started take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
+
+Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
+
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top.
 
 ## Hook Types
 
@@ -941,6 +945,8 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
 
+**Blocking cap**: consecutive blocking decisions are counted per prompt and keep counting across tool round trips, so a hook that blocks on every check ends the turn after `stopHookBlockingCap` blocks (default 8; `QWEN_CODE_STOP_HOOK_BLOCK_CAP` overrides it for one run). The count and `stop_hook_active` share the same record: both restart when the stop is allowed, when you steer or send new input, when a turn is retried, when a goal turn starts, and when the turn ends abnormally. In non-interactive text mode, Stop hook messages and cap warnings are written to stderr; JSON output is unchanged.
+
 **Example Output**:
 
 ```json
@@ -1500,14 +1506,6 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
   }
 }
 ```
-
-### Browsing your hooks
-
-Run `/hooks` to browse the configured hooks. Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
-
-Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
-
-This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `hooks.disableAllHooks`, `hooks.stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected.
 
 ## Hook Execution
 

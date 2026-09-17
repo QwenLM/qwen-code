@@ -9,6 +9,27 @@ const request = {
   modelIds: ['qwen3-asr-flash'],
 };
 describe('custom service model purpose', () => {
+  it('rejects Responses voice before installation', () => {
+    expect(
+      parseAuthProviderInstallRequest({
+        ...request,
+        wireApi: 'responses',
+        advancedConfig: { purpose: 'voice' },
+      }),
+    ).toMatchObject({
+      ok: false,
+      code: 'invalid_voice_model',
+      error: expect.stringContaining('Chat Completions'),
+    });
+    expect(
+      parseAuthProviderInstallRequest({
+        ...request,
+        wireApi: 'chat-completions',
+        advancedConfig: { purpose: 'voice' },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it('defaults an omitted voice protocol to OpenAI', () => {
     expect(
       parseAuthProviderInstallRequest({
