@@ -2646,6 +2646,8 @@ export class Config {
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
+  private readonly initialAuthType?: AuthType;
+  private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
@@ -3462,8 +3464,9 @@ export class Config {
     // Prefer params.authType over generationConfig.authType because:
     // - params.authType preserves undefined (user hasn't selected yet)
     // - generationConfig.authType may have a default value from resolvers
+    this.initialAuthType = params.authType ?? params.generationConfig?.authType;
     this.modelsConfig = new ModelsConfig({
-      initialAuthType: params.authType ?? params.generationConfig?.authType,
+      initialAuthType: this.initialAuthType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
@@ -3475,6 +3478,7 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+    this.initialResolvedAuthType = this.modelsConfig.getCurrentAuthType();
 
     // Publish the active model id for shell subprocesses. Every Config
     // publishes its own session's model — publishModelEnv registers it per
@@ -5128,10 +5132,22 @@ export class Config {
     return this.modelsConfig.getProviderProtocolConfig();
   }
 
+  syncModelSelection(
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ): void {
+    this.modelsConfig.syncAfterAuthRefresh(authType, modelId, baseUrl);
+    this.initialResolvedAuthType = undefined;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    if (!this.contentGenerator && authMethod === this.initialAuthType) {
+      authMethod = this.initialResolvedAuthType ?? authMethod;
+    }
     // The global reasoning effort (settings.model.reasoningEffort, seeded into
     // the generation config by the CLI) is NOT a provider field, but
     // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
@@ -5146,7 +5162,7 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
-    // Sync modelsConfig state for this auth refresh
+    // Sync modelsConfig state for this auth refresh.
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
@@ -6349,6 +6365,7 @@ export class Config {
     authType: AuthType,
     requiresRefresh: boolean,
   ): Promise<void> {
+    this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
       return;
     }
