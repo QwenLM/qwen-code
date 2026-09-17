@@ -419,6 +419,7 @@ export class WorkflowRunner {
           ...(options.authoringHint && !workflowName
             ? { authoringHint: options.authoringHint }
             : {}),
+          ...(config.isWorkflowNameOnly?.() === true ? { nameOnly: true } : {}),
           args: options.args,
           ...(options.resumeFromRunId
             ? {
@@ -580,8 +581,19 @@ export class WorkflowRunner {
             runId,
             emitter,
             budget,
-            resolveSavedWorkflow: (ref) =>
-              resolveSavedWorkflowScript(ref, config),
+            resolveSavedWorkflow: async (ref) => {
+              // A name-only session runs no script it cannot name, and that
+              // holds for a nested call as much as for the Workflow tool.
+              if (
+                typeof ref !== 'string' &&
+                config.isWorkflowNameOnly?.() === true
+              ) {
+                throw new Error(
+                  "workflow({scriptPath}): this session restricts workflows to named workflows (tools.workflowNameOnly) — nest with workflow('<name>') instead.",
+                );
+              }
+              return resolveSavedWorkflowScript(ref, config);
+            },
             journal,
             resumeReplay,
             scheduler,

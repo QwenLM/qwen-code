@@ -417,6 +417,12 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * it rides here. Process-local, like the notification it feeds.
    */
   authoringHint?: string;
+  /**
+   * The session runs named workflows only, so the resume call this run's
+   * notification offers names the workflow rather than its script path, and
+   * an unnamed run offers none. Process-local, like the notification.
+   */
+  nameOnly?: boolean;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -1941,6 +1947,12 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
     if (hasUninlinableResumeArgs(entry)) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
+  } else if (entry.nameOnly && !entry.workflowName) {
+    // A run started from a script — by the host, since the model cannot here —
+    // has no name to resume by, and the model may not pass a script.
+    lines.push(
+      'This session runs named workflows only, and this run has no workflow name, so only whoever started it can retry it.',
+    );
   }
   if (entry.journalPath) {
     lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);

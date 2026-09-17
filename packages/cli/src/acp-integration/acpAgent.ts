@@ -8558,6 +8558,7 @@ class QwenAgent implements Agent {
         workflowStepId: true,
         runSavedArgs: true,
         runScript: true,
+        nameOnly: config.isWorkflowNameOnly?.() === true,
       },
       savedWorkflows,
     };

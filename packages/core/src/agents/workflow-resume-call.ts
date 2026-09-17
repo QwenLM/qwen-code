@@ -34,6 +34,17 @@ export interface WorkflowResumeTarget {
   args?: unknown;
   /** Preserve background execution when the current surface accepts it. */
   resumeInBackground?: boolean;
+  /**
+   * The saved or extension workflow the run came from, when it came from one.
+   * Read only when `nameOnly` is set.
+   */
+  workflowName?: string;
+  /**
+   * The session runs named workflows only (`tools.workflowNameOnly`), where a
+   * `scriptPath` call is refused. The resume call then names the workflow, and
+   * a run with no name has none the model could make.
+   */
+  nameOnly?: boolean;
 }
 
 /**
@@ -67,17 +78,24 @@ export function hasUninlinableResumeArgs(
 }
 
 /**
- * The resume call for this run, or `null` when there is no script on disk to
- * resume from (an inline script that could not be persisted).
+ * The resume call for this run, or `null` when there is none to offer: no
+ * script on disk to resume from (an inline script that could not be
+ * persisted), or, in a name-only session, no workflow name to resume by.
  */
 export function buildResumeCall(target: WorkflowResumeTarget): string | null {
-  if (!target.scriptPath) return null;
-  const scriptPath = stripAnsiAndControl(target.scriptPath);
+  let source: string;
+  if (target.nameOnly) {
+    if (!target.workflowName) return null;
+    source = `name: ${JSON.stringify(stripAnsiAndControl(target.workflowName))}`;
+  } else {
+    if (!target.scriptPath) return null;
+    source = `scriptPath: ${JSON.stringify(stripAnsiAndControl(target.scriptPath))}`;
+  }
   const runId = stripAnsiAndControl(target.runId);
   const args = serializeResumeArgs(target.args);
   const argsPart = args === null ? '' : `, args: ${args}`;
   const backgroundPart = target.resumeInBackground
     ? ', run_in_background: true'
     : '';
-  return `Workflow({ scriptPath: ${JSON.stringify(scriptPath)}, resumeFromRunId: ${JSON.stringify(runId)}${argsPart}${backgroundPart} })`;
+  return `Workflow({ ${source}, resumeFromRunId: ${JSON.stringify(runId)}${argsPart}${backgroundPart} })`;
 }

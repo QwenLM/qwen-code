@@ -308,6 +308,13 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
  */
 export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
   {
+    section: 'tools',
+    key: 'workflowNameOnly',
+    // Only `true` turns the lock on; anything else leaves the model free to
+    // run scripts, so it ranks with unset.
+    strictness: (value: unknown): number => (value === true ? 1 : 0),
+  },
+  {
     section: 'agents',
     key: 'crossSessionMessaging',
     // Unset means on — the default — so it ranks with `true`. Anything the

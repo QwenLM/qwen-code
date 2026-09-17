@@ -854,6 +854,9 @@ function buildRunTrailer(
     runId: handle.runId,
     scriptPath: handle.scriptPath,
     args,
+    ...(config.isWorkflowNameOnly?.() === true
+      ? { nameOnly: true, workflowName: entry?.workflowName }
+      : {}),
   });
   if (resume && includeResume) {
     // An extension's file is third-party and an extension update replaces
@@ -1485,6 +1488,15 @@ const WORKFLOW_AUTHORING_POINTER = `**Writing the script**
 
 Before writing a script, load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill — the authoring reference: the sandbox contract, agent() options, \`pipeline()\` vs \`parallel()\`, verification and convergence patterns, resume, and a worked example.`;
 
+/**
+ * Follows the decision when the session runs named workflows only. The
+ * parameter schema already lacks `script` and `scriptPath` then; this says
+ * why, and keeps the model from writing a script it cannot run.
+ */
+export const WORKFLOW_NAME_ONLY_SECTION = `**Named workflows only**
+
+This session restricts this tool to named workflows. Call it as \`{ name, args }\` with the name of a saved or extension workflow; \`script\` and \`scriptPath\` are refused, and a running script cannot nest \`workflow({ scriptPath })\`. Do not write a workflow script in this session. To resume a failed run, pass the same \`name\` and \`args\` with \`resumeFromRunId\`.`;
+
 /** Appended to the pointer when a `tools.eager` allowlist defers the Skill tool. */
 const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
 
@@ -1509,11 +1521,15 @@ const WORKFLOW_AUTHORING_INLINE_NOTE =
  *
  * An `inline` request without a readable reference falls back to the pointer:
  * it is the only remaining text that names the reference at all.
+ *
+ * `nameOnly` overrides every shape: decision + the name-only section + runtime,
+ * with no reference and no pointer, because the model writes no script there.
  */
 export function buildWorkflowToolDescription(
   surface: WorkflowAuthoringSurface,
   reference: WorkflowAuthoringReference | null = readWorkflowAuthoringReference(),
   sizeGuideline: WorkflowSizeGuidelineSetting | null = null,
+  options: { nameOnly?: boolean } = {},
 ): string {
   // The size guideline is one more number the model plans a run around, so it
   // sits with the runtime facts. The inline shape has no runtime section and
@@ -1524,6 +1540,11 @@ export function buildWorkflowToolDescription(
   const runtime = size
     ? `${WORKFLOW_TOOL_RUNTIME}\n\n${size}`
     : WORKFLOW_TOOL_RUNTIME;
+  // A name-only session runs no script the model writes, so no shape carries
+  // the authoring reference or a pointer to it.
+  if (options.nameOnly) {
+    return `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_NAME_ONLY_SECTION}\n\n${runtime}`;
+  }
   const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${runtime}\n\n${WORKFLOW_AUTHORING_POINTER}`;
   switch (surface) {
     case 'pointer':
@@ -1550,8 +1571,46 @@ export function buildWorkflowToolDescription(
  * sentence has to name wherever the rest of the authoring contract actually is
  * in this session, or the parameter the model is about to fill contradicts the
  * description beside it.
+ *
+ * A name-only session drops `script` and `scriptPath` from the schema the
+ * model sees, and `name` and `resumeFromRunId` say how to call and resume by
+ * name. `name` is not made `required`: the host's own runs validate against
+ * this same schema and start from a script.
  */
-function buildWorkflowParamSchema(surface: WorkflowAuthoringSurface) {
+function buildWorkflowParamSchema(
+  surface: WorkflowAuthoringSurface,
+  nameOnly = false,
+) {
+  if (nameOnly) {
+    const {
+      script: _script,
+      scriptPath: _scriptPath,
+      ...properties
+    } = WORKFLOW_PARAM_SCHEMA.properties;
+    return {
+      ...WORKFLOW_PARAM_SCHEMA,
+      properties: {
+        ...properties,
+        name: {
+          type: 'string',
+          description:
+            'Name of the workflow to run: `<name>` for one in ' +
+            '`.qwen/workflows` or `~/.qwen/workflows`, or ' +
+            '`<extension>:<name>` for one an active extension ships. This ' +
+            'session runs named workflows only, so every call passes `name`.',
+        },
+        resumeFromRunId: {
+          type: 'string',
+          description:
+            'Optional. Resume a prior run by id (e.g. wf_abc123…): pass the ' +
+            'same `name` and `args` the original run used. agent() calls ' +
+            'whose rolling prefix-hash matches a journaled result are served ' +
+            'from cache for the longest unchanged prefix, and the first ' +
+            'changed or missing call onward runs live.',
+        },
+      },
+    };
+  }
   const base = WORKFLOW_PARAM_SCHEMA.properties.script.description;
   const where =
     surface === 'pointer' || surface === 'pointer-via-tool-search'
@@ -1615,6 +1674,18 @@ function isScriptAuthoredByThisCall(
   }
 }
 
+/**
+ * The script-bearing fields a call carries, which a name-only session refuses.
+ * Presence is what counts, not whether the value would validate: an empty
+ * `script` is still an attempt to run one.
+ */
+function describeUnnamedWorkflowSources(params: WorkflowParams): string[] {
+  const refused: string[] = [];
+  if (params.script !== undefined) refused.push('script');
+  if (params.scriptPath !== undefined) refused.push('scriptPath');
+  return refused;
+}
+
 /** Runner option carrying the hint, omitted when there is none. */
 function authoringHintOption(hint: string | null): { authoringHint?: string } {
   return hint ? { authoringHint: hint } : {};
@@ -1632,11 +1703,24 @@ export class WorkflowTool extends BaseDeclarativeTool<
    */
   readonly authoringSurface: WorkflowAuthoringSurface;
 
+  /**
+   * Whether this session runs named workflows only (`tools.workflowNameOnly`),
+   * read once with the description and schema it shapes. The keyword reminder
+   * reads it from here for the same reason it reads `authoringSurface`.
+   */
+  readonly nameOnly: boolean;
+
   constructor(
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions = {},
   ) {
-    const surface = resolveWorkflowAuthoringSurface(config);
+    const nameOnly = config.isWorkflowNameOnly?.() === true;
+    // No script the model writes can run, so the authoring reference has
+    // nowhere to be pointed at: the description, the failure hint and the
+    // keyword reminder all take the shape that leaves it out.
+    const surface: WorkflowAuthoringSurface = nameOnly
+      ? 'withheld'
+      : resolveWorkflowAuthoringSurface(config);
     super(
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
@@ -1645,13 +1729,35 @@ export class WorkflowTool extends BaseDeclarativeTool<
         undefined,
         config.getWorkflowSizeGuideline?.() ??
           resolveWorkflowSizeGuidelineSetting(undefined),
+        { nameOnly },
       ),
       Kind.Other,
-      buildWorkflowParamSchema(surface),
+      buildWorkflowParamSchema(surface, nameOnly),
       /* isOutputMarkdown */ true,
       /* canUpdateOutput */ true,
     );
     this.authoringSurface = surface;
+    this.nameOnly = nameOnly;
+  }
+
+  /**
+   * Every call the model or a client schedules comes through here; the host's
+   * own runs come through {@link buildSessionOwnedBackground} and are not the
+   * model's to restrict. In a name-only session a call that carries a script
+   * or a script path is refused before anything is read, approved or run.
+   */
+  override build(
+    params: WorkflowParams,
+  ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
+    if (this.nameOnly) {
+      const refused = describeUnnamedWorkflowSources(params);
+      if (refused.length > 0) {
+        throw new Error(
+          `WorkflowTool: this session restricts the Workflow tool to named workflows (tools.workflowNameOnly). Not allowed here: ${refused.join(', ')}. Invoke as {name, args} only.`,
+        );
+      }
+    }
+    return super.build(params);
   }
 
   buildSessionOwnedBackground(
