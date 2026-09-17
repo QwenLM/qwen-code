@@ -579,12 +579,17 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
       (job.steps ?? []).filter((s) => s.name === 'Unpack build artifact'),
     );
     // A leg unpacks once what it downloads in two attempts (first try plus
-    // the bounded retry pinned below), so count the first attempts, not
-    // every download step.
-    const firstAttempts = downloads.filter(
-      (s) => s.name === 'Download build artifact',
+    // the bounded retry pinned below), so count the consuming legs by
+    // the archive they pull, not by step name: a leg fetching e2e-build
+    // under off-convention step names must still join the count.
+    const archiveLegs = Object.values(doc.jobs).filter((job) =>
+      (job.steps ?? []).some(
+        (s) =>
+          String(s.uses || '').startsWith('actions/download-artifact@') &&
+          s.with?.name === 'e2e-build',
+      ),
     );
-    assert.equal(unpacks.length, firstAttempts.length);
+    assert.equal(unpacks.length, archiveLegs.length);
     for (const unpack of unpacks) {
       assert.ok(
         unpack.run.endsWith('/' + archive + '"'),
@@ -632,16 +637,23 @@ describe('e2e build artifact download retry (consumer legs)', () => {
   // the attempts drifting apart — is silent until the next transient stall
   // reds a main run again, so pin the contract per leg.
   const doc = parse(readFileSync(E2E_WORKFLOW, 'utf8'));
+  // Membership by the behaviour the contract protects — pulling the
+  // e2e-build archive — not by step name: a leg fetching it under
+  // off-convention names must still carry the retry pair below.
   const consumers = Object.entries(doc.jobs).filter(([, job]) =>
-    (job.steps ?? []).some((s) => s.name === 'Download build artifact'),
+    (job.steps ?? []).some(
+      (s) =>
+        String(s.uses || '').startsWith('actions/download-artifact@') &&
+        s.with?.name === 'e2e-build',
+    ),
   );
 
   it('finds the legs that consume the build artifact', () => {
     // The pins below are per consumer; an empty match set would green them
     // vacuously, so fail when the filter stops seeing legs. The four known
     // legs are pinned by name in scripts/tests/e2e-workflow.test.js; a new
-    // leg with a 'Download build artifact' step joins consumers on its own
-    // and must then carry the pair.
+    // leg downloading e2e-build joins consumers on its own and must then
+    // carry the pair.
     assert.ok(
       consumers.length >= 4,
       'expected the four e2e legs downloading the build artifact',
@@ -681,7 +693,22 @@ describe('e2e build artifact download retry (consumer legs)', () => {
       // missing — stays red through both attempts.
       assert.equal(first.id, 'download-build');
       assert.equal(first['continue-on-error'], true);
+      // An absorbed stall must not burn the job budget unbounded — the
+      // sandbox:none shard retry prices it to the second (the 2100s gate
+      // in run-e2e-tests.sh) — so the first attempt is time-boxed and a
+      // hang converts into a retryable failure.
+      assert.equal(
+        first['timeout-minutes'],
+        10,
+        `${jobName} first download attempt must be time-boxed`,
+      );
       assert.equal(retry['continue-on-error'], undefined);
+      // A job-level key computes the leg's conclusion green whatever
+      // either attempt exits. isolated-nightly carries one deliberately,
+      // so it is exempt — the fork-gated legs must not grow one.
+      if (jobName !== 'isolated-nightly') {
+        assert.equal(job['continue-on-error'], undefined);
+      }
       // The whole expression, not a substring: a prepended failure()
       // conjunct is false once the first attempt's continue-on-error absorbs
       // the stall (its conclusion is success; only its outcome is failure),
