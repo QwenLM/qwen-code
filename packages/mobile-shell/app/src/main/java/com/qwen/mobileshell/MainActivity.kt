@@ -1,8 +1,11 @@
 package com.qwen.mobileshell
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
@@ -10,6 +13,7 @@ import android.text.method.PasswordTransformationMethod
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.JsResult
+import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -25,8 +29,11 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.webkit.ProfileStore
 import androidx.webkit.WebStorageCompat
 import androidx.webkit.WebViewCompat
@@ -40,9 +47,22 @@ class MainActivity : AppCompatActivity() {
     private var activeDialog: AlertDialog? = null
     private var activeJsResult: JsResult? = null
     private var connectionAttempt = 0
+    private var microphoneDialog: AlertDialog? = null
+    private var microphoneAuthorized = false
+    private val microphone: NativeMicrophonePermission by lazy {
+        NativeMicrophonePermission(
+            { ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED },
+            { microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+            { microphoneAuthorized = true },
+        )
+    }
+    private val microphoneLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        microphone.result(it)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        microphone.restoreAwaitingResult(savedInstanceState?.getBoolean("microphone-in-flight") ?: false)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 val view = webView
@@ -260,6 +280,27 @@ class MainActivity : AppCompatActivity() {
             displayZoomControls = false
         }
         view.webChromeClient = object : WebChromeClient() {
+            override fun onPermissionRequest(request: PermissionRequest) {
+                if (!microphone.begin(request, profile.origin) {
+                    !isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) &&
+                        view === webView && view.parent != null && OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty())
+                }) return
+                cancelDialog()
+                microphoneDialog = AlertDialog.Builder(this@MainActivity)
+                    .setTitle(R.string.microphone_title)
+                    .setMessage(getString(R.string.microphone_consent, profile.origin))
+                    .setPositiveButton(R.string.microphone_allow) { _, _ ->
+                        microphoneDialog = null
+                        microphone.decide(request, true)
+                    }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> cancelMicrophone() }
+                    .setOnCancelListener { cancelMicrophone() }.show()
+            }
+
+            override fun onPermissionRequestCanceled(request: PermissionRequest) {
+                if (microphone.cancelledByWebView(request)) dismissMicrophoneDialog()
+            }
+
             override fun onJsConfirm(view: WebView, url: String, message: String, result: JsResult): Boolean {
                 if (view !== webView || !OriginPolicy.isSameOrigin(profile.origin, url)) {
                     result.cancel()
@@ -280,6 +321,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         view.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                if (view === webView) cancelMicrophone()
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (view !== webView) return true
                 if (OriginPolicy.isSameOrigin(profile.origin, request.url.toString())) return false
@@ -321,6 +366,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showConnectionError(view: WebView, profile: ConnectionProfile) {
+        cancelMicrophone()
+        if (microphoneAuthorized) {
+            destroyConnection()
+            showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) { connect(profile) }
+            return
+        }
         cancelDialog()
         (view.parent as? ViewGroup)?.removeView(view)
         showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) {
@@ -372,6 +423,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun destroyConnection() {
         connectionAttempt++
+        cancelMicrophone()
+        microphoneAuthorized = false
         cancelDialog()
         val previous = webView
         webView = null
@@ -384,5 +437,32 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         destroyConnection()
         super.onDestroy()
+    }
+
+    private fun dismissMicrophoneDialog() {
+        val dialog = microphoneDialog
+        microphoneDialog = null
+        dialog?.setOnCancelListener(null)
+        dialog?.dismiss()
+    }
+
+    private fun cancelMicrophone() {
+        microphone.cancel()
+        dismissMicrophoneDialog()
+    }
+
+    override fun onStop() {
+        cancelMicrophone()
+        val profile = activeProfile
+        if (microphoneAuthorized && profile != null) {
+            destroyConnection()
+            showMessage(getString(R.string.microphone_closed), getString(R.string.microphone_reconnect)) { connect(profile) }
+        }
+        super.onStop()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("microphone-in-flight", microphone.awaitingResult)
+        super.onSaveInstanceState(outState)
     }
 }
