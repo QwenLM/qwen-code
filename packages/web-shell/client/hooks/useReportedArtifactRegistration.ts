@@ -3,7 +3,6 @@ import {
   useActions,
   useConnection,
   useDaemonSessionOwnerGuard,
-  useTranscriptBlocks,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonSessionArtifactInput,
@@ -16,8 +15,14 @@ import { requestToast } from '../components/ToastHost';
 import { readReportedArtifacts } from '../adapters/reported-artifacts';
 import { useI18n } from '../i18n';
 import { extractErrorDetail } from '../utils/errorDetail';
+import { useAnimationFrameTranscriptSnapshot } from './useAnimationFrameTranscriptBlocks';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
+
+export type RegistrationErrorTranslator = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
 
 /**
  * Files that slash commands reported writing, read back off the transcript.
@@ -41,20 +46,26 @@ export function collectReportedArtifacts(
  * artifact store, so they show up in the artifact panel next to the files the
  * agent produced. Wait for the catalog before registering to avoid claiming
  * an existing artifact from another browser client.
+ *
+ * `translateError`: App's own hook body runs above the `<I18nProvider>` it
+ * renders, where the i18n context is the key-passthrough default; App passes
+ * its own translator so the failure toast is localized on the main view too.
  */
 export function useReportedArtifactRegistration(
   registered: readonly DaemonSessionArtifact[],
   hydrated: boolean,
-  refresh: () => Promise<DaemonSessionArtifact[] | undefined>,
+  refresh: () => Promise<void>,
+  translateError?: RegistrationErrorTranslator,
 ): void {
-  const { t } = useI18n();
+  const { t: contextTranslate } = useI18n();
+  const t = translateError ?? contextTranslate;
   const actions = useActions();
   const connection = useConnection();
   const guard = useDaemonSessionOwnerGuard();
   const ownerRef = useRef(guard.capture());
   if (!ownerRef.current.isCurrent()) ownerRef.current = guard.capture();
   const owner = ownerRef.current;
-  const blocks = useTranscriptBlocks();
+  const { blocks } = useAnimationFrameTranscriptSnapshot();
   const sessionId = connection.sessionId;
   const attemptedRef = useRef({
     owner,
@@ -106,9 +117,11 @@ export function useReportedArtifactRegistration(
           'code' in error.body &&
           error.body.code === 'session_artifact_forbidden'
         ) {
-          const artifacts = await refresh();
-          if (!owner.isCurrent()) return;
-          if (artifacts?.some((entry) => entry.workspacePath === key)) return;
+          // The daemon raises the cross-client 403 only after resolving an
+          // existing artifact for this path, so the export IS registered.
+          // Resync this client's catalog rather than reporting a failure.
+          await refresh();
+          return;
         }
         requestToast(
           'error',

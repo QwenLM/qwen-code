@@ -37,7 +37,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => ({ addArtifact: sdk.addArtifact }),
   useConnection: () => sdk.connection,
   useDaemonSessionOwnerGuard: () => sdk.guard,
-  useTranscriptBlocks: () => sdk.blocks,
+}));
+
+vi.mock('./useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptSnapshot: () => ({ blocks: sdk.blocks }),
 }));
 
 vi.mock('../components/ToastHost', () => ({ requestToast: vi.fn() }));
@@ -250,25 +253,23 @@ describe('useReportedArtifactRegistration', () => {
     expect(requestToast).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, [], [{ workspacePath: 'another.md' }]])(
-    'reports a conflict when refreshing does not confirm the exported path: %j',
-    async (catalog) => {
-      sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];
-      sdk.addArtifact.mockRejectedValue(
-        new DaemonHttpError(
-          403,
-          { code: 'session_artifact_forbidden' },
-          'conflict',
-        ),
-      );
-      sdk.refresh.mockResolvedValue(catalog);
-      await render();
-      expect(requestToast).toHaveBeenCalledWith(
-        'error',
-        'Could not add exported artifact: conflict',
-      );
-    },
-  );
+  it('treats a cross-client conflict as already registered, without a failure toast', async () => {
+    // The daemon raises the upsert 403 only after resolving an existing
+    // artifact for the path, so the outcome does not depend on whether the
+    // resync comes back with the catalog.
+    sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];
+    sdk.addArtifact.mockRejectedValue(
+      new DaemonHttpError(
+        403,
+        { code: 'session_artifact_forbidden' },
+        'conflict',
+      ),
+    );
+    sdk.refresh.mockResolvedValue(undefined);
+    await render();
+    expect(sdk.refresh).toHaveBeenCalledTimes(1);
+    expect(requestToast).not.toHaveBeenCalled();
+  });
 
   it('reports unrelated permission errors in the active language', async () => {
     sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];

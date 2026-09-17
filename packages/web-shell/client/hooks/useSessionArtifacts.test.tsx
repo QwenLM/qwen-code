@@ -45,13 +45,16 @@ const sdkMock = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useTranscriptBlocks: () => sdkMock.blocks,
   useActions: () => sdkMock.actions,
   useConnection: () => sdkMock.connection,
   useDaemonSessionOwnerGuard: () => sdkMock.ownerGuard,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: sdkMock.artifactsVersion,
   }),
+}));
+
+vi.mock('./useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptSnapshot: () => ({ blocks: sdkMock.blocks }),
 }));
 
 let root: Root | null = null;
@@ -176,6 +179,44 @@ describe('useSessionArtifacts', () => {
     expect(sdkMock.actions.addArtifact).toHaveBeenCalledTimes(2);
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
     expect(latestState?.artifacts).toEqual(exported);
+    expect(requestToast).not.toHaveBeenCalled();
+  });
+
+  it('treats a cross-client registration conflict as benign even when the resync fails', async () => {
+    const exported = artifact('first');
+    sdkMock.actions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [] })
+      .mockRejectedValueOnce(new Error('Failed to fetch'));
+    sdkMock.actions.addArtifact.mockRejectedValue(
+      new DaemonHttpError(
+        403,
+        { code: 'session_artifact_forbidden' },
+        'already owned',
+      ),
+    );
+    await renderHookHost();
+    expect(latestState?.artifacts).toEqual([]);
+    sdkMock.blocks = [
+      {
+        id: 'export-result',
+        kind: 'assistant',
+        text: 'Exported',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: [
+            {
+              kind: 'html',
+              storage: 'workspace',
+              title: exported.title,
+              workspacePath: exported.workspacePath,
+            },
+          ],
+        },
+      },
+    ];
+    await rerenderHookHost();
+    expect(sdkMock.actions.addArtifact).toHaveBeenCalledTimes(1);
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
     expect(requestToast).not.toHaveBeenCalled();
   });
 

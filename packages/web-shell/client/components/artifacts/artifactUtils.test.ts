@@ -434,22 +434,73 @@ describe('artifactUtils', () => {
     expect(
       child.querySelector('#transcript-stylesheet')?.getAttribute('href'),
     ).toBe(`data:text/css;base64,${btoa('verified bytes')}`);
-    for (const invalid of [
-      html.replace('0.23.4/', 'latest/'),
-      html.replace('0.23.4/', '0.23.4-secret-data/'),
-      html.replace('0.23.4/', '0.23.3/'),
-      html.replace('unpkg.com/', 'unpkg.com.evil.example/'),
-      html.replace('.js"', '.js?x=1"'),
-      html.replace(`integrity="${integrity}"`, ''),
+    for (const { invalid, blockedExtension } of [
+      { invalid: html.replace('0.23.4/', 'latest/'), blockedExtension: 'js' },
+      {
+        invalid: html.replace('0.23.4/', '0.23.4-secret-data/'),
+        blockedExtension: 'js',
+      },
+      { invalid: html.replace('0.23.4/', '0.23.3/'), blockedExtension: 'js' },
+      {
+        invalid: html.replace('unpkg.com/', 'unpkg.com.evil.example/'),
+        blockedExtension: 'js',
+      },
+      { invalid: html.replace('.js"', '.js?x=1"'), blockedExtension: 'js' },
+      {
+        invalid: html.replace(`integrity="${integrity}"`, ''),
+        blockedExtension: 'js',
+      },
+      {
+        invalid: html.replace('export-transcript-document.css', 'evil.css'),
+        blockedExtension: 'css',
+      },
+      {
+        invalid: html.replace(
+          `rel="stylesheet" integrity="${integrity}"`,
+          'rel="stylesheet"',
+        ),
+        blockedExtension: 'css',
+      },
     ]) {
       fetchMock.mockClear();
       await expect(
         loadArtifactPreviewDocument(invalid, 'Export', signal),
       ).rejects.toThrow('Unsupported export preview resource');
       expect(
-        fetchMock.mock.calls.some(([url]) => String(url).endsWith('.js')),
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).endsWith(`.${blockedExtension}`),
+        ),
       ).toBe(false);
     }
+  });
+
+  it('aborts the sibling asset fetch when one arm rejects', async () => {
+    vi.stubGlobal('__WEB_SHELL_VERSION__', '0.23.4');
+    const base = 'https://unpkg.com/@qwen-code/qwen-code@0.23.4/';
+    const integrity = `sha384-${'a'.repeat(64)}`;
+    const html = `<script id="transcript-document" type="application/json">{}</script>
+      <script id="transcript-renderer" integrity="${integrity}" src="${base}export-transcript-document.js"></script>
+      <link id="transcript-stylesheet" rel="stylesheet" integrity="${integrity}" href="${base}export-transcript-document.css">`;
+    let cssSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn(
+      async (url: unknown, init?: RequestInit): Promise<Response> => {
+        if (String(url).endsWith('.js')) {
+          throw new TypeError('Integrity mismatch');
+        }
+        cssSignal = init?.signal ?? undefined;
+        return new Promise<Response>((resolve, reject) => {
+          cssSignal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          );
+          setTimeout(() => resolve(new Response('css')), 10);
+        });
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(
+      loadArtifactPreviewDocument(html, 'Export', new AbortController().signal),
+    ).rejects.toThrow('Integrity mismatch');
+    expect(cssSignal?.aborted).toBe(true);
   });
 
   it('does not render an export when its resource integrity check fails', async () => {

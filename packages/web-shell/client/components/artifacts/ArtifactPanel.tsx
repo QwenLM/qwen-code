@@ -3777,7 +3777,7 @@ function RenderedHtmlPreview({
       </div>
     );
   if (document === null)
-    return <div className={styles.empty}>Loading preview...</div>;
+    return <div className={styles.empty}>{t('attachment.loadingPreview')}</div>;
   return (
     <iframe
       className={styles.htmlPreview}

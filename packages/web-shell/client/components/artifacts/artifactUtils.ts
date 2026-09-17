@@ -416,52 +416,69 @@ export async function loadArtifactPreviewDocument(
   ) {
     return wrapArtifactPreview(prepareArtifactPreview(doc), title);
   }
-  await Promise.all(
-    [
-      ['script#transcript-renderer', 'src', 'js', 'text/javascript'],
+  // A rejected arm must stop the sibling: Promise.all settles immediately
+  // but would otherwise let the other megabyte-sized asset download and
+  // base64 encode run to completion for a document already discarded. The
+  // caller's own abort still applies through the forwarded listener.
+  const linked = new AbortController();
+  const forwardAbort = () => linked.abort();
+  signal.addEventListener('abort', forwardAbort, { once: true });
+  if (signal.aborted) linked.abort();
+  try {
+    await Promise.all(
       [
-        'link#transcript-stylesheet[rel="stylesheet"]',
-        'href',
-        'css',
-        'text/css',
-      ],
-    ].map(async ([selector, attribute, extension, mimeType]) => {
-      const asset = doc.querySelector(selector);
-      const url = asset?.getAttribute(attribute) ?? '';
-      const integrity = asset?.getAttribute('integrity') ?? '';
-      if (!asset) return;
-      const expectedUrl = `https://unpkg.com/@qwen-code/qwen-code@${__WEB_SHELL_VERSION__}/export-transcript-document.${extension}`;
-      if (
-        url !== expectedUrl ||
-        !/^sha384-[A-Za-z0-9+/]{64}$/.test(integrity)
-      ) {
-        throw new Error(
-          'Unsupported export preview resource; use an export matching the current Web Shell version.',
-        );
-      }
-      // Fetch outside the untrusted document: URL-based CSP would also allow
-      // its own scripts to send arbitrary query strings to the CDN.
-      const response = await fetch(url, {
-        integrity,
-        signal,
-        credentials: 'omit',
-        referrerPolicy: 'no-referrer',
-        redirect: 'error',
-      });
-      if (!response.ok)
-        throw new Error(`Could not load export renderer (${response.status}).`);
-      const blob = new Blob([await response.arrayBuffer()], { type: mimeType });
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(blob);
-      });
-      asset.setAttribute(attribute, dataUrl);
-      asset.removeAttribute('integrity');
-      asset.removeAttribute('crossorigin');
-    }),
-  );
+        ['script#transcript-renderer', 'src', 'js', 'text/javascript'],
+        [
+          'link#transcript-stylesheet[rel="stylesheet"]',
+          'href',
+          'css',
+          'text/css',
+        ],
+      ].map(async ([selector, attribute, extension, mimeType]) => {
+        const asset = doc.querySelector(selector);
+        const url = asset?.getAttribute(attribute) ?? '';
+        const integrity = asset?.getAttribute('integrity') ?? '';
+        if (!asset) return;
+        const expectedUrl = `https://unpkg.com/@qwen-code/qwen-code@${__WEB_SHELL_VERSION__}/export-transcript-document.${extension}`;
+        if (
+          url !== expectedUrl ||
+          !/^sha384-[A-Za-z0-9+/]{64}$/.test(integrity)
+        ) {
+          throw new Error(
+            'Unsupported export preview resource; use an export matching the current Web Shell version.',
+          );
+        }
+        // Fetch outside the untrusted document: URL-based CSP would also allow
+        // its own scripts to send arbitrary query strings to the CDN.
+        const response = await fetch(url, {
+          integrity,
+          signal: linked.signal,
+          credentials: 'omit',
+          referrerPolicy: 'no-referrer',
+          redirect: 'error',
+        });
+        if (!response.ok)
+          throw new Error(
+            `Could not load export renderer (${response.status}).`,
+          );
+        const blob = new Blob([await response.arrayBuffer()], {
+          type: mimeType,
+        });
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(blob);
+        });
+        asset.setAttribute(attribute, dataUrl);
+        asset.removeAttribute('integrity');
+        asset.removeAttribute('crossorigin');
+      }),
+    );
+  } finally {
+    signal.removeEventListener('abort', forwardAbort);
+    linked.abort();
+  }
   return wrapArtifactPreview(prepareArtifactPreview(doc), title);
 }
 

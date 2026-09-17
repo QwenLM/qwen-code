@@ -334,6 +334,9 @@ function scheduledTaskPanel(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // The boundary matrix spies on DOMParser.prototype per row; restore it so
+  // the leak cannot skew call-count assertions in later tests.
+  vi.restoreAllMocks();
   delete (window as { __TAURI__?: unknown }).__TAURI__;
   for (const { root, container } of mounted) {
     act(() => root.unmount());
@@ -3168,6 +3171,104 @@ describe('ArtifactPanel workspace artifact previews', () => {
       ).toBe(content);
     },
   );
+
+  it('restores the DOMParser spy after the boundary matrix', () => {
+    expect(vi.isMockFunction(DOMParser.prototype.parseFromString)).toBe(false);
+  });
+
+  it('localizes the export preview loading placeholder', async () => {
+    vi.stubGlobal('__WEB_SHELL_VERSION__', '0.23.4');
+    const base = 'https://unpkg.com/@qwen-code/qwen-code@0.23.4/';
+    const integrity = `sha384-${'a'.repeat(64)}`;
+    const content = `<script id="transcript-document" type="application/json">{}</script><script id="transcript-renderer" integrity="${integrity}" src="${base}export-transcript-document.js"></script><link id="transcript-stylesheet" rel="stylesheet" integrity="${integrity}" href="${base}export-transcript-document.css">`;
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: content.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content,
+      encoding: 'utf-8',
+      truncated: false,
+    });
+    // The renderer fetch never settles, so the placeholder stays on screen.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise(() => {})),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel(
+          {
+            id: 'export-preview',
+            kind: 'html',
+            storage: 'workspace',
+            source: 'client',
+            status: 'available',
+            title: 'export.html',
+            workspacePath: 'export.html',
+            mimeType: 'text/html; charset=utf-8',
+            clientRetained: false,
+            createdAt: '2026-09-16T00:00:00.000Z',
+            updatedAt: '2026-09-16T00:00:00.000Z',
+          },
+          undefined,
+          'zh-CN',
+        ),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('正在加载预览...');
+    expect(container.textContent).not.toContain('Loading preview...');
+  });
+
+  it('reads a secondary-workspace file through the capped preview window', async () => {
+    mockSecondaryWorkspaceActions.fileStat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 2,
+      modifiedMs: 1,
+    });
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: '{}',
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel(
+          {
+            id: 'secondary-file',
+            kind: 'file',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'report.json',
+            workspacePath: 'report.json',
+            retention: 'ephemeral',
+            clientRetained: false,
+            createdAt: '2026-09-16T00:00:00.000Z',
+            updatedAt: '2026-09-16T00:00:00.000Z',
+          },
+          { workspaceCwd: '/secondary', workspaceId: 'secondary-id' },
+        ),
+      ),
+    );
+    await flush();
+
+    expect(
+      mockSecondaryWorkspaceActions.readWorkspaceFile,
+    ).toHaveBeenCalledWith('report.json', { maxBytes: 256 * 1024 });
+  });
 
   it.each([
     {
