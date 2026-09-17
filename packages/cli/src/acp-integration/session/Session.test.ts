@@ -555,6 +555,7 @@ describe('Session', () => {
     beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
@@ -809,6 +810,7 @@ describe('Session', () => {
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       finishManagedAutoMemoryRecall: vi.fn(),
+      captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };
     mockMemoryManager = {
@@ -2944,6 +2946,15 @@ describe('Session', () => {
         expect.any(AbortSignal),
       );
       expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      // Captured twice: once inside `#recordPromptCompletionEffects` (before
+      // `scheduleExtract`, pinned below) and once at the turn boundary that
+      // feeds the follow-up suggestion.
+      expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledTimes(2);
+      expect(
+        mockLlmClient.captureCacheSafeParams.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        mockMemoryManager.scheduleExtract.mock.invocationCallOrder[0]!,
+      );
       expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
         projectRoot: '/repo',
         sessionId: 'test-session-id',
@@ -3040,6 +3051,11 @@ describe('Session', () => {
       expect(mockLlmClient.beginManagedAutoMemoryRecall).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // A retry skips managed auto-memory, but the turn still ends `end_turn`,
+      // so the follow-up suggestion fires and reads the process-global
+      // cache-safe slot. The turn boundary has to refresh it anyway, or the
+      // suggestion is generated from a transcript missing this turn.
+      expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledOnce();
 
       mockChat.sendMessageStream = vi
         .fn()
@@ -3054,6 +3070,9 @@ describe('Session', () => {
       expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledOnce();
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // A failed turn never reaches the success path, so it must not publish
+      // its partial transcript as cache-safe.
+      expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledOnce();
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
@@ -48543,7 +48562,7 @@ describe('Session', () => {
       let userInputDelivered = false;
       mockGuardBridge(() => {
         // The drain right after Stop 2 delivers user input, which discards
-        // that Stop's allow before it is applied.
+        // that Stop's block before it is applied.
         if (stopCalls === 2 && !userInputDelivered) {
           userInputDelivered = true;
           return {
@@ -48561,7 +48580,7 @@ describe('Session', () => {
           }
           stopCalls++;
           stopActiveFlags.push(request.input?.stop_hook_active);
-          return stopCalls === 1 || stopCalls === 3
+          return stopCalls <= 3
             ? {
                 success: true,
                 output: { decision: 'block', reason: `block ${stopCalls}` },
@@ -48577,7 +48596,7 @@ describe('Session', () => {
       await runGuardPrompt();
 
       expect(userInputDelivered).toBe(true);
-      expect(stopActiveFlags.slice(0, 3)).toEqual([false, true, false]);
+      expect(stopActiveFlags.slice(0, 4)).toEqual([false, true, false, true]);
       // Stop 3 blocked the user's turn: one block, not two consecutive ones.
       expect(stopCalls).toBeGreaterThanOrEqual(4);
       expect(agentMessageChunks()).not.toContain(

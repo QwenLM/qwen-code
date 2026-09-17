@@ -867,8 +867,10 @@ await agent('scan package.json')
     expect(tool.authoringSurface).toBe('inline');
     // Raised again from 25,000 when the reference gained the workflow size
     // limits and the description the size guideline paragraph, which put the
-    // fallback at 25,759.
-    expect(tool.description.length).toBeLessThanOrEqual(26_500);
+    // fallback at 25,759. Raised again from 26,500 when the reference gained
+    // `agent({tools})`, whose entry states what the allowlist refuses and what
+    // it cannot promise, which put the fallback at 26,900.
+    expect(tool.description.length).toBeLessThanOrEqual(27_500);
   });
 
   it('rejects build() when script is missing', () => {
