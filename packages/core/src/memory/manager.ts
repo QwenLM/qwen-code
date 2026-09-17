@@ -586,7 +586,10 @@ export class MemoryManager {
 
   private track<T>(taskId: string, promise: Promise<T>): Promise<T> {
     this.inFlight.set(taskId, promise);
-    void promise.finally(() => this.inFlight.delete(taskId));
+    void promise.then(
+      () => this.inFlight.delete(taskId),
+      () => this.inFlight.delete(taskId),
+    );
     return promise;
   }
 

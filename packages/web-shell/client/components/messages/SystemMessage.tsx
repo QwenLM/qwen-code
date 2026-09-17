@@ -1,3 +1,5 @@
+import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
+import { useSubagentDetails } from '../../subagentDetailsContext';
 import { memo, useCallback } from 'react';
 import {
   CheckIcon,
@@ -5,6 +7,8 @@ import {
   CircleMinusIcon,
   CircleXIcon,
   CopyIcon,
+  LinkIcon,
+  FileTextIcon,
   InfoIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -27,6 +31,7 @@ import {
 import { GoalStatusMessage, parseGoalStatusMessage } from './GoalStatusMessage';
 import { Markdown } from './Markdown';
 import { UserMessage } from './UserMessage';
+import { Button } from '../ui/button';
 import styles from './SystemMessage.module.css';
 
 interface SystemMessageProps {
@@ -42,6 +47,7 @@ interface SystemMessageProps {
   }>;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: {
@@ -107,12 +113,14 @@ export const SystemMessage = memo(function SystemMessage({
   images,
   files,
   onShowContextDetail,
+  onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
   const { t } = useI18n();
+  const backgroundDetails = useSubagentDetails()?.onOpenBackground;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
     void writeClipboardText(content)
@@ -121,6 +129,89 @@ export const SystemMessage = memo(function SystemMessage({
       })
       .catch(warnClipboardWriteFailure);
   }, [content, flashCopied]);
+  if (source === 'background_notification_turn_started') {
+    const turn = parseDaemonBackgroundTurn(data);
+    const taskStatus = (
+      data as { backgroundTask?: { status?: string } } | undefined
+    )?.backgroundTask?.status;
+    const markerLabel =
+      taskStatus === 'completed'
+        ? t('system.taskCompleted')
+        : taskStatus === 'failed'
+          ? t('system.taskFailed')
+          : taskStatus === 'cancelled'
+            ? t('system.taskCancelled')
+            : t('background.result');
+    const MarkerIcon =
+      taskStatus === 'completed'
+        ? CircleCheckIcon
+        : taskStatus === 'failed'
+          ? CircleXIcon
+          : taskStatus === 'cancelled'
+            ? CircleMinusIcon
+            : InfoIcon;
+    return (
+      <div
+        className={`${styles.notificationBubble} ${styles.backgroundResult}`}
+        role="status"
+        data-background-turn-start
+      >
+        <span
+          className={styles.notificationIcon}
+          data-tone={
+            taskStatus === 'completed'
+              ? 'success'
+              : taskStatus === 'failed'
+                ? 'error'
+                : 'info'
+          }
+          aria-label={markerLabel}
+          title={markerLabel}
+          role="img"
+        >
+          <MarkerIcon aria-hidden="true" />
+        </span>
+        <span className="shrink-0 text-muted-foreground">
+          {t(turn?.kind === 'agent' ? 'background.agent' : 'background.task')}
+        </span>
+        <span aria-hidden="true" className="text-muted-foreground">
+          ·
+        </span>
+        <span
+          className="min-w-0 flex-1 truncate"
+          title={turn?.label ?? turn?.kind ?? content}
+        >
+          {turn?.label ?? turn?.kind ?? content}
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {onLocateBackgroundSource && turn?.toolUseId && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+              onClick={() => onLocateBackgroundSource('', turn.toolUseId)}
+            >
+              <LinkIcon size={12} aria-hidden="true" />
+              {t('background.source')}
+            </Button>
+          )}
+          {backgroundDetails && turn && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+              onClick={() => backgroundDetails(turn)}
+            >
+              <FileTextIcon size={12} aria-hidden="true" />
+              {t('background.details')}
+            </Button>
+          )}
+        </span>
+      </div>
+    );
+  }
   if (source === 'mid_turn_message_injected') {
     return (
       <UserMessage
@@ -219,7 +310,9 @@ export const SystemMessage = memo(function SystemMessage({
     variant === 'info' && source === 'model_switch_summary';
   const isRecap = variant === 'info' && source === 'recap';
   const isTaskNotification =
-    variant === 'info' && source === 'background_notification';
+    variant === 'info' &&
+    (source === 'background_notification' ||
+      source === 'background_task_completed');
   const notificationData =
     isTaskNotification && typeof data === 'object' && data !== null
       ? (data as Record<string, unknown>)
@@ -304,23 +397,29 @@ export const SystemMessage = memo(function SystemMessage({
 
   if (isTaskNotification) {
     return (
-      <div className={styles.notificationBubbleRow}>
-        <div className={styles.notificationBubbleColumn}>
-          <div className={styles.notificationBubble}>
-            <span
-              className={styles.notificationIcon}
-              data-tone={taskNotificationTone}
-              role="img"
-              aria-label={taskNotificationLabel}
-              title={taskNotificationLabel}
-            >
-              <TaskNotificationIcon aria-hidden="true" />
-            </span>
-            <div className={styles.notificationText}>
-              {taskI18nText ?? <Markdown content={content} />}
-            </div>
-          </div>
+      <div
+        className={`${styles.notificationBubble} ${styles.backgroundResult}`}
+      >
+        <span
+          className={styles.notificationIcon}
+          data-tone={taskNotificationTone}
+          role="img"
+          aria-label={taskNotificationLabel}
+          title={taskNotificationLabel}
+        >
+          <TaskNotificationIcon aria-hidden="true" />
+        </span>
+        <div
+          className={`min-w-0 flex-1${taskI18nText ? ' truncate' : ''}`}
+          title={taskI18nText}
+        >
+          {taskI18nText ?? <Markdown content={content} />}
         </div>
+        {notificationData?.['awaitingProcessing'] === true && (
+          <span className="ml-auto shrink-0 text-muted-foreground">
+            {t('background.pending')}
+          </span>
+        )}
       </div>
     );
   }

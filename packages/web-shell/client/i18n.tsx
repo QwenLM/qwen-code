@@ -16,6 +16,15 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'footnotes.note': (v) => `Footnote ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `View ${v?.count ?? ''} references`,
+  'footnotes.preview': 'Reference preview',
+  'footnotes.previous': 'Previous reference',
+  'footnotes.next': 'Next reference',
+  'footnotes.citations': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
+  'daemon.capacity.exhausted':
+    'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -539,6 +548,21 @@ const EN: Messages = {
       : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
   'visionBridge.ok': (v) =>
     `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
+  'approval.goal.title': 'Confirm session goal',
+  'approval.goal.overview': 'Goal overview',
+  'approval.goal.full': 'Full content',
+  'approval.goal.outcome': 'Outcome',
+  'approval.goal.doneWhen': 'Completion criteria',
+  'approval.goal.mustNot': 'Constraints',
+  'approval.goal.budget': 'Budget',
+  'approval.goal.onBlock': 'When blocked',
+  'approval.goal.context': 'Context',
+  'approval.goal.confirm': 'Set goal and continue',
+  'approval.goal.reject': 'Not now',
+  'approval.goal.hint':
+    'Setting this goal continues execution and checks progress after each turn. Blockers will be reported.',
+  'approval.goal.pending': 'Submitting…',
+  'approval.goal.failed': 'Could not submit your choice. Please try again.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -856,7 +880,7 @@ const EN: Messages = {
   'contextUsage.builtinTools': 'Built-in tools',
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
-  'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedOverhead': 'Estimated base overhead',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -866,15 +890,14 @@ const EN: Messages = {
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
     'No active session yet. Send your first message before viewing context usage.',
-  'contextUsage.noApiResponse':
-    'No API response yet. Send a message to see actual usage.',
+  'contextUsage.usageUnavailable':
+    'Current context usage is unavailable. The estimates below cover base overhead only, excluding conversation messages.',
   'contextUsage.overLimit':
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': 'System prompt',
   'contextUsage.title': 'Context Usage',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': 'Usage by category',
   'contextUsage.used': 'Used',
   'contextUsage.accessibleUsage': (v) =>
     `${v?.used} of ${v?.total} tokens used`,
@@ -882,6 +905,25 @@ const EN: Messages = {
   'contextUsage.viewInConversation':
     'Click to view the breakdown in the conversation.',
   'daemon.title': 'Daemon Status',
+  'daemon.connection.title': 'Connection',
+  'daemon.connection.target': 'Current target',
+  'daemon.connection.state': 'Connection state',
+  'daemon.connection.address': 'Daemon address',
+  'daemon.connection.token': 'Bearer token (optional)',
+  'daemon.connection.connect': 'Connect',
+  'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
+  'daemon.connection.notReady':
+    'The daemon did not accept the connection; the stored credential was left unchanged.',
+  'daemon.connection.authFailed':
+    'The daemon rejected that token; the stored credential was left unchanged.',
+  'daemon.connection.reloadUnavailable':
+    'Browser storage is unavailable, so the new token could not be applied to this connection.',
+  'daemon.connection.switchUnavailable':
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
+  'daemon.connection.status.idle': 'Idle',
+  'daemon.connection.status.connecting': 'Connecting',
+  'daemon.connection.status.connected': 'Connected',
+  'daemon.connection.status.error': 'Error',
   'daemon.details.loading': 'Loading diagnostics...',
   'daemon.details.failed': 'Failed to load diagnostics.',
   'daemon.refresh': 'Refresh',
@@ -1156,6 +1198,7 @@ const EN: Messages = {
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
     `${v?.count ?? 0} file(s) exceeded the attachment size limit.`,
+  'editor.pastedTextShowInEditor': 'Show inline',
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -1260,6 +1303,8 @@ const EN: Messages = {
   'workflowRuns.user': 'User',
   'workflowRuns.projectDescription': 'Available in this project',
   'workflowRuns.userDescription': 'Available across projects',
+  'workflowRuns.extension': 'Extension',
+  'workflowRuns.extensionDescription': 'Provided by an installed extension',
   'workflowRuns.detail.toggle': (v) => `Show details for ${v?.name ?? ''}`,
   'workflowRuns.detail.loading': 'Loading workflow definition…',
   'workflowRuns.detail.unavailable':
@@ -1469,6 +1514,8 @@ const EN: Messages = {
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.protocolMismatch':
+    'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
   'localFiles.trigger': 'Local files',
   'localFiles.hint':
@@ -1837,6 +1884,14 @@ const EN: Messages = {
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
+  'background.result': 'Background result',
+  'background.agent': 'Background agent',
+  'background.running': 'Background tasks running',
+  'background.task': 'Background task',
+  'background.details': 'View details',
+  'background.processing': (v) => `Processing ${v?.label ?? ''} results`,
+  'background.source': 'Source',
+  'background.pending': 'Awaiting processing',
   'system.taskCompleted': 'Background task completed',
   'system.taskFailed': 'Background task failed',
   'system.taskCancelled': 'Background task cancelled',
@@ -1987,6 +2042,7 @@ const EN: Messages = {
   'auth.step.group': 'Type',
   'auth.step.provider': 'Provider',
   'auth.step.protocol': 'Protocol',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': 'Model IDs',
@@ -1997,6 +2053,8 @@ const EN: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API format',
   'auth.protocol.gemini': 'Gemini-compatible',
   'auth.protocol.geminiDesc': 'Google Gemini API format',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key cannot be empty.',
   'auth.baseUrlInvalid': 'Base URL must start with http:// or https://.',
   'auth.baseUrlPrompt': 'Enter the API endpoint for this protocol.',
@@ -2439,6 +2497,9 @@ const EN: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
+  'goal.turnsOfBudget': (v) =>
+    `${v?.count ?? 0} / ${v?.budget ?? 0} ${v?.budget === 1 ? 'turn' : 'turns'}`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
   'goal.tokens': (v) => `${v?.used ?? 0} tokens`,
   'goal.tokensOfBudget': (v) => `${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': 'Goals',
@@ -2634,7 +2695,7 @@ const EN: Messages = {
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
-    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -2821,8 +2882,26 @@ const EN: Messages = {
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
   'contextUsage.refresh': 'Refresh',
+  'contextUsage.remaining': 'Remaining',
+  'contextUsage.advanced': 'Advanced · usage by category',
+  'contextUsage.snapshot': 'Snapshot',
+  'contextUsage.viewCurrent': 'View current context',
+  'contextUsage.compress': 'Compress context',
+  'contextUsage.compressing': 'Compressing…',
+  'contextUsage.compressed': 'Compression completed. Context usage refreshed.',
+  'contextUsage.compressCancelled':
+    'Cancellation requested. Refresh to check current usage.',
+  'contextUsage.compressInterrupted':
+    'Connection changed during compression. Refresh to check current usage.',
+  'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.compressRefreshFailed':
+    'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
+  'contextUsage.compressUnavailable':
+    'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
+  'contextUsage.previousReading':
+    'Could not refresh. Showing a previous reading.',
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
@@ -2902,6 +2981,8 @@ const EN: Messages = {
   'planExecution.unblocks': 'Unblocks:',
   'planExecution.unassigned': 'Unassigned executions',
   'planExecution.attention': 'Needs attention',
+  'planExecution.agentCount': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count ?? 0) === 1 ? 'agent' : 'agents'}`,
   'planExecution.status.running': 'Running',
   'planExecution.status.paused': 'Paused',
   'planExecution.status.completed': 'Completed',
@@ -2941,6 +3022,7 @@ const EN: Messages = {
   'workflow.dependencies.unblocks': 'Unblocks',
   'workflow.dependencies.noDownstream': 'No downstream steps',
   'workflow.activity.empty': 'No Agent runs are linked to a Todo yet.',
+  'workflow.activity.showAll': (v) => `Show all ${v?.count ?? 0} runs`,
   'workflow.deliverables.title': 'Session deliverables',
   'workflow.deliverables.none': 'No artifacts have been published yet',
   'workflow.status.running': 'Running',
@@ -2972,6 +3054,9 @@ const EN: Messages = {
   'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
   'sources.title': 'Sources',
+  'sources.count': (v) =>
+    `${v?.count ?? 0} ${(v?.count ?? 0) === 1 ? 'source' : 'sources'}`,
+  'sources.currentTurn': 'Sources for this turn',
   'sources.add': 'Add source',
   'sources.empty': 'Add files or links for reference.',
   'sources.explanation':
@@ -3195,6 +3280,9 @@ const EN: Messages = {
   'tools.updating': 'Updating...',
   'tool.collapse': '▲ Collapse',
   'tool.expand': 'Expand',
+  'tool.viewFile': 'View file',
+  'tool.viewImage': 'View image',
+  'tool.viewCurrentFile': 'View the current file',
   'tool.collapseHint': 'Collapse',
   'tool.status.failed': 'Failed',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
@@ -3514,7 +3602,22 @@ const EN: Messages = {
   'channels.editor.secret.placeholder': (v) => `Enter ${v?.label ?? 'secret'}`,
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
+  'channels.editor.field.shared.outputMode': 'Output Mode',
+  'channels.editor.field.shared.outputMode.description':
+    'Choose one final result for the complete task, each complete assistant response, or the last reply in each turn. Defaults to per turn: the main response finishes independently of background follow-ups. Applies to cards and ordinary messages.',
+  'channels.editor.field.shared.outputMode.option.per_task': 'Per task',
+  'channels.editor.field.shared.outputMode.option.per_response': 'Per response',
+  'channels.editor.field.shared.outputMode.option.per_turn':
+    'Per turn (default)',
   'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.dws.senderPolicy': 'Sender policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
+  'channels.editor.field.dws.dmPolicy': 'Direct message access',
+  'channels.editor.field.dws.dmPolicy.description':
+    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
+  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
+  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
   'channels.editor.field.shared.senderPolicy.description':
     'Choose who can start a direct conversation with this Channel.',
   'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
@@ -3740,6 +3843,14 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'footnotes.note': (v) => `脚注 ${v?.number ?? ''}`,
+  'footnotes.references': (v) => `查看 ${v?.count ?? ''} 条引用`,
+  'footnotes.preview': '引用预览',
+  'footnotes.previous': '上一条引用',
+  'footnotes.next': '下一条引用',
+  'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
+  'daemon.capacity.exhausted':
+    '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
@@ -3942,6 +4053,21 @@ const ZH: Messages = {
   'toolName.record_source': '记录来源',
   'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
+  'toolName.omni_downsample_image': '降采样图像',
+  'toolName.omni_downscale_video': '降采样视频',
+  'toolName.omni_downsample_audio': '降采样音频',
+  'toolName.omni_extract_keyframes': '提取关键帧',
+  'toolName.omni_extract_audio': '提取音轨',
+  'toolName.omni_clip_video': '剪辑视频',
+  'toolName.omni_clip_image': '裁剪图像',
+  'toolName.omni_clip_audio': '剪辑音频',
+  'toolName.omni_caption_image': '描述图像',
+  'toolName.omni_caption_audio': '描述音频',
+  'toolName.omni_ocr_image': '识别图像文字',
+  'toolName.omni_understand_video_segments': '分段理解视频',
+  'toolName.omni_convert_image': '转换图像',
+  'toolName.omni_transcribe_audio': '转写音频',
+  'toolName.omni_recall_media_memory': '召回媒体记忆',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
   'toolName.bash': '运行命令',
@@ -4311,6 +4437,21 @@ const ZH: Messages = {
       : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
   'visionBridge.ok': (v) =>
     `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
+  'approval.goal.title': '确认会话目标',
+  'approval.goal.overview': '目标概览',
+  'approval.goal.full': '完整内容',
+  'approval.goal.outcome': '目标',
+  'approval.goal.doneWhen': '完成条件',
+  'approval.goal.mustNot': '执行边界',
+  'approval.goal.budget': '预算',
+  'approval.goal.onBlock': '遇到阻塞时',
+  'approval.goal.context': '上下文',
+  'approval.goal.confirm': '设置并继续',
+  'approval.goal.reject': '暂不设置',
+  'approval.goal.hint':
+    '设置后将继续执行，并在每轮结束时检查目标进展；遇到阻塞会说明原因。',
+  'approval.goal.pending': '正在提交…',
+  'approval.goal.failed': '提交失败，请重试。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -4593,7 +4734,7 @@ const ZH: Messages = {
   'contextUsage.builtinTools': '内置工具',
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
-  'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedOverhead': '基础开销估算',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -4603,20 +4744,37 @@ const ZH: Messages = {
   'contextUsage.model': '模型',
   'contextUsage.noSession':
     '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
-  'contextUsage.noApiResponse':
-    '尚无 API 响应。发送一条消息后可查看实际使用量。',
+  'contextUsage.usageUnavailable':
+    '当前上下文用量暂不可用。下方仅为基础开销估算，不含对话消息。',
   'contextUsage.overLimit':
     '上下文已超过限制！请使用 /compress 或 /clear 减少占用。',
   'contextUsage.skills': 'Skills',
   'contextUsage.systemPrompt': '系统提示词',
   'contextUsage.title': '上下文使用情况',
   'contextUsage.tokens': 'tokens',
-  'contextUsage.usageByCategory': '按类别统计',
   'contextUsage.used': '已用',
   'contextUsage.accessibleUsage': (v) => `已用 ${v?.used} / ${v?.total} tokens`,
   'contextUsage.viewDetails': '查看明细',
   'contextUsage.viewInConversation': '点击在对话中查看上下文组成。',
   'daemon.title': 'Daemon 状态',
+  'daemon.connection.title': '连接',
+  'daemon.connection.target': '当前目标',
+  'daemon.connection.state': '连接状态',
+  'daemon.connection.address': 'Daemon 地址',
+  'daemon.connection.token': 'Bearer token（可选）',
+  'daemon.connection.connect': '连接',
+  'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
+  'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
+  'daemon.connection.authFailed':
+    'Daemon 拒绝了该 token，已保存的凭据未被修改。',
+  'daemon.connection.reloadUnavailable':
+    '浏览器存储不可用，因此新 token 无法应用到当前连接。',
+  'daemon.connection.switchUnavailable':
+    '浏览器存储不可用，因此无法把 token 带到该 daemon。',
+  'daemon.connection.status.idle': '空闲',
+  'daemon.connection.status.connecting': '连接中',
+  'daemon.connection.status.connected': '已连接',
+  'daemon.connection.status.error': '错误',
   'daemon.details.loading': '正在加载诊断信息...',
   'daemon.details.failed': '诊断信息加载失败。',
   'daemon.refresh': '刷新',
@@ -4876,6 +5034,7 @@ const ZH: Messages = {
   'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
+  'editor.pastedTextShowInEditor': '显示到输入框',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -4969,6 +5128,8 @@ const ZH: Messages = {
   'workflowRuns.user': '用户',
   'workflowRuns.projectDescription': '仅在当前项目中可用',
   'workflowRuns.userDescription': '在所有项目中可用',
+  'workflowRuns.extension': '扩展',
+  'workflowRuns.extensionDescription': '由已安装的扩展提供',
   'workflowRuns.detail.toggle': (v) => `查看 ${v?.name ?? ''} 的详情`,
   'workflowRuns.detail.loading': '正在加载工作流定义…',
   'workflowRuns.detail.unavailable': '这个工作流定义已不可用。',
@@ -5164,6 +5325,8 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.protocolMismatch':
+    '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
   'localFiles.trigger': '本地文件',
   'localFiles.hint':
@@ -5505,6 +5668,14 @@ const ZH: Messages = {
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
+  'background.result': '后台结果',
+  'background.agent': '后台智能体',
+  'background.running': '后台任务执行中',
+  'background.task': '后台任务',
+  'background.details': '查看详情',
+  'background.processing': (v) => `正在处理 ${v?.label ?? ''} 结果`,
+  'background.source': '来源',
+  'background.pending': '等待处理',
   'system.taskCompleted': '后台任务执行完成',
   'system.taskFailed': '后台任务执行失败',
   'system.taskCancelled': '后台任务已取消',
@@ -5634,6 +5805,7 @@ const ZH: Messages = {
   'auth.step.group': '类型',
   'auth.step.provider': '供应商',
   'auth.step.protocol': '协议',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': '模型 ID',
@@ -5644,6 +5816,8 @@ const ZH: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API 格式',
   'auth.protocol.gemini': 'Gemini 兼容',
   'auth.protocol.geminiDesc': 'Google Gemini API 格式',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key 不能为空。',
   'auth.baseUrlInvalid': 'Base URL 必须以 http:// 或 https:// 开头。',
   'auth.baseUrlPrompt': '输入此协议的 API endpoint。',
@@ -6052,6 +6226,8 @@ const ZH: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
+  'goal.turnsOfBudget': (v) => `${v?.count ?? 0} / ${v?.budget ?? 0} 轮`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
   'goal.tokens': (v) => `已用 ${v?.used ?? 0} tokens`,
   'goal.tokensOfBudget': (v) =>
     `已用 ${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
@@ -6234,7 +6410,7 @@ const ZH: Messages = {
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
-    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
@@ -6409,8 +6585,24 @@ const ZH: Messages = {
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
   'contextUsage.refresh': '刷新',
+  'contextUsage.remaining': '剩余',
+  'contextUsage.advanced': '高级 · 用量分类',
+  'contextUsage.snapshot': '历史快照',
+  'contextUsage.viewCurrent': '查看当前上下文',
+  'contextUsage.compress': '手动压缩',
+  'contextUsage.compressing': '正在压缩…',
+  'contextUsage.compressed': '压缩完成，已刷新上下文用量。',
+  'contextUsage.compressCancelled': '已请求取消压缩，请刷新确认当前用量。',
+  'contextUsage.compressInterrupted':
+    '压缩期间连接发生变化，请刷新查看当前使用量。',
+  'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.compressRefreshFailed':
+    '压缩已完成，但用量刷新失败。请点击刷新重试。',
+  'contextUsage.compressUnavailable':
+    '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
+  'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
@@ -6489,6 +6681,7 @@ const ZH: Messages = {
   'planExecution.unblocks': '解锁：',
   'planExecution.unassigned': '未关联的执行',
   'planExecution.attention': '需要关注',
+  'planExecution.agentCount': (v) => `${v?.count ?? 0} 个 Agent`,
   'planExecution.status.running': '运行中',
   'planExecution.status.paused': '已暂停',
   'planExecution.status.completed': '已完成',
@@ -6527,6 +6720,7 @@ const ZH: Messages = {
   'workflow.dependencies.unblocks': '解除阻塞',
   'workflow.dependencies.noDownstream': '没有下游步骤',
   'workflow.activity.empty': '还没有关联到待办的 Agent 执行。',
+  'workflow.activity.showAll': (v) => `查看全部 ${v?.count ?? 0} 条执行`,
   'workflow.deliverables.title': '会话交付物',
   'workflow.deliverables.none': '尚未发布产物',
   'workflow.status.running': '运行中',
@@ -6558,6 +6752,8 @@ const ZH: Messages = {
   'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
   'sources.title': '来源',
+  'sources.count': (v) => `${v?.count ?? 0} 个来源`,
+  'sources.currentTurn': '本轮来源',
   'sources.add': '添加来源',
   'sources.empty': '添加文件或链接作为参考。',
   'sources.explanation': '添加引用不会将内容发送给助手。',
@@ -6758,6 +6954,9 @@ const ZH: Messages = {
   'tools.updating': '更新中...',
   'tool.collapse': '▲ 收起',
   'tool.expand': '展开',
+  'tool.viewFile': '查看文件',
+  'tool.viewImage': '查看图片',
+  'tool.viewCurrentFile': '查看当前文件',
   'tool.collapseHint': '收起',
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
@@ -7053,7 +7252,21 @@ const ZH: Messages = {
   'channels.editor.secret.clear': '清除',
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
+  'channels.editor.field.shared.outputMode': '输出模式',
+  'channels.editor.field.shared.outputMode.description':
+    '选择在整个任务完成后、每次完整回复后，或每轮结束时发送最后一条回复。默认按轮输出：主回复独立结束，后台后续回复单独发送。适用于卡片和普通消息。',
+  'channels.editor.field.shared.outputMode.option.per_task': '按任务',
+  'channels.editor.field.shared.outputMode.option.per_response': '按回复',
+  'channels.editor.field.shared.outputMode.option.per_turn': '按轮（默认）',
   'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
+  'channels.editor.field.dws.dmPolicy': '私聊访问',
+  'channels.editor.field.dws.dmPolicy.description':
+    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
+  'channels.editor.field.dws.dmPolicy.option.open': '开放',
+  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
   'channels.editor.field.shared.senderPolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
   'channels.editor.field.shared.senderPolicy.option.pairing': '配对',

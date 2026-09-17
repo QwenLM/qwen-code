@@ -46,12 +46,18 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 import { Storage } from '../config/storage.js';
+import type { Config } from '../config/config.js';
 import { CompressionStatus } from '../core/turn.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   SessionSourceService,
   type SessionSourcesSnapshot,
 } from './session-sources.js';
-import type { ChatRecord } from './chatRecordingService.js';
+import {
+  ChatRecordingService,
+  type ChatRecord,
+} from './chatRecordingService.js';
+import { buildSessionHistoryFromConversation } from './session-api-history.js';
 import {
   buildApiHistoryFromConversation,
   getResumeTokenCounts,
@@ -123,6 +129,204 @@ describe('SessionTranscriptReader', () => {
     );
     return filePath;
   }
+
+  it.each([false, true])(
+    'restores completed slash commands consistently with compression=%s',
+    async (compressed) => {
+      const answer = record('a1', null, 'previous answer');
+      const prefix: ChatRecord = compressed
+        ? {
+            ...answer,
+            type: 'system',
+            subtype: 'chat_compression',
+            message: undefined,
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 50,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+              compressedHistory: [answer.message!],
+            },
+          }
+        : answer;
+      const user = record('u1', 'a1', '/docs');
+      const output: ChatRecord = {
+        ...record('output', 'u1', ''),
+        type: 'system',
+        subtype: 'slash_command',
+        message: undefined,
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/docs',
+          outputHistoryItems: [
+            { type: 'assistant', text: 'Documentation URL' },
+          ],
+        },
+      };
+      await writeRecords([prefix, user, output]);
+      const service = new SessionService(workspaceDir, {
+        runtimeBaseDir: runtimeDir,
+      });
+      const loaded = await service.loadSession(sessionId);
+      const history = buildApiHistoryFromConversation(loaded!.conversation);
+      expect(history).toEqual([answer.message]);
+      expect(detectTurnInterruption(history).kind).toBe('none');
+      for (const replay of [
+        { kind: 'none' },
+        { kind: 'all', hideInheritedHistory: false },
+      ] as const) {
+        const projection = await service.readRestoreProjection(sessionId, {
+          replay,
+        });
+        expect(projection?.runtime.apiHistory).toEqual(history);
+        if (replay.kind === 'all') {
+          expect(projection?.replay?.records).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ uuid: 'u1', message: user.message }),
+              expect.objectContaining({
+                uuid: 'output',
+                systemPayload: output.systemPayload,
+              }),
+            ]),
+          );
+        }
+      }
+
+      const invocation: ChatRecord = {
+        ...output,
+        uuid: 'invocation',
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/docs',
+          sentToModel: true,
+        },
+      };
+      await writeRecords([
+        prefix,
+        user,
+        invocation,
+        { ...output, parentUuid: 'invocation' },
+      ]);
+      const custom = await service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      });
+      expect(custom?.runtime.apiHistory).toEqual([
+        answer.message,
+        user.message,
+      ]);
+      expect(detectTurnInterruption(custom!.runtime.apiHistory).kind).toBe(
+        'interrupted_prompt',
+      );
+    },
+  );
+
+  it('round-trips a recorded Goal turn end through selective restore, fork, and rewind', async () => {
+    const config = {
+      storage: new Storage(workspaceDir),
+      getSessionId: () => sessionId,
+      getProjectRoot: () => workspaceDir,
+      getCliVersion: () => 'test',
+      getResumedSessionData: () => undefined,
+    } as unknown as Config;
+    const recorder = new ChatRecordingService(config, undefined, false);
+    const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+    recorder.recordUserMessage([{ text: 'complete the Goal' }]);
+    recorder.recordAssistantTurn({
+      model: 'test',
+      goalContext: permit,
+      message: [{ functionCall: { id: 'finish', name: 'update_goal' } }],
+    });
+    recorder.recordToolResult(
+      [
+        {
+          functionResponse: {
+            id: 'finish',
+            name: 'update_goal',
+            response: { readyForVerification: true },
+          },
+        },
+      ],
+      undefined,
+      { goalContext: permit, provenance: 'goal_runtime' },
+    );
+    await recorder.recordGoalTurnEnd('finish', permit);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const loaded = await service.loadSession(sessionId);
+    const legacy = buildSessionHistoryFromConversation(loaded!.conversation);
+    const projection = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(projection?.runtime.completedToolCallIds).toEqual(['finish']);
+    expect(projection?.runtime.apiHistory).toEqual(legacy.apiHistory);
+    expect(legacy.completedToolCallIds).toEqual(['finish']);
+    expect(legacy.apiHistory).toHaveLength(3);
+    expect(legacy.apiHistory.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
+      'finish',
+    );
+
+    const secondPermit = { ...permit, turnId: 'second-turn' };
+    recorder.recordUserMessage([{ text: 'another Goal turn' }]);
+    recorder.recordAssistantTurn({
+      model: 'test',
+      goalContext: secondPermit,
+      message: [{ functionCall: { id: 'finish-2', name: 'update_goal' } }],
+    });
+    recorder.recordToolResult(
+      [
+        {
+          functionResponse: {
+            id: 'finish-2',
+            name: 'update_goal',
+            response: { readyForVerification: true },
+          },
+        },
+      ],
+      undefined,
+      { goalContext: secondPermit, provenance: 'goal_runtime' },
+    );
+    await recorder.recordGoalTurnEnd('finish-2', secondPermit);
+
+    const forkId = '660e8400-e29b-41d4-a716-446655440001';
+    await service.forkSession(sessionId, forkId);
+    const fork = await service.readRestoreProjection(forkId, {
+      replay: { kind: 'none' },
+    });
+    expect(fork?.runtime.completedToolCallIds).toEqual(['finish', 'finish-2']);
+
+    recorder.recordMidTurnUserMessage(
+      [{ text: 'next request' }],
+      'next request',
+    );
+    await recorder.flush();
+    const next = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(next?.runtime.completedToolCallIds).toEqual(['finish', 'finish-2']);
+    expect(next?.runtime.apiHistory).toHaveLength(7);
+    expect(next?.runtime.apiHistory.at(-1)).toEqual({
+      role: 'user',
+      parts: [{ text: 'next request' }],
+    });
+
+    recorder.rewindRecording(1, { truncatedCount: 4 });
+    await recorder.flush();
+    const earlier = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(earlier?.runtime.completedToolCallIds).toEqual(['finish']);
+    expect(earlier?.runtime.apiHistory).toEqual(legacy.apiHistory);
+
+    recorder.rewindRecording(0, { truncatedCount: 3 });
+    await recorder.flush();
+    const rewound = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(rewound?.runtime.completedToolCallIds).toBeUndefined();
+    expect(rewound?.runtime.apiHistory).toEqual([]);
+  });
 
   it('restores the latest session sources across rewind and compression without changing model history', async () => {
     const persisted: SessionSourcesSnapshot[] = [];

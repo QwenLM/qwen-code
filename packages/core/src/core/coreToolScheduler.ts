@@ -8,6 +8,8 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   ToolExecutionStatus,
+  PolicyArtifactBatch,
+  ToolExecutionOrigin,
 } from './turn.js';
 import type {
   AutoModeFallbackConfirmation,
@@ -24,6 +26,7 @@ import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
@@ -264,6 +267,23 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
 ]);
+
+// The tri-state persistedOutputFiles mapping every truncation pass reports
+// through: a written spill file is reusable; a changed-but-fileless body
+// decided "no reusable file"; an untouched body made no decision, so
+// finalization may still persist it. Compare content identity rather than
+// `outputFile` so a truncated-but-unsaved result (a disk-write failure
+// returns a bounded preview with no file) still counts as bounded. One owner
+// keeps the success, combined, and timeout passes in agreement.
+function persistedOutputFilesForTruncation(
+  beforeContent: PartListUnion,
+  truncated: { content: PartListUnion; outputFile?: string },
+): string[] | undefined {
+  if (truncated.outputFile) {
+    return [truncated.outputFile];
+  }
+  return truncated.content !== beforeContent ? [] : undefined;
+}
 
 const OPT_IN_TOOL_MESSAGES: Record<
   string,
@@ -1763,16 +1783,47 @@ export class CoreToolScheduler {
   private async processToolResultImages(
     responseParts: Part[],
     signal: AbortSignal,
+    executionOrigin?: ToolExecutionOrigin,
   ): Promise<{
     responseParts: Part[];
     modelOverride?: string;
     visionBridgeNotice?: string;
   }> {
+    // A fixed_policy invocation's result never feeds the model — the
+    // orchestrator consumes `policyArtifacts` directly — so the image
+    // funnel (omni re-delivery + vision bridge) must not run on it: it
+    // would re-enter media processing from inside a policy run, wasting
+    // work and re-acquiring the per-root resource gate this very run may
+    // already hold (self-deadlock at concurrency 1). Applies to every
+    // call site (success, timeout, tool error) via this single check.
+    if (executionOrigin?.kind === 'fixed_policy') {
+      return { responseParts };
+    }
     let modelOverride: string | undefined;
     const notices: string[] = [];
+    // Omni second normalization trigger point: convert inline tool-result
+    // media into oss:// fileData BEFORE the vision bridge runs — converted
+    // parts are invisible to isImagePart, so the bridge skips them. Sibling
+    // step by design (§8.2): never mixed into bridge logic. Preserves the
+    // identity-equality contract: unchanged input returns the same array.
+    // Dynamic import keeps the omni module graph out of the ACP/serve
+    // fast-path static bundle closure (mirrors fileUtils' pattern; the
+    // serve bundle-closure CI check forbids iconv-scale chunks on the
+    // acpAgent static path).
+    let omniProcessed = responseParts;
+    if (this.config.isOmniEnabled?.()) {
+      const { processToolResultOmniMedia } = await import(
+        '../omni/tool-result-media.js'
+      );
+      omniProcessed = await processToolResultOmniMedia(
+        responseParts,
+        this.config,
+        signal,
+      );
+    }
     const processedParts = await bridgeToolResultImages({
       config: this.config,
-      responseParts,
+      responseParts: omniProcessed,
       signal,
       onFullTurnModel: (model) => {
         if (!this.onToolResultFullTurnModel?.(model)) return false;
@@ -2718,6 +2769,7 @@ export class CoreToolScheduler {
           const canonicalName = canonicalToolName(reqInfo.name);
           if (
             this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+            reqInfo.executionOrigin?.kind !== 'fixed_policy' &&
             !isCodeModeToolCallAllowed(canonicalName, reqInfo.source ?? 'model')
           ) {
             newToolCalls.push({
@@ -2863,10 +2915,45 @@ export class CoreToolScheduler {
             continue;
           }
 
+          // Omni media-policy protocol gate (before buildInvocation, so the
+          // merged arguments still go through the tool's native schema and
+          // business validation):
+          // - model/client-origin calls of a media-policy tool require
+          //   modelAccess.enabled, are rejected when they explicitly name a
+          //   lockedArguments key, and get defaultArguments/lockedArguments
+          //   merged in;
+          // - a fixed_policy origin on a NON-media-policy tool is rejected
+          //   (defense in depth: a forged origin must not become a
+          //   permission bypass for Shell/Edit/MCP tools);
+          // - a missing origin fails closed as model.
+          const policyGate = evaluateMediaPolicyToolCall({
+            config: this.config,
+            tool: toolInstance,
+            args: reqInfo.args,
+            executionOrigin: reqInfo.executionOrigin,
+          });
+          if (policyGate.outcome === 'reject') {
+            newToolCalls.push({
+              status: 'error',
+              request: reqInfo,
+              tool: toolInstance,
+              response: createErrorResponse(
+                reqInfo,
+                new Error(policyGate.message),
+                policyGate.reason === 'invalid_params'
+                  ? ToolErrorType.INVALID_TOOL_PARAMS
+                  : ToolErrorType.EXECUTION_DENIED,
+                'not_started',
+              ),
+              durationMs: 0,
+            });
+            continue;
+          }
+
           const invocationOrError = runInRequestGoalContext(reqInfo, () =>
             this.buildInvocation(
               toolInstance,
-              reqInfo.args,
+              policyGate.args,
               reqInfo.callId,
               reqInfo.prompt_id,
             ),
@@ -3037,6 +3124,22 @@ export class CoreToolScheduler {
           // =================================================================
           // L3→L4→L5 Permission Flow
           // =================================================================
+
+          // Fixed-policy orchestrator calls skip the interactive permission
+          // flow entirely: no PermissionManager ask/deny evaluation, no
+          // confirmation dialog, no plan/auto classification. The remaining
+          // guards still hold — PM tool-enablement ran at schedule time,
+          // origin/descriptor pairing was enforced before buildInvocation,
+          // and PreToolUse hooks fire (a hook deny fails the call closed)
+          // at execution time.
+          if (reqInfo.executionOrigin?.kind === 'fixed_policy') {
+            this.setToolCallOutcome(
+              reqInfo.callId,
+              ToolConfirmationOutcome.ProceedAlways,
+            );
+            this.setStatusInternal(reqInfo.callId, 'scheduled');
+            continue;
+          }
 
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
@@ -3587,16 +3690,15 @@ export class CoreToolScheduler {
                 rejectPlanShell(errorMessage);
                 continue;
               }
-              this.setStatusInternal(
-                reqInfo.callId,
-                'error',
-                createErrorResponse(
+              this.setStatusInternal(reqInfo.callId, 'error', {
+                ...createErrorResponse(
                   reqInfo,
                   new Error(errorMessage),
                   ToolErrorType.EXECUTION_DENIED,
                   'not_started',
                 ),
-              );
+                approvalRequired: true,
+              });
               setToolSpanFailure(
                 toolSpan,
                 TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,
@@ -5020,10 +5122,15 @@ export class CoreToolScheduler {
         // prompt, bounce the tool into the existing awaiting_approval flow
         // instead of denying it. 'denied'/'stop' (and 'ask' in a
         // non-interactive/background context where we cannot prompt) keep
-        // the original deny-as-error behavior.
+        // the original deny-as-error behavior. A fixed_policy invocation
+        // never bounces: the orchestrator awaits it headlessly behind the
+        // scheduler, so an awaiting_approval entry would sit unanswerable
+        // (the confirmation UI belongs to the outer tool call) — an 'ask'
+        // on a fixed-policy call fails closed as a deny instead.
         if (
           preHookResult.blockType === 'ask' &&
           !signal.aborted &&
+          scheduledCall.request.executionOrigin?.kind !== 'fixed_policy' &&
           this.canPromptForAskBounce()
         ) {
           // Mirror the confirmation-phase abort re-check: never open a
@@ -5708,6 +5815,7 @@ export class CoreToolScheduler {
           callId,
           toolName,
           content,
+          toolResult.outputBudgetApplied === true,
         );
         content = persisted.content;
         mergePersistedOutputFiles(persisted.persistedOutputFiles);
@@ -5857,11 +5965,10 @@ export class CoreToolScheduler {
           );
           content = truncated.content;
           mergePersistedOutputFiles(
-            truncated.outputFile
-              ? [truncated.outputFile]
-              : truncated.content !== contentBeforeTruncation
-                ? []
-                : undefined,
+            persistedOutputFilesForTruncation(
+              contentBeforeTruncation,
+              truncated,
+            ),
           );
         } catch (truncErr) {
           // A truncation/IO failure must never demote a successful tool call
@@ -5920,11 +6027,10 @@ export class CoreToolScheduler {
               );
               content = recombined.content;
               mergePersistedOutputFiles(
-                recombined.outputFile
-                  ? [recombined.outputFile]
-                  : recombined.content !== contentBeforeRecombination
-                    ? []
-                    : undefined,
+                persistedOutputFilesForTruncation(
+                  contentBeforeRecombination,
+                  recombined,
+                ),
               );
             } catch (truncErr) {
               debugLogger.warn(
@@ -5951,6 +6057,7 @@ export class CoreToolScheduler {
         const processedImages = await this.processToolResultImages(
           convertedResponse,
           signal,
+          scheduledCall.request.executionOrigin,
         );
         const response = processedImages.responseParts;
         if (response !== convertedResponse) {
@@ -5963,6 +6070,53 @@ export class CoreToolScheduler {
           ...(toolResult.artifacts ?? []),
           ...(postToolUseArtifacts ?? []),
         ];
+        // Raw media-policy artifacts, captured from the tool's OWN result —
+        // deliberately excluding the PostToolUse hook artifacts merged into
+        // `artifacts` above, which must never impersonate policy outputs.
+        const policyArtifacts: PolicyArtifactBatch | undefined =
+          scheduledCall.tool.mediaPolicyDescriptor &&
+          toolResult.artifacts &&
+          toolResult.artifacts.length > 0
+            ? {
+                toolName: canonicalName,
+                invocationId: callId,
+                executionOrigin: scheduledCall.request.executionOrigin ?? {
+                  kind: 'model',
+                },
+                artifacts: toolResult.artifacts,
+              }
+            : undefined;
+        // Model/client-origin successes enter the SAME OmniPolicySucceeded
+        // boundary the fixed-policy orchestrator uses (memory design M
+        // §7.1/§17): without this, an evidence-gathering call the advisor
+        // suggested succeeds but is never recorded, so the next recall
+        // reports the identical gap and the work is re-paid every session.
+        // Awaited (the commit must not race the next turn's recall) and
+        // internally never-throwing — collection failure cannot affect the
+        // tool result (D12).
+        if (
+          policyArtifacts &&
+          policyArtifacts.executionOrigin.kind !== 'fixed_policy' &&
+          scheduledCall.tool.mediaPolicyDescriptor
+        ) {
+          const { collectModelPolicyCall } = await import(
+            '../omni/policy/model-call-collection.js'
+          );
+          await collectModelPolicyCall({
+            config: this.config,
+            batch: policyArtifacts,
+            descriptor: scheduledCall.tool.mediaPolicyDescriptor,
+            args: scheduledCall.invocation.params as Record<string, unknown>,
+            // The REAL execution window (approval wait excluded). Without
+            // it the record would hold the collection window instead, and
+            // a 98-minute audio extraction reads as 0.6s.
+            ...('executionStartTime' in scheduledCall &&
+            typeof scheduledCall.executionStartTime === 'number'
+              ? { startedAt: scheduledCall.executionStartTime }
+              : {}),
+            signal,
+          });
+        }
         const successResponse: CoreToolCallResponseInfo = {
           callId,
           responseParts: response,
@@ -5991,6 +6145,7 @@ export class CoreToolScheduler {
             ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
+          ...(policyArtifacts ? { policyArtifacts } : {}),
         };
         // After an APPROVED exit_plan_mode, swap the large `plan` argument
         // still sitting in the model turn's functionCall for a pointer to the
@@ -6116,11 +6271,60 @@ export class CoreToolScheduler {
         }
 
         if (isTimeout) {
-          const timeoutContent = await this.maybePersistLargeToolResult(
-            callId,
-            toolName,
-            toolResult.llmContent,
-          );
+          // The generic gate stands down for a marked body; bound the timeout
+          // detail at the producer's own declared budget instead — char-only,
+          // mirroring the success path's per-tool pass. An honest producer is
+          // a no-op under its own budget; anything appended after the mark
+          // stays bounded. A marked producer with no declared budget keeps
+          // the stand-down (it claims the sizing decision for itself).
+          const markedProducerBudget =
+            toolResult.outputBudgetApplied === true
+              ? scheduledCall.tool.maxOutputChars
+              : undefined;
+          let timeoutContent: {
+            content: PartListUnion;
+            persistedOutputFiles?: string[];
+          };
+          if (markedProducerBudget !== undefined) {
+            try {
+              const truncated = await truncateLlmContent(
+                this.config,
+                toolName,
+                toolResult.llmContent,
+                {
+                  threshold: markedProducerBudget,
+                  lines: Number.POSITIVE_INFINITY,
+                  keep: scheduledCall.tool.truncateKeep,
+                },
+                scheduledCall.request.prompt_id,
+              );
+              timeoutContent = {
+                content: truncated.content,
+                persistedOutputFiles: persistedOutputFilesForTruncation(
+                  toolResult.llmContent,
+                  truncated,
+                ),
+              };
+            } catch (truncErr) {
+              // A truncation/IO failure must never demote the result — keep
+              // the detail and warn, same as the success-path pass.
+              debugLogger.warn(
+                `TRUNCATION (timeout detail) failed for ${toolName}: ${
+                  truncErr instanceof Error
+                    ? truncErr.message
+                    : String(truncErr)
+                }`,
+              );
+              timeoutContent = { content: toolResult.llmContent };
+            }
+          } else {
+            timeoutContent = await this.maybePersistLargeToolResult(
+              callId,
+              toolName,
+              toolResult.llmContent,
+              toolResult.outputBudgetApplied === true,
+            );
+          }
           let responseParts = convertToFunctionErrorResponse(
             toolName,
             callId,
@@ -6138,6 +6342,7 @@ export class CoreToolScheduler {
           const processedImages = await this.processToolResultImages(
             responseParts,
             signal,
+            scheduledCall.request.executionOrigin,
           );
           responseParts = processedImages.responseParts;
 
@@ -6201,9 +6406,17 @@ export class CoreToolScheduler {
         // Truncate oversized error messages (e.g., large stderr)
         const errorGateThreshold =
           this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;
+        // Only skip when the message still IS the body the producer sized.
+        // Producers that build `error.message` separately (spawn/setup
+        // failures) and any failure-hook context appended above both change the
+        // string, so those keep the gate.
+        const errorBodyAlreadyBounded =
+          toolResult.outputBudgetApplied === true &&
+          errorMessage === toolResult.llmContent;
         if (
           canonicalName !== ToolNames.EXEC &&
           errorMessage.length > errorGateThreshold &&
+          !errorBodyAlreadyBounded &&
           !isAlreadyTruncated(errorMessage)
         ) {
           const persistResult = await persistAndTruncateToolResult(
@@ -6264,6 +6477,7 @@ export class CoreToolScheduler {
           const processedImages = await this.processToolResultImages(
             imageErrorParts,
             signal,
+            scheduledCall.request.executionOrigin,
           );
           const bridgedErrorParts = processedImages.responseParts;
           if (
@@ -6654,10 +6868,15 @@ export class CoreToolScheduler {
     callId: string,
     toolName: string,
     content: PartListUnion,
+    outputBudgetApplied: boolean,
   ): Promise<{
     content: PartListUnion;
     persistedOutputFiles?: string[];
   }> {
+    // The producer already sized this body. This gate sits below some per-tool
+    // budgets, so applying it too would decide that window under a second
+    // policy.
+    if (outputBudgetApplied) return { content };
     if (GATE_EXEMPT_TOOLS.has(canonicalToolName(toolName))) return { content };
 
     const text = extractTextFromPartListUnion(content);

@@ -233,6 +233,38 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ImageGen: 'image_gen',
   ImageGenTool: 'image_gen',
 
+  // Omni media tools
+  omni_downsample_image: 'omni_downsample_image',
+  DownsampleImage: 'omni_downsample_image',
+  omni_downscale_video: 'omni_downscale_video',
+  DownscaleVideo: 'omni_downscale_video',
+  omni_downsample_audio: 'omni_downsample_audio',
+  DownsampleAudio: 'omni_downsample_audio',
+  omni_extract_keyframes: 'omni_extract_keyframes',
+  ExtractKeyframes: 'omni_extract_keyframes',
+  omni_extract_audio: 'omni_extract_audio',
+  ExtractAudio: 'omni_extract_audio',
+  omni_clip_video: 'omni_clip_video',
+  ClipVideo: 'omni_clip_video',
+  omni_convert_image: 'omni_convert_image',
+  ConvertImage: 'omni_convert_image',
+  omni_transcribe_audio: 'omni_transcribe_audio',
+  TranscribeAudio: 'omni_transcribe_audio',
+  omni_clip_image: 'omni_clip_image',
+  ClipImage: 'omni_clip_image',
+  omni_clip_audio: 'omni_clip_audio',
+  ClipAudio: 'omni_clip_audio',
+  omni_caption_image: 'omni_caption_image',
+  CaptionImage: 'omni_caption_image',
+  omni_caption_audio: 'omni_caption_audio',
+  CaptionAudio: 'omni_caption_audio',
+  omni_ocr_image: 'omni_ocr_image',
+  OcrImage: 'omni_ocr_image',
+  omni_understand_video_segments: 'omni_understand_video_segments',
+  UnderstandVideoSegments: 'omni_understand_video_segments',
+  omni_recall_media_memory: 'omni_recall_media_memory',
+  RecallMediaMemory: 'omni_recall_media_memory',
+
   // Tool search tool
   tool_search: 'tool_search',
   ToolSearch: 'tool_search',
@@ -320,6 +352,32 @@ export function resolveToolName(rawName: string): string {
   return Object.hasOwn(TOOL_NAME_ALIASES, rawName)
     ? TOOL_NAME_ALIASES[rawName]!
     : rawName;
+}
+
+const TOOL_NAME_ALIASES_BY_CANONICAL: ReadonlyMap<string, readonly string[]> =
+  (() => {
+    const byCanonical = new Map<string, string[]>();
+    for (const [alias, canonical] of Object.entries(TOOL_NAME_ALIASES)) {
+      const aliases = byCanonical.get(canonical);
+      if (aliases) {
+        aliases.push(alias);
+      } else {
+        byCanonical.set(canonical, [alias]);
+      }
+    }
+    return byCanonical;
+  })();
+
+/**
+ * Every name that {@link resolveToolName} resolves to the given canonical tool
+ * name, including Claude Code's names (`Bash`, `Read`, `Write`). Exact names
+ * only: the meta-categories applied by {@link toolMatchesRuleToolName} (a
+ * `Read` rule also covering `grep_search`, a `Bash` rule also covering
+ * `monitor`) are not expanded here. Empty for a name the table does not know,
+ * such as an MCP tool.
+ */
+export function getToolNameAliases(canonicalName: string): readonly string[] {
+  return TOOL_NAME_ALIASES_BY_CANONICAL.get(canonicalName) ?? [];
 }
 
 /**
@@ -1461,6 +1519,19 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Whether a deny entry covers a tool name, as a subagent's tool filter judges
+ * it: an MCP tool matches server-level, wildcard and exact MCP patterns (see
+ * {@link matchesMcpPattern}); every other tool matches only its exact name.
+ * One predicate for every place that applies a deny list to a tool pool, so the
+ * declaration filter and the callers that predict it cannot disagree.
+ */
+export function matchesToolPattern(pattern: string, toolName: string): boolean {
+  return toolName.startsWith('mcp__')
+    ? matchesMcpPattern(pattern, toolName)
+    : pattern === toolName;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

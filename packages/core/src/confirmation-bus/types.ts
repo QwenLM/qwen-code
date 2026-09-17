@@ -17,6 +17,7 @@ export enum MessageBusType {
   TOOL_EXECUTION_FAILURE = 'tool-execution-failure',
   HOOK_EXECUTION_REQUEST = 'hook-execution-request',
   HOOK_EXECUTION_RESPONSE = 'hook-execution-response',
+  HOOK_PROGRESS = 'hook-progress',
 }
 
 export interface ToolConfirmationRequest {
@@ -123,10 +124,76 @@ export interface HookExecutionResponse {
   stopHookCount?: number;
 }
 
+/**
+ * How a single hook finished, as reported on {@link HookProgress}.
+ * `cancelled` means the user aborted; `timeout` means the hook ran past its
+ * own timeout. They are reported separately because a UI tells them apart.
+ */
+export type HookProgressOutcome =
+  | 'success'
+  | 'blocked'
+  | 'error'
+  | 'timeout'
+  | 'cancelled';
+
+/**
+ * Published once when each hook starts and once when it ends, for every hook
+ * event, whether the event was fired directly or through the bus. Purely
+ * observational: nothing waits for a subscriber.
+ */
+export interface HookProgress {
+  type: MessageBusType.HOOK_PROGRESS;
+  phase: 'start' | 'end';
+  /** HookEventName value, e.g. 'PreToolUse'. */
+  eventName: string;
+  /** Display name: the hook's name, else its command, url, id or prompt. */
+  hookName: string;
+  hookType: 'command' | 'http' | 'function' | 'prompt';
+  /**
+   * Opaque id for ONE hook execution: the same value on this hook's `start`
+   * and its `end`, unique within the process. Consumers pair the two by it and
+   * must never render it: it carries no meaning for a reader.
+   */
+  invocationId: string;
+  /**
+   * The subagent whose turn ran this hook, when one did. A subagent's hooks
+   * live in the parent registry and publish on the parent bus, so a consumer
+   * that writes to a transcript needs this to pick the right one.
+   */
+  agentId?: string;
+  /** 0-based position of this hook inside the event's batch. */
+  index: number;
+  /** Number of hooks in the event's batch. */
+  total: number;
+  /** The hook's configured statusMessage, when set. Both phases carry it. */
+  statusMessage?: string;
+  /** end only. */
+  durationMs?: number;
+  /** end only. */
+  outcome?: HookProgressOutcome;
+  /** end only: the error message when the hook failed to run cleanly. */
+  error?: string;
+  /** end only: a command hook's exit code when its process ran to completion. */
+  exitCode?: number;
+  /** end only: this hook's own systemMessage, not the aggregated one. */
+  systemMessage?: string;
+  /** end only: the reason given when outcome is 'blocked'. */
+  blockedReason?: string;
+  /** end only: true when the hook was handed to the async registry. */
+  async?: boolean;
+  /**
+   * end only: display level that overrides whatever a consumer would derive
+   * from `outcome`. Not set by hook execution itself; reserved for replaying
+   * async hook output, whose stderr is a warning rather than an error.
+   */
+  level?: 'info' | 'warning' | 'error';
+}
+
 export type Message =
   | ToolConfirmationRequest
   | ToolConfirmationResponse
   | ToolExecutionSuccess
   | ToolExecutionFailure
   | HookExecutionRequest
-  | HookExecutionResponse;
+  | HookExecutionResponse
+  | HookProgress;

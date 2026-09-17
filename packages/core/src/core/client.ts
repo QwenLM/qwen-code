@@ -71,6 +71,7 @@ import {
   resolveInteractionMode,
   resolveMainSessionOutputStyle,
 } from './prompts.js';
+import { buildOmniMediaGuidanceSection } from '../omni/media-guidance.js';
 import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
@@ -121,6 +122,10 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import {
+  extractTurnBudgetDirectiveText,
+  parseTurnBudgetDirective,
+} from './turn-budget.js';
 import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
@@ -147,10 +152,8 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
-import {
-  buildApiHistoryFromConversation,
-  replayUiTelemetryFromConversation,
-} from '../services/sessionService.js';
+import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
+import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
@@ -219,8 +222,13 @@ export enum SendMessageType {
   Goal = 'goal',
 }
 
-/** Upper bound on prompt ids remembered as Stop-hook-forced. */
-const MAX_STOP_HOOK_FORCED_PROMPT_IDS = 32;
+/** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
+export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
+
+interface StopHookChain {
+  count: number;
+  reasons: string[];
+}
 
 export interface SendMessageOptions {
   type: SendMessageType;
@@ -232,11 +240,6 @@ export interface SendMessageOptions {
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
   steerInput?: SteerInput;
-  /** Track stop hook iterations to prevent infinite loops and display loop info */
-  stopHookState?: {
-    iterationCount: number;
-    reasons: string[];
-  };
   /** Display text for notification messages (persisted for session resume). */
   notificationDisplayText?: string;
   /** Todo work chain that owns this automatic turn, when it is related. */
@@ -443,8 +446,10 @@ export class LlmClient {
   };
   private sessionTurnCount = 0;
   /**
-   * Prompt ids whose previous Stop check was blocked by a Stop hook, so the
-   * turn now running is that hook's continuation. Drives `stop_hook_active`.
+   * In-flight Stop-hook chains keyed by prompt id. An entry means the last
+   * Stop check blocked: `has()` supplies `stop_hook_active`, and the same
+   * record owns its count and reasons without a concurrent side query
+   * resetting or advancing another prompt's chain.
    *
    * Kept on the client, keyed by prompt id, because a hook-forced
    * continuation that calls a tool comes back through a fresh top-level
@@ -457,10 +462,10 @@ export class LlmClient {
    * cleared when the stop is allowed, the blocking cap is hit, steer input
    * replaces the turn, or the send exits abnormally.
    *
-   * Only the flag lives here; the consecutive-block count still rides the
-   * per-call `stopHookState`.
+   * Bounded and LRU-ordered: a continuation whose tool result never returns
+   * leaves its id behind until eviction.
    */
-  private readonly stopHookForcedPromptIds = new Set<string>();
+  private readonly stopHookChains = new Map<string, StopHookChain>();
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
   /** Whether a steer message arrived since the last dispatched skill review. */
@@ -609,8 +614,9 @@ export class LlmClient {
         sessionStartSource ?? SessionStartSource.Resume,
         signal,
       );
-      this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
+      await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
+      chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -618,10 +624,6 @@ export class LlmClient {
           counts.promptTokenCount,
           counts.outputTokenCount,
           counts.isEstimated,
-        );
-      } else {
-        chat.setLastPromptTokenCount(
-          uiTelemetryService.getLastPromptTokenCount(),
         );
       }
     } else if (resumedSessionData) {
@@ -632,26 +634,24 @@ export class LlmClient {
       );
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
-      const resumedHistory = buildApiHistoryFromConversation(
+      const restored = buildSessionHistoryFromConversation(
         resumedSessionData.conversation,
       );
+      const resumedHistory = restored.apiHistory;
       this.seedRecentCompletedToolNamesFromHistory(resumedHistory);
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
         signal,
       );
-      this.restoreLoadedSkillsFromHistory(resumedHistory);
+      await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
+      chat.setCompletedToolCallIds(restored.completedToolCallIds);
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
           resumeTokenCounts.outputTokenCount,
           resumeTokenCounts.isEstimated,
-        );
-      } else {
-        chat.setLastPromptTokenCount(
-          uiTelemetryService.getLastPromptTokenCount(),
         );
       }
 
@@ -700,11 +700,17 @@ export class LlmClient {
     }
   }
 
-  private restoreLoadedSkillsFromHistory(history: Content[]): void {
+  private async restoreLoadedSkillsFromHistory(
+    history: Content[],
+  ): Promise<void> {
     const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
-      | { restoreLoadedSkillsFromHistory?: (history: Content[]) => void }
+      | {
+          restoreLoadedSkillsFromHistory?: (
+            history: Content[],
+          ) => void | Promise<void>;
+        }
       | undefined;
-    skillTool?.restoreLoadedSkillsFromHistory?.(history);
+    await skillTool?.restoreLoadedSkillsFromHistory?.(history);
   }
 
   async addHistory(content: Content) {
@@ -1374,6 +1380,26 @@ export class LlmClient {
   }
 
   /** @internal */
+  captureCacheSafeParams(): void {
+    try {
+      const chat = this.getChat();
+      const historyForCache = this.getHistoryTailShallow(40, true);
+      const cachedHistory = slimCompactionInput(
+        historyForCache,
+        this.config.getEffectiveInputModalities(),
+      ).slimmedHistory;
+      saveCacheSafeParams(
+        chat.getGenerationConfig(),
+        cachedHistory,
+        this.config.getModel(),
+        this.config.getSessionId(),
+      );
+    } catch {
+      // Best-effort — don't block the main flow
+    }
+  }
+
+  /** @internal */
   consumeManagedAutoMemoryRecall(
     deliveryPoint: 'initial' | 'tool_result',
   ): Promise<RelevantAutoMemoryPromptResult | null> {
@@ -1651,6 +1677,11 @@ export class LlmClient {
     const base = getMainSessionBaseSystemPrompt(this.config);
     const stableLayers = {
       base,
+      // Progressive media understanding contract: WHY deliveries carry
+      // 【媒体降质】/【媒体省略】/【媒体转写】 markers and how to fetch
+      // fuller evidence. Stable — omni config/provider don't change
+      // in-session — so it belongs inside the cached static prefix.
+      mediaGuidance: buildOmniMediaGuidanceSection(this.config),
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
@@ -1693,6 +1724,7 @@ export class LlmClient {
     await this.seedAgentReminderDedupFromCurrent();
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
+      this.getChat().getCompletedToolCallIds(),
     );
   }
 
@@ -1727,7 +1759,10 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
-      this.getChat().setHistory([startupContext, ...currentHistory]);
+      this.getChat().setHistory(
+        [startupContext, ...currentHistory],
+        this.getChat().getCompletedToolCallIds(),
+      );
     }
   }
 
@@ -2922,7 +2957,10 @@ export class LlmClient {
       const changed = m.tokensSaved > 0;
       if (changed) {
         // setHistory conservatively clears loaded-skill tracking.
-        this.getChat().setHistory(mcResult.history);
+        this.getChat().setHistory(
+          mcResult.history,
+          this.getChat().getCompletedToolCallIds(),
+        );
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
@@ -2962,22 +3000,66 @@ export class LlmClient {
     }
   }
 
-  private markStopHookForced(promptId: string): void {
-    this.stopHookForcedPromptIds.delete(promptId);
-    this.stopHookForcedPromptIds.add(promptId);
-    // Bounded: a continuation that ends with tool calls the caller never
-    // re-enters leaves its id behind until that id starts a new interaction.
-    while (
-      this.stopHookForcedPromptIds.size > MAX_STOP_HOOK_FORCED_PROMPT_IDS
-    ) {
-      const oldest = this.stopHookForcedPromptIds.values().next().value;
+  private nextStopHookBlock(promptId: string, reason: string) {
+    const chain = this.stopHookChains.get(promptId);
+    const iterationCount = (chain?.count ?? 0) + 1;
+    const reasons = [...(chain?.reasons ?? []), reason];
+    const cap = this.config.getStopHookBlockingCap();
+    return { iterationCount, reasons, cap, capped: iterationCount >= cap };
+  }
+
+  private recordStopHookBlock(
+    promptId: string,
+    iterationCount: number,
+    reasons: string[],
+  ): void {
+    this.stopHookChains.delete(promptId);
+    this.stopHookChains.set(promptId, { count: iterationCount, reasons });
+    while (this.stopHookChains.size > MAX_STOP_HOOK_CHAIN_PROMPT_IDS) {
+      const oldest = this.stopHookChains.keys().next().value;
       if (oldest === undefined) break;
-      this.stopHookForcedPromptIds.delete(oldest);
+      this.stopHookChains.delete(oldest);
     }
   }
 
-  private clearStopHookForced(promptId: string): void {
-    this.stopHookForcedPromptIds.delete(promptId);
+  private clearStopHookChain(promptId: string): void {
+    this.stopHookChains.delete(promptId);
+  }
+
+  /**
+   * Open the turn's token budget: the session's output-token total now, and
+   * the `+500k`-style target the user typed, if any. Only a user query or its
+   * retry can carry a directive; a cron, goal, notification or teammate turn
+   * starts with none. A retry of the same prompt keeps the snapshot it
+   * already has, so the failed attempt's tokens still count against it.
+   */
+  private beginTurnBudget(
+    messageType: SendMessageType,
+    request: PartListUnion,
+    promptId: string,
+  ): void {
+    const turnBudget = this.config.getTurnBudget?.();
+    if (!turnBudget) return;
+    const sessionId = this.config.getSessionId();
+    if (
+      messageType === SendMessageType.Retry &&
+      turnBudget.current(sessionId)?.promptId === promptId
+    ) {
+      return;
+    }
+    const directive =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Retry
+        ? parseTurnBudgetDirective(extractTurnBudgetDirectiveText(request))
+        : null;
+    turnBudget.beginTurn({
+      promptId,
+      sessionId,
+      budget: directive?.total ?? null,
+      ...(directive ? { directiveText: directive.text } : {}),
+      outputTokensAtTurnStart:
+        uiTelemetryService.getTotalOutputTokens(sessionId),
+    });
   }
 
   async *sendMessageStream(
@@ -3047,6 +3129,11 @@ export class LlmClient {
     ) {
       await this.config.assertCanStartTurn();
     }
+    if (
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery
+    )
+      this.config.applyReasoningOverrides?.();
     const signal = options?.goalSignal
       ? AbortSignal.any([callerSignal, options.goalSignal])
       : callerSignal;
@@ -3381,9 +3468,14 @@ export class LlmClient {
     if (startsInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+      // A side question asked while a turn is running is not a new turn: it
+      // must not move the running turn's starting point or drop its target.
+      if (!options?.isConcurrentSideQuery) {
+        this.beginTurnBudget(messageType, request, prompt_id);
+      }
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
-      this.clearStopHookForced(prompt_id);
+      this.clearStopHookChain(prompt_id);
       startInteractionSpan(this.config, {
         promptId: prompt_id,
         model: options?.modelOverride ?? this.config.getModel(),
@@ -3610,9 +3702,6 @@ export class LlmClient {
           goalPermit,
           goalTurnKey,
           goalOrigin,
-          ...(messageType === SendMessageType.Goal
-            ? { stopHookState: undefined }
-            : {}),
         };
       }
       if (goalRuntime) bindGoalStateEvents(goalRuntime);
@@ -4120,6 +4209,49 @@ export class LlmClient {
           systemReminders.unshift(userQueryMemory.prompt);
         }
 
+        // Omni passive media-memory recall (memory design M §9.3, D10
+        // sideQuery mode): a bounded selector reads what memory knows
+        // about the media handles THIS request carries and the chosen
+        // entries are injected here — strictly before the main request
+        // is sent (never retrofitted into a later turn). Latency is
+        // bounded by sideQuery.timeoutMs; the no-op cases (mode active,
+        // memory off, no handles in the request) return null without
+        // model traffic, and every failure degrades to no injection.
+        // Optional call: stub configs in tests may omit the method.
+        if (this.config.isOmniEnabled?.()) {
+          const { runOmniMemorySideQuery, formatOmniMemorySideQueryReminder } =
+            await import('../omni/memory-side-query.js');
+          const omniRecall = await runOmniMemorySideQuery({
+            config: this.config,
+            requestParts: requestToSend,
+            promptId: prompt_id,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+          if (omniRecall?.result) {
+            systemReminders.push(
+              formatOmniMemorySideQueryReminder(omniRecall.result),
+            );
+            // The user record was persisted before this reminder existed —
+            // record the payload so the transcript (and the trajectory
+            // exporter) shows what memory the model was actually given.
+            this.config
+              .getChatRecordingService()
+              ?.recordOmniRecallReminder(omniRecall.result);
+          } else if (omniRecall?.reason) {
+            // A degraded passive recall is invisible by construction: the
+            // turn proceeds normally, just without the memory it was
+            // supposed to carry. With a pinned-but-unavailable selector
+            // model that is a permanent outage of the feature with nothing
+            // to see, so the reason is recorded (memory design M §9.3
+            // obliges recording it) rather than dropped on the floor.
+            debugLogger.debug(
+              `omni passive media-memory recall degraded ` +
+                `(${omniRecall.reason}) for ` +
+                `${omniRecall.resourceIds.length} resource(s)`,
+            );
+          }
+        }
+
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
@@ -4542,7 +4674,7 @@ export class LlmClient {
         const steerInput = await takeSteerInput(steerTurnBudget);
         if (steerInput) {
           // A steered turn is user-driven, not forced by a Stop hook.
-          this.clearStopHookForced(prompt_id);
+          this.clearStopHookChain(prompt_id);
           const pushCountBefore = currentPushCount();
           let steeredTurn: Turn;
           try {
@@ -4600,7 +4732,7 @@ export class LlmClient {
               // True while this prompt is continuing because a Stop hook
               // blocked, including after tool calls made along the way, so a
               // hook can tell its own continuation apart and stop re-blocking.
-              stop_hook_active: this.stopHookForcedPromptIds.has(prompt_id),
+              stop_hook_active: this.stopHookChains.has(prompt_id),
               last_assistant_message: responseText,
               ...contextUsage,
             },
@@ -4641,20 +4773,12 @@ export class LlmClient {
             stopOutput?.shouldStopExecution())
         ) {
           const continueReason = stopOutput.getEffectiveReason();
-          const currentIterationCount =
-            (options?.stopHookState?.iterationCount ?? 0) + 1;
-          const currentReasons = [
-            ...(options?.stopHookState?.reasons ?? []),
-            continueReason,
-          ];
-          const stopHookBlockingCap = this.config.getStopHookBlockingCap();
+          const { iterationCount, reasons, cap, capped } =
+            this.nextStopHookBlock(prompt_id, continueReason);
 
-          if (currentIterationCount >= stopHookBlockingCap) {
-            this.clearStopHookForced(prompt_id);
-            const warning = formatStopHookBlockingCapWarning(
-              'Stop',
-              stopHookBlockingCap,
-            );
+          if (capped) {
+            this.clearStopHookChain(prompt_id);
+            const warning = formatStopHookBlockingCapWarning('Stop', cap);
             yield {
               type: LlmEventType.HookSystemMessage,
               value: warning,
@@ -4676,8 +4800,8 @@ export class LlmClient {
             yield {
               type: LlmEventType.StopHookLoop,
               value: {
-                iterationCount: currentIterationCount,
-                reasons: currentReasons,
+                iterationCount,
+                reasons,
                 stopHookCount: response.stopHookCount ?? 1,
               },
             };
@@ -4700,7 +4824,7 @@ export class LlmClient {
               continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
             }
             const pushCountBefore = currentPushCount();
-            this.markStopHookForced(prompt_id);
+            this.recordStopHookBlock(prompt_id, iterationCount, reasons);
             let hookTurn: Turn;
             try {
               hookTurn = yield* this.sendMessageStream(
@@ -4712,10 +4836,6 @@ export class LlmClient {
                   type: SendMessageType.Hook,
                   submittedPrompt: undefined,
                   steerInput: pendingSteer,
-                  stopHookState: {
-                    iterationCount: currentIterationCount,
-                    reasons: currentReasons,
-                  },
                 },
                 hookTurnBudget,
               );
@@ -4746,24 +4866,16 @@ export class LlmClient {
           const continueReason = stopOutput.getEffectiveReason();
 
           // Track stop hook iterations
-          const currentIterationCount =
-            (options?.stopHookState?.iterationCount ?? 0) + 1;
-          const currentReasons = [
-            ...(options?.stopHookState?.reasons ?? []),
-            continueReason,
-          ];
+          const { iterationCount, reasons, cap, capped } =
+            this.nextStopHookBlock(prompt_id, continueReason);
 
           // Emit StopHookLoop starting with the first blocking decision so
           // /goal and configured Stop hooks both surface their reason before
           // the follow-up turn is generated. The cap check stays before the
           // yield because a cap of 1 means no follow-up turn should run.
-          const stopHookBlockingCap = this.config.getStopHookBlockingCap();
-          if (currentIterationCount >= stopHookBlockingCap) {
-            this.clearStopHookForced(prompt_id);
-            const warning = formatStopHookBlockingCapWarning(
-              'Stop',
-              stopHookBlockingCap,
-            );
+          if (capped) {
+            this.clearStopHookChain(prompt_id);
+            const warning = formatStopHookBlockingCapWarning('Stop', cap);
             yield {
               type: LlmEventType.HookSystemMessage,
               value: warning,
@@ -4786,8 +4898,8 @@ export class LlmClient {
           yield {
             type: LlmEventType.StopHookLoop,
             value: {
-              iterationCount: currentIterationCount,
-              reasons: currentReasons,
+              iterationCount,
+              reasons,
               stopHookCount: response.stopHookCount ?? 1,
             },
           };
@@ -4810,7 +4922,7 @@ export class LlmClient {
             continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
           }
           const pushCountBefore = currentPushCount();
-          this.markStopHookForced(prompt_id);
+          this.recordStopHookBlock(prompt_id, iterationCount, reasons);
           let hookTurn: Turn;
           try {
             hookTurn = yield* this.sendMessageStream(
@@ -4822,10 +4934,6 @@ export class LlmClient {
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
                 steerInput: pendingSteer,
-                stopHookState: {
-                  iterationCount: currentIterationCount,
-                  reasons: currentReasons,
-                },
               },
               hookTurnBudget,
             );
@@ -4854,7 +4962,7 @@ export class LlmClient {
         }
 
         // The stop was allowed, so this prompt is no longer hook-forced.
-        this.clearStopHookForced(prompt_id);
+        this.clearStopHookChain(prompt_id);
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
@@ -4885,26 +4993,7 @@ export class LlmClient {
         // Save cache-safe params here — before any early return — so that
         // background readers calling getCacheSafeParams(sessionId) can see the
         // current turn's history regardless of which path exits below.
-        try {
-          const chat = this.getChat();
-          const maxHistoryForCache = 40;
-          const historyForCache = this.getHistoryTailShallow(
-            maxHistoryForCache,
-            true,
-          );
-          const cachedHistory = slimCompactionInput(
-            historyForCache,
-            this.config.getEffectiveInputModalities(),
-          ).slimmedHistory;
-          saveCacheSafeParams(
-            chat.getGenerationConfig(),
-            cachedHistory,
-            this.config.getModel(),
-            this.config.getSessionId(),
-          );
-        } catch {
-          // Best-effort — don't block the main flow
-        }
+        this.captureCacheSafeParams();
 
         if (this.config.getSkipNextSpeakerCheck()) {
           if (!isGoalRuntimeTurn) {
@@ -5093,7 +5182,7 @@ export class LlmClient {
       if (!normalCompletion) {
         // Only a natural end can hand a hook-forced turn's tool calls back to
         // the caller for a ToolResult re-entry; any other exit ends it.
-        this.clearStopHookForced(prompt_id);
+        this.clearStopHookChain(prompt_id);
         this.config.takePendingGoalProposal?.(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
@@ -5240,6 +5329,9 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      this.getChat().setCompletedToolCallIds(
+        previousChat.getCompletedToolCallIds(),
+      );
       if (
         !this.lastSessionStartContext &&
         previousSessionStartContext &&

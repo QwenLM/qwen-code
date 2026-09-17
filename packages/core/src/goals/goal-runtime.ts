@@ -48,6 +48,7 @@ import {
   isGoalTokenBudgetSpent,
   isGoalTurnBudgetSpent,
   isRepeatedBlockerProposal,
+  type GoalBroadcastMeta,
   type GoalCheckpointFailureShape,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
@@ -65,6 +66,7 @@ import {
   elapsedActiveTime,
   GoalInvalidTransitionError,
   reduceGoalControl,
+  reduceGoalSpend,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
 import type {
@@ -247,8 +249,16 @@ export interface GoalRuntime {
    * cause the broadcast carried.
    */
   getRecoveryCause?(): GoalStateCause | undefined;
+  /**
+   * `meta.replayed` is set on the one broadcast `restore()` makes to
+   * republish recovered state; every other broadcast passes no `meta`.
+   */
   subscribe(
-    listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
+    listener: (
+      snapshot: GoalSnapshotV2,
+      cause?: GoalStateCause,
+      meta?: GoalBroadcastMeta,
+    ) => void,
   ): () => void;
   restore(records: readonly GoalRecoveryRecord[]): Promise<void>;
   prepareRestore(
@@ -319,7 +329,11 @@ export function createGoalRuntime(
     activity: 'idle',
   };
   const listeners = new Set<
-    (value: GoalSnapshotV2, cause?: GoalStateCause) => void
+    (
+      value: GoalSnapshotV2,
+      cause?: GoalStateCause,
+      meta?: GoalBroadcastMeta,
+    ) => void
   >();
   let dispatchTail = Promise.resolve();
   let host: GoalTurnHost | undefined;
@@ -661,10 +675,10 @@ export function createGoalRuntime(
 
   const getSnapshot = (): GoalSnapshotV2 => structuredClone(snapshot);
 
-  const broadcast = (cause?: GoalStateCause) => {
+  const broadcast = (cause?: GoalStateCause, meta?: GoalBroadcastMeta) => {
     for (const listener of listeners) {
       try {
-        listener(getSnapshot(), cause);
+        listener(getSnapshot(), cause, meta);
       } catch {
         // Subscribers cannot roll back a committed runtime transition.
       }
@@ -964,9 +978,16 @@ export function createGoalRuntime(
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
 
       const now = Date.now();
+      const meteredGoal = reduceGoalSpend(
+        snapshot.goal,
+        outcome.kind === 'decision'
+          ? (outcome.result.usage?.totalTokenCount ?? 0)
+          : 0,
+        now,
+      );
       if (outcome.kind === 'decision' && outcome.result.decision === 'accept') {
         const acceptedGoal = {
-          ...snapshot.goal,
+          ...meteredGoal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
           lastReason:
@@ -1039,7 +1060,7 @@ export function createGoalRuntime(
       const rejectedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...snapshot.goal,
+          ...meteredGoal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
           lastReason: outcome.result.reason,
@@ -1318,12 +1339,19 @@ export function createGoalRuntime(
     attempt: CheckpointAttempt,
     checkpoint: NonNullable<GoalSnapshotV2['goal']>['evidenceCheckpoint'],
     stalled: boolean,
+    replay: boolean,
+    tokens: number,
   ): Promise<void> => {
     if (!checkpoint) return;
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      const meteredGoal = reduceGoalSpend(snapshot.goal, tokens, Date.now());
+      // A restore replay is exempt on this arm as on the failure arm: one
+      // that comes back full on an overflowing window records what it ran
+      // into but keeps the streak it restored, so a session is not stopped at
+      // activation for a check no turn of its own earned.
       const checkpointStalls = stalled
-        ? (snapshot.goal.checkpointStalls ?? 0) + 1
+        ? (snapshot.goal.checkpointStalls ?? 0) + (replay ? 0 : 1)
         : 0;
       const health: CheckpointHealthUpdate = stalled
         ? FULL_CLAIM_LIST_FAILURE
@@ -1333,7 +1361,7 @@ export function createGoalRuntime(
       if (
         await settleIfCheckpointStalled(
           attempt,
-          snapshot.goal,
+          meteredGoal,
           checkpointStalls,
           health,
         )
@@ -1346,7 +1374,7 @@ export function createGoalRuntime(
       const checkpointSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...withCheckpointHealth(snapshot.goal, checkpointStalls, health),
+          ...withCheckpointHealth(meteredGoal, checkpointStalls, health),
           evidenceCursor: { recordId: attempt.recordUuid },
           evidenceCheckpoint: checkpoint,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
@@ -1424,7 +1452,8 @@ export function createGoalRuntime(
       // checkpoint is kept: the cursor cannot move past records a later batch
       // failed to fold. Only the overflowing live check is split, because only
       // it can spend a stall: a window with room settles a failure as
-      // inconclusive and a restore replay is exempt, so splitting either would
+      // inconclusive and a restore replay spends none on either arm, so
+      // splitting either would
       // cost calls -- and, for the replay, hold up session activation -- without
       // changing an attempt the breaker counts.
       const batches = splitCheckpointEvidence(
@@ -1435,6 +1464,7 @@ export function createGoalRuntime(
       );
       let checkpoint: GoalEvidenceCheckpoint | undefined;
       let batchIndex = 0;
+      let checkpointTokens = 0;
       try {
         let previousClaims = window.previousClaims;
         for (; batchIndex < batches.length; batchIndex++) {
@@ -1452,6 +1482,8 @@ export function createGoalRuntime(
             attempt.controller.signal,
           );
           if (attempt.controller.signal.aborted) return;
+          const tokens = result.usage?.totalTokenCount ?? 0;
+          if (Number.isFinite(tokens) && tokens > 0) checkpointTokens += tokens;
           checkpoint = materializeGoalEvidenceCheckpoint({
             // An intermediate batch gets its own id segment, so the claim ids
             // the next batch cites cannot collide with the kept checkpoint's
@@ -1523,6 +1555,8 @@ export function createGoalRuntime(
         attempt,
         checkpoint!,
         isGoalCheckpointStalled(window, checkpoint!),
+        replay,
+        checkpointTokens,
       );
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
@@ -1549,7 +1583,11 @@ export function createGoalRuntime(
       return recoveryCause;
     },
     subscribe(
-      listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
+      listener: (
+        value: GoalSnapshotV2,
+        cause?: GoalStateCause,
+        meta?: GoalBroadcastMeta,
+      ) => void,
     ): () => void {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -1684,7 +1722,11 @@ export function createGoalRuntime(
       restoreActivation = restorePreparation.then(async (attempt) => {
         assertAvailable();
         restoreActivationPending = false;
-        if (preparedRestoreHasSnapshot) broadcast(preparedRestoreCause);
+        // The cause is the recovered record's: the transition it names was
+        // published by the session that made it, so mark this one a replay.
+        if (preparedRestoreHasSnapshot) {
+          broadcast(preparedRestoreCause, { replayed: true });
+        }
         if (!attempt) {
           await enqueue(async () => {
             assertAvailable();

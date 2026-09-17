@@ -1971,7 +1971,10 @@ describe('LlmClient Goal admission', () => {
           output: { decision: 'block', reason: 'Run the policy check' },
           stopHookCount: 1,
         })
-        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+        .mockResolvedValue({
+          output: { decision: 'block', reason: 'Run the policy check' },
+          stopHookCount: 1,
+        }),
     };
     vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
     vi.mocked(config.getMessageBus).mockReturnValue(
@@ -1984,7 +1987,12 @@ describe('LlmClient Goal admission', () => {
     // Goal turn 1: the hook-forced continuation ends with a tool call that is
     // never returned. Goal turn 2 then runs under the same prompt id, which
     // is how consecutive goal continuations are submitted.
-    turnMocks.pendingToolCalls.push([], [{ name: 'read_file' }], []);
+    turnMocks.pendingToolCalls.push(
+      [],
+      [{ name: 'read_file' }],
+      [],
+      [{ name: 'read_file' }],
+    );
     const goalSend = () =>
       collect(
         client.sendMessageStream(
@@ -2006,6 +2014,7 @@ describe('LlmClient Goal admission', () => {
       .filter(([request]) => request.eventName === 'Stop')
       .map(([request]) => request.input.stop_hook_active);
     expect(stopFlags).toEqual([false, false]);
+    expect(client['stopHookChains'].get('goal-prompt-shared')?.count).toBe(1);
     expect(secondTurnEvents).not.toContainEqual(
       expect.objectContaining({ type: LlmEventType.HookSystemMessage }),
     );

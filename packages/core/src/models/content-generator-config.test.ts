@@ -362,6 +362,27 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.thinkingMandatory).toBeUndefined();
     });
 
+    it('does not inherit enableRequestMetadata from another same-provider model', () => {
+      // A per-model decision: an inherited true would ship the DashScope
+      // tracing object to a vendor-forwarded side model and get the 400 the
+      // gate exists to avoid, so an unset side model falls back to the gate.
+      const config = createMockConfig(
+        { ...parentConfig, enableRequestMetadata: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.enableRequestMetadata).toBeUndefined();
+    });
+
     it.each(['image', 'voice'] as const)(
       'rejects %s-only models for agent content generation',
       (purpose) => {
@@ -470,8 +491,8 @@ describe('buildAgentContentGeneratorConfig', () => {
       const config = createMockConfig(parentConfig, {
         capabilities: {
           reasoning: {
-            thinking: true,
-            disableField: 'reasoning_effort',
+            profile: 'openai-effort',
+            defaultEffort: 'high',
             efforts: ['low', 'medium', 'high'],
           },
         },

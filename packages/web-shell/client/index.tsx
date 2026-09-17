@@ -244,6 +244,14 @@ export type {
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
+  WebShellFootnote,
+  WebShellSource,
+  WebShellSourceReference,
+  WebShellSourceIconResolver,
+  WebShellFootnoteIconResolver,
+  WebShellFootnotePreviewInfo,
+  WebShellFootnotePreviewHandle,
+  WebShellFootnotePreviewMount,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
   ArtifactImageRenderer,
@@ -289,3 +297,9 @@ export type {
   EchartsRuntime,
   EchartsRuntimeLoader,
 } from './components/messages/MarkdownChartRenderer';
+
+export { WEB_SHELL_SETTING_ITEM_IDS } from './settings';
+export type {
+  WebShellSettingItemId,
+  WebShellSettingsOptions,
+} from './settings';

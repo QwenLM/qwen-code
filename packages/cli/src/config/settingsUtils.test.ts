@@ -1237,11 +1237,12 @@ describe('setNestedProperty prototype-pollution guards', () => {
 });
 
 describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
-  it('lists the cross-session keys, and the restricted list no longer does', () => {
+  it('lists the name-only lock and the cross-session keys, and the restricted list does not', () => {
     const keys = WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
       ({ section, key }) => `${section}.${key}`,
     );
     expect(keys).toEqual([
+      'tools.workflowNameOnly',
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
     ]);
@@ -1278,13 +1279,26 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
     expect(messaging.strictness({})).toBe(messaging.strictness(false));
   });
 
-  it('ranks the switch off as stricter than on, and unset as off', () => {
+  // A repository may turn the name-only lock on for itself, never off: only
+  // `true` locks, so anything else ranks with the unlocked default.
+  it('ranks the name-only lock on as stricter than off, unset or garbage', () => {
+    const lock = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'workflowNameOnly',
+    )!;
+    expect(lock.strictness(true)).toBeGreaterThan(lock.strictness(false));
+    expect(lock.strictness(undefined)).toBe(lock.strictness(false));
+    expect(lock.strictness('true')).toBe(lock.strictness(false));
+  });
+
+  it('ranks the switch off as stricter than on, and unset as on', () => {
+    // The switch defaults to on, so a workspace `false` must outrank an
+    // unset user scope or a repository could never turn messaging off.
     const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
       ({ key }) => key === 'crossSessionMessaging',
     )!;
     expect(messaging.strictness(true)).toBeLessThan(
       messaging.strictness(false),
     );
-    expect(messaging.strictness(undefined)).toBe(messaging.strictness(false));
+    expect(messaging.strictness(undefined)).toBe(messaging.strictness(true));
   });
 });

@@ -181,6 +181,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
@@ -231,6 +232,7 @@ export type {
   DaemonUiFollowupSuggestionEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUiUserResourceLinkEvent,
   DaemonUiToolProvenance,
   DaemonUiToolUpdateEvent,
   DaemonUiWorkspaceAgentChangedEvent,
@@ -614,9 +616,12 @@ export type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonWorkflowApprovalStatusEntry,
+  DaemonWorkflowSizeWarning,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,
+  DaemonWorkflowCallTrace,
   DaemonWorkflowEvent,
   DaemonWorkflowPhaseVisit,
   DaemonSessionProcessTaskLifecycleStatus,
@@ -845,3 +850,6 @@ export type {
   DaemonSessionArtifactStorage,
   SessionMetadataResult,
 } from './types.js';
+
+export { parseDaemonBackgroundTurn } from './types.js';
+export type { DaemonBackgroundTurn } from './types.js';

@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../../config/config.js';
+import { TurnBudget } from '../../core/turn-budget.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
@@ -32,11 +33,16 @@ import {
   WorkflowStartCancelledError,
 } from './workflow-runner.js';
 import { compileWorkflowScript } from './workflow-sandbox.js';
+import {
+  WORKFLOW_SIZE_GUIDELINE_AGENTS,
+  WORKFLOW_SIZE_WARNING_AGENTS_ENV,
+} from './workflow-size.js';
 
 const {
   createProductionDispatchMock,
   journalWrites,
   logWorkflowRunMock,
+  logWorkflowSizeWarningMock,
   persistInlineWorkflowScriptMock,
   resolveSavedWorkflowScriptMock,
   writeLineMock,
@@ -45,6 +51,7 @@ const {
   createProductionDispatchMock: vi.fn(),
   journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  logWorkflowSizeWarningMock: vi.fn(),
   persistInlineWorkflowScriptMock: vi.fn(),
   resolveSavedWorkflowScriptMock: vi.fn(),
   writeLineMock: vi.fn(),
@@ -53,6 +60,7 @@ const {
 
 vi.mock('../../telemetry/loggers.js', () => ({
   logWorkflowRun: logWorkflowRunMock,
+  logWorkflowSizeWarning: logWorkflowSizeWarningMock,
 }));
 
 vi.mock('../workflow-snapshot.js', () => ({
@@ -198,6 +206,168 @@ describe('WorkflowRunner', () => {
       modelText.indexOf('</recovery>'),
     );
     expect(recovery).toContain(hint);
+  });
+
+  // The Workflow tool shows the user the file a `scriptPath` or `name` call
+  // loads, then hands that same read to the runner. Reading the path again
+  // here would run whatever the file holds by then, not what was approved.
+  it('runs the script a caller already loaded instead of reading scriptPath again', async () => {
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    resolveSavedWorkflowScriptMock.mockClear();
+
+    const handle = await WorkflowRunner.start({
+      config,
+      scriptPath: '/saved/audit.js',
+      loadScript: async () => ({
+        name: 'audit',
+        scriptPath: '/saved/audit.js',
+        script: "return 'approved';",
+        savedWorkflowName: 'audit',
+      }),
+      args: undefined,
+      signal: new AbortController().signal,
+    });
+    const settlement = await handle.completion;
+
+    expect(settlement.ok && settlement.outcome.result).toBe('approved');
+    expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+    expect(handle.scriptPath).toBe('/saved/audit.js');
+    expect(registry.get(handle.runId)?.workflowName).toBe('audit');
+  });
+
+  // A model call in a name-only session refuses nesting by path; the Workflow
+  // tool asks for that per call, so a host's own run — same session, no flag —
+  // nests freely. Any other malformed ref reaches the resolver untouched.
+  it('refuses a nested workflow({scriptPath}) only for a call that asks it to', async () => {
+    const nested = {
+      name: 'audit',
+      scriptPath: '/saved/audit.js',
+      script: "return 'nested';",
+      savedWorkflowName: 'audit',
+    };
+    for (const restrict of [true, false]) {
+      const { config, registry } = configWithRegistry();
+      // Locked either way: the flag, not the session, decides.
+      Object.assign(config, { isWorkflowNameOnly: () => true });
+      stubStorage(config, await makeStorageRoot());
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue(nested);
+
+      const byPath = await WorkflowRunner.start({
+        config,
+        script: "return await workflow({ scriptPath: '/saved/audit.js' });",
+        args: undefined,
+        signal: new AbortController().signal,
+        dispatch: async () => 'unused',
+        ...(restrict ? { restrictNestedScriptPaths: true } : {}),
+      });
+      const pathSettlement = await byPath.completion;
+      if (restrict) {
+        expect(pathSettlement.ok).toBe(false);
+        expect(!pathSettlement.ok && pathSettlement.message).toContain(
+          "workflow({scriptPath}): this session restricts workflows to named workflows (tools.workflowNameOnly) — nest with workflow('<name>') instead.",
+        );
+        expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+      } else {
+        expect(pathSettlement.ok && pathSettlement.outcome.result).toBe(
+          'nested',
+        );
+      }
+      expect(registry.get(byPath.runId)).not.toHaveProperty('resumeName');
+
+      const byName = await WorkflowRunner.start({
+        config,
+        script: "return await workflow('audit');",
+        args: undefined,
+        signal: new AbortController().signal,
+        dispatch: async () => 'unused',
+        ...(restrict ? { restrictNestedScriptPaths: true } : {}),
+      });
+      const nameSettlement = await byName.completion;
+      expect(nameSettlement.ok && nameSettlement.outcome.result).toBe('nested');
+      expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(
+        'audit',
+        config,
+      );
+    }
+  });
+
+  it('leaves a malformed nested ref to the resolver under the restriction', async () => {
+    const { config } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    resolveSavedWorkflowScriptMock.mockReset();
+    resolveSavedWorkflowScriptMock.mockRejectedValue(
+      new Error(
+        'workflow() expects a workflow name (string) or {scriptPath: string}.',
+      ),
+    );
+
+    const handle = await WorkflowRunner.start({
+      config,
+      script: 'return await workflow(42);',
+      args: undefined,
+      signal: new AbortController().signal,
+      dispatch: async () => 'unused',
+      restrictNestedScriptPaths: true,
+    });
+    const settlement = await handle.completion;
+
+    expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(42, config);
+    expect(!settlement.ok && settlement.message).toContain(
+      'workflow() expects a workflow name',
+    );
+    expect(!settlement.ok && settlement.message).not.toContain(
+      'tools.workflowNameOnly',
+    );
+  });
+
+  // The name a locked session resumes by must lead back to the script that
+  // ran. The runner checks once, as the run starts.
+  it('records a resume name only when the name resolves to the script that ran', async () => {
+    const root = await makeStorageRoot();
+    const ran = path.join(root, 'audit.js');
+    const other = path.join(root, 'other-audit.js');
+    await fs.writeFile(ran, "return 'ran';", 'utf8');
+    await fs.writeFile(other, "return 'other';", 'utf8');
+
+    const start = async (nameOnly: boolean, resolvesTo: string) => {
+      const { config, registry } = configWithRegistry();
+      Object.assign(config, { isWorkflowNameOnly: () => nameOnly });
+      stubStorage(config, root);
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue({
+        name: 'audit',
+        scriptPath: resolvesTo,
+        script: "return 'ran';",
+        savedWorkflowName: 'audit',
+      });
+      const handle = await WorkflowRunner.start({
+        config,
+        scriptPath: ran,
+        loadScript: async () => ({
+          name: 'audit',
+          scriptPath: ran,
+          script: "return 'ran';",
+          savedWorkflowName: 'audit',
+        }),
+        args: undefined,
+        signal: new AbortController().signal,
+        dispatch: async () => 'unused',
+      });
+      await handle.completion;
+      return registry.get(handle.runId);
+    };
+
+    expect((await start(true, ran))?.resumeName).toBe('audit');
+    expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(
+      'audit',
+      expect.anything(),
+    );
+    expect((await start(true, other))?.resumeName).toBeUndefined();
+    const unlocked = await start(false, ran);
+    expect(unlocked?.resumeName).toBeUndefined();
+    expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
   });
 
   async function generatedReview(script: string) {
@@ -1959,5 +2129,150 @@ describe('WorkflowRunner', () => {
         fs.readdir(path.join(root, 'generated', 'inline')),
       ).resolves.toEqual([`${first.runId}.js`]);
     });
+  });
+  // A `+250k` turn target belongs to the turn, not to this run: the run's
+  // budget measures the turn, while the registry — what `/workflows` and the
+  // snapshot show — keeps this run's own figures and records no cap for it.
+  it('builds a directive budget from the turn and registers no per-run cap', async () => {
+    const { config, registry } = configWithRegistry();
+    const turns = new TurnBudget();
+    turns.beginTurn({
+      promptId: 'turn',
+      sessionId: 'runner-turn',
+      budget: 250_000,
+      directiveText: '+250k',
+      outputTokensAtTurnStart: 0,
+    });
+    Object.assign(config, {
+      getSessionId: () => 'runner-turn',
+      getTurnBudget: () => turns,
+    });
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return budget.total',
+      args: undefined,
+      dispatch: async () => 'unused',
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: 250_000 },
+    });
+    expect(handle.budget.source).toBe('directive');
+    expect(handle.budget.total).toBe(250_000);
+    expect(registry.get(handle.runId)?.tokenBudgetTotal).toBeNull();
+  });
+});
+
+// ── Workflow size ─────────────────────────────────────────────────────
+//
+// The runner is the one place a run's size is evaluated: it reads the
+// guideline once, checks on every scheduled agent and every spend update, and
+// hands the first warning to the registry. The thresholds themselves are
+// covered in workflow-size.test.ts; these pin the wiring.
+describe('WorkflowRunner — workflow size', () => {
+  beforeEach(() => {
+    logWorkflowSizeWarningMock.mockClear();
+  });
+
+  function fanOut(count: number): string {
+    return `return await parallel(Array.from({ length: ${count} }, (_, i) => () => agent('item ' + i)))`;
+  }
+
+  it('flags a run that schedules more agents than the default guideline, once', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: fanOut(WORKFLOW_SIZE_GUIDELINE_AGENTS.medium + 5),
+      args: undefined,
+      dispatch: async () => 'ok',
+    });
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    expect(registry.get(handle.runId)?.sizeWarning).toMatchObject({
+      axis: 'agents',
+      scheduledAgents: WORKFLOW_SIZE_GUIDELINE_AGENTS.medium + 1,
+      agentCap: WORKFLOW_SIZE_GUIDELINE_AGENTS.medium,
+      capFromGuideline: true,
+    });
+    expect(logWorkflowSizeWarningMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes the agent threshold from a configured guideline', async () => {
+    const { config, registry } = configWithRegistry();
+    Object.assign(config, {
+      getWorkflowSizeGuideline: () => ({ size: 'small', isDefault: false }),
+    });
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: fanOut(WORKFLOW_SIZE_GUIDELINE_AGENTS.small + 1),
+      args: undefined,
+      dispatch: async () => 'ok',
+    });
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.sizeWarning).toMatchObject({
+      axis: 'agents',
+      agentCap: WORKFLOW_SIZE_GUIDELINE_AGENTS.small,
+    });
+  });
+
+  it('stays quiet within bounds, and lets the env raise the threshold', async () => {
+    vi.stubEnv(WORKFLOW_SIZE_WARNING_AGENTS_ENV, '100');
+    try {
+      const { config, registry } = configWithRegistry();
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        // Past the default guideline, under the env threshold, and under the
+        // token projection (20 × 70k < 1.5M).
+        script: fanOut(20),
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await handle.completion;
+
+      expect(registry.get(handle.runId)?.sizeWarning).toBeUndefined();
+      expect(logWorkflowSizeWarningMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  // A resume replays agents by call sequence; a clock or a random draw changes
+  // the sequence. Refused before launch, with its own cause rather than the
+  // syntax hint a compile failure carries.
+  it('refuses a script that reads the clock before any agent runs', async () => {
+    const { config } = configWithRegistry();
+    const dispatch = vi.fn(async () => 'ok');
+    const start = WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: "await agent('first')\nreturn await agent('stamp ' + Date.now())",
+      args: undefined,
+      dispatch,
+    });
+
+    await expect(start).rejects.toBeInstanceOf(WorkflowScriptNotLaunchedError);
+    await expect(start).rejects.toThrow(/Date\.now\(\) on line 2/);
+    await expect(start).rejects.not.toThrow(/TypeScript syntax/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps the syntax hint on a compile failure', async () => {
+    const { config } = configWithRegistry();
+    await expect(
+      WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: "const target: string = 'x'\nawait agent(target)",
+        args: undefined,
+        dispatch: async () => 'ok',
+      }),
+    ).rejects.toThrow(/TypeScript syntax/);
   });
 });

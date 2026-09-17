@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
 import type {
   SessionUpdate,
   ToolCallContent,
@@ -519,7 +520,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     let ordinal = 0;
     let activeSegmentLane: string | undefined;
     let activeSegmentId: string | undefined;
+    const backgroundTurn = parseBackgroundNotificationTurn(
+      record.subtype === 'background_task_completed'
+        ? undefined
+        : (record as unknown as Record<string, unknown>)['backgroundTurn'],
+    );
     const emit = (update: SessionUpdate): TranscriptReplayEmission => {
+      if (backgroundTurn)
+        update = { ...update, _meta: { ...update._meta, backgroundTurn } };
       const emissionOrdinal = ordinal++;
       const lane = transcriptSegmentLane(update);
       if (lane && (lane !== activeSegmentLane || !activeSegmentId)) {
@@ -747,11 +755,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
     const references = payload?.['attachmentReferences'];
-    if (!Array.isArray(references)) return;
-    for (const reference of references) {
+    for (const reference of Array.isArray(references) ? references : []) {
       if (!isObjectRecord(reference)) continue;
       const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
       if (update) yield emit(update);
+    }
+    const resourceLinks = payload?.['resourceLinks'];
+    for (const link of Array.isArray(resourceLinks) ? resourceLinks : []) {
+      if (
+        !isObjectRecord(link) ||
+        link['type'] !== 'resource_link' ||
+        typeof link['uri'] !== 'string' ||
+        link['uri'].length === 0 ||
+        typeof link['name'] !== 'string'
+      ) {
+        continue;
+      }
+      const updateMeta = buildUpdateMeta(meta);
+      yield emit({
+        sessionUpdate: 'user_message_chunk',
+        content: structuredClone(link),
+        ...(updateMeta ? { _meta: updateMeta } : {}),
+      } as SessionUpdate);
     }
   }
 
@@ -971,7 +996,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       const usage = usageFromTaskExecution(resultDisplay);
       if (Object.keys(usage).length > 0) {
         this.addUsage(usage);
-        yield emit(createTranscriptUsageUpdate(usage, meta));
+        yield emit(
+          createTranscriptUsageUpdate(usage, {
+            ...meta,
+            extra: { ...meta.extra, parentToolCallId: callId },
+          }),
+        );
       }
     }
   }
@@ -1006,6 +1036,27 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           extra: {
             qwenDiscreteMessage: true,
             promptCancelled: { promptId, cancelledAt, elapsedMs },
+          },
+        }),
+      );
+      return;
+    }
+    if (record.subtype === 'background_task_completed') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (!payload || typeof payload['displayText'] !== 'string') return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: payload['displayText'],
+          ...meta,
+          extra: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            ...(isObjectRecord(payload['backgroundTask'])
+              ? { backgroundTask: payload['backgroundTask'] }
+              : {}),
           },
         }),
       );

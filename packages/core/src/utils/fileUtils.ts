@@ -818,14 +818,21 @@ function isTextMime(lookedUpMimeType: string): boolean {
 }
 
 /**
- * Video containers whose MIME type `mime/lite` does not carry in its default
- * "standard" database. `.m4v`'s `video/x-m4v` mapping lives only in the
- * non-default "other" set, so `mime.getType('clip.m4v')` returns null and —
- * without this override — {@link detectFileType} falls through to the content
- * sampler and misclassifies a real video as binary.
+ * Media containers whose MIME type `mime/lite` does not carry in its default
+ * "standard" database (the mappings below live only in the non-default
+ * "other" set), so `mime.getType()` returns null and — without this
+ * override — {@link detectFileType} falls through to the content sampler and
+ * misclassifies a real video/audio file as binary. Scope rule: only list
+ * extensions whose bytes the omni recognizer can also sniff-confirm
+ * (Matroska/EBML, RIFF/AVI, FLAC, ADTS AAC), so a lie-by-extension still
+ * falls back to the legacy path instead of entering media delivery.
  */
-const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
+const MIME_LITE_MISSING_MEDIA_TYPES: ReadonlyMap<string, string> = new Map([
   ['.m4v', 'video/x-m4v'],
+  ['.mkv', 'video/x-matroska'],
+  ['.avi', 'video/x-msvideo'],
+  ['.flac', 'audio/x-flac'],
+  ['.aac', 'audio/x-aac'],
 ]);
 
 async function classifyImageContent(
@@ -907,11 +914,11 @@ export async function detectFileType(filePath: string): Promise<FileType> {
   }
 
   // Returns null if not found, or the mime type string. `mime/lite` omits a
-  // few video containers (see MIME_LITE_MISSING_VIDEO_TYPES), so fall back to
+  // few media containers (see MIME_LITE_MISSING_MEDIA_TYPES), so fall back to
   // that override before giving up — otherwise a real video falls through to
   // the content sampler and is misclassified as binary.
   const lookedUpMimeType =
-    mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
+    mime.getType(filePath) ?? MIME_LITE_MISSING_MEDIA_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
       return classifyImageContent(filePath, lookedUpMimeType);
@@ -1011,6 +1018,14 @@ export interface ProcessedFileReadResult {
   pdfVisionBridgeCandidate?: PDFVisionBridgeCandidate;
   /** User-only disclosure attached after a prepared PDF candidate runs. */
   pdfVisionBridgeNotice?: string;
+  /**
+   * Raw-resource token estimate for omni-delivered media (the single
+   * storage location for the estimate — design doc §6.4). Absent for
+   * non-omni reads; `status: 'unavailable'` when required metadata was
+   * missing. No consumer reads it yet — surfaces (context accounting,
+   * telemetry) land with the S4 limits slice.
+   */
+  tokenEstimate?: import('../omni/estimation.js').OmniTokenEstimate;
 }
 
 export interface PDFVisionBridgeFallback {
@@ -1202,7 +1217,7 @@ export async function processSingleFileContent(
 
     const mediaMimeType =
       mime.getType(filePath) ??
-      MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
+      MIME_LITE_MISSING_MEDIA_TYPES.get(path.extname(filePath).toLowerCase()) ??
       'application/octet-stream';
     // Bridge callers (`preserveUnsupportedImage`) contract for the raw bytes so
     // a vision model can transcribe them; content sniffing must not reroute
@@ -1349,7 +1364,53 @@ export async function processSingleFileContent(
         };
       }
     }
-    if (shouldRenderImageOverview && stats.size > IMAGE_MAX_SOURCE_BYTES) {
+    // Omni experiment: when active, local media files (image/audio/video)
+    // are delivered via the DashScope upload channel instead of inline
+    // base64, with a 1 GiB per-file ceiling replacing the 10MB inline cap
+    // below. Content is uploaded AS-IS (no resize/transcode — degradation
+    // is the job of omni policies, which must disclose). Dynamic import
+    // keeps the omni module (which reaches into the provider layer) out of
+    // the utility layer's dependency graph. Gated per-modality on the same
+    // `modalities` config the converter uses, so the omni path never
+    // swallows a file the vision bridge would otherwise transcribe
+    // (bridge only activates when modalities.image is false).
+    let omniModule: typeof import('../omni/index.js') | undefined;
+    if (
+      ((fileType === 'video' && modalities.video) ||
+        (fileType === 'audio' && modalities.audio) ||
+        (fileType === 'image' && modalities.image)) &&
+      // Cheap gate BEFORE the dynamic import: the import itself touches
+      // the filesystem (vitest SSR transforms), which breaks mock-fs
+      // suites and wastes a module load for every non-omni user.
+      config.isOmniEnabled?.()
+    ) {
+      const omni = await config.loadOmniMediaReader();
+      if (omni.isOmniDeliveryActive(config)) {
+        // Cheap content pre-sniff decides omni-vs-legacy BEFORE committing
+        // to the fail-closed pipeline: formats the recognizer does not
+        // support (bmp/tiff/heic images, exotic containers) must keep the
+        // baseline inline behavior instead of hard-failing, and a file
+        // whose bytes sniff as a DIFFERENT modality than its extension
+        // suggests also falls back (the legacy path sends it inline under
+        // its extension-derived type, exactly as before omni).
+        const sniffedModality = await omni.sniffFileModality(filePath);
+        if (sniffedModality === fileType) {
+          omniModule = omni;
+        }
+      }
+    }
+
+    // 100 MB source cap protects the overview DECODER, so it only applies
+    // when the overview will actually decode — i.e. when omni is not taking
+    // this file. The omni path uploads original bytes without decoding and
+    // enforces its own maxUploadFileBytes ceiling (1 GiB default);
+    // gating it here too would reject a 150 MB PNG while delivering a
+    // 500 MB GIF, purely on whether the format has an overview renderer.
+    if (
+      shouldRenderImageOverview &&
+      omniModule === undefined &&
+      stats.size > IMAGE_MAX_SOURCE_BYTES
+    ) {
       return {
         llmContent: 'Image file exceeds the 100 MB source limit.',
         returnDisplay: 'Image file exceeds the 100 MB source limit.',
@@ -1357,11 +1418,13 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
+
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&
       fileType !== 'text' &&
-      !shouldRenderImageOverview
+      !shouldRenderImageOverview &&
+      omniModule === undefined
     ) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
@@ -1561,6 +1624,19 @@ export async function processSingleFileContent(
         };
       }
       case 'image': {
+        if (omniModule) {
+          // Omni: upload the ORIGINAL bytes — no local resize (that is a
+          // lossy transform reserved for omni policies with disclosure).
+          // renderImageOverview is skipped entirely on this path.
+          return await omniModule.readMediaViaOmniDelivery({
+            filePath,
+            config,
+            displayName,
+            relativePathForDisplay,
+            expectedModality: 'image',
+            signal,
+          });
+        }
         if (shouldRenderImageOverview) {
           try {
             const view = await renderImageOverview(
@@ -1710,6 +1786,19 @@ export async function processSingleFileContent(
       }
       case 'audio':
       case 'video': {
+        if (omniModule) {
+          // Delegated to the omni module: fail-closed delivery via the
+          // DashScope upload channel; user aborts are rethrown and land in
+          // this function's outer abort handling.
+          return await omniModule.readMediaViaOmniDelivery({
+            filePath,
+            config,
+            displayName,
+            relativePathForDisplay,
+            expectedModality: fileType,
+            signal,
+          });
+        }
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
