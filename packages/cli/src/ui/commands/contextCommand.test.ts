@@ -189,6 +189,39 @@ describe('collectContextData (contextCommand)', () => {
     // still consult the singleton for unrelated figures.
   });
 
+  it('uses overhead messages when chat cached count is zero despite a foreign global (#12047)', async () => {
+    // Pins ?? vs || on the per-session preference: a chat that reports 0 must
+    // not fall through to the process-global singleton. With ||, foreign
+    // 64_653 would collapse messages to ~614 via Math.max(0, total - foreign).
+    // With ??, apiCachedTokens stays 0 and messages comes from
+    // total − scaledOverhead.
+    mockGetLastPromptTokenCount.mockReturnValue(999_000);
+    mockGetLastCachedContentTokenCount.mockReturnValue(64_653); // foreign
+    const getLastPromptTokenCount = vi.fn().mockReturnValue(65_267);
+    const getLastCachedContentTokenCount = vi.fn().mockReturnValue(0);
+    const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
+    const config = {
+      ...makeMockConfig(200_000),
+      getLlmClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount,
+          getLastCachedContentTokenCount,
+          isLastPromptTokenCountEstimated,
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(getLastCachedContentTokenCount).toHaveBeenCalled();
+    expect(data.totalTokens).toBe(65_267);
+    // Overhead branch: messages = total - scaledOverhead, not total - 64_653.
+    expect(data.breakdown.messages).toBeGreaterThan(10_000);
+    // Arithmetic fingerprint of the || leak (65_267 - 64_653).
+    expect(data.breakdown.messages).not.toBe(614);
+  });
+
   it('reports a nonzero compression-derived count as estimated', async () => {
     const config = {
       ...makeMockConfig(200_000),
