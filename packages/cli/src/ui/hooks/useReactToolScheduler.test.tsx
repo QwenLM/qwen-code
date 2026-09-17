@@ -326,8 +326,17 @@ describe('useReactToolScheduler', () => {
     });
 
     await waitFor(() => {
+      expect(execute).toHaveBeenCalledTimes(2);
+    });
+    await waitFor(() => {
       expect(latestOnComplete).toHaveBeenCalled();
     });
+    const reportedCallIds = latestOnComplete.mock.calls
+      .flat(2)
+      .map((call) => (call as { request: { callId: string } }).request.callId);
+    expect(reportedCallIds).toEqual(
+      expect.arrayContaining(['call-1', 'call-2']),
+    );
     expect(firstOnComplete).not.toHaveBeenCalled();
   });
 
@@ -412,6 +421,9 @@ describe('useReactToolScheduler', () => {
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalled();
     });
-    expect(onComplete.mock.calls[0][0][0].status).toBe('success');
+    const completedCalls = onComplete.mock.calls[0]![0] as Array<{
+      status: string;
+    }>;
+    expect(completedCalls[0]?.status).toBe('success');
   });
 });
