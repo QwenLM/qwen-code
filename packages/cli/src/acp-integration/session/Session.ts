@@ -5361,6 +5361,19 @@ export class Session implements SessionContext {
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
+      // Refresh the process-global cache-safe slot at the turn boundary.
+      // `#recordPromptCompletionEffects` only captures on a fresh user turn
+      // with managed auto-memory on, but the slot's other consumer —
+      // `generatePromptSuggestion`, reached through
+      // `#maybeEmitFollowupSuggestion` below — has no freshness check and
+      // prefers the slot over the live history tail it is handed. Without
+      // this, a continue/retry turn that still ends `end_turn` would get a
+      // suggestion generated from a transcript missing that turn. Mirrors the
+      // interactive path, which captures on every main turn in
+      // `LlmClient.sendMessageStream`.
+      if (completedResult.stopReason === 'end_turn') {
+        this.config.getLlmClient().captureCacheSafeParams();
+      }
       this.#maybeEmitFollowupSuggestion(completedResult);
       if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
@@ -5992,15 +6005,21 @@ export class Session implements SessionContext {
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
+              const resourceLinks = params.prompt
+                .filter((block) => block.type === 'resource_link')
+                .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
               recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
-                promptDisplayText !== undefined || attachmentReferences
+                promptDisplayText !== undefined ||
+                  attachmentReferences ||
+                  resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
                       ...(attachmentReferences ? { attachmentReferences } : {}),
+                      ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
                   : undefined,
                 daemonPromptId,
@@ -8760,6 +8779,7 @@ export class Session implements SessionContext {
     ) {
       return;
     }
+    this.config.getLlmClient().captureCacheSafeParams();
     const memoryManager = this.config.getMemoryManager();
     const history = this.#getCurrentChat().getHistoryShallow();
     void memoryManager

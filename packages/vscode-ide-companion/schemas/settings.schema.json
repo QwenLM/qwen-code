@@ -40,12 +40,12 @@
       }
     },
     "modelProviders": {
-      "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
+      "description": "Model providers configuration keyed by provider id (a built-in provider protocol such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations. OpenAI-compatible models can select wireApi: \"chat-completions\" or \"responses\"; omitting wireApi keeps the declared protocol (Chat Completions under openai). Released openai-responses declarations remain readable; new setup writes openai plus wireApi.",
       "type": "object",
       "additionalProperties": true
     },
     "providerProtocol": {
-      "description": "Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {\"idealab\": \"openai\"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.",
+      "description": "Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {\"idealab\": \"openai\"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry. New OpenAI configurations map to openai and select wireApi per model; released openai-responses mappings remain readable.",
       "type": "object",
       "additionalProperties": true
     },
@@ -1489,6 +1489,11 @@
             "unrestricted"
           ],
           "default": "medium"
+        },
+        "workflowNameOnly": {
+          "description": "Restrict the model to running named workflows: saved workflows and the workflows extensions ship, called by name. The model cannot run an inline script or a script path, and a running script cannot nest one by path, so every run the model starts can be matched by a Workflow(name:...) permission rule. It does not replace an approval policy: the model can still save a new workflow file and run it by name, which an approval rule scoped to specific names or script digests will ask about. Runs a host starts over ACP (run-saved, run-script, retry, rerun) are not restricted. QWEN_CODE_WORKFLOW_NAME_ONLY=1 turns it on too. A workspace may set this to true only.",
+          "type": "boolean",
+          "default": false
         },
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",

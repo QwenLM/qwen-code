@@ -340,3 +340,38 @@ describe('resume key for effort and disallowedTools', () => {
     );
   });
 });
+
+// An allowlist changes what the agent may call. The sandbox folds built-in
+// spellings, order and duplicates before the key is derived (pinned in
+// workflow-sandbox.test.ts); what it leaves alone reaches the key as written.
+describe('resume key for tools', () => {
+  it('projects the allowlist into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    ).toBe(JSON.stringify({ tools: ['read_file', 'run_shell_command'] }));
+  });
+
+  it('gives a different allowlist a different key', () => {
+    const narrow = deriveAgentKey('', 'scan', { tools: ['read_file'] });
+    expect(narrow).not.toBe(
+      deriveAgentKey('', 'scan', {
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    );
+    expect(narrow).not.toBe(deriveAgentKey('', 'scan', {}));
+    expect(narrow).toBe(deriveAgentKey('', 'scan', { tools: ['read_file'] }));
+  });
+
+  // Two names that reach one MCP tool are not folded, so they are two keys.
+  // The skill says so; this keeps the sentence honest.
+  it('keys two spellings of one MCP tool apart', () => {
+    expect(
+      deriveAgentKey('', 'scan', { tools: ['mcp__warehouse__query'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { tools: ['query (warehouse MCP Server)'] }),
+    );
+  });
+});
