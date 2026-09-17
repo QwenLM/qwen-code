@@ -2284,3 +2284,58 @@ it('preserves another workspace held queue when switching into a stopped workspa
   await act(async () => {});
   expect(actions.submitPrompt).toHaveBeenCalledOnce();
 });
+
+it('runtime stop fences a stash written before the workspace cwd resolved', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'idle',
+    actions,
+    true,
+    true,
+    false,
+    true,
+    null,
+  );
+  act(() => latest.enqueuePrompt('queued before stop, cwd unresolved'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  // Switch away while the cwd is still unresolved: the stash keys as
+  // `\u0000session-1`.
+  render('idle', 'session-2', true, false, true, null);
+  expect(latest.queuedPrompts).toHaveLength(0);
+  // The cwd resolves and the stop is observed; the unresolved-cwd stash
+  // belongs to the stopped workspace and must be fenced with it.
+  render('idle', 'session-2', true, false, true, '/workspace', true);
+  render('idle', 'session-2', true, false, true, '/workspace', false);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith(
+    'queued before stop, cwd unresolved',
+  );
+});
+
+it('runtime stop fences the live queue stashed while the workspace cwd is unresolved', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'idle',
+    actions,
+    true,
+    true,
+    false,
+    true,
+    null,
+  );
+  act(() => latest.enqueuePrompt('queued before cwd resolved'));
+  // The cwd resolves and the stop is observed in the same owner change: the
+  // departure stash is written under the unresolved-cwd key.
+  render('idle', 'session-1', false, false, true, '/workspace', true);
+  expect(latest.queuedPrompts).toEqual([]);
+  render('idle', 'session-1', false, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith('queued before cwd resolved');
+});

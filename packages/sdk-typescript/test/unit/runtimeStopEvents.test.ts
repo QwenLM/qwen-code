@@ -30,9 +30,11 @@ describe('workspace runtime stop terminal events', () => {
   );
   it('warns UI consumer when stopped session persistence is unconfirmed', () => {
     const events = normalizeDaemonEvent(terminal());
-    const visible = events
-      .map((event) => ('text' in event ? event.text : ''))
-      .join(' ');
-    expect(visible).toMatch(/persist|sav|record/i);
+    const warning = events.find(
+      (event) => 'text' in event && /persist|sav|record/i.test(event.text),
+    );
+    // The warning must stay a non-recoverable error: regressing to a plain
+    // status line would read as an ordinary close.
+    expect(warning).toMatchObject({ type: 'error', recoverable: false });
   });
 });

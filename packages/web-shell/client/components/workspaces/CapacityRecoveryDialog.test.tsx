@@ -188,6 +188,19 @@ describe('CapacityRecoveryDialog', () => {
     expect(h.resume).toHaveBeenCalledOnce();
     expect(h.stop).toHaveBeenCalledOnce();
   });
+  it('keeps Continue retryable when the continuation rejects', async () => {
+    const h = await mount();
+    h.resume.mockRejectedValueOnce(new Error('resume failed'));
+    await choose();
+    await click(button('Stop these sessions and continue'));
+    expect(h.resume).toHaveBeenCalledOnce();
+    expect(document.body.textContent).toContain('resume failed');
+    const retry = button('Continue original operation');
+    expect(retry.disabled).toBe(false);
+    await click(retry);
+    expect(h.resume).toHaveBeenCalledTimes(2);
+    expect(h.onClose).toHaveBeenCalledOnce();
+  });
   it('refreshes a rejected stale confirmation and requires a new selection', async () => {
     const h = await mount(
       vi

@@ -91,8 +91,12 @@ export function CapacityRecoveryDialog({
       await intent.resume();
       if (mounted.current) onClose();
     } catch (cause) {
-      if (mounted.current)
-        setError(cause instanceof Error ? cause.message : String(cause));
+      if (!mounted.current) return;
+      // A rejected continuation never consumed the intent: release the latch
+      // so Continue stays retryable instead of leaving an inert dialog.
+      consumed.current = false;
+      setContinued(false);
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
   const stop = async () => {

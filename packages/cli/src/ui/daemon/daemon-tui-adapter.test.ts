@@ -1302,3 +1302,21 @@ it('stopped session disconnects TUI with persistence warning', () => {
   expect(updates.some((update) => update.type === 'disconnected')).toBe(true);
   expect(JSON.stringify(updates)).toMatch(/persist|sav|record/i);
 });
+
+it('graceful stop disconnects TUI with friendly copy, not the wire cause token', () => {
+  const updates = reduceDaemonEventToTuiUpdates({
+    id: 1,
+    v: 1,
+    type: 'session_closed',
+    data: {
+      sessionId: 'session',
+      reason: 'client_close',
+      cause: 'workspace_runtime_stop',
+      exitCode: null,
+      signalCode: null,
+    },
+  });
+  expect(updates.some((update) => update.type === 'disconnected')).toBe(true);
+  expect(JSON.stringify(updates)).toContain('Workspace runtime stopped.');
+  expect(JSON.stringify(updates)).not.toContain('workspace_runtime_stop');
+});

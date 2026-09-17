@@ -699,9 +699,11 @@ export function reduceDaemonEventToTuiUpdates(
       const reason =
         data['persistenceUnconfirmed'] === true
           ? 'Workspace runtime stopped; session persistence is unconfirmed'
-          : (getString(data['cause']) ??
-            getString(data['reason']) ??
-            'session_closed');
+          : data['cause'] === 'workspace_runtime_stop'
+            ? 'Workspace runtime stopped.'
+            : (getString(data['cause']) ??
+              getString(data['reason']) ??
+              'session_closed');
       return terminalUpdates(event, reason);
     }
 

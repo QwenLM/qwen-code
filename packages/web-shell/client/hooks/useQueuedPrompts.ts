@@ -1706,9 +1706,16 @@ export function useQueuedPrompts({
     );
     if (runtimeStopped) {
       for (const key of heldPromptsByOwnerRef.current.keys()) {
+        // Compare the workspace half of the key, not a prefix: a stash
+        // written while its cwd was still unresolved keys as
+        // `\u0000<sessionId>` and can belong to the stopped workspace.
+        // Fencing an empty half degrades to handing those prompts back to
+        // the editor; missing them would re-queue them to auto-run on
+        // resume, which is what this fence exists to prevent.
+        const workspaceHalf = key.slice(0, key.indexOf('\u0000'));
         if (
-          workspaceCwd !== undefined &&
-          key.startsWith(`${workspaceCwd}\u0000`)
+          workspaceHalf === '' ||
+          (workspaceCwd !== undefined && workspaceHalf === workspaceCwd)
         )
           stoppedHeldOwnersRef.current.add(key);
       }
@@ -1762,7 +1769,13 @@ export function useQueuedPrompts({
         );
       if (heldPrompts.length > 0) {
         heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
-        if (runtimeStopped && previousOwner.workspaceCwd === workspaceCwd)
+        // An unresolved previous-owner cwd can still belong to the stopped
+        // workspace; fence conservatively (see the stash scan above).
+        if (
+          runtimeStopped &&
+          (previousOwner.workspaceCwd === undefined ||
+            previousOwner.workspaceCwd === workspaceCwd)
+        )
           stoppedHeldOwnersRef.current.add(previousOwnerKey);
       } else {
         heldPromptsByOwnerRef.current.delete(previousOwnerKey);

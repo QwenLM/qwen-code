@@ -96,3 +96,56 @@ it('offers a pending restore when stop capabilities arrive after the capacity er
   expect(current.intent?.isCurrent()).toBe(true);
   expect(actions.loadSession).not.toHaveBeenCalled();
 });
+
+it('does not re-open the chooser for a recovery rejected while another intent was open', () => {
+  const client = {} as DaemonClient;
+  const recoveryFor = (sessionId: string) => ({
+    error: new DaemonHttpError(
+      503,
+      { code: 'acp_child_capacity_exhausted' },
+      'full',
+    ),
+    sessionId,
+    mode: 'load' as const,
+  });
+  const recoveryA = recoveryFor('session-a');
+  const recoveryB = recoveryFor('session-b');
+  const actions = { loadSession: vi.fn(), resumeSession: vi.fn() };
+  let current!: ReturnType<typeof useCapacityRecovery>;
+  function Harness({ connection }: { connection: DaemonConnectionState }) {
+    current = useCapacityRecovery(
+      client,
+      ['workspace_runtime_stop'],
+      connection,
+      actions,
+    );
+    return null;
+  }
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  act(() =>
+    root.render(
+      <Harness connection={{ status: 'error', capacityRecovery: recoveryA }} />,
+    ),
+  );
+  expect(current.intent).toBeDefined();
+  // A second capacity error arrives while A's chooser is open: its offer is
+  // rejected, and per the design it is reported as a normal error rather
+  // than queued behind the existing chooser.
+  act(() =>
+    root.render(
+      <Harness connection={{ status: 'error', capacityRecovery: recoveryB }} />,
+    ),
+  );
+  void current.intent?.resume();
+  expect(actions.loadSession).toHaveBeenCalledWith(
+    'session-a',
+    expect.anything(),
+  );
+  // Dismissing A must not immediately re-open the chooser for the same
+  // pending capacity condition.
+  act(() => current.dismiss());
+  expect(current.intent).toBeUndefined();
+  expect(actions.loadSession).toHaveBeenCalledTimes(1);
+});

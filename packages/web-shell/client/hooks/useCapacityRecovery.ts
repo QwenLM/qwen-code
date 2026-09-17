@@ -76,7 +76,11 @@ export function useCapacityRecovery(
           recovery.mode === 'load' ? 'loadSession' : 'resumeSession'
         ](recovery.sessionId, { sessionContext: recovery.sessionContext }),
     });
-    if (accepted) offered.current = recovery;
+    // A rejection caused by another open intent must be recorded too:
+    // otherwise dismissing that intent re-offers the same recovery and the
+    // chooser re-opens on Cancel forever. Rejections with no intent open
+    // (e.g. the capability arriving late) stay retryable.
+    if (accepted || intentRef.current !== undefined) offered.current = recovery;
   }, [connection.capacityRecovery, offer, intent]);
   return {
     intent,

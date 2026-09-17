@@ -41,8 +41,8 @@ stateDiagram-v2
     Live --> RestoreInProgress: POST /session/:id/load or /resume
     RestoreInProgress --> Live: restoreState cached on entry
     RestoreInProgress --> Live: RestoreInProgressError (coalesce waiters)
-    Live --> Closed: DELETE /session/:id (last client)
-    Live --> Died: ACP child exit / channel.exited fired
+    Live --> Closed: DELETE /session/:id (last client) or confirmed workspace runtime stop
+    Live --> Died: ACP child exit / channel.exited outside a confirmed workspace stop, or daemon shutdown
     Closed --> [*]: session_closed terminal frame
     Died --> [*]: session_died terminal frame
 ```
@@ -130,12 +130,12 @@ A successful update fans `session_metadata_updated` to every subscriber.
 
 ### Termination
 
-| Terminal frame   | Trigger                                                                                                                                                                                                    |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_closed` | `DELETE /session/:id` (client_close), programmatic close, or confirmed workspace runtime stop (`cause: workspace_runtime_stop`). A stop-associated fatal exit also carries `persistenceUnconfirmed: true`. |
-| `session_died`   | `channel.exited` outside a confirmed workspace stop (crash, unowned child kill). Carries `exitCode?` + `signalCode?` when the OS exit path was used.                                                       |
-| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed.                                              |
-| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                                                                          |
+| Terminal frame   | Trigger                                                                                                                                                                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_closed` | `DELETE /session/:id` (client_close), programmatic close, or confirmed workspace runtime stop (`cause: workspace_runtime_stop`). A stop-associated fatal exit also carries `persistenceUnconfirmed: true`.                                                                       |
+| `session_died`   | `channel.exited` outside a confirmed workspace stop (crash or daemon-initiated kill, e.g. unknown-close-outcome recovery), or daemon shutdown (`reason: daemon_shutdown`, published without a channel exit). Carries `exitCode?` + `signalCode?` when the OS exit path was used. |
+| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed.                                                                                                                    |
+| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                                                                                                                                                |
 
 Pending permissions are resolved as `{kind:'cancelled', reason:'session_closed'}` via `mediator.forgetSession(sessionId)` at every termination path.
 

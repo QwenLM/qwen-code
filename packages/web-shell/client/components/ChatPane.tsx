@@ -910,6 +910,11 @@ export function ChatPane({
         return false;
       if (admissionPayloadLocked || planPreparationRef.current?.isCurrent())
         return false;
+      // Same fence as App's composer: a stopped runtime keeps the draft in
+      // the composer (the pane banner offers Resume); a submit here would
+      // only race the dead runtime. The parked state retains sessionId, so
+      // shouldBlockComposerSubmit alone cannot catch it.
+      if (connectionRef.current.runtimeStopped) return false;
       transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
