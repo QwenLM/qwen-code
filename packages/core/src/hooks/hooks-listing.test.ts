@@ -176,6 +176,7 @@ describe('buildHooksListing', () => {
     const registry = new HookRegistry({
       getProjectRoot: () => '/project',
       isTrustedFolder: () => true,
+      getSystemHooks: () => undefined,
       getUserHooks: () => ({
         [HookEventName.PreToolUse]: [
           {

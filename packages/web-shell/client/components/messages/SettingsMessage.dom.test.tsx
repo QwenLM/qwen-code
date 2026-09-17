@@ -8,6 +8,11 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspaceProviderStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  WEB_SHELL_SETTING_ITEM_IDS,
+  type WebShellSettingItemId,
+  type WebShellSettingsOptions,
+} from '../../settings';
 import { I18nProvider } from '../../i18n';
 import {
   SettingsMessage,
@@ -33,6 +38,19 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   };
 });
 
+// The browser-notifications row exists only when the hook returns a value;
+// individual tests opt in by assigning the stub.
+const browserNotificationsStub = vi.hoisted(() => ({
+  current: undefined as
+    | ReturnType<
+        typeof import('../../browser-turn-notifications').useBrowserNotificationSettings
+      >
+    | undefined,
+}));
+vi.mock('../../browser-turn-notifications', () => ({
+  useBrowserNotificationSettings: () => browserNotificationsStub.current,
+}));
+
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -40,6 +58,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
 afterEach(() => {
+  browserNotificationsStub.current = undefined;
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -198,6 +217,7 @@ function renderPanel(
     onThemeChange: (theme: 'dark' | 'light') => void;
     modelManagement: ModelManagementProps;
     initialCategory: string;
+    presentation: WebShellSettingsOptions;
   }> = {},
 ): HTMLElement {
   return render(
@@ -206,6 +226,7 @@ function renderPanel(
         settingsState={state}
         embedded
         initialCategory={overrides.initialCategory}
+        presentation={overrides.presentation}
         onLanguageChange={noop}
         onThemeChange={overrides.onThemeChange ?? noop}
         onSubDialog={overrides.onSubDialog ?? noop}
@@ -709,5 +730,239 @@ describe('SettingsMessage user-scope editing', () => {
     const block = container.querySelector('[data-testid="model-management"]');
     expect(block).toBeTruthy();
     expect(block?.textContent).toContain('GPT-4o');
+    // Ordinary rows exist, so the category card renders above the block with
+    // the paired mt-4 spacing.
+    expect(container.querySelector('[data-slot="card"]')).toBeTruthy();
+    expect(block?.parentElement?.className).toContain('mt-4');
   });
+  it('keeps the model list and selection when ordinary Model fields are excluded', () => {
+    const modelManagement = makeModelManagement();
+    modelManagement.currentModelId = 'other';
+    modelManagement.providers[0]!.models[0]!.isCurrent = false;
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      modelManagement,
+      presentation: { excludeItems: ['setting:fast-model'] },
+    });
+    expect(container.textContent).not.toContain('Fast Model');
+    const block = container.querySelector('[data-testid="model-management"]');
+    expect(block?.textContent).toContain('GPT-4o');
+    const modelButton = Array.from(block!.querySelectorAll('button')).find(
+      (b) => b.getAttribute('aria-label')?.includes('Set current'),
+    );
+    expect(modelButton).toBeTruthy();
+    act(() => modelButton!.click());
+    expect(modelManagement.onSelectModel).toHaveBeenCalledWith(
+      'gpt-4o(openai)',
+    );
+  });
+
+  it('excludes the model block without hiding ordinary Model settings', () => {
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      modelManagement: makeModelManagement(),
+      presentation: { excludeItems: ['builtin:model-management'] },
+    });
+    expect(container.textContent).toContain('Fast Model');
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeNull();
+  });
+
+  it('falls back from an excluded category and keeps exclusions in user scope', () => {
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      initialCategory: 'Model',
+      presentation: { excludeItems: ['setting:fast-model'] },
+    });
+    expect(container.querySelector('nav')?.textContent).not.toContain('Model');
+    expect(
+      container.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain('UI');
+    clickUserTab(container);
+    // The nav must stay filtered on the User tab too: an exclusion dropped
+    // from the user-scope path would return the Model category there.
+    expect(container.querySelector('nav')?.textContent).not.toContain('Model');
+  });
+
+  it('hides Omni media delivery when all published settings items are excluded', () => {
+    const state = makeState(
+      [
+        {
+          ...boolSetting(),
+          key: 'omni.enabled',
+          label: 'Enable Omni Media Delivery',
+          category: 'Experimental',
+        },
+      ],
+      vi.fn(),
+    );
+    const baseline = renderPanel(state);
+    expect(baseline.textContent).toContain('Enable Omni Media Delivery');
+    const excluded = renderPanel(state, {
+      presentation: { excludeItems: WEB_SHELL_SETTING_ITEM_IDS },
+    });
+    expect(excluded.querySelectorAll('nav button')).toHaveLength(0);
+    expect(excluded.querySelector('[data-slot="empty"]')).toBeTruthy();
+    clickUserTab(excluded);
+    expect(excluded.querySelectorAll('nav button')).toHaveLength(0);
+    expect(excluded.querySelector('[data-slot="empty"]')).toBeTruthy();
+  });
+
+  it('shows an empty state when every available item is excluded', () => {
+    const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
+      modelManagement: makeModelManagement(),
+      presentation: { excludeItems: WEB_SHELL_SETTING_ITEM_IDS },
+    });
+    expect(container.querySelectorAll('nav button')).toHaveLength(0);
+    expect(container.querySelector('[data-slot="empty"]')).toBeTruthy();
+    const emptyTitle = container.querySelector('[data-slot="empty-title"]');
+    const emptyDescription = container.querySelector(
+      '[data-slot="empty-description"]',
+    );
+    expect(emptyTitle?.textContent).toBeTruthy();
+    expect(emptyDescription?.textContent ?? null).not.toBe(
+      emptyTitle?.textContent,
+    );
+  });
+
+  it('preserves default content and counts for an empty exclusion list', () => {
+    const state = makeState([subDialogSetting()], vi.fn());
+    const options = { modelManagement: makeModelManagement() };
+    const baseline = renderPanel(state, options);
+    const empty = renderPanel(state, {
+      ...options,
+      presentation: { excludeItems: [] },
+    });
+    expect(empty.textContent).toBe(baseline.textContent);
+    expect(empty.querySelector('nav')?.textContent).toBe(
+      baseline.querySelector('nav')?.textContent,
+    );
+  });
+
+  it('keeps a model-only category when descriptors are absent', () => {
+    const container = renderPanel(makeState([], vi.fn()), {
+      initialCategory: 'Model',
+      modelManagement: makeModelManagement(),
+    });
+    const block = container.querySelector('[data-testid="model-management"]');
+    expect(block).toBeTruthy();
+    expect(
+      container.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain('1');
+    // With zero ordinary rows the category card is skipped entirely, and the
+    // block loses the mt-4 offset that separates it from the card.
+    expect(container.querySelector('[data-slot="card"]')).toBeNull();
+    expect(block?.parentElement?.className ?? '').not.toContain('mt-4');
+  });
+
+  it('does not invent a Model category during the initial settings load', () => {
+    const state: SettingsMessageSettingsState = {
+      status: undefined,
+      settings: [],
+      loading: true,
+      error: undefined,
+      reload: vi.fn(async () => undefined),
+      setValue: vi.fn(),
+    };
+    const container = renderPanel(state, {
+      modelManagement: makeModelManagement(),
+    });
+    const navLabels = Array.from(container.querySelectorAll('nav button')).map(
+      (button) => button.textContent,
+    );
+    expect(navLabels.some((text) => text?.includes('Model'))).toBe(false);
+  });
+
+  it('counts only ordinary rows in the Model nav badge', () => {
+    const modelFallbacksSetting: DaemonSettingDescriptor = {
+      key: 'modelFallbacks',
+      type: 'string',
+      label: 'Model Fallbacks',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    };
+    const container = renderPanel(
+      makeState([subDialogSetting(), modelFallbacksSetting], vi.fn()),
+      { modelManagement: makeModelManagement() },
+    );
+    const modelNav = Array.from(container.querySelectorAll('nav button')).find(
+      (button) => button.textContent?.includes('Model'),
+    );
+    // Two ordinary Model rows plus the management card: the badge reads 2.
+    expect(modelNav?.textContent).toContain('2');
+  });
+
+  it('confines the model-management block to the Model category', () => {
+    const container = renderPanel(
+      makeState([boolSetting(), subDialogSetting()], vi.fn()),
+      { modelManagement: makeModelManagement(), initialCategory: 'Model' },
+    );
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeTruthy();
+
+    const clickCategory = (label: string) => {
+      const button = Array.from(
+        container.querySelectorAll<HTMLButtonElement>('nav button'),
+      ).find((b) => b.textContent?.includes(label));
+      if (!button) throw new Error(`category ${label} not found`);
+      act(() => {
+        button.click();
+      });
+    };
+    clickCategory('General');
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeNull();
+    clickCategory('Model');
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeTruthy();
+  });
+
+  it.each([
+    ['builtin:chat-width', 'UI', 'Chat width', 'Browser task notifications'],
+    [
+      'builtin:browser-notifications',
+      'UI',
+      'Browser task notifications',
+      'Chat width',
+    ],
+    ['builtin:live-setup', 'Experimental', 'Qwen Live', undefined],
+    ['builtin:local-control', 'Daemon', 'Local Control', undefined],
+    ['builtin:model-management', 'Model', 'model-management', undefined],
+  ] as const)(
+    'excludes only %s while the sibling builtins remain',
+    (id, category, label, uiSibling) => {
+      browserNotificationsStub.current = {
+        enabled: true,
+        permission: 'granted',
+        pending: false,
+        persistent: true,
+        error: false,
+        setEnabled: vi.fn(async () => {}),
+        refreshPermission: vi.fn(),
+        syncLanguage: vi.fn(),
+      };
+      const container = renderPanel(makeState([], vi.fn(), liveSetup(false)), {
+        modelManagement: makeModelManagement(),
+        presentation: { excludeItems: [id as WebShellSettingItemId] },
+      });
+      const navText = container.querySelector('nav')?.textContent ?? '';
+      if (category === 'UI') {
+        // UI stays active by default; the excluded row is gone and the
+        // sibling row in the same category remains.
+        expect(container.textContent).not.toContain(label);
+        expect(container.textContent).toContain(uiSibling ?? '');
+        expect(navText).toContain('UI');
+      } else {
+        // The excluded item was the category's only row, so the category
+        // itself leaves the nav.
+        expect(navText).not.toContain(category);
+      }
+      for (const other of ['UI', 'Experimental', 'Daemon', 'Model']) {
+        if (other !== category) expect(navText).toContain(other);
+      }
+    },
+  );
 });
