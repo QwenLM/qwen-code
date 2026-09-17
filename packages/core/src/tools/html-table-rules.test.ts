@@ -192,6 +192,22 @@ describe('addTableRules', () => {
     );
   });
 
+  it("holds a rowspan open when it covers the row's last columns", () => {
+    // No later cell forces the placeholder, so it has to come from the row's
+    // right-side padding (found on Mintplex-Labs/anything-llm#6388).
+    const html =
+      '<table><tr><th>A</th><th>B</th></tr>' +
+      '<tr><td>1</td><td rowspan="2">x</td></tr>' +
+      '<tr><td>2</td></tr></table>';
+
+    expect(tableRows(service(true).turndown(html))).toEqual([
+      ['A', 'B'],
+      ['---', '---'],
+      ['1', 'x'],
+      ['2', ''],
+    ]);
+  });
+
   it('does not let a span attribute grow the output', () => {
     const page = (span: number) =>
       `<table><tr><td colspan="${span}">x</td></tr>` +
