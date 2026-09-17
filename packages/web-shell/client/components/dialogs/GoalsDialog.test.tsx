@@ -30,6 +30,8 @@ interface MockGoal {
       evidenceCursor: { recordId: string | null };
       turnCount: number;
       activeTimeMs: number;
+      turnBudget?: number;
+      activeTimeBudgetMs?: number;
       tokensUsed?: number;
       tokenBudget?: number;
       createdAt: number;
@@ -216,6 +218,52 @@ describe('GoalsDialog', () => {
       },
     };
   };
+
+  it('shows turn and active-time budgets on stopped Goals', async () => {
+    await mount([
+      withSpend({
+        status: 'paused',
+        turnCount: 3,
+        turnBudget: 20,
+        activeTimeMs: 723_000,
+        activeTimeBudgetMs: 1_800_000,
+      }),
+    ]);
+    expect(
+      document.querySelector('[data-testid="goal-turns"]')?.textContent,
+    ).toBe('3 / 20 turns');
+    expect(
+      document.querySelector('[data-testid="goal-elapsed"]')?.textContent,
+    ).toBe('12m 3s / 30m 0s');
+  });
+
+  it('keeps usage without budgets unchanged', async () => {
+    await mount([
+      withSpend({ status: 'paused', turnCount: 1, activeTimeMs: 723_000 }),
+    ]);
+    expect(
+      document.querySelector('[data-testid="goal-turns"]')?.textContent,
+    ).toBe('1 turn');
+    expect(
+      document.querySelector('[data-testid="goal-elapsed"]')?.textContent,
+    ).toBe('12m 3s');
+  });
+
+  it('hides unused budgets', async () => {
+    await mount([
+      withSpend({
+        status: 'paused',
+        turnCount: 0,
+        turnBudget: 20,
+        activeTimeMs: 0,
+        activeTimeBudgetMs: 1_800_000,
+      }),
+    ]);
+    expect(
+      document.querySelector('[data-testid="goal-turns"]')?.textContent,
+    ).not.toContain('/');
+    expect(document.querySelector('[data-testid="goal-elapsed"]')).toBeNull();
+  });
 
   it('shows spend against the budget once a turn has billed', async () => {
     await mount([withSpend({ tokensUsed: 1_234, tokenBudget: 30_000_000 })]);

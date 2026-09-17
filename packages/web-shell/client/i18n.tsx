@@ -976,6 +976,8 @@ const EN: Messages = {
     'The daemon rejected that token; the stored credential was left unchanged.',
   'daemon.connection.reloadUnavailable':
     'Browser storage is unavailable, so the new token could not be applied to this connection.',
+  'daemon.connection.switchUnavailable':
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
   'daemon.connection.status.idle': 'Idle',
   'daemon.connection.status.connecting': 'Connecting',
   'daemon.connection.status.connected': 'Connected',
@@ -2549,6 +2551,9 @@ const EN: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} turn`,
   'goal.turnLabel': (v) => `turn ${v?.count ?? 0}`,
   'goal.turns': (v) => `${v?.count ?? 0} turns`,
+  'goal.turnsOfBudget': (v) =>
+    `${v?.count ?? 0} / ${v?.budget ?? 0} ${v?.budget === 1 ? 'turn' : 'turns'}`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
   'goal.tokens': (v) => `${v?.used ?? 0} tokens`,
   'goal.tokensOfBudget': (v) => `${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,
   'goals.title': 'Goals',
@@ -4151,6 +4156,21 @@ const ZH: Messages = {
   'toolName.record_source': '记录来源',
   'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
+  'toolName.omni_downsample_image': '降采样图像',
+  'toolName.omni_downscale_video': '降采样视频',
+  'toolName.omni_downsample_audio': '降采样音频',
+  'toolName.omni_extract_keyframes': '提取关键帧',
+  'toolName.omni_extract_audio': '提取音轨',
+  'toolName.omni_clip_video': '剪辑视频',
+  'toolName.omni_clip_image': '裁剪图像',
+  'toolName.omni_clip_audio': '剪辑音频',
+  'toolName.omni_caption_image': '描述图像',
+  'toolName.omni_caption_audio': '描述音频',
+  'toolName.omni_ocr_image': '识别图像文字',
+  'toolName.omni_understand_video_segments': '分段理解视频',
+  'toolName.omni_convert_image': '转换图像',
+  'toolName.omni_transcribe_audio': '转写音频',
+  'toolName.omni_recall_media_memory': '召回媒体记忆',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
   'toolName.bash': '运行命令',
@@ -4852,6 +4872,8 @@ const ZH: Messages = {
     'Daemon 拒绝了该 token，已保存的凭据未被修改。',
   'daemon.connection.reloadUnavailable':
     '浏览器存储不可用，因此新 token 无法应用到当前连接。',
+  'daemon.connection.switchUnavailable':
+    '浏览器存储不可用，因此无法把 token 带到该 daemon。',
   'daemon.connection.status.idle': '空闲',
   'daemon.connection.status.connecting': '连接中',
   'daemon.connection.status.connected': '已连接',
@@ -6303,6 +6325,8 @@ const ZH: Messages = {
   'goal.turn': (v) => `${v?.count ?? 0} 轮`,
   'goal.turnLabel': (v) => `第 ${v?.count ?? 0} 轮`,
   'goal.turns': (v) => `${v?.count ?? 0} 轮`,
+  'goal.turnsOfBudget': (v) => `${v?.count ?? 0} / ${v?.budget ?? 0} 轮`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
   'goal.tokens': (v) => `已用 ${v?.used ?? 0} tokens`,
   'goal.tokensOfBudget': (v) =>
     `已用 ${v?.used ?? 0} / ${v?.budget ?? 0} tokens`,

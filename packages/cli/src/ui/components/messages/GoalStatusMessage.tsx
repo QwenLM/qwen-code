@@ -114,10 +114,19 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
   })();
   const stats: string[] = [];
   if (goal.turnCount > 0) {
-    stats.push(`${goal.turnCount} ${pluralTurns(goal.turnCount)}`);
+    stats.push(
+      goal.turnBudget === undefined
+        ? `${goal.turnCount} ${pluralTurns(goal.turnCount)}`
+        : `${goal.turnCount}/${goal.turnBudget} ${pluralTurns(goal.turnBudget)}`,
+    );
   }
   if (goal.activeTimeMs > 0) {
-    stats.push(formatDuration(goal.activeTimeMs, { hideTrailingZeros: true }));
+    const used = formatDuration(goal.activeTimeMs, { hideTrailingZeros: true });
+    stats.push(
+      goal.activeTimeBudgetMs === undefined
+        ? used
+        : `${used}/${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })}`,
+    );
   }
   if (goal.tokensUsed > 0) {
     const used = formatTokenCount(goal.tokensUsed);

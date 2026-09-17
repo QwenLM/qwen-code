@@ -30,6 +30,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateRecordPayloadV2,
   reduceGoalControl,
+  reduceGoalSpend,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
 
@@ -2077,5 +2078,34 @@ describe('turn and active-time budgets', () => {
       activeTimeMs: 1_800_100,
       activeTimeBudgetMs: 2_400_100,
     });
+  });
+});
+
+describe('reduceGoalSpend', () => {
+  it.each(['active', 'paused'] as const)(
+    'adds model spend without losing elapsed time for a %s Goal',
+    (status) => {
+      const goal = goalRecord({
+        status,
+        tokensUsed: 10,
+        turnCount: 2,
+        activeTimeMs: 500,
+      });
+      expect(reduceGoalSpend(goal, 30, 1_000)).toEqual({
+        ...goal,
+        tokensUsed: 40,
+        activeTimeMs: status === 'active' ? 1_400 : 500,
+        updatedAt: 1_000,
+      });
+      expect(goal).toMatchObject({
+        tokensUsed: 10,
+        activeTimeMs: 500,
+        updatedAt: 100,
+      });
+    },
+  );
+  it.each([0, -1, NaN, Infinity])('ignores unusable spend %s', (tokens) => {
+    const goal = goalRecord();
+    expect(reduceGoalSpend(goal, tokens, 99)).toBe(goal);
   });
 });
