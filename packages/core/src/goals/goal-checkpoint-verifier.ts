@@ -642,6 +642,7 @@ export function createGoalCheckpointVerifier(
       const sources = checkpointSources(input);
       let retry: CorrectiveRetry | undefined;
       let retryCause: unknown;
+      let totalTokens = 0;
       for (;;) {
         const contents = retryContents(input, retry?.note, retryCause);
         const result = await runSideQuery(config, {
@@ -668,8 +669,15 @@ export function createGoalCheckpointVerifier(
           // failures into plain Errors, erasing the InvalidGoalCheckpointError
           // class and message the verifier's own tests assert on.
         });
+        const tokens = result.usage?.totalTokenCount ?? 0;
+        if (Number.isFinite(tokens) && tokens > 0) totalTokens += tokens;
         try {
-          return parseGoalCheckpointVerifierText(result.text, sources);
+          return {
+            ...parseGoalCheckpointVerifierText(result.text, sources),
+            ...(totalTokens > 0
+              ? { usage: { totalTokenCount: totalTokens } }
+              : {}),
+          };
         } catch (error) {
           const corrective =
             retry === undefined ? correctiveRetryFor(error) : undefined;
@@ -680,6 +688,7 @@ export function createGoalCheckpointVerifier(
         }
       }
     } catch (error) {
+      // Failed checks cannot return usage, including any completed corrective attempt.
       // A provider SDK rejects its own aborted request with its own error
       // ("Request was aborted.") and drops the reason the signal carried, so
       // a check that ran past this ceiling would never say it timed out. The

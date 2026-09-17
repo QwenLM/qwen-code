@@ -9,6 +9,11 @@ import { EventEmitter } from 'node:events';
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
+import {
+  loadSettings as loadModelSettings,
+  resetHomeEnvBootstrapForTesting,
+} from '../config/settings.js';
+import { updateModelContextWindow } from './model-configuration.js';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -87,6 +92,8 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  AuthType,
+  ProviderInstallError,
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
@@ -178,6 +185,7 @@ import type {
   ServeWorkspaceMcpResourcesStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
+  ServeWorkflowActionInput,
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
 } from '@qwen-code/acp-bridge/status';
@@ -208,7 +216,6 @@ import {
   type DeviceFlowProvider,
   type DeviceFlowRegistry as DeviceFlowRegistryType,
 } from './auth/device-flow.js';
-import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import {
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
@@ -228,6 +235,10 @@ import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.j
 import { getActiveSseCount } from './routes/sse-events.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
+import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
+import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -1052,8 +1063,10 @@ interface FakeBridgeOpts {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved',
+      | 'run-saved'
+      | 'run-script',
     context?: BridgeClientRequestContext,
+    input?: ServeWorkflowActionInput,
   ) => Promise<{ changed: boolean; status?: string; taskId?: string }>;
   clearSessionGoalImpl?: (
     sessionId: string,
@@ -1386,8 +1399,10 @@ interface FakeBridge extends AcpSessionBridge {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved';
+      | 'run-saved'
+      | 'run-script';
     context?: BridgeClientRequestContext;
+    input?: ServeWorkflowActionInput;
   }>;
   clearSessionGoalCalls: string[];
   controlSessionGoalCalls: Array<{
@@ -2657,14 +2672,27 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
     },
-    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+    async controlSessionWorkflowTask(
+      sessionId,
+      taskId,
+      action,
+      context,
+      input,
+    ) {
       controlSessionWorkflowTaskCalls.push({
         sessionId,
         taskId,
         action,
         ...(context ? { context } : {}),
+        ...(input ? { input } : {}),
       });
-      return controlSessionWorkflowTaskImpl(sessionId, taskId, action, context);
+      return controlSessionWorkflowTaskImpl(
+        sessionId,
+        taskId,
+        action,
+        context,
+        input,
+      );
     },
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
@@ -3147,6 +3175,101 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
+  it.each([
+    'managed',
+    'unowned',
+    'missing_activity',
+    'busy',
+    'acpConnections',
+    'memoryTasks',
+  ] as const)(
+    'wires idle reclamation with %s runtime observations',
+    async (mode) => {
+      const bridge = fakeBridge();
+      const reclaim = vi.fn().mockResolvedValue(true);
+      Object.assign(bridge, {
+        getWorkspaceRuntimeLifecycleSnapshot: () => ({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 1,
+          activeWork: false,
+        }),
+        getIdleChannelCandidate: () => ({
+          channelId: 'primary-child',
+          runtimeEpoch: 1,
+          lastUsedAt: 1,
+        }),
+        reclaimIdleChannel: reclaim,
+      });
+      const registry = new ProcessRegistry();
+      const reservation = registry.reserve();
+      const policy = createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'admit',
+      });
+      const runtimeRemoval = {
+        beginDrain: vi.fn(),
+        cancelDrain: vi.fn(),
+        completeDrain: vi.fn(),
+        disposeRuntime: vi.fn().mockResolvedValue(undefined),
+        getActivity: vi.fn(() => ({
+          pendingSessionStarts: mode === 'busy' ? 1 : 0,
+          channelWorkers: 0,
+          voiceSessions: 0,
+        })),
+      };
+      const app = createServeApp(
+        { ...baseOpts, childHeapMode: 'admit' },
+        undefined,
+        {
+          bridge,
+          primaryWorkspaceTrusted: true,
+          voiceCoordinator: new WorkspaceVoiceCoordinator(),
+          getSessionBridges: () => [bridge],
+          managedChildProcesses: {
+            registry,
+            policy,
+            ...(mode === 'unowned'
+              ? {}
+              : {
+                  ownsBridge: (candidate: AcpSessionBridge) =>
+                    candidate === bridge,
+                }),
+          },
+          ...(mode === 'missing_activity'
+            ? {}
+            : { workspaceRuntimeRemoval: runtimeRemoval }),
+        },
+      );
+      const acpHandle = app.locals['acpHandle'] as {
+        getWorkspaceActivity: (workspaceId: string) => {
+          acpConnections: number;
+          memoryTasks: number;
+        };
+      };
+      vi.spyOn(acpHandle, 'getWorkspaceActivity').mockReturnValue({
+        acpConnections: mode === 'acpConnections' ? 1 : 0,
+        memoryTasks: mode === 'memoryTasks' ? 1 : 0,
+      });
+      try {
+        await (app.locals['reclaimIdleAcp'] as IdleAcpReclaimer)(
+          'another-workspace',
+        );
+        expect(reclaim).toHaveBeenCalledTimes(mode === 'managed' ? 1 : 0);
+        expect(runtimeRemoval.disposeRuntime).not.toHaveBeenCalled();
+        expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+      } finally {
+        reservation.cancel();
+      }
+    },
+  );
+
+  it('rejects unwired admission before creating the app', () => {
+    expect(() =>
+      createServeAppImpl({ ...baseOpts, childHeapMode: 'admit' }),
+    ).toThrow('managed child process wiring');
+  });
+
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {
@@ -4022,6 +4145,74 @@ describe('createServeApp', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
       expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it('adds the validated ?daemon= origin to the shell CSP connect-src', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170')
+        .set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+    });
+
+    // `createSendIndex` reads `?daemon=` from the raw query with the client's
+    // parser, so the header cannot depend on how Express was configured to
+    // parse queries. That is only observable under `'extended'`: the shipped
+    // default is `'simple'` (Node `querystring`, Express 5) and nothing in this
+    // repo sets it, and under `simple` a bracket key never reaches
+    // `req.query.daemon` at all — so the old `req.query` read and this one
+    // behave identically there and a test on the default parser cannot
+    // discriminate the change. Forcing `extended` is what makes this case bite:
+    // `qs` folds `?daemon[]=X` into `{ daemon: ['X'] }`, which the old read
+    // granted and the client never parsed.
+    it('grants connect-src from the client parser whatever the Express query parser is', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      app.set('query parser', 'extended');
+      expect(app.get('query parser')).toBe('extended');
+
+      const repeated = await request(app)
+        .get(
+          '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
+        )
+        .set('Host', host);
+      expect(repeated.status).toBe(200);
+      expect(repeated.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+      expect(repeated.headers['content-security-policy']).not.toContain(
+        'other.example',
+      );
+
+      const bracketed = await request(app)
+        .get('/?daemon%5B%5D=https%3A%2F%2Fevil.example')
+        .set('Host', host);
+      expect(bracketed.status).toBe(200);
+      expect(bracketed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(bracketed.headers['content-security-policy']).toContain(
+        "connect-src 'self';",
+      );
+
+      // The mixed shape is the one that broke functionally, not just by
+      // widening: `qs` yields `['evil', 'daemon.example.com:4170']`, so the old
+      // read granted the bracketed origin while the client connected to the
+      // plain one and found its own target CSP-blocked.
+      const mixed = await request(app)
+        .get(
+          '/?daemon%5B%5D=https%3A%2F%2Fevil.example&daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+        )
+        .set('Host', host);
+      expect(mixed.status).toBe(200);
+      expect(mixed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(mixed.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
     });
 
     it('rejects cross-origin requests for the pre-auth shell page (CORS wall runs first)', async () => {
@@ -10939,6 +11130,25 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('passes a percent-encoded extension workflow name through decoded', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .get(`/session/s-1/saved-workflows/${encodeURIComponent('gcp:audit')}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ sessionId: 's-1', name: 'gcp:audit' });
+      expect(bridge.sessionSavedWorkflowCalls).toEqual([
+        { sessionId: 's-1', name: 'gcp:audit' },
+      ]);
+    });
+
     it('reads a saved workflow definition and fails closed for an untrusted workspace', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -11030,7 +11240,25 @@ describe('createServeApp', () => {
         .post('/session/s-1/tasks/deep-review/workflow-action')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .send({ action: 'run-saved' });
+        .send({
+          action: 'run-saved',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        });
+      const runScriptRes = await request(app)
+        .post('/session/s-1/tasks/definition-7/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          action: 'run-script',
+          script: 'return 1',
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        });
+      const badActionRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'run-anything' });
 
       expect(pauseRes.status).toBe(200);
       expect(pauseRes.body).toEqual({ changed: true, status: 'pausing' });
@@ -11044,6 +11272,12 @@ describe('createServeApp', () => {
       expect(deleteRes.body).toEqual({ changed: true, status: 'running' });
       expect(runSavedRes.status).toBe(200);
       expect(runSavedRes.body).toEqual({ changed: true, status: 'running' });
+      expect(runScriptRes.status).toBe(200);
+      expect(runScriptRes.body).toEqual({ changed: true, status: 'running' });
+      expect(badActionRes.status).toBe(400);
+      expect(badActionRes.body.error).toContain('"run-script"');
+      // The start input reaches the runtime only for the two start actions;
+      // a control action's call carries none, as it did before it existed.
       expect(bridge.controlSessionWorkflowTaskCalls).toEqual([
         {
           sessionId: 's-1',
@@ -11055,7 +11289,24 @@ describe('createServeApp', () => {
         { sessionId: 's-1', taskId: 'task-1', action: 'retry' },
         { sessionId: 's-1', taskId: 'task-1', action: 'rerun' },
         { sessionId: 's-1', taskId: 'task-1', action: 'delete-history' },
-        { sessionId: 's-1', taskId: 'deep-review', action: 'run-saved' },
+        {
+          sessionId: 's-1',
+          taskId: 'deep-review',
+          action: 'run-saved',
+          input: {
+            args: { question: 'which tables grew?' },
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        },
+        {
+          sessionId: 's-1',
+          taskId: 'definition-7',
+          action: 'run-script',
+          input: {
+            script: 'return 1',
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        },
       ]);
     });
 
@@ -12017,7 +12268,10 @@ describe('createServeApp', () => {
           _context,
           _messageId,
           options,
-        ) => (options?.rejectIfIdle ? { accepted: false } : { accepted: true }),
+        ) =>
+          options?.rejectIfIdle
+            ? { accepted: false, reason: 'session_idle' }
+            : { accepted: true },
       });
 
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
@@ -12026,7 +12280,7 @@ describe('createServeApp', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ accepted: false });
+      expect(res.body).toEqual({ accepted: false, reason: 'session_idle' });
       expect(bridge.enqueueMidTurnCalls[0]?.options).toEqual({
         rejectIfIdle: true,
       });
@@ -23860,6 +24114,87 @@ describe('createServeApp', () => {
     });
 
     describe('session source filter', () => {
+      it('includes an active Qwen Live task before transcript persistence', async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440210';
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              sourceType: 'qwen-live',
+              clientCount: 1,
+              hasActivePrompt: true,
+            },
+          ],
+        });
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          {
+            sourceType: 'default',
+            view: 'organized',
+            group: 'all',
+          },
+        );
+        expect(result.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'qwen-live',
+            hasActivePrompt: true,
+          }),
+        ]);
+      });
+
+      it.each([undefined, 'organized'] as const)(
+        'lists persisted Qwen Live tasks in the default catalog (%s)',
+        async (view) => {
+          const sessionId = '550e8400-e29b-41d4-a716-446655440209';
+          await writeStoredSession({
+            sessionId,
+            cwd: WS_BOUND,
+            timestamp: '2026-05-17T12:00:00.000Z',
+            prompt: 'voice delegated task',
+            mtime: new Date('2026-05-17T12:00:00.000Z'),
+            sourceType: 'qwen-live',
+            sourceId: 'voice-1',
+          });
+          for (const sourceType of ['default', 'qwen-live', 'channel']) {
+            const result = await listWorkspaceSessionsForResponse(
+              fakeBridge(),
+              WS_BOUND,
+              {
+                sourceType,
+                ...(view ? { view, group: 'all' } : {}),
+              },
+            );
+            expect(
+              result.sessions.filter((row) => row.sessionId === sessionId),
+            ).toEqual(
+              sourceType === 'channel'
+                ? []
+                : [
+                    expect.objectContaining({
+                      sessionId,
+                      sourceType: 'qwen-live',
+                      sourceId: 'voice-1',
+                    }),
+                  ],
+            );
+          }
+          const mismatch = await listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            {
+              sourceType: 'default',
+              sourceId: 'other',
+              ...(view ? { view, group: 'all' } : {}),
+            },
+          );
+          expect(mismatch.sessions).toEqual([]);
+        },
+      );
+
       it('includes legacy sessions in the default source filter', async () => {
         const legacyId = '550e8400-e29b-41d4-a716-446655440201';
         const defaultId = '550e8400-e29b-41d4-a716-446655440202';
@@ -38757,6 +39092,81 @@ describe('auth device-flow routes', () => {
     expect(res.body.features).toContain('auth_device_flow');
   });
 
+  it.each([
+    { protocol: 'openai', wireApi: 'unknown' },
+    { protocol: 'openai', wireApi: null },
+    { protocol: 'anthropic', wireApi: 'responses' },
+    { protocol: 'gemini', wireApi: 'chat-completions' },
+  ])(
+    'POST /workspace/auth/provider rejects incompatible api before installation: %j',
+    async (selection) => {
+      const installAuthProvider = vi.fn();
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_api');
+      expect(installAuthProvider).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([{ protocol: 'openai', wireApi: 'responses' }])(
+    'POST /workspace/auth/provider accepts OpenAI API selection: %j',
+    async (selection) => {
+      const installAuthProvider = vi
+        .fn()
+        .mockResolvedValue({ v: 1, message: 'Saved' });
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(200);
+      expect(installAuthProvider).toHaveBeenCalledWith(
+        expect.objectContaining(selection),
+        expect.any(Function),
+      );
+    },
+  );
+
+  it('POST /workspace/auth/provider does not change a fixed provider protocol via the legacy alias', async () => {
+    const installAuthProvider = vi.fn();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge: fakeBridge(),
+      installAuthProvider,
+    });
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        protocol: 'openai-responses',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_protocol');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
   it('POST /workspace/auth/provider rejects unsupported protocol values', async () => {
     const installAuthProvider = vi.fn();
     const bridge = fakeBridge();
@@ -39242,6 +39652,45 @@ describe('auth device-flow routes', () => {
       else process.env['QWEN_HOME'] = previousQwenHome;
       await fsp.rm(qwenHome, { recursive: true, force: true });
     }
+  });
+
+  it('POST /workspace/auth/provider reports model purpose conflicts as a client error', async () => {
+    const installAuthProvider = vi
+      .fn()
+      .mockRejectedValue(
+        new ProviderInstallError(
+          'This install would replace a model configured for another purpose.',
+          'modelPurpose',
+          AuthType.USE_OPENAI,
+        ),
+      );
+    const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+        modelIds: ['image-01'],
+        advancedConfig: { purpose: 'image' },
+      });
+
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      code: 'model_purpose_conflict',
+      error:
+        'This install would replace a model configured for another purpose.',
+    });
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
   });
 
   it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {
@@ -40957,6 +41406,66 @@ describe('Live conversation runtime lifecycle', () => {
       'standalone_session_options_v1',
     );
   });
+
+  it.each([
+    { clientCount: 1, hasActivePrompt: false },
+    { clientCount: 0, hasActivePrompt: true },
+  ])(
+    'does not grant Live call protection to client-declared source metadata %j',
+    async (activity) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440211';
+      const summary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        sourceType: 'qwen-live',
+        ...activity,
+      };
+      const bridge = fakeBridge({
+        listImpl: () => [summary],
+        summaryImpl: (id) => {
+          if (id !== sessionId) throw new SessionNotFoundError(id);
+          return summary;
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          boundWorkspace: WS_BOUND,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'live-source-test',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              bridge,
+            }),
+          ]),
+        },
+      );
+      const workspaceId = encodeURIComponent(WS_BOUND);
+      const responses = [
+        await request(app)
+          .delete('/session/' + sessionId)
+          .set('Host', '127.0.0.1:' + baseOpts.port),
+      ];
+      for (const prefix of ['', '/workspaces/' + workspaceId]) {
+        for (const action of ['delete', 'archive']) {
+          responses.push(
+            await request(app)
+              .post(prefix + '/sessions/' + action)
+              .set('Host', '127.0.0.1:' + baseOpts.port)
+              .send({ sessionIds: [sessionId] }),
+          );
+        }
+      }
+      expect(responses.map((response) => response.status)).toEqual([
+        204, 200, 200, 200, 200,
+      ]);
+      expect(bridge.closeCalls.length).toBeGreaterThan(0);
+    },
+  );
 
   it('blocks REST close and archive for active Live sessions until the call stops', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
@@ -43173,3 +43682,141 @@ describe('Live Appshot server integration', () => {
     }
   });
 });
+
+it.each(['patch', 'delete', 'delete-workspace'] as const)(
+  '%s /workspace/models reloads siblings after a user write beside a workspace bucket',
+  async (method) => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-r3-scope-'));
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    const sibling = path.join(root, 'sibling');
+    await fsp.mkdir(home);
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.mkdir(sibling);
+    const userPath = path.join(home, 'settings.json');
+    const workspacePath = path.join(workspace, '.qwen/settings.json');
+    for (const [k, v] of Object.entries({
+      QWEN_HOME: home,
+      QWEN_RUNTIME_DIR: path.join(root, 'runtime'),
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'defaults.json'),
+      QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(home, 'trusted.json'),
+    }))
+      vi.stubEnv(k, v);
+    await fsp.writeFile(
+      userPath,
+      JSON.stringify({
+        $version: 4,
+        ...(method === 'delete-workspace'
+          ? { voiceModel: 'workspace-model' }
+          : {}),
+        modelProviders: {
+          openai: [
+            { id: 'user-model', generationConfig: { contextWindowSize: 8192 } },
+            { id: 'user-sibling' },
+          ],
+        },
+      }),
+    );
+    await fsp.writeFile(
+      workspacePath,
+      JSON.stringify({
+        $version: 4,
+        modelProviders: { gemini: [{ id: 'workspace-model' }] },
+      }),
+    );
+    const workspaceBefore = await fsp.readFile(workspacePath, 'utf8');
+    const primaryReload = vi.fn().mockResolvedValue({ status: 'applied' });
+    const siblingReload = vi.fn().mockResolvedValue({ status: 'applied' });
+    const bridge = fakeBridge();
+    const registry = createWorkspaceRegistry([
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-r3',
+        workspaceCwd: workspace,
+        primary: true,
+        bridge,
+        workspaceService: {
+          reloadModelProviders: primaryReload,
+        } as unknown as DaemonWorkspaceService,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'sibling-r3',
+        workspaceCwd: sibling,
+        primary: false,
+        bridge: fakeBridge(),
+        workspaceService: {
+          reloadModelProviders: siblingReload,
+        } as unknown as DaemonWorkspaceService,
+      }),
+    ]);
+    const load = () =>
+      loadModelSettings(workspace, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      });
+    const app = createServeApp(
+      { ...baseOpts, token: 'tkn', workspace },
+      undefined,
+      {
+        bridge,
+        workspaceRegistry: registry,
+        persistSettings: async (_cwd, writes, assertOpen) =>
+          load().setValues(writes, undefined, assertOpen),
+        updateModelContextWindow: async (_cwd, key, size, assertOpen) =>
+          updateModelContextWindow(load(), key, size, assertOpen),
+      },
+    );
+    try {
+      const listed = await request(app)
+        .get('/workspace/models')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(listed.status).toBe(200);
+      const target = listed.body.models.find(
+        (m: { modelId: string }) =>
+          m.modelId ===
+          (method === 'delete-workspace' ? 'workspace-model' : 'user-model'),
+      );
+      const query =
+        method === 'patch'
+          ? request(app).patch('/workspace/models')
+          : request(app).delete('/workspace/models');
+      const res = await query
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170')
+        .send(
+          method === 'patch'
+            ? { key: target.key, contextWindowSize: 65536 }
+            : target,
+        );
+      const after = JSON.parse(await fsp.readFile(userPath, 'utf8'));
+      expect(res.status).toBe(200);
+      expect(res.body.runtimeSync.status).toBe('applied');
+      if (method === 'delete-workspace') {
+        expect(
+          JSON.parse(await fsp.readFile(workspacePath, 'utf8')).modelProviders,
+        ).toEqual({ gemini: [] });
+        expect(after.voiceModel).toBe('');
+        expect(
+          after.modelProviders.openai.map((m: { id: string }) => m.id),
+        ).toEqual(['user-model', 'user-sibling']);
+      } else {
+        expect(await fsp.readFile(workspacePath, 'utf8')).toBe(workspaceBefore);
+      }
+      if (method === 'patch')
+        expect(
+          after.modelProviders.openai[0].generationConfig.contextWindowSize,
+        ).toBe(65536);
+      else if (method === 'delete')
+        expect(
+          after.modelProviders.openai.map((m: { id: string }) => m.id),
+        ).toEqual(['user-sibling']);
+      expect(primaryReload).toHaveBeenCalledOnce();
+      expect(siblingReload).toHaveBeenCalledOnce();
+    } finally {
+      await stopCreatedApps();
+      vi.unstubAllEnvs();
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  },
+);
