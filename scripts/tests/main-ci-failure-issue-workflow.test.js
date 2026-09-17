@@ -154,25 +154,26 @@ describe('main CI failure issue workflow', () => {
     );
   });
 
-  it('retries a failed job-log download once before the per-commit fallback', () => {
-    // The download rides the same transient runner-to-blobstore path the
-    // E2E lane's upload retry exists for, and losing the only attempt files
-    // an unactionable per-commit issue for a run whose log names its failing
-    // tests (run 33982750226's macOS shard, #11131). Pin the retry's shape
-    // end to end: the per-job reset, exactly two attempts, the second
-    // attempted only after the first fails, and the warn-and-drop fallback
-    // reached only after both fail — a warning raised on a first-attempt
-    // failure would claim the opposite of what a successful retry just did.
+  it('passes --allow-escape-sequences so gh does not refuse the colourised logs', () => {
+    // gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a raw response
+    // carrying terminal escape sequences unless the flag opts out, and the
+    // colourised vitest/pytest logs always carry them: without the flag
+    // every download fails deterministically — a retry would hit the
+    // identical refusal — and the plan falls back to a per-commit issue
+    // naming no failing test. The analyzer strips ANSI before matching, so
+    // the escapes never reach an issue body.
     const download = oneLine(
       jobs.analyze.steps.find(
         (step) => step.name === 'Download failed job logs',
       ).run,
     );
     expect(download).toContain(
-      'for job_id in "${job_ids[@]}"; do downloaded=\'\' for attempt in 1 2; do if gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > "${log_dir}/${job_id}.log"; then downloaded=1 break fi done',
+      'if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" --allow-escape-sequences > "${log_dir}/${job_id}.log"; then',
     );
+    // The warn-and-drop fallback is unchanged: a log that still fails only
+    // costs precision, never the issue.
     expect(download).toContain(
-      'if [[ -z "${downloaded}" ]]; then echo "::warning::Could not download the log of job ${job_id}" rm -f "${log_dir}/${job_id}.log" fi',
+      'echo "::warning::Could not download the log of job ${job_id}" rm -f "${log_dir}/${job_id}.log"',
     );
   });
 

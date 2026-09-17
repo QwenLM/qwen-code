@@ -86,23 +86,19 @@ jobs:
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
-          # One bounded retry per log, the same contract the E2E lane's
-          # upload-artifact and sandbox-image retries carry for the transient
-          # runner-to-blobstore path this download rides. A single lost
-          # attempt files an unactionable per-commit issue for a run whose log
-          # does name the failing tests (run 33982750226's macOS shard,
-          # #11131). A log that still fails only costs precision: the plan
-          # below falls back to the per-commit issue as before.
+          # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a raw response
+          # carrying terminal escape sequences unless passed
+          # --allow-escape-sequences, and the colourised vitest/pytest logs
+          # always carry them: without the flag every download fails
+          # deterministically — a retry hits the identical refusal — and the
+          # plan below falls back to a per-commit issue naming no failing
+          # test. The analyzer strips ANSI before matching, so the escapes
+          # never reach an issue body.
           for job_id in "${job_ids[@]}"; do
-            downloaded=''
-            for attempt in 1 2; do
-              if gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
-                > "${log_dir}/${job_id}.log"; then
-                downloaded=1
-                break
-              fi
-            done
-            if [[ -z "${downloaded}" ]]; then
+            if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
+              --allow-escape-sequences > "${log_dir}/${job_id}.log"; then
+              # A missing log only costs precision: with no identifiable test the
+              # plan below falls back to the per-commit issue.
               echo "::warning::Could not download the log of job ${job_id}"
               rm -f "${log_dir}/${job_id}.log"
             fi
