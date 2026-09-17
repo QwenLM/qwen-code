@@ -53,6 +53,7 @@ import {
   loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
+  configureSessionIndexing,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -1684,6 +1685,12 @@ export async function loadCliConfig(
   if (!Storage.hasRuntimeBaseDirContext()) {
     Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
   }
+
+  // Session-index sidecar backend (experimental). JSONL transcripts remain
+  // authoritative; 'file' (default) keeps the scan-based read paths.
+  configureSessionIndexing({
+    mode: settings.experimental?.sessionIndex ?? 'file',
+  });
 
   const ideMode = settings.ide?.enabled ?? false;
 
