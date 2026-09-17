@@ -3634,7 +3634,6 @@ export function App({
   const remoteWorkspaceAddActiveRef = useRef(
     initialRemoteWorkspaceAddStep === 'browse',
   );
-  const remoteWorkspaceAddCompletedRef = useRef(false);
   useEffect(() => {
     if (initialRemoteWorkspaceAddStep) clearRemoteWorkspaceAddStep();
   }, [initialRemoteWorkspaceAddStep]);
@@ -13132,7 +13131,7 @@ export function App({
   const handleAddRemoteWorkspace = useCallback(
     async (cwd: string, persist: boolean, displayName?: string) => {
       await handleAddWorkspace(cwd, persist, displayName);
-      remoteWorkspaceAddCompletedRef.current = true;
+      remoteWorkspaceAddActiveRef.current = false;
       completeRemoteWorkspaceAdd();
     },
     [handleAddWorkspace],
@@ -13142,10 +13141,6 @@ export function App({
     setShowAddWorkspaceDialog(false);
     if (!remoteWorkspaceAddActiveRef.current) return;
     remoteWorkspaceAddActiveRef.current = false;
-    if (remoteWorkspaceAddCompletedRef.current) {
-      completeRemoteWorkspaceAdd();
-      return;
-    }
     leaveRemoteWorkspaceAdd();
   }, []);
 
@@ -18364,7 +18359,8 @@ export function App({
           {!lockedWorkspaceCwd &&
             showAddWorkspaceDialog &&
             remoteWorkspaceAddActiveRef.current &&
-            !workspaceCapabilitiesReady && (
+            (!workspaceCapabilitiesReady ||
+              !dynamicWorkspaceRegistrationSupported) && (
               <DialogShell
                 // Neutral: a Local add resumes into this same shell.
                 title={t('sidebar.addWorkspaceTitle')}
@@ -18372,10 +18368,18 @@ export function App({
                 onClose={closeAddWorkspaceDialog}
               >
                 <div className="flex flex-col gap-5">
-                  <p role={workspace.status === 'error' ? 'alert' : 'status'}>
+                  <p
+                    role={
+                      workspace.status === 'error' || workspaceCapabilitiesReady
+                        ? 'alert'
+                        : 'status'
+                    }
+                  >
                     {t(
                       workspace.status === 'error'
                         ? 'workspaceHost.connectionError'
+                        : workspaceCapabilitiesReady
+                          ? 'workspaceHost.unsupported'
                         : 'workspaceHost.loadingFolders',
                     )}
                   </p>
@@ -18443,34 +18447,6 @@ export function App({
               displayNameEnabled={workspaceDisplayNameSupported}
             />
           )}
-          {!lockedWorkspaceCwd &&
-            showAddWorkspaceDialog &&
-            remoteWorkspaceAddActiveRef.current &&
-            workspaceCapabilitiesReady &&
-            !dynamicWorkspaceRegistrationSupported && (
-              <DialogShell
-                // Neutral: a Local add resumes into this same shell.
-                title={t('sidebar.addWorkspaceTitle')}
-                size="md"
-                onClose={closeAddWorkspaceDialog}
-              >
-                <div className="flex flex-col gap-5">
-                  <p role="alert">{t('workspaceHost.unsupported')}</p>
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={closeAddWorkspaceDialog}
-                    >
-                      {t('sidebar.addWorkspaceCancel')}
-                    </Button>
-                    <Button type="button" onClick={changeRemoteWorkspaceHost}>
-                      {t('workspaceHost.back')}
-                    </Button>
-                  </div>
-                </div>
-              </DialogShell>
-            )}
           {scratchOutcomeUnknown !== 'clear' && (
             <DialogShell
               title={t('sidebar.scratchOutcomeUnknownTitle')}
