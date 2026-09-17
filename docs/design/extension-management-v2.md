@@ -62,9 +62,9 @@ commit point. Before it, recovery rolls back; after it, recovery only completes
 projection and cleanup. A committed policy is never rolled back because one
 runtime refresh failed. If both a pre-commit operation and its rollback fail, the
 caller receives both errors and the journal remains; a lock-defeated rollback is
-retried on a later operation instead of stopping every one - unless it could not
-restore the destination at all, which still stops the caller rather than letting
-reads report an installed extension with no artifact.
+retried on a later operation instead of stopping every one - once a deferred
+retry window has elapsed, and only while a retry can still leave a loadable
+artifact behind.
 
 Store files use owner-only permissions and atomic no-follow writes. Extension
 ids, direct-child artifact paths, transaction paths, and names are validated.
