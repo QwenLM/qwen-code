@@ -97,7 +97,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { applySkillSideEffects } from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
-import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -988,6 +988,127 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getProjectHooks()).toBeUndefined();
       expect(config.getUserHooks()).toBe(userHooks);
+    });
+  });
+
+  describe('onMessageBusChange', () => {
+    it('calls a listener at once when a bus already exists', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('waits for initialize when no bus exists yet', async () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+      expect(listener).not.toHaveBeenCalled();
+
+      await config.initialize();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('announces the bus only once it can run hooks', async () => {
+      const config = new Config({ ...baseParams });
+      const requestListenerCounts: number[] = [];
+      config.onMessageBusChange((bus) => {
+        requestListenerCounts.push(
+          bus.listenerCount(MessageBusType.HOOK_EXECUTION_REQUEST),
+        );
+      });
+
+      await config.initialize();
+
+      expect(requestListenerCounts).toHaveLength(1);
+      expect(requestListenerCounts[0]).toBeGreaterThanOrEqual(1);
+    });
+
+    it('stops notifying a disposed listener', () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+      const dispose = config.onMessageBusChange(listener);
+
+      dispose();
+      config.setMessageBus(new MessageBus());
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('keeps initializing and notifying others when a listener throws', async () => {
+      const config = new Config({ ...baseParams });
+      config.onMessageBusChange(() => {
+        throw new Error('observer broke');
+      });
+      const other = vi.fn();
+      config.onMessageBusChange(other);
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(other).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets a listener dispose itself while it is notified', () => {
+      const config = new Config({ ...baseParams });
+      const calls: string[] = [];
+      const dispose = config.onMessageBusChange(() => {
+        calls.push('self-disposing');
+        dispose();
+      });
+      config.onMessageBusChange(() => {
+        calls.push('other');
+      });
+
+      expect(() => config.setMessageBus(new MessageBus())).not.toThrow();
+      config.setMessageBus(new MessageBus());
+
+      expect(calls).toEqual(['self-disposing', 'other', 'other']);
+    });
+
+    it('notifies a listener added during notification exactly once', () => {
+      const config = new Config({ ...baseParams });
+      const late = vi.fn();
+      const dispose = config.onMessageBusChange(() => {
+        dispose();
+        config.onMessageBusChange(late);
+      });
+
+      config.setMessageBus(new MessageBus());
+
+      // Once from its own registration, which sees the bus already set; the
+      // announcement in progress must not reach it a second time.
+      expect(late).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-announce the bus it already has', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      config.setMessageBus(bus);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces nothing when all hooks are disabled', async () => {
+      const config = new Config({ ...baseParams, disableAllHooks: true });
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      await config.initialize();
+
+      expect(config.getMessageBus()).toBeUndefined();
+      expect(listener).not.toHaveBeenCalled();
     });
   });
 
