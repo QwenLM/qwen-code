@@ -98,12 +98,19 @@ describe('parseGoalVerifierText', () => {
 
 describe('goalVerifierTimeoutMs', () => {
   it('grows with the request and stops at the side query lifetime', () => {
-    expect(goalVerifierTimeoutMs(1_000)).toBe(45_000);
-    expect(goalVerifierTimeoutMs(64_000)).toBe(60_000);
+    expect(goalVerifierTimeoutMs(0)).toBe(30_000);
+    expect(goalVerifierTimeoutMs(1_000)).toBe(30_000);
+    expect(goalVerifierTimeoutMs(32_767)).toBe(30_000);
+    expect(goalVerifierTimeoutMs(32_768)).toBe(45_000);
+    expect(goalVerifierTimeoutMs(64_000)).toBe(45_000);
     expect(goalVerifierTimeoutMs(GOAL_VERIFIER_REQUEST_BYTE_LIMIT)).toBe(
-      150_000,
+      135_000,
     );
     expect(goalVerifierTimeoutMs(10_000_000)).toBe(180_000);
+    // A size that is not a size gets the base, never an immediate timer.
+    expect(goalVerifierTimeoutMs(Number.NaN)).toBe(30_000);
+    expect(goalVerifierTimeoutMs(-5)).toBe(30_000);
+    expect(goalVerifierTimeoutMs(Number.POSITIVE_INFINITY)).toBe(30_000);
   });
 });
 

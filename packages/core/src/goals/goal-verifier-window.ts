@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { capPreviewBytes } from './goal-evidence.js';
 import {
   anchorGoalTranscript,
-  capPreviewBytes,
   coherentEvidenceProvenance,
   EvidenceSourceUnavailableError,
   evidenceContent,
@@ -16,7 +16,7 @@ import {
   type GoalEvidenceProvenance,
   type GoalEvidenceRecord,
   type GoalEvidenceValidationInput,
-} from './goal-evidence.js';
+} from './goal-evidence-shared.js';
 import { isRepeatedBlockerProposal } from './goal-protocol.js';
 import type { GoalVerifierEvidenceRecord } from './goal-verifier.js';
 
@@ -183,25 +183,31 @@ export function buildGoalVerifierEvidenceWindow(
   const prior = new Map<string, Candidate[]>(
     priorWindowTurnIds.map((turnId) => [turnId, [] as Candidate[]]),
   );
+  // The cheap attribution filters run before the provenance and content
+  // checks: most records of a long transcript are ruled out by position or
+  // stamp alone, and the content check projects a user prompt.
   for (let index = input.records.length - 1; index >= 0; index -= 1) {
     const record = input.records[index]!;
-    const provenance = coherentEvidenceProvenance(record);
-    if (!provenance || !recordHasEvidenceContent(record, provenance)) {
-      continue;
-    }
+    if (record.type === 'system') continue;
     const context = parseGoalContext(record.goalContext);
     const ownContext =
       context !== undefined &&
       context.goalId === input.goal.goalId &&
       context.revision === input.goal.revision;
+    if (record.goalContext !== undefined && !ownContext) continue;
+    if (index <= cursorIndex && !ownContext && record.type !== 'user') {
+      continue;
+    }
+    const provenance = coherentEvidenceProvenance(record);
+    if (!provenance) continue;
     if (provenance === 'real_user') {
       // Only a message this objective can have prompted: recorded after the
       // cursor, or stamped for this revision wherever it sits. A message
       // stamped for another Goal or an earlier revision may be the user's
       // consent to something else, and one whose stamp cannot be read is
       // not trusted as unstamped.
-      if (record.goalContext !== undefined && !ownContext) continue;
       if (index <= cursorIndex && !ownContext) continue;
+      if (!recordHasEvidenceContent(record, provenance)) continue;
       const candidate = {
         index,
         record,
@@ -217,7 +223,8 @@ export function buildGoalVerifierEvidenceWindow(
     if (index <= cursorIndex || !ownContext) continue;
     const group =
       context.turnId === currentTurnId ? current : prior.get(context.turnId);
-    group?.push({ index, record, provenance, turnId: context.turnId });
+    if (!group || !recordHasEvidenceContent(record, provenance)) continue;
+    group.push({ index, record, provenance, turnId: context.turnId });
   }
   const render = (candidate: Candidate) => {
     if (candidate.rendered !== undefined) return candidate.rendered;
@@ -379,21 +386,22 @@ export function validateGoalVerifierCoverage(
   let userMessage = false;
   for (let index = 0; index < input.records.length; index += 1) {
     const record = input.records[index]!;
-    const provenance = coherentEvidenceProvenance(record);
-    if (!provenance || !recordHasEvidenceContent(record, provenance)) {
-      continue;
-    }
+    if (record.type === 'system') continue;
     const context = parseGoalContext(record.goalContext);
     const ownContext =
       context !== undefined &&
       context.goalId === input.goal.goalId &&
       context.revision === input.goal.revision;
+    if (record.goalContext !== undefined && !ownContext) continue;
+    if (index <= cursorIndex && !ownContext) continue;
+    const provenance = coherentEvidenceProvenance(record);
+    if (!provenance || !recordHasEvidenceContent(record, provenance)) {
+      continue;
+    }
     if (provenance === 'real_user') {
-      if (record.goalContext !== undefined && !ownContext) continue;
-      if (index <= cursorIndex && !ownContext) continue;
       userMessage = true;
       if (!context) continue;
-    } else if (index <= cursorIndex || !ownContext) {
+    } else if (!ownContext) {
       continue;
     }
     const kinds = kindsByTurn.get(context!.turnId) ?? new Set();
@@ -528,12 +536,24 @@ function takeTrailingBytes(value: string, budget: number): string {
   let start = value.length;
   while (start > 0) {
     let next = start - 1;
+    let codePointBytes: number;
     const unit = value.charCodeAt(next);
-    if (unit >= 0xdc00 && unit <= 0xdfff && next > 0) {
-      const lead = value.charCodeAt(next - 1);
-      if (lead >= 0xd800 && lead <= 0xdbff) next -= 1;
+    if (
+      unit >= 0xdc00 &&
+      unit <= 0xdfff &&
+      next > 0 &&
+      value.charCodeAt(next - 1) >= 0xd800 &&
+      value.charCodeAt(next - 1) <= 0xdbff
+    ) {
+      next -= 1;
+      codePointBytes = 4;
+    } else if (unit < 0x80) {
+      codePointBytes = 1;
+    } else if (unit < 0x800) {
+      codePointBytes = 2;
+    } else {
+      codePointBytes = 3;
     }
-    const codePointBytes = Buffer.byteLength(value.slice(next, start), 'utf8');
     if (byteLength + codePointBytes > budget) break;
     byteLength += codePointBytes;
     start = next;

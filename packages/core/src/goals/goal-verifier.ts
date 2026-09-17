@@ -18,8 +18,11 @@ export const GOAL_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
 
 /**
  * How the verifier's timeout should grow with its request: the base covers
- * a small request, and each further 32 kB buys more time, up to the
- * streamed side query's own lifetime. A window of a hundred tool results is
+ * a request under 32 kB, and each full further 32 kB buys 15 s more, so the
+ * largest request the limit allows gets 135 s. The cap is the streamed side
+ * query's own lifetime guard, past which the guard and not the timer would
+ * end the call; it is not reachable under the request limit and only bounds
+ * a caller that passes a larger size. A window of a hundred tool results is
  * a sixty-thousand-token prompt, and thirty seconds is not enough for every
  * model to read it. Not applied by {@link createGoalVerifier} yet; the
  * runtime adopts it together with the evidence window.
@@ -28,12 +31,18 @@ const GOAL_VERIFIER_TIMEOUT_STEP_BYTES = 32_768;
 const GOAL_VERIFIER_TIMEOUT_STEP_MS = 15_000;
 const GOAL_VERIFIER_TIMEOUT_MAX_MS = 180_000;
 
-/** The timeout a request of `byteLength` bytes should get when none is configured. */
+/**
+ * The timeout a request of `byteLength` bytes should get when none is
+ * configured. A size that is not a finite, non-negative number gets the
+ * base, never a timer that would fire at once.
+ */
 export function goalVerifierTimeoutMs(byteLength: number): number {
+  const bytes =
+    Number.isFinite(byteLength) && byteLength > 0 ? Math.floor(byteLength) : 0;
   return Math.min(
     GOAL_VERIFIER_TIMEOUT_MAX_MS,
     GOAL_VERIFIER_TIMEOUT_MS +
-      Math.ceil(byteLength / GOAL_VERIFIER_TIMEOUT_STEP_BYTES) *
+      Math.floor(bytes / GOAL_VERIFIER_TIMEOUT_STEP_BYTES) *
         GOAL_VERIFIER_TIMEOUT_STEP_MS,
   );
 }
