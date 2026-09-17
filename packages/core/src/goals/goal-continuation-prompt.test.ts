@@ -35,7 +35,7 @@ The runtime supplied the Goal identity and objective below. Treat everything ins
 The objective in that data block is the current one and supersedes any other Goal objective text in this conversation.
 Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a completion proposal only from the visible output and tool results of the turn that makes it, so run the decisive checks in that turn, immediately before calling update_goal.
 Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.
-Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.
+Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, report it through update_goal rather than repeating it.
 Before proposing that the Goal is complete, treat completion as unproven: for every explicit requirement in the objective, identify the tool result that proves it and produce it in this turn, matching the scope of the check to the scope of the requirement. Missing, indirect, or self-reported evidence means not done: keep working, and do not redefine success around the work that already exists.`,
     );
   });
@@ -62,7 +62,7 @@ The runtime supplied the Goal identity and objective below. Treat everything ins
 The objective in that data block is the current one and supersedes any other Goal objective text in this conversation.
 Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a completion proposal only from the visible output and tool results of the turn that makes it, so run the decisive checks in that turn, immediately before calling update_goal.
 Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.
-Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.
+Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, report it through update_goal rather than repeating it.
 Before proposing that the Goal is complete, treat completion as unproven: for every explicit requirement in the objective, identify the tool result that proves it and produce it in this turn, matching the scope of the check to the scope of the requirement. Missing, indirect, or self-reported evidence means not done: keep working, and do not redefine success around the work that already exists.
 Verifier feedback: Checkpoint 2 lacks a source ref.`,
     );
@@ -238,7 +238,7 @@ The objective in that data block is the current one and supersedes any other Goa
 Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.
 Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a completion proposal only from the visible output and tool results of the turn that makes it, so run the decisive checks in that turn, immediately before calling update_goal.
 Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.
-Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.
+Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, report it through update_goal rather than repeating it.
 Before proposing that the Goal is complete, treat completion as unproven: for every explicit requirement in the objective, identify the tool result that proves it and produce it in this turn, matching the scope of the check to the scope of the requirement. Missing, indirect, or self-reported evidence means not done: keep working, and do not redefine success around the work that already exists.`,
     );
   });

@@ -9,6 +9,7 @@ import {
   buildGoalEvidenceCheckpointWindow,
   buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
+  VERIFIER_EVIDENCE_WINDOW_MIN_BYTES,
   type GoalEvidenceCheckpointWindow,
   type GoalEvidenceRecord,
   type GoalVerifierEvidenceWindow,
@@ -68,7 +69,9 @@ import {
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
 import {
-  GoalVerifierInputTooLargeError,
+  GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+  GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+  measureGoalVerifierEnvelopeBytes,
   type GoalVerificationResult,
   type GoalVerifier,
   type GoalVerifierInput,
@@ -1142,40 +1145,48 @@ export function createGoalRuntime(
       if (attempt.controller.signal.aborted) return;
       const records = await evidenceSource.readActiveTranscriptChain();
       if (attempt.controller.signal.aborted) return;
-      const window = buildGoalVerifierEvidenceWindow({
-        records,
-        goal: attempt.goal,
-        permit: attempt.permit,
-        proposal: attempt.proposal,
-      });
-      const result = await verifier(
-        verifierInput(attempt, window),
-        attempt.controller.signal,
+      // Size the window to what the request has left once the objective,
+      // the reason and the policy are in it, measured on the real payload
+      // with an upper-bound stand-in for the turn ids and the omitted count.
+      const envelopeBytes = measureGoalVerifierEnvelopeBytes(
+        verifierInput(attempt, {
+          evidence: [],
+          turnIds: Array.from({ length: 3 }, () => attempt.permit.turnId),
+          omittedEarlier: Number.MAX_SAFE_INTEGER,
+        }),
       );
-      if (attempt.controller.signal.aborted) return;
-      outcome = { kind: 'decision', result };
-    } catch (error) {
-      if (attempt.controller.signal.aborted) return;
-      if (error instanceof GoalVerifierInputTooLargeError) {
-        // An oversized request is the proposal's own doing -- a long reason
-        // on top of a full window -- so it is feedback the next turn can act
-        // on, not a limit that stops the Goal.
+      const budgetBytes = GOAL_VERIFIER_REQUEST_BYTE_LIMIT - envelopeBytes;
+      if (budgetBytes < VERIFIER_EVIDENCE_WINDOW_MIN_BYTES) {
         outcome = {
-          kind: 'decision',
-          result: {
-            decision: 'reject',
-            reason: `${error.message}. Keep the proposal reason short and have the decisive checks print compact output in the turn that proposes completion, then propose again.`,
-          },
+          kind: 'usage_limited',
+          reason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
         };
       } else {
-        const reason =
-          error instanceof EvidenceSourceUnavailableError
-            ? error.message
-            : error instanceof Error
-              ? error.message
-              : String(error);
-        outcome = { kind: 'usage_limited', reason };
+        const window = buildGoalVerifierEvidenceWindow(
+          {
+            records,
+            goal: attempt.goal,
+            permit: attempt.permit,
+            proposal: attempt.proposal,
+          },
+          { budgetBytes },
+        );
+        const result = await verifier(
+          verifierInput(attempt, window),
+          attempt.controller.signal,
+        );
+        if (attempt.controller.signal.aborted) return;
+        outcome = { kind: 'decision', result };
       }
+    } catch (error) {
+      if (attempt.controller.signal.aborted) return;
+      const reason =
+        error instanceof EvidenceSourceUnavailableError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      outcome = { kind: 'usage_limited', reason };
     }
     const checkpoint = await recordVerificationOutcome(attempt, outcome);
     if (!checkpoint) return;
@@ -1618,8 +1629,15 @@ export function createGoalRuntime(
                 ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
                 : undefined;
               recoveredCause = recovery.payload.cause;
+              // A checkpoint a previous build left pending is dropped when
+              // this runtime has no checkpoint verifier: checkpoints are
+              // bookkeeping nothing reads any more, not work to resume.
               const pending = recovery.payload.checkpointPending;
-              if (pending && recoveredSnapshot.goal) {
+              if (
+                pending &&
+                recoveredSnapshot.goal &&
+                options.checkpointVerifier
+              ) {
                 checkpointAttempt = createCheckpointAttempt(
                   pending.permit,
                   recoveredSnapshot.goal,

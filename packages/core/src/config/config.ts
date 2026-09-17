@@ -232,10 +232,7 @@ import {
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
+import { GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
@@ -10124,9 +10121,9 @@ export class Config {
       // are recorded rather than reconstructed from session totals.
       ledger: recorder,
       verifier: createGoalVerifier(this),
-      checkpointVerifier: createGoalCheckpointVerifier(this, {
-        timeoutMs: this.goalCheckpointTimeoutMs,
-      }),
+      // No checkpoint verifier: the terminal verifier reads the proposing
+      // turn directly, so nothing consumes checkpoint claims any more, and a
+      // checkpoint that stalled three times used to stop the Goal for it.
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,

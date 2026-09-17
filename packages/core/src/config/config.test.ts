@@ -4518,7 +4518,7 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('arms the checkpoint verifier with the configured timeout', () => {
+    it('does not wire a checkpoint verifier into the Goal runtime', () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
@@ -4528,13 +4528,10 @@ describe('Server Config (config.ts)', () => {
 
       config.getGoalRuntime();
 
-      // Assert the call, not only the getter: the options argument is the
-      // one line that carries the setting into the verifier, and the
-      // getter-only checks above stay green if it is dropped.
-      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.[0]).toBe(config);
-      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
+      // The setting still normalizes, but nothing consumes checkpoint claims
+      // any more, so no checkpoint verifier is created and no checkpoint
+      // side query can run or stall.
+      expect(vi.mocked(createGoalCheckpointVerifier)).not.toHaveBeenCalled();
     });
 
     it('caps the checkpoint ceiling at a wait the default wire honours', () => {

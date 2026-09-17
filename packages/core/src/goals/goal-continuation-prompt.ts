@@ -164,7 +164,7 @@ const FIDELITY_LINE =
  * turn that does not exist invites it to describe one.
  */
 const NO_PROGRESS_LINE =
-  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.';
+  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, report it through update_goal rather than repeating it.';
 
 const COMPLETION_AUDIT_LINE =
   'Before proposing that the Goal is complete, treat completion as unproven: for every explicit requirement in the objective, identify the tool result that proves it and produce it in this turn, matching the scope of the check to the scope of the requirement. Missing, indirect, or self-reported evidence means not done: keep working, and do not redefine success around the work that already exists.';

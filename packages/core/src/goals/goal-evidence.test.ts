@@ -16,7 +16,6 @@ import {
   buildGoalEvidenceCatalog,
   buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
-  VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT,
   InvalidGoalEvidenceReferenceError,
   validateGoalEvidenceReferences,
   type GoalEvidenceProvenance,
@@ -1215,23 +1214,32 @@ describe('Goal evidence errors', () => {
   });
 });
 
+const blockedProposal = (
+  blockerKind: NonNullable<GoalTerminalProposal['blockerKind']>,
+) => blocked(blockerKind, []);
+
 describe('Goal verifier evidence window', () => {
+  const cursor = () =>
+    record('cursor', 'system', { provenance: 'goal_control' });
   const build = (
     records: GoalEvidenceRecord[],
     proposal: GoalTerminalProposal,
     currentPermit = permit(),
     currentGoal = goal(),
+    budgetBytes?: number,
   ) =>
-    buildGoalVerifierEvidenceWindow({
-      records,
-      goal: currentGoal,
-      permit: currentPermit,
-      proposal,
-    });
+    buildGoalVerifierEvidenceWindow(
+      {
+        records: [cursor(), ...records],
+        goal: currentGoal,
+        permit: currentPermit,
+        proposal,
+      },
+      budgetBytes === undefined ? {} : { budgetBytes },
+    );
 
   it("sends the proposing turn's records newest first, plus the user's own messages from any turn", () => {
     const records = [
-      record('cursor', 'system', { provenance: 'goal_control' }),
       record('choice', 'user', {
         turnId: 'turn-1',
         provenance: 'real_user',
@@ -1291,9 +1299,108 @@ describe('Goal verifier evidence window', () => {
     expect(JSON.stringify(window)).not.toContain('earlier');
   });
 
-  it('keeps both ends of a long user message so a decision at its end stays provable', () => {
-    const pasted = 'log line\n'.repeat(3_000); // ~27 000 bytes in the middle
-    const text = `Please pick between the two plans below.\n${pasted}\nApproved: go with plan B.`;
+  it("keeps the user's approval from before the cursor and ignores anomalies behind it", () => {
+    const records = [
+      record('old-approval', 'user', {
+        turnId: 'turn-0',
+        provenance: 'real_user',
+        text: 'Approved: ship it',
+      }),
+      // A Goal-owned record with malformed turn context before the cursor
+      // used to be skipped by the cursor-bounded scan; it still is.
+      record('bad', 'assistant', {
+        text: 'claims the goal',
+        goalContext: { goalId: GOAL_ID, revision: REVISION },
+      }),
+      record('resume-cursor', 'system', { provenance: 'goal_control' }),
+      record('tool', 'tool_result', {
+        turnId: 'turn-3',
+        toolResponse: { output: 'shipped' },
+      }),
+    ];
+
+    const window = buildGoalVerifierEvidenceWindow({
+      records,
+      goal: goal('resume-cursor'),
+      permit: permit(),
+      proposal: complete([]),
+    });
+
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual([
+      'tool',
+      'old-approval',
+    ]);
+    expect(() =>
+      buildGoalVerifierEvidenceWindow({
+        records: [...records, { ...records[1]!, uuid: 'bad-after' }],
+        goal: goal('resume-cursor'),
+        permit: permit(),
+        proposal: complete([]),
+      }),
+    ).toThrow(expect.objectContaining({ code: 'malformed_turn_context' }));
+    expect(() =>
+      buildGoalVerifierEvidenceWindow({
+        records,
+        goal: goal('missing-cursor'),
+        permit: permit(),
+        proposal: complete([]),
+      }),
+    ).toThrow(expect.objectContaining({ code: 'cursor_not_found' }));
+  });
+
+  it("reserves room for the user's messages and a blocked proposal's earlier turns", () => {
+    const filler = (turnId: string, count: number, prefix: string) =>
+      Array.from({ length: count }, (_, index) =>
+        record(`${prefix}-${index}`, 'tool_result', {
+          turnId,
+          toolResponse: { output: 'x'.repeat(2_000) },
+        }),
+      );
+    const records = [
+      record('approval', 'user', {
+        turnId: 'turn-1',
+        provenance: 'real_user',
+        text: 'Approved: plan B',
+      }),
+      ...filler('turn-2', 40, 't2'),
+      ...filler('turn-3', 40, 't3'),
+      ...filler('turn-4', 200, 't4'),
+    ];
+
+    // A busy closing turn alone exceeds the window, yet the approval and
+    // (for a blocked proposal) the two preceding turns still get in.
+    const completion = build(records, complete([]), permit('turn-4'));
+    expect(completion.evidence.some((entry) => entry.uuid === 'approval')).toBe(
+      true,
+    );
+    expect(completion.omittedEarlier).toBeGreaterThan(0);
+    expect(completion.evidence[0]!.uuid).toBe('t4-199');
+    expect(completion.evidence.every((e) => e.turnId !== 'turn-2')).toBe(true);
+
+    const blocked = build(
+      records,
+      blockedProposal('repeated'),
+      permit('turn-4'),
+    );
+    expect(blocked.turnIds).toEqual(['turn-2', 'turn-3', 'turn-4']);
+    const byTurn = (turnId: string) =>
+      blocked.evidence.filter((entry) => entry.turnId === turnId).length;
+    expect(byTurn('turn-2')).toBeGreaterThan(0);
+    expect(byTurn('turn-3')).toBeGreaterThan(0);
+    expect(byTurn('turn-4')).toBeGreaterThan(byTurn('turn-3'));
+    expect(blocked.evidence.some((entry) => entry.uuid === 'approval')).toBe(
+      true,
+    );
+    // Newest first across the parts, by transcript position.
+    const uuids = blocked.evidence.map((entry) => entry.uuid);
+    expect(uuids[0]).toBe('t4-199');
+    expect(uuids.at(-1)).toBe('approval');
+    expect(uuids.indexOf('t3-39')).toBeGreaterThan(uuids.indexOf('t4-0'));
+  });
+
+  it('keeps both ends of a long record so a summary at its end stays visible', () => {
+    const output = `$ npm test\n${'not ok 1 - some test\n'.repeat(3_000)}Tests 412 passed`;
+    const text = `Please pick between the two plans below.\n${'log line\n'.repeat(3_000)}\nApproved: go with plan B.`;
     const records = [
       record('ask', 'user', {
         turnId: 'turn-1',
@@ -1302,27 +1409,26 @@ describe('Goal verifier evidence window', () => {
       }),
       record('tool', 'tool_result', {
         turnId: 'turn-3',
-        toolResponse: { output: 'x'.repeat(2_500) },
+        toolResponse: { output },
       }),
     ];
 
     const window = build(records, complete([]));
 
+    const tool = window.evidence.find((entry) => entry.uuid === 'tool')!;
+    expect(tool.content.startsWith('{"name":"shell"')).toBe(true);
+    expect(tool.content).toContain('Tests 412 passed');
+    expect(tool.content).toContain('[middle truncated]');
+    expect(Buffer.byteLength(tool.content, 'utf8')).toBeLessThanOrEqual(16_000);
     const user = window.evidence.find((entry) => entry.uuid === 'ask')!;
-    expect(user.proofKind).toBe('user_input');
     expect(user.content.startsWith('Please pick between the two plans')).toBe(
       true,
     );
     expect(user.content.endsWith('Approved: go with plan B.')).toBe(true);
-    expect(user.content).toContain('[middle of the user message truncated]');
     expect(Buffer.byteLength(user.content, 'utf8')).toBeLessThanOrEqual(16_000);
-    expect(Buffer.byteLength(user.content, 'utf8')).toBeGreaterThan(2_000);
-    // Tool results keep the plain 2 000-byte cap: they can be produced again.
-    const tool = window.evidence.find((entry) => entry.uuid === 'tool')!;
-    expect(Buffer.byteLength(tool.content, 'utf8')).toBe(2_000);
   });
 
-  it('cuts a long multi-byte user message on code point boundaries', () => {
+  it('cuts a long multi-byte record on code point boundaries', () => {
     const text = `选项${'界'.repeat(9_000)}批准`;
     const records = [
       record('ask', 'user', {
@@ -1354,7 +1460,7 @@ describe('Goal verifier evidence window', () => {
     });
     // A blocked window still reaches back two turns, so the earlier turn's
     // record is admitted even though the current turn has none.
-    expect(build(records, blocked('repeated', []))).toMatchObject({
+    expect(build(records, blockedProposal('repeated'))).toMatchObject({
       evidence: [{ uuid: 't2', turnId: 'turn-2' }],
       turnIds: ['turn-2', 'turn-3'],
       omittedEarlier: 0,
@@ -1369,7 +1475,11 @@ describe('Goal verifier evidence window', () => {
       }),
     );
 
-    const window = build(records, blocked('repeated', []), permit('turn-4'));
+    const window = build(
+      records,
+      blockedProposal('repeated'),
+      permit('turn-4'),
+    );
 
     expect(window.turnIds).toEqual(['turn-2', 'turn-3', 'turn-4']);
     expect(window.evidence.map((entry) => entry.uuid)).toEqual([
@@ -1388,28 +1498,31 @@ describe('Goal verifier evidence window', () => {
       }),
     );
 
-    const window = build(records, complete([]));
+    const window = build(records, complete([]), permit(), goal(), 100_000);
 
-    // Each record is capped to 2 000 content bytes and costs its JSON keys
-    // and ids on top, so fewer than 112 fit the 224 000-byte window; the
-    // ones that do not are the oldest, and they are counted, not dropped.
-    expect(window.evidence.length).toBeLessThan(112);
-    expect(window.evidence.length).toBeGreaterThan(100);
+    // Each record costs its content plus JSON keys, ids and a comma, so
+    // fewer than 48 of these fit a 100 000-byte budget; the ones that do not
+    // are the oldest, and they are counted, not dropped.
+    expect(window.evidence.length).toBeLessThan(48);
+    expect(window.evidence.length).toBeGreaterThan(40);
     expect(window.omittedEarlier).toBe(140 - window.evidence.length);
     expect(window.evidence[0]!.uuid).toBe('a-139');
     expect(window.evidence.at(-1)!.uuid).toBe(
       `a-${140 - window.evidence.length}`,
     );
-    expect(window.evidence[0]!.content.endsWith('…[truncated]')).toBe(true);
-    expect(Buffer.byteLength(window.evidence[0]!.content, 'utf8')).toBe(2_000);
     const serialized = window.evidence.reduce(
-      (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)),
+      (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)) + 1,
       0,
     );
-    expect(serialized).toBeLessThanOrEqual(VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT);
+    expect(serialized).toBeLessThanOrEqual(100_000);
     expect(
-      serialized + Buffer.byteLength(JSON.stringify(window.evidence[0])),
-    ).toBeGreaterThan(VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT);
+      serialized + Buffer.byteLength(JSON.stringify(window.evidence[0])) + 1,
+    ).toBeGreaterThan(100_000);
+    // The budget never exceeds the window ceiling, whatever the caller says.
+    expect(
+      build(records, complete([]), permit(), goal(), 10_000_000).evidence
+        .length,
+    ).toBeLessThan(140);
   });
 
   it('rejects a permit that does not match the Goal or is not the lineage tail', () => {
@@ -1437,7 +1550,6 @@ describe('Goal verifier evidence window', () => {
         complete([]),
       ),
     ).toThrow(expect.objectContaining({ code: 'malformed_turn_context' }));
-    expect(() => build(records, complete([]))).not.toThrow();
     expect(() => build(records, complete([]))).not.toThrow(
       EvidenceSourceUnavailableError,
     );

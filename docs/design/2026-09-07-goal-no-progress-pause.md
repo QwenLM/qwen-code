@@ -81,9 +81,12 @@ better, on the turn where they coincide.
   `limitKind`. The bound stands down when `spentBudget` finds any spent
   allowance, the streak stays on the record, and the gate runs as it would
   have.
-- A checkpoint stall streak. A model that fills the evidence window with prose
+- A checkpoint stall streak. (Historical: since the verifier judges a proposal
+  from the proposing turn directly, `update_goal` no longer answers
+  `checkpointRequired` and no checkpoint runs; the stall streak stays at zero.)
+  A model that fills the evidence window with prose
   and calls no tool is quiet by this bound's measure and overflowing by the
-  checkpoint's, and `update_goal` answers `checkpointRequired` on an
+  checkpoint's, and `update_goal` used to answer `checkpointRequired` on an
   overflowing catalog without recording a proposal. That Goal is drowning in
   evidence, not idling: the pause's remedy (resume) would send it straight
   back into the same window, while the stall breaker stops it with the reason

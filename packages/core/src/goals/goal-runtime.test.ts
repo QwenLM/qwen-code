@@ -58,6 +58,7 @@ import {
   GoalCheckpointVerifierInputTooLargeError,
 } from './goal-checkpoint-verifier.js';
 import {
+  GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
   GoalVerifierInputTooLargeError,
   type GoalVerifier,
 } from './goal-verifier.js';
@@ -1191,10 +1192,10 @@ describe('goal runtime', () => {
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
     const permit = host.started[0];
     const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    // 140 records of 2 000 capped content bytes against a 224 000-byte
-    // window measured on the serialized records: only the newest hundred or
-    // so are sent and the rest are counted, so a turn that ran a hundred
-    // tools no longer stops the Goal -- it is judged from its tail.
+    // 140 records of 2 100 content bytes against a 224 000-byte window
+    // measured on the serialized records: only the newest hundred or so are
+    // sent and the rest are counted, so a turn that ran a hundred tools no
+    // longer stops the Goal -- it is judged from its tail.
     records = verifierEvidenceWindow(permit, cursorId, 140).map((record) =>
       record.type === 'assistant'
         ? {
@@ -1212,7 +1213,7 @@ describe('goal runtime', () => {
 
     expect(verifier).toHaveBeenCalledOnce();
     const input = vi.mocked(verifier).mock.calls[0]![0];
-    expect(input.evidence.length).toBeGreaterThan(100);
+    expect(input.evidence.length).toBeGreaterThan(90);
     expect(input.evidence.length).toBeLessThan(112);
     expect(input.evidence[0]!.uuid).toBe('assistant-evidence-139');
     expect(input.evidence.at(-1)!.uuid).toBe(
@@ -1228,7 +1229,44 @@ describe('goal runtime', () => {
     ]);
   });
 
-  it('rejects with feedback instead of stopping when the verifier request is too large', async () => {
+  it('stops with a clear reason when the objective leaves the verifier no room for evidence', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    // /goal set accepts any length; a pasted 250 kB specification is the
+    // objective, and no evidence window can fit next to it.
+    await runtime.dispatch({
+      action: 'create',
+      objective: 'x'.repeat(250_000),
+    });
+    const permit = host.started[0];
+    records = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        lastReason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+      },
+    });
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('stops the Goal when the verifier still refuses its request as too large', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
     const evidenceSource = fakeEvidenceSource(() => records);
@@ -1251,23 +1289,16 @@ describe('goal runtime', () => {
 
     await runtime.finishTurn(permit);
 
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'verifier_reject',
-    ]);
+    // The window is sized from the measured envelope, so this is a bug, not
+    // a shape the model can fix; it stops with the real reason on record.
     expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
+      activity: 'idle',
       goal: {
-        status: 'active',
+        status: 'usage_limited',
         lastReason: expect.stringContaining('exceeds the 256000-byte limit'),
       },
     });
-    expect(runtime.getSnapshot().goal?.limitKind).toBeUndefined();
-    expect(host.started).toHaveLength(2);
-    expect(runtime.getVerifierFeedback(host.started[1]!)).toContain(
-      'Keep the proposal reason short',
-    );
+    expect(host.started).toHaveLength(1);
   });
 
   it('lets a repeated blocker streak reach the verifier when the catalog truncates', async () => {

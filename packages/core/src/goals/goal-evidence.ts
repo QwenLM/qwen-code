@@ -41,30 +41,43 @@ const CHECKPOINT_BYTE_THRESHOLD = 19_200;
 const CHECKPOINT_CONTENT_BYTE_LIMIT = 2_000;
 const CHECKPOINT_CONTENT_TRUNCATION_MARKER = '\n\u2026[truncated]';
 /**
- * How much of a user's own message the verifier window keeps, and how that
- * budget is split. A tool result or model text that is cut short can be
- * produced again in the next turn; a user message cannot, and it is the
- * only thing that proves what the user asked, chose or approved. Those
- * messages are also front- and back-loaded -- instructions first, a pasted
- * log in the middle, the decision at the end -- so the cut is taken out of
- * the middle, marked, and the tail gets the larger share.
+ * How much of one record the verifier window keeps, and how that budget is
+ * split. Records are front- and back-loaded: a tool result opens with the
+ * command and ends with its summary line ("Tests 412 passed"), a user
+ * message opens with the instruction and ends with the decision, so the cut
+ * is taken out of the middle, marked, and the tail gets the larger share.
+ * The checkpoint window keeps its own, smaller head-only cut.
  */
-const USER_EVIDENCE_CONTENT_BYTE_LIMIT = 16_000;
-const USER_EVIDENCE_HEAD_BYTES = 6_000;
-const USER_EVIDENCE_MIDDLE_TRUNCATION_MARKER =
-  '\n\u2026[middle of the user message truncated]\n';
+const VERIFIER_EVIDENCE_CONTENT_BYTE_LIMIT = 16_000;
+const VERIFIER_EVIDENCE_HEAD_BYTES = 6_000;
+const VERIFIER_EVIDENCE_MIDDLE_TRUNCATION_MARKER =
+  '\n\u2026[middle truncated]\n';
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
 const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
 /**
- * Serialized bytes the verifier evidence window may hold, measured on each
- * record exactly as the verifier request carries it (uuid, provenance,
- * turnId, proofKind and content, with their JSON keys). The verifier refuses
- * a request over 256 000 bytes, and the rest of that request -- a proposal
- * reason of up to 16 000 bytes, the objective, a blocked policy and the
- * envelope keys -- fits in the 32 000 bytes left over, so a window built at
- * this limit always reaches the model.
+ * The most serialized bytes the verifier evidence window ever holds,
+ * measured on each record exactly as the verifier request carries it
+ * (uuid, provenance, turnId, proofKind and content, with their JSON keys and
+ * the comma between records). The caller passes the budget the request has
+ * actually left after its envelope -- objective, proposal reason, blocked
+ * policy -- and this is the ceiling on that budget.
  */
 export const VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT = 224_000;
+/**
+ * Below this budget the window cannot carry one full record next to the
+ * envelope, so the proposal cannot be judged at all: the objective or the
+ * proposal reason is the problem, not the evidence.
+ */
+export const VERIFIER_EVIDENCE_WINDOW_MIN_BYTES = 32_000;
+/**
+ * Bytes of the window held back for the user's own messages and, for a
+ * blocked proposal, for each of the two preceding turns. A busy closing
+ * turn -- a hundred tool calls -- fills a newest-first window by itself, and
+ * without a reserve the user's earlier approval and the turns a repeated
+ * blocker is judged across would never get in.
+ */
+const VERIFIER_USER_EVIDENCE_RESERVE_BYTES = 32_000;
+const VERIFIER_PRIOR_TURN_RESERVE_BYTES = 32_000;
 
 export type GoalEvidenceProvenance =
   | 'real_user'
@@ -123,8 +136,9 @@ export interface GoalVerifierEvidenceRecord {
 
 /**
  * The evidence a terminal proposal is judged from: the records of the Goal
- * turns the proposal's policy speaks about, newest first, bounded by
- * {@link VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT}.
+ * turns the proposal's policy speaks about, newest first, bounded by the
+ * budget the verifier request has left (at most
+ * {@link VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT}).
  *
  * A completion is judged from the turn that proposed it, so the decisive
  * checks have to run in that turn. A blocked proposal is judged from the
@@ -143,12 +157,22 @@ export interface GoalVerifierEvidenceWindow {
   /** The Goal turns the window covers, oldest first; the current turn is last. */
   turnIds: string[];
   /**
-   * Eligible records left out because the window reached its byte limit.
-   * Always the oldest ones: the newest record is admitted first, and once
-   * one does not fit nothing older is tried, so the window is a contiguous
-   * newest-first prefix rather than a best packing.
+   * Eligible records left out because the window reached its byte budget.
+   * Within each part of the window -- the current turn, the user's messages,
+   * a blocked proposal's preceding turns -- the newest record is admitted
+   * first and once one does not fit nothing older is tried, so each part is
+   * a contiguous newest-first prefix rather than a best packing.
    */
   omittedEarlier: number;
+}
+
+export interface BuildGoalVerifierEvidenceWindowOptions {
+  /**
+   * Serialized bytes the verifier request has left for evidence once its
+   * envelope is counted. Capped at {@link VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT};
+   * that ceiling is also the default.
+   */
+  budgetBytes?: number;
 }
 
 export interface GoalEvidenceContext {
@@ -577,7 +601,7 @@ export class GoalEvidenceCheckpointAccumulator {
       turnId: context.turnId,
       preview,
       proofKind: proofKindOf(provenance),
-      content: capEvidenceContent(content),
+      content: capCheckpointContent(content),
     });
   }
 
@@ -718,13 +742,17 @@ export function validateGoalEvidenceReferences(
  *
  * Throws {@link EvidenceSourceUnavailableError} when the transcript cannot be
  * attributed to this permit: a permit that does not match the Goal revision,
- * a Goal-owned record with malformed turn context, a turn that re-enters the
- * lineage, or a current turn that is in the lineage but not at its tail. A
- * current turn that has recorded nothing yet is not an error: its window is
- * empty, and the verifier answers that with a rejection the model can act on.
+ * a missing evidence cursor, a Goal-owned record after the cursor with
+ * malformed turn context, a turn that re-enters the lineage, or a current
+ * turn that is in the lineage but not at its tail. Records before the cursor
+ * are not examined for lineage, so an anomaly a resume or edit already moved
+ * past stays behind it. A current turn that has recorded nothing yet is not
+ * an error: its window is empty, and the verifier answers that with a
+ * rejection the model can act on.
  */
 export function buildGoalVerifierEvidenceWindow(
   input: GoalEvidenceValidationInput,
+  options: BuildGoalVerifierEvidenceWindowOptions = {},
 ): GoalVerifierEvidenceWindow {
   if (
     input.permit.goalId !== input.goal.goalId ||
@@ -736,9 +764,8 @@ export function buildGoalVerifierEvidenceWindow(
       'The current Goal permit does not match the Goal evidence revision.',
     );
   }
-  // The whole chain, not the part after the cursor: a blocked window spans
-  // three turns, which can reach behind a cursor that a resume repointed.
-  const lineageTurnIds = collectLineageTurnIds(input, -1);
+  const cursorIndex = locateEvidenceCursor(input);
+  const lineageTurnIds = collectLineageTurnIds(input, cursorIndex);
   const currentIndex = lineageTurnIds.indexOf(input.permit.turnId);
   if (currentIndex !== -1 && currentIndex !== lineageTurnIds.length - 1) {
     throw new EvidenceSourceUnavailableError(
@@ -748,16 +775,26 @@ export function buildGoalVerifierEvidenceWindow(
   }
   const priorTurnIds =
     currentIndex === -1 ? lineageTurnIds : lineageTurnIds.slice(0, -1);
-  const turnIds = [
-    ...(input.proposal.status === 'blocked' ? priorTurnIds.slice(-2) : []),
-    input.permit.turnId,
-  ];
-  const windowTurnIds = new Set(turnIds);
+  const priorWindowTurnIds =
+    input.proposal.status === 'blocked' ? priorTurnIds.slice(-2) : [];
+  const turnIds = [...priorWindowTurnIds, input.permit.turnId];
 
-  const evidence: GoalVerifierEvidenceRecord[] = [];
-  let omittedEarlier = 0;
-  let bytes = 0;
-  let full = false;
+  // Every eligible record, newest first, already cut to size. The user's
+  // own messages are taken from anywhere in the chain -- an approval given
+  // before a resume repointed the cursor is still the user's approval --
+  // while everything else has to belong to a window turn after the cursor.
+  interface Candidate {
+    index: number;
+    entry: GoalVerifierEvidenceRecord;
+    bytes: number;
+  }
+  const current: Candidate[] = [];
+  const user: Candidate[] = [];
+  // One list per preceding turn, so each turn gets its own reserve; a single
+  // newest-first list would let the nearer turn spend both shares.
+  const prior = new Map<string, Candidate[]>(
+    priorWindowTurnIds.map((turnId) => [turnId, [] as Candidate[]]),
+  );
   for (let index = input.records.length - 1; index >= 0; index -= 1) {
     const record = input.records[index]!;
     const provenance = coherentEvidenceProvenance(record);
@@ -766,15 +803,22 @@ export function buildGoalVerifierEvidenceWindow(
     if (
       !context ||
       context.goalId !== input.goal.goalId ||
-      context.revision !== input.goal.revision ||
-      (!windowTurnIds.has(context.turnId) && provenance !== 'real_user')
+      context.revision !== input.goal.revision
     ) {
       continue;
     }
-    const content =
+    const group =
       provenance === 'real_user'
-        ? capUserEvidenceContent(evidenceContent(record, provenance))
-        : capEvidenceContent(evidenceContent(record, provenance));
+        ? user
+        : index <= cursorIndex
+          ? undefined
+          : context.turnId === input.permit.turnId
+            ? current
+            : prior.get(context.turnId);
+    if (!group) continue;
+    const content = capVerifierEvidenceContent(
+      evidenceContent(record, provenance),
+    );
     if (!content) continue;
     const entry: GoalVerifierEvidenceRecord = {
       uuid: record.uuid,
@@ -783,16 +827,79 @@ export function buildGoalVerifierEvidenceWindow(
       proofKind: proofKindOf(provenance),
       content,
     };
-    const entryBytes = Buffer.byteLength(JSON.stringify(entry), 'utf8');
-    if (full || bytes + entryBytes > VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT) {
-      full = true;
-      omittedEarlier += 1;
-      continue;
-    }
-    bytes += entryBytes;
-    evidence.push(entry);
+    group.push({
+      index,
+      entry,
+      // The comma that separates records in the request array counts too.
+      bytes: Buffer.byteLength(JSON.stringify(entry), 'utf8') + 1,
+    });
   }
-  return { evidence, turnIds, omittedEarlier };
+
+  const budget = Math.max(
+    0,
+    Math.min(
+      VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT,
+      options.budgetBytes ?? VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT,
+    ),
+  );
+  const admitted = new Set<number>();
+  let used = 0;
+  // Admits a contiguous newest-first prefix of `group`, spending at most
+  // `share` of the budget on this pass. A later pass with no share limit
+  // resumes exactly where this one stopped, so the prefix stays contiguous.
+  const admit = (group: readonly Candidate[], share: number): void => {
+    let spent = 0;
+    for (const candidate of group) {
+      if (admitted.has(candidate.index)) continue;
+      if (spent + candidate.bytes > share || used + candidate.bytes > budget) {
+        break;
+      }
+      admitted.add(candidate.index);
+      spent += candidate.bytes;
+      used += candidate.bytes;
+    }
+  };
+  admit(user, VERIFIER_USER_EVIDENCE_RESERVE_BYTES);
+  for (const group of prior.values()) {
+    admit(group, VERIFIER_PRIOR_TURN_RESERVE_BYTES);
+  }
+  admit(current, Number.POSITIVE_INFINITY);
+  admit(user, Number.POSITIVE_INFINITY);
+  for (const group of prior.values()) {
+    admit(group, Number.POSITIVE_INFINITY);
+  }
+
+  const candidates = [...current, ...user, ...prior.values()].flat();
+  const evidence = candidates
+    .filter((candidate) => admitted.has(candidate.index))
+    .sort((left, right) => right.index - left.index)
+    .map((candidate) => candidate.entry);
+  return {
+    evidence,
+    turnIds,
+    omittedEarlier: candidates.length - evidence.length,
+  };
+}
+
+/** Index of the Goal's evidence cursor in the active transcript chain. */
+function locateEvidenceCursor(input: GoalEvidenceContext): number {
+  const cursorId = input.goal.evidenceCursor.recordId;
+  if (cursorId === null) {
+    throw new EvidenceSourceUnavailableError(
+      'cursor_unset',
+      'The Goal evidence cursor is not available.',
+    );
+  }
+  const cursorIndex = input.records.findIndex(
+    (record) => record.uuid === cursorId,
+  );
+  if (cursorIndex === -1) {
+    throw new EvidenceSourceUnavailableError(
+      'cursor_not_found',
+      `The Goal evidence cursor ${cursorId} is not in the active transcript chain.`,
+    );
+  }
+  return cursorIndex;
 }
 
 function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
@@ -1259,63 +1366,54 @@ export function capPreviewBytes(value: string, limit: number): string {
 }
 
 /**
- * Keeps the first {@link USER_EVIDENCE_HEAD_BYTES} and the last of the
- * remaining budget of a user message, with a marker where the middle was.
+ * Keeps the first {@link VERIFIER_EVIDENCE_HEAD_BYTES} and the last of the
+ * remaining budget of a record, with a marker where the middle was.
  */
-function capUserEvidenceContent(content: string): string {
-  if (Buffer.byteLength(content, 'utf8') <= USER_EVIDENCE_CONTENT_BYTE_LIMIT) {
+function capVerifierEvidenceContent(content: string): string {
+  if (
+    Buffer.byteLength(content, 'utf8') <= VERIFIER_EVIDENCE_CONTENT_BYTE_LIMIT
+  ) {
     return content;
   }
   const tailBudget =
-    USER_EVIDENCE_CONTENT_BYTE_LIMIT -
-    USER_EVIDENCE_HEAD_BYTES -
-    Buffer.byteLength(USER_EVIDENCE_MIDDLE_TRUNCATION_MARKER, 'utf8');
-  return `${takeLeadingBytes(content, USER_EVIDENCE_HEAD_BYTES)}${USER_EVIDENCE_MIDDLE_TRUNCATION_MARKER}${takeTrailingBytes(content, tailBudget)}`;
+    VERIFIER_EVIDENCE_CONTENT_BYTE_LIMIT -
+    VERIFIER_EVIDENCE_HEAD_BYTES -
+    Buffer.byteLength(VERIFIER_EVIDENCE_MIDDLE_TRUNCATION_MARKER, 'utf8');
+  return `${capPreviewBytes(content, VERIFIER_EVIDENCE_HEAD_BYTES)}${VERIFIER_EVIDENCE_MIDDLE_TRUNCATION_MARKER}${takeTrailingBytes(content, tailBudget)}`;
 }
 
-/** The longest prefix of `value` within `budget` UTF-8 bytes, on a code point boundary. */
-function takeLeadingBytes(value: string, budget: number): string {
-  let byteLength = 0;
-  let cutoff = 0;
-  for (const codePoint of value) {
-    const codePointBytes = Buffer.byteLength(codePoint, 'utf8');
-    if (byteLength + codePointBytes > budget) break;
-    byteLength += codePointBytes;
-    cutoff += codePoint.length;
-  }
-  return value.slice(0, cutoff);
-}
-
-/** The longest suffix of `value` within `budget` UTF-8 bytes, on a code point boundary. */
+/**
+ * The longest suffix of `value` within `budget` UTF-8 bytes, on a code point
+ * boundary. Walks back from the end one UTF-16 unit at a time, so the cost
+ * is the budget, not the size of a pasted log.
+ */
 function takeTrailingBytes(value: string, budget: number): string {
-  const codePoints = [...value];
   let byteLength = 0;
-  let start = codePoints.length;
-  for (let index = codePoints.length - 1; index >= 0; index -= 1) {
-    const codePointBytes = Buffer.byteLength(codePoints[index]!, 'utf8');
+  let start = value.length;
+  while (start > 0) {
+    let next = start - 1;
+    const unit = value.charCodeAt(next);
+    if (unit >= 0xdc00 && unit <= 0xdfff && next > 0) {
+      const lead = value.charCodeAt(next - 1);
+      if (lead >= 0xd800 && lead <= 0xdbff) next -= 1;
+    }
+    const codePointBytes = Buffer.byteLength(value.slice(next, start), 'utf8');
     if (byteLength + codePointBytes > budget) break;
     byteLength += codePointBytes;
-    start = index;
+    start = next;
   }
-  return codePoints.slice(start).join('');
+  return value.slice(start);
 }
 
-function capEvidenceContent(content: string): string {
+/** Cuts checkpoint window content to its head-only byte limit, with a marker. */
+function capCheckpointContent(content: string): string {
   if (Buffer.byteLength(content, 'utf8') <= CHECKPOINT_CONTENT_BYTE_LIMIT) {
     return content;
   }
   const budget =
     CHECKPOINT_CONTENT_BYTE_LIMIT -
     Buffer.byteLength(CHECKPOINT_CONTENT_TRUNCATION_MARKER, 'utf8');
-  let byteLength = 0;
-  let cutoff = 0;
-  for (const codePoint of content) {
-    const codePointBytes = Buffer.byteLength(codePoint, 'utf8');
-    if (byteLength + codePointBytes > budget) break;
-    byteLength += codePointBytes;
-    cutoff += codePoint.length;
-  }
-  return `${content.slice(0, cutoff)}${CHECKPOINT_CONTENT_TRUNCATION_MARKER}`;
+  return `${capPreviewBytes(content, budget)}${CHECKPOINT_CONTENT_TRUNCATION_MARKER}`;
 }
 
 function evidenceContent(

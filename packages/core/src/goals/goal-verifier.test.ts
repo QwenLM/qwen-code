@@ -11,6 +11,7 @@ import {
   createGoalVerifier,
   GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
   GoalVerifierInputTooLargeError,
+  measureGoalVerifierEnvelopeBytes,
   parseGoalVerifierText,
   type GoalVerifierInput,
 } from './goal-verifier.js';
@@ -229,56 +230,68 @@ describe('createGoalVerifier', () => {
     expect(generateText).toHaveBeenCalledOnce();
   });
 
-  it('sends a window built at its own budget with the longest allowed reason', async () => {
+  it('sends a window sized from the measured envelope, with the longest allowed reason', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
     // Production ids are 36-character UUIDs; the per-record JSON overhead is
-    // what the window budget has to leave room for, so model it faithfully.
+    // what the budget has to leave room for, so model it faithfully.
     const goalId = '0f8c1d2e-3a4b-4c5d-8e6f-7a8b9c0d1e2f';
     const turnId = '9e8d7c6b-5a4f-4e3d-9c2b-1a0f9e8d7c6b';
-    const records: GoalEvidenceRecord[] = Array.from(
-      { length: 140 },
-      (_, index) => ({
+    const records: GoalEvidenceRecord[] = [
+      { uuid: 'cursor', type: 'system', provenance: 'goal_control' },
+      ...Array.from({ length: 140 }, (_, index) => ({
         uuid: `${index.toString(16).padStart(8, '0')}-1111-4222-8333-444455556666`,
-        type: 'assistant',
-        provenance: 'assistant_output',
+        type: 'assistant' as const,
+        provenance: 'assistant_output' as const,
         goalContext: { goalId, revision: 1, turnId },
-        message: { parts: [{ text: 'x'.repeat(2_100) }] },
-      }),
-    );
-    const objective = 'o'.repeat(1_500);
+        message: { parts: [{ text: '"\\'.repeat(1_050) }] },
+      })),
+    ];
+    const objective = '"o\\'.repeat(6_000);
     const reason = '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3));
     const proposal = {
       status: 'blocked' as const,
       reason,
       blockerKind: 'repeated' as const,
     };
-    const window = buildGoalVerifierEvidenceWindow({
-      records,
-      goal: {
-        goalId,
-        revision: 1,
-        objective,
-        status: 'active',
-        evidenceCursor: { recordId: null },
-        turnCount: 1,
-        activeTimeMs: 0,
-        tokensUsed: 0,
-        createdAt: 0,
-        updatedAt: 0,
-      },
-      permit: { goalId, revision: 1, turnId },
+    const base = {
+      goal: { goalId, revision: 1, objective },
+      currentTurnId: turnId,
       proposal,
+      blockedPolicy: 'p'.repeat(1_500),
+    };
+    const envelopeBytes = measureGoalVerifierEnvelopeBytes({
+      ...base,
+      evidence: [],
+      evidenceTurnIds: [turnId, turnId, turnId],
+      omittedEarlier: Number.MAX_SAFE_INTEGER,
     });
+    const window = buildGoalVerifierEvidenceWindow(
+      {
+        records,
+        goal: {
+          goalId,
+          revision: 1,
+          objective,
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+        permit: { goalId, revision: 1, turnId },
+        proposal,
+      },
+      { budgetBytes: GOAL_VERIFIER_REQUEST_BYTE_LIMIT - envelopeBytes },
+    );
     expect(window.omittedEarlier).toBeGreaterThan(0);
 
     await expect(
       createGoalVerifier(config)({
-        goal: { goalId, revision: 1, objective },
-        currentTurnId: turnId,
-        proposal,
-        blockedPolicy: 'p'.repeat(1_500),
+        ...base,
         evidence: window.evidence,
         evidenceTurnIds: window.turnIds,
         omittedEarlier: window.omittedEarlier,
@@ -287,9 +300,14 @@ describe('createGoalVerifier', () => {
     const request = generateText.mock.calls[0]![0] as Parameters<
       BaseLlmClient['generateText']
     >[0];
-    expect(
-      Buffer.byteLength(request.contents[0]?.parts?.[0]?.text ?? '', 'utf8'),
-    ).toBeLessThanOrEqual(GOAL_VERIFIER_REQUEST_BYTE_LIMIT);
+    const bytes = Buffer.byteLength(
+      request.contents[0]?.parts?.[0]?.text ?? '',
+      'utf8',
+    );
+    expect(bytes).toBeLessThanOrEqual(GOAL_VERIFIER_REQUEST_BYTE_LIMIT);
+    // The budget is used, not merely respected: one more record would not fit.
+    const oneMore = Buffer.byteLength(JSON.stringify(window.evidence[0])) + 1;
+    expect(bytes + oneMore).toBeGreaterThan(GOAL_VERIFIER_REQUEST_BYTE_LIMIT);
   });
 
   it('rejects an unbounded verifier request before calling the provider', async () => {
