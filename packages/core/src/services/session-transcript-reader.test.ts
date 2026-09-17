@@ -48,6 +48,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 import { Storage } from '../config/storage.js';
 import type { Config } from '../config/config.js';
 import { CompressionStatus } from '../core/turn.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   SessionSourceService,
   type SessionSourcesSnapshot,
@@ -128,6 +129,97 @@ describe('SessionTranscriptReader', () => {
     );
     return filePath;
   }
+
+  it.each([false, true])(
+    'restores completed slash commands consistently with compression=%s',
+    async (compressed) => {
+      const answer = record('a1', null, 'previous answer');
+      const prefix: ChatRecord = compressed
+        ? {
+            ...answer,
+            type: 'system',
+            subtype: 'chat_compression',
+            message: undefined,
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 50,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+              compressedHistory: [answer.message!],
+            },
+          }
+        : answer;
+      const user = record('u1', 'a1', '/docs');
+      const output: ChatRecord = {
+        ...record('output', 'u1', ''),
+        type: 'system',
+        subtype: 'slash_command',
+        message: undefined,
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/docs',
+          outputHistoryItems: [
+            { type: 'assistant', text: 'Documentation URL' },
+          ],
+        },
+      };
+      await writeRecords([prefix, user, output]);
+      const service = new SessionService(workspaceDir, {
+        runtimeBaseDir: runtimeDir,
+      });
+      const loaded = await service.loadSession(sessionId);
+      const history = buildApiHistoryFromConversation(loaded!.conversation);
+      expect(history).toEqual([answer.message]);
+      expect(detectTurnInterruption(history).kind).toBe('none');
+      for (const replay of [
+        { kind: 'none' },
+        { kind: 'all', hideInheritedHistory: false },
+      ] as const) {
+        const projection = await service.readRestoreProjection(sessionId, {
+          replay,
+        });
+        expect(projection?.runtime.apiHistory).toEqual(history);
+        if (replay.kind === 'all') {
+          expect(projection?.replay?.records).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ uuid: 'u1', message: user.message }),
+              expect.objectContaining({
+                uuid: 'output',
+                systemPayload: output.systemPayload,
+              }),
+            ]),
+          );
+        }
+      }
+
+      const invocation: ChatRecord = {
+        ...output,
+        uuid: 'invocation',
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/docs',
+          sentToModel: true,
+        },
+      };
+      await writeRecords([
+        prefix,
+        user,
+        invocation,
+        { ...output, parentUuid: 'invocation' },
+      ]);
+      const custom = await service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      });
+      expect(custom?.runtime.apiHistory).toEqual([
+        answer.message,
+        user.message,
+      ]);
+      expect(detectTurnInterruption(custom!.runtime.apiHistory).kind).toBe(
+        'interrupted_prompt',
+      );
+    },
+  );
 
   it('round-trips a recorded Goal turn end through selective restore, fork, and rewind', async () => {
     const config = {
