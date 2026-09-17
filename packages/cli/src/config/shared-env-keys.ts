@@ -61,6 +61,10 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // The name-only lock is a deployment policy. A project that wants it sets
+  // tools.workflowNameOnly, which a workspace may only turn on; a project
+  // .env must not be able to unset the operator's exported value.
+  'QWEN_CODE_WORKFLOW_NAME_ONLY',
   // The review prebuild (commands/review/lib/prebuild.ts) is an operator
   // decision: CI welds it as real step env, a local operator exports it. A
   // project `.env` must not opt its own review into the blocking

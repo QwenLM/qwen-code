@@ -493,6 +493,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -604,6 +605,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -694,6 +696,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -775,6 +778,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -827,6 +831,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never;
@@ -911,6 +916,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -987,6 +993,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1052,6 +1059,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1184,6 +1192,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never);
@@ -1236,6 +1245,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1282,6 +1292,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1349,6 +1360,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     };
@@ -1692,6 +1704,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1955,6 +1968,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2027,6 +2041,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2276,6 +2291,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2511,6 +2527,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2722,6 +2739,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2851,6 +2869,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2979,6 +2998,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3103,6 +3123,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3262,6 +3283,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3576,6 +3598,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3751,6 +3774,7 @@ describe('startInteractiveUI', () => {
       // options; the messaging path is covered in startInteractiveUI.test.
       agents: { crossSessionMessaging: false },
     },
+    getSystemHooks: () => undefined,
     getUserHooks: () => undefined,
     getProjectHooks: () => undefined,
   } as LoadedSettings;

@@ -294,8 +294,9 @@ is never automatically mounted.
 Inherited file provenance marks trust without giving the child ownership of the
 ancestor's reload scope. Reload only removes keys known from the child's own
 files or settings; surviving ancestor values retain their provenance in later
-child CLIs. A malformed definition whose AST and lenient parser disagree on its
-name reserves both names when refusing an execution declaration.
+child CLIs. A malformed definition reserves every usable top-level AST name when
+refusing an execution declaration. The lenient parser's name is used only when
+the AST resolves no usable name; prose cannot add names alongside AST declarations.
 
 ## Lifecycle and recovery
 

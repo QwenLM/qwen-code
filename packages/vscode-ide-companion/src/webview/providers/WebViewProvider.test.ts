@@ -2684,6 +2684,31 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       'not a forwarded loopback address',
     );
   });
+
+  it('refuses an IPv6 loopback that the webview CSP cannot express', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://[::1]:52100',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: { message?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data?.message).toContain(
+      'cannot connect to an IPv6 literal',
+    );
+  });
 });
 
 describe('WebViewProvider web-shell permission bridge', () => {

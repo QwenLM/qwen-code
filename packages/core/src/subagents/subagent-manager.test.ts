@@ -449,6 +449,59 @@ You are a helpful assistant.
       },
     );
 
+    it.each(
+      ['|', '>'].flatMap((style) =>
+        [
+          'executor:\n\tcommand: acp-reviewer',
+          'executionBackend: container\nmetadata:\n\tcommand: example',
+        ].map((declaration) => ({ style, declaration })),
+      ),
+    )(
+      'does not reserve names from $style prose on refusal: $declaration',
+      async ({ style, declaration }) => {
+        const projectDir = path.join(
+          mockConfig.getProjectRoot(),
+          '.qwen',
+          'agents',
+        );
+        vi.mocked(fs.readdir).mockImplementation(
+          async (directory) =>
+            (directory === projectDir ? ['reviewer.md'] : []) as never,
+        );
+        vi.mocked(fs.readFile).mockResolvedValue(
+          `---\nname: reviewer\ndescription: ${style}\n  This agent documents other agents.\n  name: explore\n${declaration}\n---\nReview the project carefully.\n`,
+        );
+
+        const refusals = new Map<string, SubagentError>();
+        expect(await loadSubagentFromDir(projectDir, refusals)).toEqual([]);
+        expect.soft([...refusals.keys()]).toEqual(['reviewer']);
+        await expect(manager.loadSubagent('Explore')).resolves.toMatchObject({
+          name: 'Explore',
+          isBuiltin: true,
+        });
+        await expect(manager.loadSubagent('reviewer')).rejects.toMatchObject({
+          subagentName: 'reviewer',
+        });
+      },
+    );
+
+    it('retains the lenient refusal name when the AST name cannot resolve', async () => {
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      vi.mocked(fs.readdir).mockResolvedValue(['reviewer.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: *missing\ndescription: Project agent\nexecutor: {kind: invalid, command: runner}\n---\nReview the project.\n',
+      );
+
+      const refusals = new Map<string, SubagentError>();
+      expect(await loadSubagentFromDir(projectDir, refusals)).toEqual([]);
+      expect([...refusals.keys()]).toEqual(['*missing']);
+      expect(refusals.get('*missing')?.subagentName).toBe('*missing');
+    });
+
     it.each([
       { yamlName: '123', name: '123' },
       { yamlName: 'true', name: 'true' },

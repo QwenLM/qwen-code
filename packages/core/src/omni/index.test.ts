@@ -75,6 +75,74 @@ describe('sanitizeErrorMessage', () => {
     expect(sanitizeErrorMessage(err)).not.toContain('/opt/data');
     expect(sanitizeErrorMessage(err)).toContain('clip.mp4');
   });
+
+  it('scrubs a known path the filesystem re-spelled', () => {
+    // A filesystem reports a path as the platform resolved it, not as the
+    // caller spelled it: on Windows `/Users/a/…` comes back `C:\Users\a\…`,
+    // and the pattern pass stops at the first space or quote inside a
+    // segment, so the verbatim replacement alone leaks the parent (#12082).
+    for (const [known, parent, message] of [
+      [
+        "/Users/a/it's (v2)+final@x/clip.mp4",
+        "it's (v2)+final@x",
+        String.raw`ENOENT: no such file or directory, stat 'C:\Users\a\it's (v2)+final@x\clip.mp4'`,
+      ],
+      [
+        '/Users/a/My Videos/clip.mp4',
+        'My Videos',
+        String.raw`ENOENT: no such file or directory, stat 'C:\Users\a\My Videos\clip.mp4'`,
+      ],
+      [
+        'C:/Users/a/My Videos/clip.mp4',
+        'My Videos',
+        String.raw`ENOENT: no such file or directory, stat 'C:\Users\a\My Videos\clip.mp4'`,
+      ],
+    ] as const) {
+      const out = sanitizeErrorMessage(new Error(message), [known]);
+      expect(out).not.toContain(parent);
+      expect(out).toContain('clip.mp4');
+    }
+  });
+
+  it('collapses a sibling path that shares only the known path dirs', () => {
+    // The known-path pass matches the whole path, never its directories
+    // alone: stripping the dirs takes the separator the pattern pass anchors
+    // on, and the sibling survives as 'cache/tmp.aac' — a directory name the
+    // pattern pass removes when the known path is left in place.
+    const err = new Error(
+      'ffmpeg: /home/user/media/cache/tmp.aac: No such file or directory',
+    );
+    const out = sanitizeErrorMessage(err, ['/home/user/media/clip.mp4']);
+    expect(out).not.toContain('cache');
+    expect(out).toContain('tmp.aac');
+  });
+
+  it('scrubs every occurrence of a re-spelled known path, drive included', () => {
+    const err = new Error(
+      String.raw`ffmpeg: C:\Users\a\My Videos\clip.mp4: Invalid data found when processing input (C:\Users\a\My Videos\clip.mp4)`,
+    );
+    expect(sanitizeErrorMessage(err, ['/Users/a/My Videos/clip.mp4'])).toBe(
+      'ffmpeg: clip.mp4: Invalid data found when processing input (clip.mp4)',
+    );
+  });
+
+  it('keeps a basename containing replacement patterns intact', () => {
+    // Exact assertions catch replacement-string expansion of `$&` in both
+    // the verbatim and re-spelling passes.
+    const known = '/Users/a b/x$&y.mp4';
+    for (const [message, expected] of [
+      [
+        String.raw`ENOENT: no such file or directory, stat '/Users/a b/x$&y.mp4'`,
+        String.raw`ENOENT: no such file or directory, stat 'x$&y.mp4'`,
+      ],
+      [
+        String.raw`ENOENT: no such file or directory, stat 'C:\Users\a b\x$&y.mp4'`,
+        String.raw`ENOENT: no such file or directory, stat 'x$&y.mp4'`,
+      ],
+    ] as const) {
+      expect(sanitizeErrorMessage(new Error(message), [known])).toBe(expected);
+    }
+  });
 });
 
 describe('effectiveMaxDownloadFileBytes', () => {
@@ -767,10 +835,8 @@ describe('readMediaViaOmniDelivery result shape', () => {
     }));
     const { readMediaViaOmniDelivery } = await import('./index.js');
 
-    // Each fixture is resolved into this platform's own spelling before it
-    // reaches the pipeline: fs reports the resolved path, so a POSIX spelling
-    // on Windows is a different input shape — scrubbing one is tracked in
-    // #12082, not asserted here.
+    // These fixtures use platform-native spelling; cross-spelling is covered
+    // by the unit case above and the integration case below.
     const cases = [
       ['/Users/张三/视频/clip.mp4', '/Users/张三'],
       ['/Users/a/videos/~draft.mp4', '/Users/a/videos'],
@@ -795,39 +861,34 @@ describe('readMediaViaOmniDelivery result shape', () => {
     }
   });
 
-  // A path spelled differently from the way the filesystem reports it still
-  // leaks on Windows: the sanitizer replaces the caller's spelling, the error
-  // text carries the resolved one, and the fallback pass stops at the first
-  // space or quote inside a segment, so the parent survives into the delivery
-  // error (#12082). Skipped there until the sanitizer handles it — this is the
-  // case to unskip once that lands, not a coverage drop.
-  it.skipIf(process.platform === 'win32')(
-    'never leaks the parent directory when the spelling differs from the fs report',
-    async () => {
-      vi.doMock('./ffmpeg.js', () => ({
-        isFfmpegAvailable: vi.fn().mockResolvedValue(true),
-        isFfprobeAvailable: vi.fn().mockResolvedValue(true),
-      }));
-      const { readMediaViaOmniDelivery } = await import('./index.js');
+  // A path spelled differently from the way the filesystem reports it: the
+  // error carries the resolved spelling, so the sanitizer matches the known
+  // path with `/` and `\` interchangeable instead of only verbatim (#12082).
+  it('never leaks the parent directory when the spelling differs from the fs report', async () => {
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    const { readMediaViaOmniDelivery } = await import('./index.js');
 
-      for (const [filePath, parentFragment] of [
-        ["/Users/a/it's (v2)+final@x/clip.mp4", "it's (v2)+final@x"],
-        ['/Users/a/My Videos/clip.mp4', '/Users/a/My Videos'],
-      ] as const) {
-        const result = await readMediaViaOmniDelivery({
-          filePath,
-          config: deliveryConfig(),
-          displayName: 'clip.mp4',
-          relativePathForDisplay: 'clip.mp4',
-          expectedModality: 'video',
-        });
-        expect(result.error).toMatch(/Omni media delivery failed/);
-        for (const field of [result.error, result.llmContent]) {
-          expect(String(field)).not.toContain(parentFragment);
-        }
+    for (const [filePath, parentFragment] of [
+      ["/Users/a/it's (v2)+final@x/clip.mp4", "it's (v2)+final@x"],
+      // Separator-free so it detects a leaked parent under either spelling.
+      ['/Users/a/My Videos/clip.mp4', 'My Videos'],
+    ] as const) {
+      const result = await readMediaViaOmniDelivery({
+        filePath,
+        config: deliveryConfig(),
+        displayName: 'clip.mp4',
+        relativePathForDisplay: 'clip.mp4',
+        expectedModality: 'video',
+      });
+      expect(result.error).toMatch(/Omni media delivery failed/);
+      for (const field of [result.error, result.llmContent]) {
+        expect(String(field)).not.toContain(parentFragment);
       }
-    },
-  );
+    }
+  });
 });
 
 describe('processMediaForOmniDelivery upload cache integration', () => {

@@ -1964,7 +1964,6 @@ function parseSubagentContent(
   let executionBackend: 'container' | undefined;
   let declaredName: string | undefined;
   const declaredNames: string[] = [];
-  let acceptedName: string | undefined;
   try {
     const normalizedContent = normalizeContent(content);
 
@@ -1980,13 +1979,6 @@ function parseSubagentContent(
 
     // Parse YAML frontmatter
     const frontmatter = parseYaml(frontmatterYaml) as Record<string, unknown>;
-    if (frontmatter['name'] != null) {
-      try {
-        acceptedName = String(frontmatter['name']) || undefined;
-      } catch {
-        // Keep the AST name when the lenient value cannot name a definition.
-      }
-    }
 
     // Real-AST executor claim + trusted declared name, computed BEFORE any
     // validation can throw so the catch can route an executor-claiming file's
@@ -2356,12 +2348,10 @@ function parseSubagentContent(
     return config;
   } catch (error) {
     const refuse = (refusal: SubagentError): never => {
-      // Malformed YAML can make the AST and the accepted lenient name differ.
+      // The lenient parser can hoist names from prose. Its fallback name is
+      // already carried by subagentName when the AST has no usable name.
       if (isNamedExecutionRefusal(refusal)) {
-        acceptedRefusalNames.set(
-          refusal,
-          acceptedName ? [...declaredNames, acceptedName] : declaredNames,
-        );
+        acceptedRefusalNames.set(refusal, declaredNames);
       }
       throw refusal;
     };
