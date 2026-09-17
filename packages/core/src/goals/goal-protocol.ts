@@ -566,7 +566,12 @@ export type GoalBlockerKind =
 export interface GoalTerminalProposal {
   status: 'complete' | 'blocked';
   reason: string;
-  evidenceRefs: string[];
+  /**
+   * @deprecated The verifier judges a proposal from the tail of the Goal's
+   * transcript, not from references the model cites. Accepted and ignored so
+   * a model still following the older contract is not refused.
+   */
+  evidenceRefs?: string[];
   blockerKind?: GoalBlockerKind;
 }
 
@@ -683,6 +688,19 @@ export function goalPauseReasonForFailure(message: string): string {
     detail
       ? `The Goal turn could not finish: ${detail}. Run /goal resume to continue.`
       : 'The Goal turn could not finish. Run /goal resume to continue.',
+  );
+}
+
+/**
+ * The pause reason for a terminal proposal the verifier gave no verdict on:
+ * it timed out, the side query failed, or its answer was not a verdict.
+ */
+export function goalPauseReasonForVerifierFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The Goal verifier could not judge the proposal: ${detail}. Run /goal resume to continue.`
+      : 'The Goal verifier could not judge the proposal. Run /goal resume to continue.',
   );
 }
 

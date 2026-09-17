@@ -460,6 +460,42 @@ export interface DaemonGitCommitResult {
   subject: string;
 }
 
+/** A single configured remote. `pushUrl` equals `fetchUrl` unless a
+ * push-URL override is configured (`git remote set-url --push`). */
+export interface DaemonGitRemoteInfo {
+  name: string;
+  fetchUrl: string;
+  pushUrl: string;
+  /** Configured fetch URLs beyond the first (multi-fetch remotes). */
+  extraFetchUrls: number;
+  /** Configured push URLs beyond the first (mirror-push remotes). */
+  extraPushUrls: number;
+  /** The remote feeds a partial clone (`remote.<name>.promisor`). */
+  promisor: boolean;
+  /** `remote.<name>.partialclonefilter` value when configured. */
+  partialCloneFilter?: string;
+  /** A configured fetch refspec differs from git's add-time default. */
+  customRefspec: boolean;
+  /** Other `remote.<name>.*` settings (proxy, mirror, tagopt, …) that
+   * removal destroys and re-adding cannot restore. */
+  otherSettings: number;
+}
+
+/** Response from `GET /workspaces/:workspace/git/remotes`. */
+export interface DaemonGitRemotesResult {
+  v: 1;
+  workspaceCwd: string;
+  available: boolean;
+  remotes: DaemonGitRemoteInfo[];
+}
+
+/** Response from the remote add/remove mutations: the fresh list. */
+export interface DaemonGitRemoteMutationResult {
+  v: 1;
+  workspaceCwd: string;
+  remotes: DaemonGitRemoteInfo[];
+}
+
 /** Review decision for an open pull request, lowercased from GitHub's enum. */
 export type DaemonGitHubPullRequestReviewDecision =
   | 'approved'
@@ -2939,6 +2975,11 @@ export interface DaemonSessionSupportedCommandsStatus {
     runSavedArgs?: boolean;
     /** Whether the `run-script` action exists. */
     runScript?: boolean;
+    /**
+     * Whether the session's model may run named workflows only. The host's
+     * own `run-saved`, `run-script`, `retry` and `rerun` are not restricted.
+     */
+    nameOnly?: boolean;
   };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
@@ -4746,7 +4787,9 @@ export interface DaemonAuthProviderDescriptor {
     flowTitle?: string;
     baseUrlStepTitle?: string;
   };
-  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+  steps: Array<
+    'protocol' | 'wireApi' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
+  >;
 }
 
 export interface DaemonAuthProviderCatalog {
@@ -4764,6 +4807,7 @@ export interface DaemonAuthProviderCatalog {
 export interface DaemonAuthProviderInstallRequest {
   providerId: string;
   protocol?: string;
+  wireApi?: 'chat-completions' | 'responses';
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];

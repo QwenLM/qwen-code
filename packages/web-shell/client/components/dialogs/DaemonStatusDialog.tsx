@@ -763,8 +763,14 @@ function DaemonStatusDialogInner({
             // credential before the page reloads, so probe it first —
             // a non-success response must not destroy the working token.
             if (daemonOrigin !== workspace.baseUrl) {
-              setConnectionError('');
-              onChangeTarget(daemonOrigin, token);
+              const switched = onChangeTarget(daemonOrigin, token);
+              // A switch the credential cannot ride along on is refused rather
+              // than landing the shell on the new target unauthenticated.
+              setConnectionError(
+                switched === false
+                  ? t('daemon.connection.switchUnavailable')
+                  : '',
+              );
               return;
             }
             setConnectBusy(true);
