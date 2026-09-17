@@ -334,18 +334,40 @@ jobs:
           # lock lands on the shared dir: taken in a job-private dir it
           # excludes nothing (no other process opens that file), so the
           # prune would race sibling legs' in-flight docker work.
-          ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)" || {
+          # GITHUB_STEP_SUMMARY= blanks the resolver's banner for this one
+          # caller: this step discards a job-private result and opens no
+          # lock in it, so the banner's "this job locks in <dir>" would lie.
+          ci_lock_dir="$(GITHUB_STEP_SUMMARY= bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)" || {
             ci_lock_dir="${HOME}/.cache/qwen-code-ci"
-            mkdir -p "${ci_lock_dir}" && [ -w "${ci_lock_dir}" ] || ci_lock_dir=''
+            daemon_lock="${ci_lock_dir}/docker-sandbox-daemon.lock"
+            if mkdir -p "${ci_lock_dir}" && [ -w "${ci_lock_dir}" ]; then
+              # Probe the lock FILE, not only the dir: a root-owned 0400
+              # leftover fails `exec 9>` with EACCES inside the if below,
+              # which bash -e does not abort on.
+              if [ -e "${daemon_lock}" ] && [ ! -w "${daemon_lock}" ]; then
+                skip_reason="${daemon_lock} is not writable by this job"
+                ci_lock_dir=''
+              fi
+            else
+              skip_reason="cannot create a writable ${ci_lock_dir}"
+              ci_lock_dir=''
+            fi
           }
-          [ "${ci_lock_dir}" = "${HOME}/.cache/qwen-code-ci" ] || ci_lock_dir=''
-          if [ -n "${ci_lock_dir}" ] && exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock" && flock --nonblock 9; then
+          if [ -n "${ci_lock_dir}" ] && [ "${ci_lock_dir}" != "${HOME}/.cache/qwen-code-ci" ]; then
+            skip_reason="the shared lock dir ${HOME}/.cache/qwen-code-ci is not usable by this job"
+            ci_lock_dir=''
+          fi
+          if [ -z "${ci_lock_dir}" ]; then
+            echo "Docker cleanup skipped: ${skip_reason}; clearing ${HOME}/.cache/qwen-code-ci needs a human on this host"
+          elif exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock" && flock --nonblock 9; then
             docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' 9>&- || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
           else
             echo "Docker cleanup skipped because the shared daemon is active"
           fi
           # The dangling prune removes only untagged, unreferenced images,
-          # so it needs no daemon lock and stays unconditional.
+          # so it needs no daemon lock and stays unconditional — announced
+          # separately so a "skipped" line above scopes to the labelled one.
+          echo "Running the unconditional dangling prune"
           docker image prune --force --filter 'until=24h' 9>&- || echo "::warning::docker image prune failed on ${RUNNER_NAME:-this runner}; dangling images may accumulate"
 
   e2e-test-macos:

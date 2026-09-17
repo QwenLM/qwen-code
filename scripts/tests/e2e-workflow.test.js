@@ -381,8 +381,12 @@ describe('e2e workflow', () => {
       expect(e2eRunScript).toContain(
         'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)"',
       );
+      // The prune step discards a job-private resolver result and opens no
+      // lock in it, so it blanks GITHUB_STEP_SUMMARY: the resolver's
+      // fallback banner would claim a lock dir this step never uses. The
+      // leg's calls keep the banner.
       expect(prune.run).toContain(
-        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)"',
+        'ci_lock_dir="$(GITHUB_STEP_SUMMARY= bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)"',
       );
       // Both sites open the daemon lock through the resolved dir, so one
       // contract change cannot drift them onto different files.
@@ -405,7 +409,7 @@ describe('e2e workflow', () => {
       // docker work. The guard is for this step only — the test leg keeps
       // failing loudly, because there the leg genuinely cannot run.
       expect(prune.run).toContain(
-        'ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)" || {',
+        'ci_lock_dir="$(GITHUB_STEP_SUMMARY= bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)" || {',
       );
       expect(prune.run).toContain('ci_lock_dir="${HOME}/.cache/qwen-code-ci"');
       expect(prune.run).toContain('mkdir -p "${ci_lock_dir}"');
@@ -420,10 +424,10 @@ describe('e2e workflow', () => {
       // dangling images are untagged and unreferenced, so no running leg
       // can lose its image to it.
       expect(prune.run).toContain(
-        '[ "${ci_lock_dir}" = "${HOME}/.cache/qwen-code-ci" ] || ci_lock_dir=',
+        '[ "${ci_lock_dir}" != "${HOME}/.cache/qwen-code-ci" ]',
       );
       expect(prune.run).toContain(
-        'if [ -n "${ci_lock_dir}" ] && exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock" && flock --nonblock 9; then',
+        'elif exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock" && flock --nonblock 9; then',
       );
     });
 
@@ -440,6 +444,43 @@ describe('e2e workflow', () => {
       expect(e2eRunScript).not.toMatch(
         /resolve-ci-lock-dir\.sh[^\n]*\)"\s*\|\|/,
       );
+    });
+
+    it('probes exactly the lock files each call site opens', () => {
+      // The string pins above and the bash cases both key on lock names
+      // they already know, so the probe list can drift away from the
+      // `exec N>` lines it covers with every gate green — and an unprobed
+      // lock then dies with EACCES on a poisoned host, the #12006
+      // signature. Deriving both sets from the same file turns the drift
+      // into a set difference. The per-commit coordinator name keeps
+      // ${GITHUB_SHA} unexpanded on both sides, so this stays a pure
+      // string-set comparison.
+      const openedLocks = (script, dirVar) =>
+        [
+          ...script.matchAll(
+            new RegExp(`exec \\d+>"\\$\\{${dirVar}\\}/([^"]+)"`, 'g'),
+          ),
+        ].map((m) => m[1]);
+      const probedLocks = (script, dirVar) => {
+        const call = script.match(
+          new RegExp(
+            `${dirVar}="\\$\\([^)]*resolve-ci-lock-dir\\.sh([^)]*)\\)"`,
+          ),
+        );
+        expect(call, dirVar).not.toBeNull();
+        return [...call[1].matchAll(/"([^"]+)"|([^\s"]+)/g)].map(
+          (m) => m[1] ?? m[2],
+        );
+      };
+      for (const [script, dirVar] of [
+        [e2eRunScript, 'ci_lock_dir'],
+        [e2eRunScript, 'ci_build_lock_dir'],
+        [prune.run, 'ci_lock_dir'],
+      ]) {
+        expect(openedLocks(script, dirVar).sort(), dirVar).toEqual(
+          probedLocks(script, dirVar).sort(),
+        );
+      }
     });
 
     it('resolves the lock dir before any descriptor is opened', () => {

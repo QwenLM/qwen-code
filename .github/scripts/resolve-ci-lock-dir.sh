@@ -59,12 +59,12 @@ if ! mkdir -p "${fallback}"; then
   echo "::error::${problem}, and job-private fallback ${fallback} cannot be created; the docker sandbox locks cannot be opened" >&2
   exit 1
 fi
-echo "::warning::${problem} — using job-private lock dir ${fallback}; docker build/prune coordination on this host is lost for this job" >&2
+echo "::warning::${problem} — using job-private lock dir ${fallback} for: $*; cross-job coordination on these locks is lost for this job" >&2
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
     echo '### ⚠️ Docker lock-dir fallback active'
     echo
-    echo "${problem} — this job locks in the job-private \`${fallback}\`. Coordination with sibling jobs, the root \`qwen-docker-cleanup\` timer, and the release build lane is **lost** for this job: a prune can race in-flight docker work, and \`until=24h\` does not protect a reused sandbox image. The shared dir does not heal itself — clearing \`${primary}\` needs a human on the host."
+    echo "${problem} — this job locks in the job-private \`${fallback}\` for: $*. Cross-job coordination on these locks is **lost** for this job. The shared dir does not heal itself — clearing \`${primary}\` needs a human on the host."
   } >>"${GITHUB_STEP_SUMMARY}" || true
 fi
 printf '%s\n' "${fallback}"

@@ -132,9 +132,9 @@ describe('CI docker lock dir resolution', () => {
 
   // The `cannot create` cause is the only probe message that distinguishes
   // an unwritable $HOME, a .cache that is a regular file, ENOSPC and EROFS
-  // from the unwritable-dir and unwritable-lock causes pinned above — and
-  // it is the only signal an operator gets on a pool host, so the message
-  // itself is pinned, not just the branch.
+  // from the unwritable-lock cause pinned above and the unwritable-dir
+  // cause pinned below — and it is the only signal an operator gets on a
+  // pool host, so the message itself is pinned, not just the branch.
   it('names the cause when the shared dir cannot be created', () => {
     const world = makeWorld();
     try {
@@ -186,6 +186,11 @@ describe('CI docker lock dir resolution', () => {
         expect(result.stdout.trim()).toBe(
           join(world.runnerTemp, 'qwen-code-ci-locks'),
         );
+        // Pin the cause text, not only the branch: on a pool host the
+        // ::warning:: is the only signal separating an ownership problem
+        // from ENOSPC/EROFS, and the summary body interpolates the primary
+        // path regardless of the cause, so it cannot carry this pin.
+        expect(result.stderr).toContain('is not writable');
       } finally {
         rmSync(world.dir, { recursive: true, force: true });
       }
@@ -250,13 +255,17 @@ describe('CI docker lock dir resolution', () => {
         // silent death again, now on a directory that does not exist.
         expect(result.stdout.trim()).toBe('');
         expect(result.stderr).toContain('::error::');
+        expect(result.stderr).toContain('is not writable');
       } finally {
         rmSync(world.dir, { recursive: true, force: true });
       }
     },
   );
 
-  function runDockerLeg(world, { imagePresent = true, home, runnerTemp } = {}) {
+  function runDockerLeg(
+    world,
+    { imagePresent = true, home, runnerTemp, extraEnv = {} } = {},
+  ) {
     const dockerStub = join(world.bin, 'docker');
     writeFileSync(
       dockerStub,
@@ -298,6 +307,7 @@ describe('CI docker lock dir resolution', () => {
         RUNNER_ENVIRONMENT: 'self-hosted',
         GITHUB_SHA: 'testsha12006',
         E2E_CONTAINER_OWNER: 'test-owner',
+        ...extraEnv,
       },
       encoding: 'utf8',
     });
@@ -406,7 +416,12 @@ describe('CI docker lock dir resolution', () => {
         const buildLock = join(shared, 'docker-sandbox-build.lock');
         writeFileSync(buildLock, '');
         chmodSync(buildLock, 0o400);
-        const { exitCode } = runDockerLeg(world, { imagePresent: false });
+        const summary = join(world.dir, 'summary.md');
+        writeFileSync(summary, '');
+        const { exitCode, output } = runDockerLeg(world, {
+          imagePresent: false,
+          extraEnv: { GITHUB_STEP_SUMMARY: summary },
+        });
         expect(exitCode).toBe(0);
         expect(existsSync(join(shared, 'docker-sandbox-daemon.lock'))).toBe(
           true,
@@ -421,6 +436,15 @@ describe('CI docker lock dir resolution', () => {
         ]) {
           expect(existsSync(join(fallback, name)), name).toBe(true);
         }
+        // Only the build mutex degraded here — the daemon lock stayed
+        // shared — so neither the warning nor the run-page summary may
+        // claim the prune coordination is lost. They must name the locks
+        // this call actually probed instead.
+        expect(output).toContain('docker-sandbox-build.lock');
+        expect(output).not.toMatch(/prune/);
+        const content = readFileSync(summary, 'utf8');
+        expect(content).toContain('docker-sandbox-build.lock');
+        expect(content).not.toMatch(/prune/);
       } finally {
         rmSync(world.dir, { recursive: true, force: true });
       }
@@ -462,7 +486,7 @@ describe('CI docker lock dir resolution', () => {
       (step) => step.name === 'Prune dangling docker images',
     ).run;
 
-    function runPruneStep(world, { withResolver }) {
+    function runPruneStep(world, { withResolver, extraEnv = {} }) {
       writeFileSync(
         join(world.bin, 'docker'),
         [
@@ -497,6 +521,7 @@ describe('CI docker lock dir resolution', () => {
           HOME: world.home,
           RUNNER_TEMP: world.runnerTemp,
           DOCKER_LOG: dockerLog,
+          ...extraEnv,
         },
         encoding: 'utf8',
       });
@@ -508,6 +533,29 @@ describe('CI docker lock dir resolution', () => {
           : '',
       };
     }
+
+    it('locks the shared dir and prunes when the resolver is healthy', () => {
+      const world = makeWorld();
+      try {
+        const { exitCode, dockerArgv } = runPruneStep(world, {
+          withResolver: true,
+        });
+        expect(exitCode).toBe(0);
+        // The production path, driven end to end: the resolver prints the
+        // shared primary, the step's equality guard accepts it, and the
+        // labelled prune runs under the exclusive daemon lock. A one-token
+        // drift between the resolver's `primary` and the literal the step
+        // re-spells would turn the prune into a permanent no-op with every
+        // other gate green — only driving the two sides together sees it.
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        expect(existsSync(join(shared, 'docker-sandbox-daemon.lock'))).toBe(
+          true,
+        );
+        expect(dockerArgv).toContain('image prune --all');
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    });
 
     it('locks the shared dir and prunes when the resolver itself cannot run', () => {
       const world = makeWorld();
@@ -538,11 +586,77 @@ describe('CI docker lock dir resolution', () => {
             withResolver: true,
           });
           expect(exitCode).toBe(0);
-          expect(output).toContain('Docker cleanup skipped');
-          // The resolver returns the job-private fallback here; only the
-          // dangling prune (which needs no exclusion) may still run.
+          // The step discards the resolver's job-private fallback, so its
+          // own skip line must name the lock dir it could not use and point
+          // at the human cleanup — never assert the "daemon is active"
+          // cause no probe verified.
+          const skipLine = output
+            .split('\n')
+            .find((line) => line.includes('Docker cleanup skipped'));
+          expect(skipLine).toContain(shared);
+          expect(skipLine).toContain('needs a human');
+          expect(output).not.toContain('shared daemon is active');
+          // Only the dangling prune (which needs no exclusion) may run.
           expect(dockerArgv).not.toContain('image prune --all');
           expect(dockerArgv).toContain('image prune --force');
+        } finally {
+          rmSync(world.dir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    // The resolver-absent arm of #12006: Checkout failed, the shared dir is
+    // writable, but the daemon lock itself is a root-owned 0400 leftover.
+    // The inline probe must see the lock FILE — probing only the dir lets
+    // `exec 9>` fail with EACCES inside the if-condition, which bash -e
+    // does not abort on, and the step then reports the daemon as active.
+    it.skipIf(isRoot)(
+      'names the unwritable daemon lock when the resolver cannot run',
+      () => {
+        const world = makeWorld();
+        try {
+          const shared = join(world.home, '.cache', 'qwen-code-ci');
+          mkdirSync(shared, { recursive: true });
+          const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+          writeFileSync(daemonLock, '');
+          chmodSync(daemonLock, 0o400);
+          const { exitCode, output, dockerArgv } = runPruneStep(world, {
+            withResolver: false,
+          });
+          expect(exitCode).toBe(0);
+          expect(output).toContain('docker-sandbox-daemon.lock');
+          expect(output).not.toContain('shared daemon is active');
+          expect(dockerArgv).not.toContain('image prune --all');
+          expect(dockerArgv).toContain('image prune --force');
+        } finally {
+          rmSync(world.dir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    // This step discards a job-private resolver result and opens no lock in
+    // it, so the resolver's banner ("this job locks in the job-private
+    // <dir>") would describe a lock this job never took. The call site
+    // blanks GITHUB_STEP_SUMMARY to suppress it; the leg's calls keep it.
+    it.skipIf(isRoot)(
+      'writes no fallback banner for the caller that discards the result',
+      () => {
+        const world = makeWorld();
+        try {
+          const shared = join(world.home, '.cache', 'qwen-code-ci');
+          mkdirSync(shared, { recursive: true });
+          chmodSync(shared, 0o555);
+          const summary = join(world.dir, 'summary.md');
+          writeFileSync(summary, '');
+          const { exitCode, dockerArgv } = runPruneStep(world, {
+            withResolver: true,
+            extraEnv: { GITHUB_STEP_SUMMARY: summary },
+          });
+          expect(exitCode).toBe(0);
+          expect(readFileSync(summary, 'utf8')).not.toContain(
+            'this job locks in',
+          );
+          expect(dockerArgv).not.toContain('image prune --all');
         } finally {
           rmSync(world.dir, { recursive: true, force: true });
         }
