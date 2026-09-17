@@ -6,12 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import type { HookConfig } from './types.js';
-import {
-  HOOKS_CONFIG_FIELDS,
-  HookEventName,
-  HookType,
-  HooksConfigSource,
-} from './types.js';
+import { HookEventName, HookType, HooksConfigSource } from './types.js';
 
 /**
  * Where a listed hook lives. `registry` rows come from settings files and
@@ -249,48 +244,34 @@ function toRow(
   };
 }
 
-const DISPLAYABLE_HOOK_TYPES: readonly string[] = Object.values(HookType);
 const HOOK_EVENT_NAMES: readonly string[] = Object.values(HookEventName);
+
+/** The field each settings hook type must carry, as the registry requires. */
+const LITERAL_FIELD: Readonly<Record<string, string>> = {
+  [HookType.Command]: 'command',
+  [HookType.Http]: 'url',
+  [HookType.Prompt]: 'prompt',
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function optionalString(value: unknown): string | undefined {
-  return value === undefined || value === null ? undefined : String(value);
-}
-
 /**
  * A display-safe copy of one hook read straight from settings, or undefined
- * when it lacks what the registry requires of its type (so it would never have
- * been registered). The settings are not validated anywhere on this path, so
- * every value that reaches display text is coerced to a string.
+ * when the registry would not have accepted it. Function hooks cannot come
+ * from settings JSON. Nothing validated these values, so every one that
+ * reaches display text is coerced to a string.
  */
 function displayableSettingsHook(raw: unknown): HookConfig | undefined {
-  if (!isRecord(raw) || typeof raw['type'] !== 'string') return undefined;
-  const type = raw['type'];
-  if (!DISPLAYABLE_HOOK_TYPES.includes(type)) return undefined;
-  const literalField =
-    type === HookType.Command
-      ? 'command'
-      : type === HookType.Http
-        ? 'url'
-        : type === HookType.Prompt
-          ? 'prompt'
-          : undefined;
-  if (literalField !== undefined) {
-    if (typeof raw[literalField] !== 'string' || raw[literalField] === '') {
-      return undefined;
-    }
-  } else if (typeof raw['callback'] !== 'function') {
-    // Function hooks: settings JSON cannot carry a callback.
-    return undefined;
-  }
+  if (!isRecord(raw)) return undefined;
+  const literalField = LITERAL_FIELD[String(raw['type'])];
+  const literal = literalField === undefined ? undefined : raw[literalField];
+  if (typeof literal !== 'string' || literal === '') return undefined;
   const copy: Record<string, unknown> = { ...raw };
   for (const field of ['name', 'description', 'statusMessage', 'if']) {
-    const value = optionalString(raw[field]);
-    if (value === undefined) delete copy[field];
-    else copy[field] = value;
+    if (copy[field] === undefined || copy[field] === null) delete copy[field];
+    else copy[field] = String(copy[field]);
   }
   if (typeof raw['timeout'] !== 'number') delete copy['timeout'];
   if (typeof raw['async'] !== 'boolean') delete copy['async'];
@@ -311,7 +292,7 @@ function rowsFromSettings(
   const addScope = (hooks: unknown, source: HooksConfigSource) => {
     if (!isRecord(hooks)) return;
     for (const [eventName, definitions] of Object.entries(hooks)) {
-      if (HOOKS_CONFIG_FIELDS.includes(eventName)) continue;
+      // Also skips the non-event keys `enabled`, `disabled`, `notifications`.
       if (!HOOK_EVENT_NAMES.includes(eventName)) continue;
       if (!Array.isArray(definitions)) continue;
       for (const definition of definitions as unknown[]) {
