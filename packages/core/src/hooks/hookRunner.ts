@@ -674,7 +674,9 @@ export class HookRunner {
     try {
       // Check if this is an async command hook
       if (this.isAsyncHook(hookConfig)) {
-        return this.executeAsyncHook(
+        // Awaited so a rejection lands in the catch below: executeHook never
+        // throws, and the caller's onHookEnd always runs.
+        return await this.executeAsyncHook(
           hookConfig as CommandHookConfig,
           eventName,
           input,
@@ -741,6 +743,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };
@@ -831,6 +834,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -861,6 +865,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -904,6 +909,7 @@ export class HookRunner {
       hookConfig,
       eventName,
       success: true,
+      outcome: 'success',
       duration: 0,
       isAsync: true,
       output: { continue: true },
@@ -968,7 +974,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -978,7 +988,7 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, index);
       return result;
     });
 
@@ -994,7 +1004,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -1012,7 +1026,7 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, i);
       results.push(result);
 
       // If the hook succeeded and has output, use it to modify the input for the next hook
@@ -1343,6 +1357,7 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: aborted ? 'cancelled' : 'timeout',
           error: new Error(
             aborted
               ? 'Hook execution cancelled (aborted)'
@@ -1466,6 +1481,7 @@ export class HookRunner {
             hookConfig,
             eventName,
             success: false,
+            outcome: 'timeout',
             error: new Error(`Hook timed out after ${timeout / 1000}s`),
             stdout,
             stderr,
@@ -1510,19 +1526,31 @@ export class HookRunner {
             !Array.isArray(parsed)
           ) {
             output = parsed as HookOutput;
+          } else if (
+            parseFailed &&
+            !isBlockingError &&
+            textToParse.startsWith('{')
+          ) {
+            // Output that starts like a JSON object but does not parse is a
+            // broken structured payload, not context or a message: as in
+            // Claude Code, it is a non-blocking error and nothing of it reaches
+            // the model. Exit code 2 still blocks on its stderr text below.
+            debugLogger.warn(
+              `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`,
+            );
+            finish({
+              hookConfig,
+              eventName,
+              success: false,
+              outcome: 'non_blocking_error',
+              error: new Error('Hook output is not valid JSON'),
+              stdout,
+              stderr,
+              exitCode: exitCode ?? -1,
+              duration,
+            });
+            return;
           } else {
-            // Output shaped like a JSON object that fails to parse is a broken
-            // structured payload, not context: as in Claude Code, it is kept
-            // out of the model.
-            const malformedObject =
-              parseFailed &&
-              textToParse.startsWith('{') &&
-              textToParse.endsWith('}');
-            if (malformedObject) {
-              debugLogger.warn(
-                `Hook "${hookConfig.name || hookConfig.command}" printed output that looks like a JSON object but is not valid JSON; it is not added to model context`,
-              );
-            }
             output = this.convertPlainTextToHookOutput(
               textToParse,
               isBlockingError
@@ -1530,7 +1558,7 @@ export class HookRunner {
                 : exitCode === EXIT_CODE_SUCCESS
                   ? EXIT_CODE_SUCCESS
                   : EXIT_CODE_NON_BLOCKING_ERROR,
-              parsedFromStdout && !malformedObject ? eventName : undefined,
+              parsedFromStdout ? eventName : undefined,
             );
           }
         }
@@ -1540,6 +1568,14 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: exitCode === EXIT_CODE_SUCCESS,
+          // A signal this runner did not send (it returned above for its own
+          // abort and timeout) leaves exitCode null: a failure, not a cancel.
+          outcome:
+            exitCode === EXIT_CODE_SUCCESS
+              ? 'success'
+              : exitCode === 2
+                ? 'blocking'
+                : 'non_blocking_error',
           output,
           stdout,
           stderr,
@@ -1562,6 +1598,7 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error,
           stdout,
           stderr,
@@ -1572,18 +1609,32 @@ export class HookRunner {
   }
 
   /**
-   * Expand command with environment variables and input context
+   * Resolve project directory variables in a command string before launch.
+   *
+   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
+   * always exported in the hook's environment. Bash expands exported
+   * variables itself, so a bash command is passed through unchanged: a text
+   * substitution would put shell quotes inside a double-quoted
+   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
+   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
+   * for those shells each variable is replaced with the quoted project
+   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
+   * left for the shell to read.
    */
   private expandCommand(
     command: string,
     input: HookInput,
     shellType: ShellType,
   ): string {
+    if (shellType === 'bash') {
+      return command;
+    }
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
   }
 
   /**

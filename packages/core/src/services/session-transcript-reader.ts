@@ -265,6 +265,7 @@ export interface SessionRestoreReplayPage {
 
 export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
+  completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
   attributionSnapshot?: AttributionSnapshot;
@@ -2728,7 +2729,9 @@ export class SessionTranscriptReader {
       const entry = index.byUuid.get(uuid);
       if (
         position === compressionPosition ||
-        (entry?.type !== 'system' &&
+        ((entry?.type !== 'system' ||
+          entry?.subtype === 'goal_turn_end' ||
+          entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
       ) {
         modelSet.add(uuid);
@@ -3120,8 +3123,10 @@ export class SessionTranscriptReader {
     const restoredTokenCounts = resumeTokenCounts.finish();
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
+    const completedToolCallIds = apiHistory.getCompletedToolCallIds();
     const runtime: SessionRuntimeResumeState = {
       apiHistory: apiHistory.finish(),
+      ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }
         : {}),

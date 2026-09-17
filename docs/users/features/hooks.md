@@ -28,6 +28,16 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 - Integrate with external systems and services
 - Modify tool inputs or responses programmatically
 
+### Browsing your hooks
+
+Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
+
+The browser never edits your configuration: to add, change or remove a hook, edit `settings.json`. It does re-read it. Opening the interactive menu reloads hook definitions from the user, workspace and system (System and SystemDefaults) settings files used by this session, including when the session runs in a worktree, so definitions you added, changed or removed since the session started take effect without a restart. If the user or workspace file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown. If a system settings file cannot be read or parsed, the hooks from the system files stay as they were, your other edits still take effect, the file is left untouched, and an error names it.
+
+Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
+
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
+
 ## Hook Types
 
 Qwen Code supports four hook executor types:
@@ -70,7 +80,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh\"",
             "name": "security-check",
             "timeout": 10
           }
@@ -80,6 +90,10 @@ Command hooks execute commands via child processes. Input JSON is passed through
   }
 }
 ```
+
+`QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are set to the project directory in the environment of every command hook. Bash hooks read them from the environment, so double-quote them like any other shell variable, as in `"$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh"`. For cmd hooks, and for a bare `$QWEN_PROJECT_DIR` in PowerShell hooks, the variable is replaced with the quoted project directory before the command runs; `$env:QWEN_PROJECT_DIR` also works in PowerShell.
+
+Migration: bash hooks used to have these variables replaced in the command text before the shell ran, and that replacement has been removed. A bash hook that leaves the variable unquoted in a project path containing spaces, or writes it inside single quotes such as `'$QWEN_PROJECT_DIR/hook.sh'`, must now double-quote it: `"$QWEN_PROJECT_DIR/hook.sh"`.
 
 ### HTTP Hooks
 
@@ -339,51 +353,60 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                                   | Matcher Target                                                 |
-| :------------------- | :----------------------------------------------- | :------------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                            | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
-| `PostToolUse`        | After successful tool execution                  | Tool id                                                        |
-| `PostToolUseFailure` | After tool execution fails                       | Tool id                                                        |
-| `UserPromptSubmit`   | Before supported model invocations               | None                                                           |
-| `SessionStart`       | When session starts or resumes                   | Source (`startup`, `resume`, `clear`, `compact`)               |
-| `SessionEnd`         | When session ends                                | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
-| `SessionDelete`      | After an explicitly selected session is deleted  | None                                                           |
-| `MessageDisplay`     | Repeatedly, as the reply streams                 | None (always fires)                                            |
-| `Stop`               | When Claude prepares to conclude response        | None (always fires)                                            |
-| `SubagentStart`      | When subagent starts                             | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
-| `SubagentStop`       | When subagent stops                              | Agent type                                                     |
-| `PreCompact`         | Before conversation compaction                   | Trigger (`manual`, `auto`)                                     |
-| `Notification`       | When notifications are sent                      | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
-| `PermissionRequest`  | When permission dialog is shown                  | Tool id                                                        |
-| `PermissionDenied`   | When AUTO-mode classification denies a tool call | Tool id                                                        |
-| `TodoCreated`        | When a new todo item is created                  | None (always fires)                                            |
-| `TodoCompleted`      | When a todo item is marked as completed          | None (always fires)                                            |
+| Event                 | Triggered When                                                         | Matcher Target                                                   |
+| :-------------------- | :--------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `PreToolUse`          | Before tool execution                                                  | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.)   |
+| `PostToolUse`         | After successful tool execution                                        | Tool id                                                          |
+| `PostToolUseFailure`  | After tool execution fails                                             | Tool id                                                          |
+| `PostToolBatch`       | Once after every tool call in a batch has resolved                     | None (always fires)                                              |
+| `UserPromptSubmit`    | Before supported model invocations                                     | None                                                             |
+| `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent | Command name, without the leading `/`                            |
+| `SessionStart`        | When session starts or resumes                                         | Source (`startup`, `resume`, `clear`, `compact`)                 |
+| `SessionEnd`          | When session ends                                                      | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)            |
+| `SessionDelete`       | After an explicitly selected session is deleted                        | None                                                             |
+| `MessageDisplay`      | Repeatedly, as the reply streams                                       | None (always fires)                                              |
+| `Stop`                | Before the turn ends                                                   | None (always fires)                                              |
+| `StopFailure`         | When an API error or loop detection ends the turn, instead of `Stop`   | Error type (`rate_limit`, `server_error`, `loop_detected`, etc.) |
+| `SubagentStart`       | When subagent starts                                                   | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                    |
+| `SubagentStop`        | When subagent stops                                                    | Agent type                                                       |
+| `PreCompact`          | Before conversation compaction                                         | Trigger (`manual`, `auto`)                                       |
+| `PostCompact`         | After conversation compaction succeeds                                 | Trigger (`manual`, `auto`)                                       |
+| `Notification`        | When notifications are sent                                            | Type (`permission_prompt`, `idle_prompt`, `auth_success`)        |
+| `PermissionRequest`   | When permission dialog is shown                                        | Tool id                                                          |
+| `PermissionDenied`    | When AUTO-mode classification denies a tool call                       | Tool id                                                          |
+| `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                              |
+| `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                              |
+| `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                     |
 
 ### Matcher Patterns
 
 `matcher` is a regular expression used to filter trigger conditions.
 
-| Event Type          | Events                                                                                     | Matcher Support | Matcher Target                                                |
-| :------------------ | :----------------------------------------------------------------------------------------- | :-------------- | :------------------------------------------------------------ |
-| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc. |
-| Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                          |
-| Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
-| Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
-| Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                           |
-| Notification Events | `Notification`                                                                             | ✅ Regex        | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
-| Compact Events      | `PreCompact`                                                                               | ✅ Regex        | Trigger: `manual`, `auto`                                     |
-| Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
-| Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                           |
-| Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                           |
-| Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                           |
+| Event Type          | Events                                                                                     | Matcher Support | Matcher Target                                                                                                                                         |
+| :------------------ | :----------------------------------------------------------------------------------------- | :-------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc.                                                                                          |
+| Tool Events         | `PostToolBatch`                                                                            | ❌ No           | N/A                                                                                                                                                    |
+| Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                                                                                                                   |
+| Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`                                                                                                        |
+| Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.                                                                                                   |
+| Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                                                                                                                    |
+| Notification Events | `Notification`                                                                             | ✅ Regex        | Type: `permission_prompt`, `idle_prompt`, `auth_success`                                                                                               |
+| Compact Events      | `PreCompact`, `PostCompact`                                                                | ✅ Regex        | Trigger: `manual`, `auto`                                                                                                                              |
+| Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                                                                                                                    |
+| Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                                                                                                                    |
+| Prompt Events       | `UserPromptExpansion`                                                                      | ✅ Regex        | Command name without the leading `/`, for example `init`                                                                                               |
+| Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                                                                                                                    |
+| Stop Events         | `StopFailure`                                                                              | ✅ Regex        | Error type: `rate_limit`, `authentication_failed`, `billing_error`, `invalid_request`, `server_error`, `max_output_tokens`, `loop_detected`, `unknown` |
+| Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                                                                                                                    |
+| Instruction Events  | `InstructionsLoaded`                                                                       | ✅ Regex        | File path of the loaded file                                                                                                                           |
 
 **Matcher Syntax:**
 
 - Empty string `""`, `"*"` or `".*"` matches all events of that type
 - A matcher is first compared exactly. In a `|`-separated list such as `permission_prompt | idle_prompt`, the matcher matches when any entry, ignoring spaces around it, is `*`, `.*`, or exactly the value, unless the whole matcher starts with `^` or `(`, in which case it is only a regular expression. Only a `|` outside `[...]` and groups, and not escaped with a backslash, separates entries: the pipes in `notes\|todo\.md`, `foo[ |]bar` and `a(b | c)` are part of the regular expression, and the spaces around them are kept. List entries are never read as regular expressions on their own
-- Otherwise the matcher is an unanchored regular expression (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`). For a list that does not start with `^` or `(`, the expression is built from the trimmed, non-empty entries, so a stray `|` as in `read_(file|edit)|` is ignored and never makes the matcher match everything, and a matcher of only `|` matches nothing. A matcher that starts with `^` or `(` is compiled exactly as written, so a trailing `|` there, as in `^write_file|`, does make it match everything. Because the expression is unanchored, `read` also matches `read_file` and `edit` also matches `notebook_edit`. Add `^` and `$` to match a whole value, and anchor exclusions as well: `^(?!write_file).*$` excludes `write_file`, while unanchored `(?!write_file).*` still matches it
+- Otherwise the matcher is an unanchored regular expression (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`). For a list that does not start with `^` or `(`, the expression is built from the trimmed, non-empty entries (an escaped space at an entry's edge, as in `\.env\ |\.pem`, is kept), so a stray `|` as in `read_(file|edit)|` is ignored and never makes the matcher match everything, and a matcher of only `|` matches nothing. A matcher that starts with `^` or `(` is compiled exactly as written, so a trailing `|` there, as in `^write_file|`, does make it match everything. Because the expression is unanchored, `read` also matches `read_file` and `edit` also matches `notebook_edit`. Add `^` and `$` to match a whole value, and anchor exclusions as well: `^(?!write_file).*$` excludes `write_file`, while unanchored `(?!write_file).*` still matches it
 - The same rules apply to every event that supports a matcher, and to hooks registered by skills
-- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids. Aliases are only compared exactly, so anchor runtime ids (`^write_file$`), not display names.
+- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, and so are the tool names permission rules accept, including Claude Code's `Bash`, `Read` and `Write`, so a matcher copied from a Claude Code config such as `"Bash"` or `"Write|Edit"` works unchanged. New configs should still prefer runtime ids. Aliases are only compared exactly, so anchor runtime ids (`^write_file$`), not display names. Each alias names exactly one tool: unlike a permission rule, a `Read` matcher does not also cover `grep_search` or `glob`, and a `Bash` matcher does not cover `monitor`.
 
 **Examples:**
 
@@ -459,11 +482,13 @@ Qwen does not control whether a hook process, endpoint, callback, or model provi
   "timestamp": "string",
   "permission_mode": "default | plan | auto_edit | auto | yolo",
   "agent_id": "string (only when the event fires inside a subagent)",
-  "prompt_id": "string (when the event belongs to a model turn)"
+  "prompt_id": "string (when the event belongs to a model turn)",
+  "source_type": "string (only when the session has a declared source)",
+  "source_id": "string (only when the session source has an id)"
 }
 ```
 
-Event-specific fields are added based on the hook type. `permission_mode` is the session's approval mode unless the event reports the mode that applied to it, as tool and subagent events do. `agent_id` is present only when the event fires inside a subagent; `agent_type` is reported on `SessionStart`, `SubagentStart` and `SubagentStop`.
+Event-specific fields are added based on the hook type. `permission_mode` is the session's approval mode unless the event reports the mode that applied to it, as tool and subagent events do. `agent_id` is present only when the event fires inside a subagent; `agent_type` is reported on `SessionStart`, `SubagentStart` and `SubagentStop`. `source_type` and `source_id` appear only in ACP sessions whose client declared a session source when creating the session.
 
 Hook input is a forward-extensible JSON contract: new optional fields can be added to existing events. Consumers should ignore unknown fields. A strict decoder that rejects unknown properties must be updated to explicitly allow each new optional field before upgrading Qwen Code. For security-sensitive hooks, a decoder failure can change fail-open or fail-closed behavior, so administrators must validate the upgraded payload against the deployed hook before rollout.
 
@@ -478,6 +503,8 @@ Hook output is returned via `stdout` (command) or HTTP response body (http) as J
 | `0`       | Success. A JSON object in `stdout` controls behavior. Any other `stdout`, including bare JSON values such as `42`, is plain text: it is added to the model context on `SessionStart`, `UserPromptSubmit` and `UserPromptExpansion`, and kept as a system message on other events. Output that looks like a JSON object but does not parse is never added to the model context. |
 | `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model.                                                                                                                                                                                                                                                                                          |
 | Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.                                                                                                                                                                                                                                                                                                    |
+
+Adding plain text to the model context applies only to a command hook's `stdout`. An HTTP hook's response body is read as JSON only when its `Content-Type` is `application/json`; any other non-empty body becomes a `systemMessage` on every event. An HTTP hook that adds context must return JSON with `hookSpecificOutput.additionalContext`.
 
 **Output Structure:**
 
@@ -509,7 +536,7 @@ Hook output supports three categories of fields:
 
 ```json
 {
-  "permission_mode": "default | plan | auto_edit | yolo",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
   "tool_name": "name of the tool being executed",
   "tool_input": "object containing the tool's input parameters",
   "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
@@ -555,7 +582,7 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 
 ```json
 {
-  "permission_mode": "default | plan | auto_edit | yolo",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
   "tool_name": "name of the tool that was executed",
   "tool_input": "object containing the tool's input parameters",
   "tool_response": "object containing the tool's response",
@@ -591,7 +618,7 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 
 ```json
 {
-  "permission_mode": "default | plan | auto_edit | yolo",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
   "tool_use_id": "unique identifier for the tool use (internal format, e.g., toolu_xxx)",
   "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)",
   "tool_name": "name of the tool that failed",
@@ -613,6 +640,51 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 {
   "hookSpecificOutput": {
     "additionalContext": "Error: File not found. Failure logged in monitoring system."
+  }
+}
+```
+
+#### PostToolBatch
+
+**Purpose**: Runs once after all tool calls in a batch have resolved, before their results are returned to the model. Use it to review the batch as a whole, add context to it, or stop it.
+
+**Matcher**: None. `PostToolBatch` always fires, and a `matcher` on it is ignored.
+
+**Event-specific fields**:
+
+```json
+{
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
+  "tool_calls": [
+    {
+      "tool_name": "runtime tool id, for example run_shell_command",
+      "tool_input": "object containing the tool's input parameters",
+      "tool_use_id": "the call id from the model's request",
+      "tool_call_id": "the same call id (optional)",
+      "status": "success | error | cancelled",
+      "tool_response": "object with response_parts, result_display, error, error_type, execution_status, content_length and, when present, vision_bridge_notice (optional)"
+    }
+  ]
+}
+```
+
+**Output Options**:
+
+- `hookSpecificOutput.additionalContext`: appended to the result of the last call in the batch, after a blank line. `<` and `>` are escaped.
+- `decision`: `"block"` or `"deny"` stops the batch, and so does `continue: false` or exit code 2. The last call's result is replaced by an error that carries `stopReason`, or `reason` when there is no `stopReason`. The other results are kept, and `additionalContext` is still appended.
+- `stopReason` / `reason`: the text of that error.
+
+If the hooks fail, or do not finish within 15 seconds, the batch continues with its results unchanged.
+
+**Example Output**:
+
+```json
+{
+  "decision": "block",
+  "reason": "This batch edited files outside the allowed directory",
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolBatch",
+    "additionalContext": "Ask the user before retrying these edits."
   }
 }
 ```
@@ -719,6 +791,43 @@ When sent to the model, injected `additionalContext` is appended as its own mess
 }
 ```
 
+#### UserPromptExpansion
+
+**Purpose**: Runs when a slash command expands into a prompt for the model, after the expansion and before the prompt is sent. This covers commands that submit a prompt, such as custom commands, skills, MCP prompts and built-in commands like `/init`. Commands that only act locally do not fire it. It fires in the interactive UI, headless runs and ACP sessions, and when the model runs a model-invocable command.
+
+**Matcher**: Matches against `command_name`. For example, `"matcher": "^init$"` fires only for `/init`.
+
+**Event-specific fields**:
+
+```json
+{
+  "command_name": "slash command name without the leading /",
+  "command_args": "argument text after the command name",
+  "prompt": "the expanded prompt, with non-text parts rendered as text"
+}
+```
+
+When a headless or ACP message invokes several skills at once, `command_name` is their names joined by spaces and `command_args` is the remaining text.
+
+**Output Options**:
+
+- `decision`: `"block"` or `"deny"` stops the expanded prompt from being sent, and so does `continue: false` or exit code 2. The user sees `UserPromptExpansion blocked: <reason>`; for a model-invoked command, that message is returned as the error.
+- `reason` / `stopReason`: the text shown in that message.
+- `hookSpecificOutput.additionalContext`: appended to the expanded prompt after a blank line. `&`, `<` and `>` are escaped, and the result is cut to 10,000 characters.
+
+A command hook that exits 0 with plain-text `stdout` has that text treated as `additionalContext` (see [Exit Code Behavior](#hook-output-structure)).
+
+**Example Output**:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptExpansion",
+    "additionalContext": "Follow the repository's CONTRIBUTING.md when generating QWEN.md."
+  }
+}
+```
+
 #### SessionStart
 
 **Purpose**: Executed when a new session starts to perform initialization tasks.
@@ -727,7 +836,7 @@ When sent to the model, injected `additionalContext` is appended as its own mess
 
 ```json
 {
-  "permission_mode": "default | plan | auto_edit | yolo",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
   "source": "startup | resume | clear | compact",
   "model": "the model being used",
   "agent_type": "the type of agent if applicable (optional)"
@@ -818,7 +927,9 @@ The hook uses the deleting runtime's normal session fields (`session_id`, `trans
   "last_assistant_message": "the last message from the assistant",
   "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
   "context_limit": "context window size in tokens (optional)",
-  "input_tokens": "prompt token count (may include output tokens depending on provider; optional)"
+  "input_tokens": "prompt token count (may include output tokens depending on provider; optional)",
+  "background_tasks": "array of background tasks, each with id, status, agent_type, started_at and optional description",
+  "crons": "array of scheduled jobs, each with id, schedule, prompt, recurring, enabled and optional next_run and last_run"
 }
 ```
 
@@ -834,6 +945,8 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
 
+**Blocking cap**: consecutive blocking decisions are counted per prompt and keep counting across tool round trips, so a hook that blocks on every check ends the turn after `stopHookBlockingCap` blocks (default 8; `QWEN_CODE_STOP_HOOK_BLOCK_CAP` overrides it for one run). The count and `stop_hook_active` share the same record: both restart when the stop is allowed, when you steer or send new input, when a turn is retried, when a goal turn starts, and when the turn ends abnormally. In non-interactive text mode, Stop hook messages and cap warnings are written to stderr; JSON output is unchanged.
+
 **Example Output**:
 
 ```json
@@ -845,23 +958,25 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 #### StopFailure
 
-**Purpose**: Executed when the turn ends due to an API error or loop detection (instead of Stop). This is a **fire-and-forget** event - hook output and exit codes are ignored.
+**Purpose**: Runs instead of `Stop` when an API error or loop detection ends the turn. API errors fire it in the interactive UI and in ACP sessions, but not in headless (`-p`) runs. Loop detection fires it in the interactive UI and in headless runs, but not in ACP sessions. This is a **fire-and-forget** event: Qwen does not wait for the hooks, and their output and exit codes are ignored.
 
 **Event-specific fields**:
 
 ```json
 {
   "error": "rate_limit | authentication_failed | billing_error | invalid_request | server_error | max_output_tokens | loop_detected | unknown",
-  "error_details": "detailed error message (optional)",
-  "last_assistant_message": "the last message from the assistant before the error (optional)"
+  "error_details": "the error message, or the loop type for loop_detected (optional)",
+  "last_assistant_message": "optional; the interactive UI currently sets it to the formatted error text"
 }
 ```
+
+For API errors, `error` is derived from the HTTP status and the error message: status 429 or "rate limit" gives `rate_limit`; 401 or "unauthorized" gives `authentication_failed`; 402, 403, "billing" or "quota" gives `billing_error`; 400 or "invalid" gives `invalid_request`; any other status of 500 or above gives `server_error`; "max_tokens" or "token limit" gives `max_output_tokens`; anything else is `unknown`. The checks run in that order.
 
 **Matcher**: Matches against the `error` field. For example, `"matcher": "rate_limit"` will only trigger for rate limit errors.
 
 **Output Options**:
 
-- **None** - StopFailure is fire-and-forget. All hook output and exit codes are ignored.
+- **None** - StopFailure is fire-and-forget. All hook output, errors and exit codes are discarded.
 
 **Exit Code Handling**:
 
@@ -907,7 +1022,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 ```json
 {
-  "permission_mode": "default | plan | auto_edit | yolo",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
   "agent_id": "identifier for the subagent",
   "agent_type": "type of agent (Bash, Explorer, Plan, Custom, etc.)"
 }
@@ -936,12 +1051,14 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 ```json
 {
-  "permission_mode": "default | plan | auto_edit | yolo",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
   "stop_hook_active": "false on the first stop check; true when the subagent is continuing because a SubagentStop hook blocked its previous stop",
   "agent_id": "identifier for the subagent",
   "agent_type": "type of agent",
   "agent_transcript_path": "path to the subagent's transcript",
-  "last_assistant_message": "the last message from the subagent"
+  "last_assistant_message": "the last message from the subagent",
+  "background_tasks": "array of background tasks, same shape as in Stop",
+  "crons": "array of scheduled jobs, same shape as in Stop"
 }
 ```
 
@@ -989,32 +1106,22 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 #### PostCompact
 
-**Purpose**: Executed after conversation compaction completes to archive summaries or track usage.
+**Purpose**: Runs after a conversation compaction succeeds, to archive the summary or track usage. It does not fire when compaction fails. Qwen waits for the hooks to finish before continuing.
 
 **Event-specific fields**:
 
 ```json
 {
   "trigger": "manual | auto",
-  "compact_summary": "the summary generated by the compaction process"
+  "compact_summary": "the summary that replaced the compacted history, without its <analysis> block"
 }
 ```
 
-**Matcher**: Matches against the `trigger` field. For example, `"matcher": "manual"` will only trigger for manual compaction via `/compact` command.
+**Matcher**: Matches against the `trigger` field: `manual` when compaction was requested, for example with `/compress`, and `auto` when Qwen compacts on its own. For example, `"matcher": "manual"` fires only for requested compactions.
 
 **Output Options**:
 
-- `hookSpecificOutput.additionalContext`: additional context (for logging only)
-- Standard hook output fields (for logging only)
-
-**Note**: PostCompact is **not** in the official decision mode supported events list. The `decision` field and other control fields do not produce any control effects - they are only used for logging purposes.
-
-**Exit Code Handling**:
-
-| Exit Code | Behavior                                                  |
-| --------- | --------------------------------------------------------- |
-| 0         | Success - stdout shown to user in verbose mode            |
-| Other     | Non-blocking error - stderr shown to user in verbose mode |
+- **None** - PostCompact output is ignored. `decision`, `continue`, `additionalContext` and exit codes have no effect.
 
 **Example Configuration**:
 
@@ -1083,7 +1190,7 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
 
 ```json
 {
-  "permission_mode": "default | plan | auto_edit | yolo",
+  "permission_mode": "default | plan | auto_edit | auto | yolo",
   "tool_name": "name of the tool requesting permission",
   "tool_input": "object containing the tool's input parameters",
   "permission_suggestions": "array of suggested permissions (optional)"
@@ -1112,6 +1219,30 @@ A command hook is left to finish if Qwen exits after dispatch; its stdout and st
   }
 }
 ```
+
+#### PermissionDenied
+
+**Purpose**: Runs when the AUTO-mode classifier blocks a tool call, including when repeated blocks make Qwen fall back to asking the user. It reports the denial and cannot approve or change the call. Qwen waits for the hooks before continuing; a hook failure is logged and does not change the outcome.
+
+**Matcher**: Matches against the tool id, like the other tool events.
+
+**Event-specific fields**:
+
+```json
+{
+  "tool_name": "runtime tool id of the denied call",
+  "tool_input": "object containing the tool's input parameters",
+  "tool_use_id": "the call id",
+  "tool_call_id": "the same call id (optional)",
+  "reason": "classifier_blocked | classifier_unavailable"
+}
+```
+
+`reason` is currently always `classifier_blocked`. `classifier_unavailable` is defined, but a call denied because the classifier returned no verdict does not fire this event.
+
+**Output Options**:
+
+- **None** - PermissionDenied output and exit codes are ignored.
 
 #### TodoCreated
 
@@ -1311,9 +1442,37 @@ exit 0
 - **Workflow Control**: Block completion until prerequisites are met
 - **Integration**: Sync todos with external task management systems (Jira, Trello, etc.)
 
+#### InstructionsLoaded
+
+**Purpose**: Runs for each context file Qwen loads into the system prompt, such as `QWEN.md`, and for each file those files import. Use it to audit which instruction files a session uses. It is informational: it cannot stop or change loading.
+
+It fires when the session starts, when context files are reloaded during the session, and for every file pulled in through an import, after the file has been read. Qwen waits for the hooks before it continues loading; a hook failure is logged and does not stop loading.
+
+**Matcher**: Matches against `file_path`. For example, `"matcher": "QWEN\\.local\\.md$"` fires only for local context files.
+
+**Event-specific fields**:
+
+```json
+{
+  "file_path": "path of the loaded file",
+  "memory_type": "user | project | local | extension",
+  "load_reason": "session_start | include | refresh",
+  "trigger_file_path": "for include: the context file whose loading pulled this file in (optional)",
+  "parent_file_path": "for include: the file that contains the import (optional)"
+}
+```
+
+`load_reason` is `session_start` for the initial load, `refresh` when context files are reloaded, and `include` for a file reached through an import.
+
+`memory_type` is `extension` for an extension's context files and files in its directory, `user` for files in the global `.qwen` directory or directly in your home directory, `local` for `.qwen/QWEN.local.md` at the project root, and `project` for any other file. An imported file has the same `memory_type` as the context file that imported it.
+
+**Output Options**:
+
+- **None** - InstructionsLoaded output and exit codes are ignored.
+
 ## Hook Configuration
 
-Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files:
+Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
 
 ```json
 {
@@ -1360,14 +1519,14 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 
 Only `command` type supports asynchronous execution. Setting `"async": true` runs the hook in the background without blocking the main flow.
 
-Async hooks are scoped to the Qwen process because their captured output is delivered through the in-memory async hook registry. On POSIX, Qwen reclaims a still-running async hook process tree when it exits, except for event types whose sections explicitly guarantee fire-and-forget completion after exit. Windows cannot reconstruct a descendant tree after its root exits, so full parent-exit reclamation there requires a Job Object or descendant tracking.
+Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-running async hook process tree when it exits, except for event types whose sections explicitly guarantee fire-and-forget completion after exit. Windows cannot reconstruct a descendant tree after its root exits, so full parent-exit reclamation there requires a Job Object or descendant tracking.
 
 **Features:**
 
-- Cannot return decision control (operation has already occurred)
-- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
-- Suitable for auditing, logging, background testing, etc.
-- Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default)
+- Cannot return decision control (the event continues as soon as the hook starts)
+- Output is not delivered yet: `systemMessage`, `additionalContext` and plain `stdout` from an async hook are neither shown to the user nor added to the model context. The debug log records only that the hook started, completed or failed. Delivering this output is planned.
+- Suitable for side effects such as auditing, logging and background tests that write their results somewhere you can read them
+- Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default). While all 10 slots are in use, a new async hook is skipped
 
 **Example:**
 
@@ -1380,7 +1539,7 @@ Async hooks are scoped to the Qwen process because their captured output is deli
         "hooks": [
           {
             "type": "command",
-            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh",
+            "command": "\"$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh\"",
             "async": true,
             "timeout": 300
           }
@@ -1396,11 +1555,12 @@ Async hooks are scoped to the Qwen process because their captured output is deli
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 if [[ "$FILE_PATH" != *.ts && "$FILE_PATH" != *.js ]]; then exit 0; fi
-RESULT=$(npm test 2>&1)
-if [ $? -eq 0 ]; then
-  echo "{\"systemMessage\": \"Tests passed after editing $FILE_PATH\"}"
+# Async hook output is not shown yet, so write the result to a file.
+LOG=/tmp/qwen-async-tests.log
+if npm test >"$LOG" 2>&1; then
+  echo "Tests passed after editing $FILE_PATH" >>"$LOG"
 else
-  echo "{\"systemMessage\": \"Tests failed: $RESULT\"}"
+  echo "Tests failed after editing $FILE_PATH" >>"$LOG"
 fi
 ```
 
@@ -1565,9 +1725,26 @@ sys.exit(0)
 
 ## Troubleshooting
 
-- Check application logs for hook execution details
+### A hook does not fire
+
+1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with the warning `Invalid hook event name`.
+2. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
+3. **Folder trust.** Hooks in a project's `.qwen/settings.json` load only when the folder is trusted. User hooks load regardless of folder trust.
+4. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
+5. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
+   - `[HOOK_REGISTRY]`: `Hook registry initialized with N hook entries`, and hook definitions discarded as invalid
+   - `[TRUSTED_HOOKS]`: `Hook <name> started for event <event>` and the matching `ended` line for each run, async hook status, and hook system messages
+   - `[HOOK_MATCHER]`: matchers that are not valid regular expressions
+   - `[HOOK_TIMEOUT]`: command hook `timeout` values read as milliseconds or ignored
+   - `[HTTP_HOOK_RUNNER]`, `[URL_VALIDATOR]`, `[PROMPT_HOOK_RUNNER]`, `[FUNCTION_HOOK_RUNNER]`, `[SKILL_HOOKS]`, `[SESSION_HOOKS_MANAGER]`, `[ASYNC_HOOK_REGISTRY]` and `[HOOK_AGGREGATOR]`: details from the individual runners and registries
+
+   Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
+
+6. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls and HTTP security settings require a restart.
+
+### Other checks
+
 - Verify hook script permissions and executability
 - Ensure proper JSON formatting in hook outputs
 - Use specific matcher patterns to avoid unintended hook execution
-- Use `--debug` mode to see detailed hook matching and execution information. Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
 - Temporarily disable all hooks: add `"disableAllHooks": true` in settings

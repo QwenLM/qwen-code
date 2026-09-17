@@ -110,9 +110,99 @@ for (const theme of ['light', 'dark']) {
       .getByRole('group', { name: 'Context Usage', exact: true })
       .first();
     await expect(historical).toContainText('Snapshot');
-    await page
-      .getByRole('button', { name: 'Context Usage', exact: true })
+    const snapshotMeter = historical.locator('[data-web-shell-context-meter]');
+    await expect(snapshotMeter).toBeVisible();
+    const readsBeforeCollapse = reads;
+    await historical
+      .getByRole('button', { name: 'Collapse', exact: true })
       .click();
+    await expect(snapshotMeter).toBeHidden();
+    await expect(historical).toHaveText('Context Usage Snapshot', {
+      useInnerText: true,
+    });
+    const expandSnapshot = historical.getByRole('button', {
+      name: 'Expand',
+      exact: true,
+    });
+    await expect(expandSnapshot).toHaveAttribute('aria-expanded', 'false');
+    await historical.screenshot({
+      path: testInfo.outputPath(`context-snapshot-collapsed-${theme}.png`),
+    });
+    await expandSnapshot.press('Enter');
+    await expect(snapshotMeter).toBeVisible();
+    const collapseSnapshot = historical.getByRole('button', {
+      name: 'Collapse',
+      exact: true,
+    });
+    await expect(collapseSnapshot).toHaveAttribute('aria-expanded', 'true');
+    await historical.screenshot({
+      path: testInfo.outputPath(`context-snapshot-expanded-${theme}.png`),
+    });
+    await collapseSnapshot.press('Space');
+    await expect(snapshotMeter).toBeHidden();
+    await expandSnapshot.click();
+    await expect(snapshotMeter).toBeVisible();
+    expect(reads).toBe(readsBeforeCollapse);
+    const editor = page.locator(
+      '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
+    );
+    await editor.click();
+    await editor.fill('Keep this draft while compressing');
+    const readsBeforeHover = reads;
+    await ring.hover();
+    const hover = page.locator('[data-web-shell-context-popover]');
+    await expect(hover).toBeVisible();
+    await expect(hover).toContainText('36,000 tokens');
+    await expect(editor).toBeFocused();
+    expect(reads).toBe(readsBeforeHover);
+    expect(submitted).toHaveLength(0);
+    await hover.hover();
+    await page.mouse.move(5, 5);
+    await expect(hover).not.toBeVisible();
+    await expect(editor).toBeFocused();
+    await ring.hover();
+    await expect(hover).toBeVisible();
+    await ring.focus();
+    await ring.press('Escape');
+    await ring.press('ArrowDown');
+    const firstAction = hover.getByRole('button', {
+      name: 'Compress context',
+      exact: true,
+    });
+    const secondAction = hover.getByRole('button', {
+      name: 'View details',
+      exact: true,
+    });
+    await expect(firstAction).toBeFocused();
+    await firstAction.press('Tab');
+    await expect(secondAction).toBeFocused();
+    await secondAction.press('Tab');
+    await expect(firstAction).toBeFocused();
+    await firstAction.press('Shift+Tab');
+    await expect(secondAction).toBeFocused();
+    await secondAction.press('Shift+Tab');
+    await expect(firstAction).toBeFocused();
+    expect(
+      daemon.requests.filter((request) =>
+        request.path.endsWith('/approval-mode'),
+      ),
+    ).toHaveLength(0);
+    await firstAction.press('Escape');
+    await editor.click();
+    await expect(hover).not.toBeVisible();
+    await expect(editor).toBeFocused();
+    await ring.hover();
+    await ring.focus();
+    await ring.press('ArrowDown');
+    await firstAction.press('Tab');
+    await secondAction.press('Enter');
+    await expect(hover).not.toBeVisible();
+    await expect(ring).toBeFocused();
+    await expect(
+      page
+        .getByRole('group', { name: 'Context Usage', exact: true })
+        .filter({ hasText: 'Snapshot' }),
+    ).toHaveCount(1);
     const panel = page.locator('[class*="panel"][aria-busy]');
     const feedbackColor =
       theme === 'dark' ? 'rgb(160, 160, 160)' : 'rgb(95, 98, 89)';
@@ -123,14 +213,38 @@ for (const theme of ['light', 'dark']) {
       exact: true,
     });
     await expect(compress).toBeEnabled();
-    const editor = page.locator(
-      '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
-    );
-    await editor.fill('Keep this draft while compressing');
-    await compress.evaluate((button: HTMLButtonElement) => {
-      button.click();
-      button.click();
+    await ring.focus();
+    await ring.press('ArrowDown');
+    const hoverCompress = hover.getByRole('button', {
+      name: 'Compress context',
+      exact: true,
     });
+    await expect(hoverCompress).toBeFocused();
+    await hoverCompress.press('Escape');
+    await expect(hover).not.toBeVisible();
+    await expect(ring).toBeFocused();
+    await ring.press('ArrowDown');
+    await expect(hoverCompress).toBeFocused();
+    await page.evaluate(() => {
+      window.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          document.body.dataset.contextHostEnter = 'true';
+        }
+      });
+    });
+    await hoverCompress.press('Enter');
+    await expect(hover).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(secondAction).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(secondAction).toBeFocused();
+    await hover.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('body')).not.toHaveAttribute(
+      'data-context-host-enter',
+      'true',
+    );
     await expect.poll(() => submitted.length).toBe(1);
     expect(submitted[0]).toMatchObject({
       prompt: [{ type: 'text', text: '/compress' }],
@@ -139,10 +253,14 @@ for (const theme of ['light', 'dark']) {
       panel.getByRole('button', { name: 'Compressing…', exact: true }),
     ).toBeDisabled();
     await expect(
+      hover.getByRole('button', { name: 'Compressing…', exact: true }),
+    ).toBeDisabled();
+    await expect(
       panel.getByRole('button', { name: 'Refresh', exact: true }),
     ).toBeDisabled();
     await expect(editor).toHaveText('Keep this draft while compressing');
     await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
     await page.screenshot({
       path: testInfo.outputPath(`context-compressing-${theme}.png`),
     });
@@ -160,8 +278,13 @@ for (const theme of ['light', 'dark']) {
       'Compression completed. Context usage refreshed.',
     );
     await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
     await expect.poll(() => reads).toBeGreaterThan(readsBeforeCompletion);
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
+    await expect(hover).toContainText('20,000 tokens');
+    await expect(hover).toContainText(
+      'Compression completed. Context usage refreshed.',
+    );
     await expect(panel).toContainText('Remaining 80.0k');
     await expect(historical.locator('[class*="percentage"]')).toHaveText(
       '64.0%',
@@ -172,8 +295,16 @@ for (const theme of ['light', 'dark']) {
       path: testInfo.outputPath(`context-compressed-${theme}.png`),
     });
 
+    await hover
+      .getByRole('button', { name: 'View details', exact: true })
+      .click();
     await compress.click();
     await expect.poll(() => submitted.length).toBe(2);
+    await ring.hover();
+    await expect(hover).toHaveAttribute('data-state', 'open');
+    await expect(
+      hover.getByRole('button', { name: 'Compressing…', exact: true }),
+    ).toBeDisabled();
     await daemon.sendEvent({
       id: 40,
       v: 1,
@@ -189,6 +320,13 @@ for (const theme of ['light', 'dark']) {
       'Compression failed. You can try again.',
     );
     await expect(panel.getByRole('alert')).toHaveCSS('color', errorColor);
+    await expect(hover.getByRole('alert')).toHaveText(
+      'Compression failed. You can try again.',
+    );
+    await expect(hover.getByRole('alert')).toHaveCSS('color', errorColor);
+    await hover
+      .getByRole('button', { name: 'View details', exact: true })
+      .click();
     await expect(compress).toBeEnabled();
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
 
@@ -215,5 +353,89 @@ for (const theme of ['light', 'dark']) {
     await expect(historical.locator('[class*="percentage"]')).toHaveText(
       '64.0%',
     );
+  });
+}
+
+for (const key of ['Enter', 'Space']) {
+  test(`@smoke context card keeps a settled btw answer when activated with ${key}`, async ({
+    page,
+  }, testInfo) => {
+    const answer = 'Keep this side answer while managing context.';
+    const scenario = createWebShellDaemonScenario({
+      btwAnswer: answer,
+      supportedCommands: {
+        availableCommands: [
+          {
+            name: 'compress',
+            description: 'Compress context',
+            input: null,
+            _meta: { source: 'builtin-command' },
+          },
+        ],
+      },
+    });
+    const daemon = await installMockDaemon(page, scenario, {
+      baseURL: String(testInfo.project.use.baseURL),
+    });
+    const submitted: unknown[] = [];
+    await page.route(/\/session\/[^/]+\/prompt$/, (route) => {
+      submitted.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 202,
+        json: { promptId: 'btw-compression', lastEventId: 20 },
+      });
+    });
+    await page.goto(`/session/${scenario.sessionId}`);
+    await daemon.sse.waitForConnection(scenario.sessionId);
+    await daemon.sendEvent(
+      replayCompleteEvent({ sessionId: scenario.sessionId }),
+    );
+    await daemon.sendEvent({
+      id: 20,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage: { inputTokens: 10_000 } },
+        },
+      },
+    });
+    const editor = page.locator(
+      '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
+    );
+    await editor.fill('/btw keep this answer');
+    await editor.press('Enter');
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await expect(editor.locator('.cm-placeholder')).toBeVisible();
+    const ring = page.locator('[data-web-shell-context-usage]');
+    const card = page.locator('[data-web-shell-context-popover]');
+    const compress = card.getByRole('button', {
+      name: 'Compress context',
+      exact: true,
+    });
+    await ring.focus();
+    await ring.press('ArrowDown');
+    await expect(compress).toBeFocused();
+    await compress.press('Escape');
+    await expect(card).not.toBeVisible();
+    await expect(ring).toBeFocused();
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await ring.press('ArrowDown');
+    await expect(compress).toBeFocused();
+    await compress.press(key);
+    await expect.poll(() => submitted.length).toBe(1);
+    expect(submitted[0]).toMatchObject({
+      prompt: [{ type: 'text', text: '/compress' }],
+    });
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await expect(card).toBeFocused();
+    await page.keyboard.press(key);
+    expect(submitted).toHaveLength(1);
+    await expect(page.getByText(answer, { exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(card).not.toBeVisible();
+    await expect(ring).toBeFocused();
   });
 }

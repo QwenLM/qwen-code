@@ -12,6 +12,7 @@ import {
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
   HookEventName,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
   MAX_WEB_SEARCH_TIMEOUT_MS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   OutputFormat,
@@ -261,17 +262,29 @@ describe('SettingsSchema', () => {
       });
     });
 
-    // Bounds mirror resolveWebSearchTimeoutMs: without them the write paths
-    // accept any number and the runtime silently falls back to the default.
-    // The maximum is core's constant so the schema cannot drift from the
-    // runtime contract it documents.
+    // Type and bounds mirror resolveWebSearchTimeoutMs, which accepts only
+    // whole numbers in range: without them the write paths accept values the
+    // runtime silently replaces with the default. The maximum is core's
+    // constant so the schema cannot drift from the runtime contract.
     it('should bound tools.webSearch.timeoutMs to the runtime contract', () => {
       expect(
         getSettingsSchema().tools.properties.webSearch.properties.timeoutMs,
       ).toMatchObject({
-        type: 'number',
+        type: 'integer',
         minimum: 1,
         maximum: MAX_WEB_SEARCH_TIMEOUT_MS,
+        showInDialog: true,
+      });
+    });
+
+    it('should bound tools.webSearch.maxPerSession to the runtime contract', () => {
+      expect(
+        getSettingsSchema().tools.properties.webSearch.properties.maxPerSession,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
+        requiresRestart: true,
         showInDialog: true,
       });
     });
@@ -347,14 +360,16 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
-    it('should keep cross-session messaging off by default', () => {
-      // The default is the entire security posture of the feature: shipping
-      // it flipped on would open every session on the box to peer messages.
+    it('should keep cross-session messaging on by default', () => {
+      // On by default since docs/design/2026-09-14-cross-session-messaging-default-on.md.
+      // This value is not what bounds a peer: the inbound gate is (review-class
+      // parity, an explicit hold or refuse), with the tighten-only workspace
+      // ranking and the per-session inbox token around it.
       const crossSessionMessaging =
         getSettingsSchema().agents.properties.crossSessionMessaging;
 
       expect(crossSessionMessaging.type).toBe('boolean');
-      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.default).toBe(true);
       expect(crossSessionMessaging.requiresRestart).toBe(true);
       expect(crossSessionMessaging.showInDialog).toBe(false);
     });

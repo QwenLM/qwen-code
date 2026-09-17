@@ -15,6 +15,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
   ToolConfirmationPayload,
+  ToolExecutionOrigin,
   ToolInvocation,
   ToolInvocationGuard,
   ToolExecutionStatus,
@@ -67,6 +68,7 @@ import {
   MOCK_TOOL_GET_DEFAULT_PERMISSION,
   MOCK_TOOL_GET_CONFIRMATION_DETAILS,
 } from '../test-utils/mock-tool.js';
+import type { MediaPolicyToolDescriptor } from '../tools/tools.js';
 import { LlmChat } from './llm-chat.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
@@ -100,6 +102,19 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+
+/** MockTool that self-identifies as an omni media-policy tool, so a
+ * `fixed_policy` execution origin passes the scheduler's origin/descriptor
+ * pairing gate and reaches the code under test. */
+class MockMediaPolicyTool extends MockTool {
+  override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+    return {
+      kind: 'media_policy',
+      inputMediaTypes: ['image'],
+      outputs: [],
+    };
+  }
+}
 
 type ToolSpanRecord = {
   name: string;
@@ -6030,6 +6045,80 @@ describe('CoreToolScheduler', () => {
       ],
     );
     expect(runSideQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('skips the image funnel entirely for a fixed_policy invocation', async () => {
+    // Same vision-bridge setup that DOES bridge for a model-originated call
+    // (see the test above) — the only difference is the execution origin.
+    // A fixed-policy call's result never feeds the model (the orchestrator
+    // consumes policyArtifacts directly), and running the funnel would
+    // re-enter media processing from inside a policy run.
+    runSideQueryMock.mockResolvedValue({ text: 'Screen says READY' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'degraded image written' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+            displayName: 'degraded.png',
+          },
+        },
+      ],
+      returnDisplay: 'degraded image written',
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'omni_downsample_image',
+            new MockMediaPolicyTool({
+              name: 'omni_downsample_image',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-policy-image',
+          name: 'omni_downsample_image',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-policy-image',
+          executionOrigin: {
+            kind: 'fixed_policy',
+            policyId: 'img-downsample',
+            stage: 'preprocessing',
+          },
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    // No vision bridge side query, no bridged text, no notice/override.
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.response?.['output']).toContain(
+      'degraded image written',
+    );
+    expect(functionResponse?.response?.['output']).not.toContain(
+      'Screen says READY',
+    );
+    expect(completed.response.visionBridgeNotice).toBeUndefined();
+    expect(completed.response.modelOverride).toBeUndefined();
   });
 
   it('bridges images returned with a tool error', async () => {
@@ -12736,6 +12825,13 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expect(completedCalls[0].status).toBe('error');
+    // A hook block is not an approval problem, so it must not carry the
+    // marker that makes the headless CLI suggest -y.
+    const blockedCall = completedCalls[0];
+    if (blockedCall.status !== 'error') {
+      throw new Error('expected the hook-blocked call to settle as an error');
+    }
+    expect(blockedCall.response.approvalRequired).toBeUndefined();
     // This test exercises the actual PreToolUse hook deny path inside
     // _executeToolCallBody — which is the only site that should still emit
     // 'pre_hook_blocked' (#4321 review C-Critical).
@@ -14130,6 +14226,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     args?: Record<string, unknown>;
     abortController?: AbortController;
     tools?: AnyDeclarativeTool[];
+    executionOrigin?: ToolExecutionOrigin;
   }): Promise<{
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -14147,6 +14244,9 @@ describe('CoreToolScheduler telemetry spans', () => {
           args: options.args ?? { input: 'x' },
           isClientInitiated: false,
           prompt_id: 'prompt-ask',
+          ...(options.executionOrigin
+            ? { executionOrigin: options.executionOrigin }
+            : {}),
         },
       ],
       abortController.signal,
@@ -14526,6 +14626,77 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completed[0].status).toBe('error');
     expect(execute).not.toHaveBeenCalled();
     expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('denies a PreToolUse ask (no bounce) for a fixed_policy invocation', async () => {
+    // Interactive session where a model-originated call WOULD bounce — the
+    // exclusion must come from the execution origin alone: the orchestrator
+    // awaits the call headlessly behind the scheduler, so an
+    // awaiting_approval entry would sit unanswerable.
+    const execute = vi.fn();
+    const messageBus = askMessageBus();
+    const { onAllToolCallsComplete, onToolCallsUpdate } = await scheduleWithAsk(
+      {
+        messageBus,
+        // Media-policy tool: a fixed_policy origin on a non-policy tool
+        // would be rejected by the origin/descriptor gate before the hook
+        // even fires, which is not the path under test here.
+        tools: [new MockMediaPolicyTool({ name: 'mockTool', execute })],
+        executionOrigin: {
+          kind: 'fixed_policy',
+          policyId: 'img-downsample',
+          stage: 'preprocessing',
+        },
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('error');
+    expect(execute).not.toHaveBeenCalled();
+    // Never bounced: no awaiting_approval transition, no blocked span.
+    const statuses = onToolCallsUpdate.mock.calls.flatMap((call) =>
+      (call[0] as ToolCall[]).map((tc) => tc.status),
+    );
+    expect(statuses).not.toContain('awaiting_approval');
+    expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('still denies a hard PreToolUse deny for a fixed_policy invocation (fail-closed)', async () => {
+    // The fixed_policy exemption is scoped to the ask-bounce ONLY: a hook
+    // that hard-denies must block a policy-originated run exactly like any
+    // other — policies must not become a hook-bypass channel.
+    const execute = vi.fn();
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: { decision: 'deny', reason: 'blocked by policy hook' },
+      }),
+    };
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      messageBus,
+      tools: [new MockMediaPolicyTool({ name: 'mockTool', execute })],
+      executionOrigin: {
+        kind: 'fixed_policy',
+        policyId: 'img-downsample',
+        stage: 'preprocessing',
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('error');
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('cancels a pending ask (no hang) when the signal aborts', async () => {
@@ -16115,9 +16286,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
     } as unknown as Config;
+    const onAllToolCallsComplete = vi.fn();
     const scheduler = new CoreToolScheduler({
       config: mockConfig,
-      onAllToolCallsComplete: vi.fn(),
+      onAllToolCallsComplete,
       onToolCallsUpdate: vi.fn(),
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
@@ -16142,6 +16314,14 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
       'non_interactive_denied',
     );
+    // The only denial a headless front end may answer with an approval-mode
+    // hint: it is marked so the CLI can tell it from a hook block or deny rule.
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls[0][0];
+    expect(completed[0].status).toBe('error');
+    expect(completed[0].response.approvalRequired).toBe(true);
   });
 
   it('PermissionRequest hook deny path emits failure_kind=permission_hook_denied (#4321)', async () => {

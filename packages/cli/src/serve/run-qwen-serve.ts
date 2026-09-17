@@ -47,12 +47,14 @@ import {
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { MAX_CHANNEL_CONTROL_WORKSPACES } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { assertChannelControlWorkspaceCapacity } from './channel-control-capacity.js';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 import type {
   NdJsonMessageObservation,
   NdJsonQueueSaturationInfo,
 } from '@qwen-code/acp-bridge/ndJsonStream';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
+import { getEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
@@ -470,6 +472,8 @@ type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type ServeWorkspaceSkillStatus =
+  import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
   loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
   parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
@@ -2054,6 +2058,7 @@ function buildProviderSetupInputs(
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
+    ...(req.wireApi ? { wireApi: req.wireApi } : {}),
     baseUrl,
     apiKey: req.apiKey.trim(),
     modelIds: normalizeInstallModelIds(
@@ -3817,14 +3822,23 @@ async function runQwenServeImpl(
       `At most ${opts.maxRegisteredWorkspaces} --workspace values may be registered.`,
     );
   }
-  // Resolve the daemon's memory figures once. Nothing downstream consumes
-  // them to size a child: dividing a pool by a workspace count is unsound
-  // while registration does not spawn a child, and bounding the aggregate
-  // needs admission at spawn time keyed on live children. The one consumer
-  // today is the adaptive live-journal growth pool below.
+  // Resolve one budget for journal growth and optional child-count admission.
+  // Child heap arguments continue to use the legacy policy.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
+  if (opts.childHeapMode === 'admit' && deps.bridge) {
+    throw new TypeError(
+      'ACP admission cannot be combined with an injected bridge.',
+    );
+  }
+  const admissionPolicy =
+    opts.childHeapMode === 'admit'
+      ? createChildHeapPolicy({
+          budget: opts.daemonMemoryBudget,
+          mode: 'admit',
+        })
+      : undefined;
   if (
     opts.daemonMemoryBudget.budgetSource === 'flag' ||
     opts.daemonMemoryBudget.insufficientMemory
@@ -5221,6 +5235,7 @@ async function runQwenServeImpl(
     const workspaceTrustOperationGate = new PathMutexRegistry();
     const runWorkspaceTrustOperation = <T>(operation: () => Promise<T>) =>
       workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
+    const idleReclaimerRef: { current?: IdleAcpReclaimer } = {};
     const processRegistry = new runtime.ProcessRegistry();
     managedProcessRegistry = processRegistry;
     // One policy for the whole daemon, beside the one registry it reads. Both
@@ -5232,10 +5247,11 @@ async function runQwenServeImpl(
     // otherwise — a status field asserting enforcement that is not happening.
     const childHeapPolicy: ChildHeapPolicy | undefined =
       opts.daemonMemoryBudget && !deps.bridge
-        ? createChildHeapPolicy({
+        ? (admissionPolicy ??
+          createChildHeapPolicy({
             budget: opts.daemonMemoryBudget,
             mode: opts.childHeapMode ?? 'observe',
-          })
+          }))
         : undefined;
     managedChildHeapPolicy = childHeapPolicy;
     const fsFactory = runtime.resolveBridgeFsFactory({
@@ -5262,6 +5278,9 @@ async function runQwenServeImpl(
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
       childHeapPolicy,
+      reclaimIdleChild: async (signal) => {
+        await idleReclaimerRef.current?.(daemonWorkspaceHash, signal);
+      },
       pipeLimits: runtime.daemonAcpNdJsonLimits,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
@@ -5359,6 +5378,46 @@ async function runQwenServeImpl(
         workspaceTrusted: trusted,
       });
     };
+    const resolveSkillToggleIdentities = async (
+      workspace: string,
+      skillNames: readonly string[],
+    ) => {
+      let skills: ServeWorkspaceSkillStatus[] | undefined;
+      try {
+        const workspaceRuntime =
+          workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
+        const status =
+          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus({
+            route: 'skill settings persistence',
+            workspaceCwd: workspace,
+          });
+        if (status?.initialized) skills = status.skills;
+      } catch {
+        // Preserve the legacy name heuristic when the catalog is unavailable.
+      }
+      const skillsByName = new Map(
+        skills?.map((skill) => [skill.name.trim().toLowerCase(), skill]),
+      );
+      return skillNames.map((skillName) => {
+        const skill = skillsByName.get(skillName.trim().toLowerCase());
+        if (!skill) {
+          const prefixEnd = skillName.indexOf(':');
+          return {
+            name: skillName,
+            ...(prefixEnd > 0
+              ? { authoredName: skillName.slice(prefixEnd + 1) }
+              : {}),
+          };
+        }
+        if (skill.level !== 'extension' || !skill.extensionName) {
+          return { name: skillName };
+        }
+        return {
+          name: skillName,
+          authoredName: skillName.slice(skill.extensionName.length + 1),
+        };
+      });
+    };
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -5412,7 +5471,11 @@ async function runQwenServeImpl(
         // locks such rows, and a route that persists anyway reports an
         // enable the merged config still denies.
         if (enabled) {
-          const block = skillToggleBlockForName(fresh, skillName);
+          const [skillIdentity] = await resolveSkillToggleIdentities(
+            workspace,
+            [skillName],
+          );
+          const block = skillToggleBlockForName(fresh, skillIdentity);
           if (block) {
             return { changed: false, disabled: workspaceDisabled, block };
           }
@@ -5483,40 +5546,53 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'enabled',
         );
+        const skillIdentities = enabled
+          ? await resolveSkillToggleIdentities(workspace, skillNames)
+          : skillNames.map((name) => ({ name }));
         let next = { disabled: initialDisabled, enabled: initialEnabled };
-        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
+        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
+          skillNames.map((skillName) => ({ skillName, changed: false }));
+        let pending = skillNames.map((_, index) => index);
 
-        for (const skillName of skillNames) {
-          // Same refusal as the single toggle. The block is read off the
-          // file, so an earlier grant in this batch that already lifted a
-          // workspace entry off the lists about to be written clears it.
-          if (enabled) {
-            const block = skillToggleBlockForName(fresh, skillName);
-            if (
-              block &&
-              !(
-                block.scope === 'Workspace' &&
-                block.list === 'disabled' &&
-                !next.disabled.some(
-                  (name) => name.trim().toLowerCase() === block.entry,
+        for (let pass = 0; pass < skillNames.length; pass += 1) {
+          const refused: number[] = [];
+          let listChanged = false;
+          for (const index of pending) {
+            const skillName = skillNames[index];
+            if (enabled) {
+              const block = skillToggleBlockForName(
+                fresh,
+                skillIdentities[index],
+              );
+              if (
+                block &&
+                !(
+                  block.scope === 'Workspace' &&
+                  block.list === 'disabled' &&
+                  !next.disabled.some(
+                    (name) => name.trim().toLowerCase() === block.entry,
+                  )
                 )
-              )
-            ) {
-              outcomes.push({ skillName, changed: false });
-              continue;
+              ) {
+                refused.push(index);
+                continue;
+              }
             }
+            const updated = updateWorkspaceSkillSettingLists(
+              next,
+              skillName,
+              enabled,
+            );
+            const changed =
+              JSON.stringify(updated.disabled) !==
+                JSON.stringify(next.disabled) ||
+              JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
+            next = updated;
+            outcomes[index] = { skillName, changed };
+            listChanged ||= changed;
           }
-          const updated = updateWorkspaceSkillSettingLists(
-            next,
-            skillName,
-            enabled,
-          );
-          const changed =
-            JSON.stringify(updated.disabled) !==
-              JSON.stringify(next.disabled) ||
-            JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
-          next = updated;
-          outcomes.push({ skillName, changed });
+          pending = refused;
+          if (pending.length === 0 || !listChanged) break;
         }
 
         const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
@@ -6217,6 +6293,9 @@ async function runQwenServeImpl(
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        reclaimIdleChild: async (signal) => {
+          await idleReclaimerRef.current?.(secondaryWorkspaceHash, signal);
+        },
         pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
@@ -6877,6 +6956,9 @@ async function runQwenServeImpl(
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        reclaimIdleChild: async (signal) => {
+          await idleReclaimerRef.current?.(wsHash, signal);
+        },
         pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
@@ -7734,6 +7816,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      modelSelectionBaseEnv: getEnvironmentBeforeLoad() ?? daemonRuntimeBaseEnv,
       runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
@@ -7792,6 +7875,16 @@ async function runQwenServeImpl(
       getMetricsSeries: () => metricsRing.snapshot(),
       getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
       getChildHeapPolicySnapshot: () => managedChildHeapPolicy?.snapshot(),
+      ...(childHeapPolicy
+        ? {
+            managedChildProcesses: {
+              registry: processRegistry,
+              policy: childHeapPolicy,
+              ownsBridge: (candidate: AcpSessionBridge) =>
+                runtimeBridges.includes(candidate),
+            },
+          }
+        : {}),
       recordDaemonRequest: (durationMs, statusCode) =>
         metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,
@@ -7837,9 +7930,16 @@ async function runQwenServeImpl(
             const plan = core.buildInstallPlan(
               provider,
               inputs,
-              fresh.merged.modelProviders?.[
-                inputs.protocol ?? provider.protocol
-              ],
+              core.getModelsForProviderProtocol(
+                fresh.merged.modelProviders,
+                inputs.protocol ?? provider.protocol,
+                fresh.merged.providerProtocol,
+              ),
+              {
+                authType: fresh.merged.security?.auth?.selectedType,
+                id: fresh.merged.model?.name,
+                baseUrl: fresh.merged.model?.baseUrl,
+              },
             );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
@@ -7883,6 +7983,9 @@ async function runQwenServeImpl(
           },
         ),
     });
+    idleReclaimerRef.current = app.locals['reclaimIdleAcp'] as
+      | IdleAcpReclaimer
+      | undefined;
     serveAppForRuntimeLifecycle.current = app;
     invalidatePrimaryServeFeaturesCache =
       (
