@@ -1,3 +1,4 @@
+import { saveBlob } from '../../utils/saveBlob';
 import type {
   DaemonSessionArtifact,
   DaemonWorkspaceFileBytes,
@@ -320,18 +321,11 @@ export async function downloadWorkspaceFile(
       isCancelled,
     },
   );
-  const url = URL.createObjectURL(blob);
-  try {
-    const link = document.createElement('a');
-    link.href = url;
-    link.download =
-      normalizePath(workspacePath).split('/').at(-1) ?? workspacePath;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  await saveBlob(
+    blob,
+    normalizePath(workspacePath).split('/').at(-1) ?? workspacePath,
+    isCancelled,
+  );
 }
 
 export function getArtifactLocation(artifact: DaemonSessionArtifact): string {

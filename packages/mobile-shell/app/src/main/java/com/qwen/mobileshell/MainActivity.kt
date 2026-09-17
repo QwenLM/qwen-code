@@ -24,7 +24,9 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.ProfileStore
@@ -40,9 +42,14 @@ class MainActivity : AppCompatActivity() {
     private var activeDialog: AlertDialog? = null
     private var activeJsResult: JsResult? = null
     private var connectionAttempt = 0
+    private val saveLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        downloads.result(it.resultCode, it.data)
+    }
+    private val downloads: NativeDownloads by lazy { NativeDownloads(this) { saveLauncher.launch(it) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        downloads.restoreAwaitingResult(savedInstanceState?.getBoolean("downloadPickerPending") == true)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 val view = webView
@@ -249,6 +256,10 @@ class MainActivity : AppCompatActivity() {
             .encodedFragment(profile.token?.let { "token=${Uri.encode(it)}" }).build().toString()
         webView = view
         activeProfile = profile
+        downloads.install(view, profile.origin) { view === webView && view.parent != null && OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty()) }
+        view.setDownloadListener { _, _, _, _, _ ->
+            Toast.makeText(this, R.string.download_update_required, Toast.LENGTH_LONG).show()
+        }
         view.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -280,6 +291,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         view.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                if (view === webView) downloads.cancel()
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (view !== webView) return true
                 if (OriginPolicy.isSameOrigin(profile.origin, request.url.toString())) return false
@@ -321,6 +336,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showConnectionError(view: WebView, profile: ConnectionProfile) {
+        downloads.cancel()
         cancelDialog()
         (view.parent as? ViewGroup)?.removeView(view)
         showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) {
@@ -372,6 +388,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun destroyConnection() {
         connectionAttempt++
+        downloads.cancel()
         cancelDialog()
         val previous = webView
         webView = null
@@ -384,5 +401,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         destroyConnection()
         super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("downloadPickerPending", downloads.awaitingResult)
+        super.onSaveInstanceState(outState)
     }
 }
