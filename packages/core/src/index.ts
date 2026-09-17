@@ -24,6 +24,7 @@ export {
 } from './config/models.js';
 export {
   type AvailableModel,
+  type ModelWireApi,
   type ModelCapabilities,
   type ModelConfig as ProviderModelConfig,
   type ModelConfigCliInput,
@@ -35,6 +36,10 @@ export {
   isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  validateModelProvidersConfig,
+  resolveModelSelectionAuthType,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,

@@ -29,6 +29,7 @@ import type {
   Config,
   ProviderConfig,
   ProviderSetupInputs,
+  ModelWireApi,
 } from '@qwen-code/qwen-code-core';
 import {
   ALIBABA_PROVIDERS,
@@ -37,6 +38,7 @@ import {
   AuthType,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   customProvider,
   findExistingProviderModels,
   findProviderByCredentials,
@@ -46,7 +48,10 @@ import {
   logAuth,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
+import {
+  createLoadedSettingsAdapter,
+  getRawModelProviders,
+} from '../../config/loadedSettingsAdapter.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
 import {
@@ -118,12 +123,6 @@ const PROTOCOL_ITEMS: RadioItem[] = [
     value: AuthType.USE_OPENAI,
   },
   {
-    key: AuthType.USE_OPENAI_RESPONSES,
-    label: t('OpenAI Responses'),
-    description: t('OpenAI Responses API — streaming reasoning + tool use'),
-    value: AuthType.USE_OPENAI_RESPONSES,
-  },
-  {
     key: AuthType.USE_ANTHROPIC,
     label: t('Anthropic-compatible'),
     description: t('Anthropic Messages API format'),
@@ -154,6 +153,7 @@ function providerToItem(config: ProviderConfig): RadioItem {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -333,7 +333,12 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       protocolOpts.includes(p.value as AuthType),
     );
   }, [provider]);
-  const [cursor, setCursor] = useState(0);
+  const [cursor, setCursor] = useState(
+    Math.max(
+      0,
+      items.findIndex((item) => item.value === flow.state.protocol),
+    ),
+  );
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'up') {
@@ -344,6 +349,35 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       const item = items[cursor];
       if (item) flow.selectProtocol(item.value as AuthType);
     }
+  });
+  return (
+    <>
+      <RadioList items={items} cursor={cursor} />
+      <box marginTop={1}>
+        <text fg={C.dim}>{NAV_HINT_SELECT}</text>
+      </box>
+    </>
+  );
+}
+
+function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
+  const items: RadioItem[] = [
+    {
+      key: 'chat-completions',
+      label: t('Chat Completions'),
+      value: 'chat-completions',
+    },
+    { key: 'responses', label: t('Responses'), value: 'responses' },
+  ];
+  const [cursor, setCursor] = useState(
+    flow.state.wireApi === 'responses' ? 1 : 0,
+  );
+  useKeyboard((key) => {
+    const o = toOriginalKey(key);
+    if (o.name === 'up') setCursor(0);
+    else if (o.name === 'down') setCursor(1);
+    else if (o.name === 'return')
+      flow.selectWireApi(items[cursor]!.value as ModelWireApi);
   });
   return (
     <>
@@ -812,7 +846,11 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }) {
         {t('The following JSON will be saved to settings.json:')}
       </text>
       <box marginTop={1}>
-        <text fg={C.text}>{flow.state.previewJson}</text>
+        {flow.state.previewError ? (
+          <text fg={C.red}>{flow.state.previewError}</text>
+        ) : (
+          <text fg={C.text}>{flow.state.previewJson}</text>
+        )}
       </box>
       <box marginTop={1}>
         <text fg={C.dim}>{t('Enter to save, Esc to go back')}</text>
@@ -833,6 +871,8 @@ function SetupSteps({
   switch (step) {
     case 'protocol':
       return <ProtocolStep flow={flow} />;
+    case 'wireApi':
+      return <ApiStep flow={flow} />;
     case 'baseUrl':
       return Array.isArray(provider.baseUrl) ? (
         <BaseUrlSelectStep provider={provider} flow={flow} />
@@ -922,7 +962,7 @@ function AuthDialogFlow({
 
   const handleProviderSubmit = useCallback(
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
-      const protocol = inputs.protocol ?? providerConfig.protocol;
+      let protocol = inputs.protocol ?? providerConfig.protocol;
       const stepAtSubmit = stepRef.current;
       const reArmField = () => {
         if (stepRef.current === stepAtSubmit) setRetrySeq((n) => n + 1);
@@ -931,17 +971,23 @@ function AuthDialogFlow({
         const plan = buildInstallPlan(
           providerConfig,
           inputs,
-          settings.merged.modelProviders?.[
-            inputs.protocol ?? providerConfig.protocol
-          ],
+          getModelsForProviderProtocol(
+            settings.merged.modelProviders,
+            inputs.protocol ?? providerConfig.protocol,
+            settings.merged.providerProtocol,
+          ),
+          {
+            authType: settings.merged.security?.auth?.selectedType,
+            id: settings.merged.model?.name,
+            baseUrl: settings.merged.model?.baseUrl,
+          },
         );
+        protocol = plan.authType;
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+            config.syncModelSelection(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
         if (!plan.modelSelection && !config.getAuthType()) {
@@ -978,7 +1024,17 @@ function AuthDialogFlow({
     [settings, config, notify, onClose],
   );
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
+    getRawModelProviders(settings),
+  );
   stepRef.current = setupFlow.state.step;
 
   // -- Navigation (AuthDialog parity) ---------------------------------------
@@ -1016,11 +1072,23 @@ function AuthDialogFlow({
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
+  // The saved route and ids the wizard reopens with. Both must come from the
+  // same lookup: seeding the ids of a Responses install while the API step
+  // defaults to Chat Completions would restamp them onto the other wire.
+  const findSavedModels = (providerConfig: ProviderConfig) =>
+    findExistingProviderModels(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.modelProviders,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
+
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findSavedModels(providerConfig);
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
     return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
@@ -1033,7 +1101,7 @@ function AuthDialogFlow({
       if (!providerConfig) return;
       setupFlow.start(
         providerConfig,
-        undefined,
+        findSavedModels(providerConfig)?.protocol,
         existingEnv,
         getExistingModelIds(providerConfig),
       );
@@ -1078,7 +1146,7 @@ function AuthDialogFlow({
         case 'CUSTOM_PROVIDER':
           setupFlow.start(
             customProvider,
-            undefined,
+            findSavedModels(customProvider)?.protocol,
             existingEnv,
             getExistingModelIds(customProvider),
           );

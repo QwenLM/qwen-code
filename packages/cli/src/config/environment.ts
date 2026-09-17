@@ -21,6 +21,10 @@ import {
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { publishPendingCompileCache } from './compile-cache.js';
+import {
+  captureEnvironmentBeforeLoad,
+  resetEnvironmentSnapshotForTesting,
+} from './environment-snapshot.js';
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
   ENV_CORRUPTED_PATH,
@@ -163,6 +167,7 @@ export function resetHomeEnvBootstrapForTesting(): void {
 /** Test-only: reset environment reload provenance between tests. */
 export function resetEnvironmentTrackingForTesting(): void {
   resetLoaderKeyRejectionReportingForTesting();
+  resetEnvironmentSnapshotForTesting();
   dotEnvSourcedKeys.clear();
   settingsEnvSourcedKeys.clear();
   lastReloadSnapshot.clear();
@@ -322,6 +327,11 @@ export function findEnvFiles(
       pushCandidate(candidate);
     }
   };
+
+  if (path.resolve(startDir) === path.resolve(homeDir)) {
+    pushHomeCandidates();
+    return found;
+  }
 
   let currentDir = realStartDir;
   let visitedHomeDir = false;
@@ -571,6 +581,7 @@ export function loadEnvironment(
   settings: Settings,
   startDir: string = process.cwd(),
 ): void {
+  captureEnvironmentBeforeLoad();
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
