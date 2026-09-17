@@ -15,6 +15,10 @@ describe('main CI failure issue workflow', () => {
   );
   const yml = parse(workflow);
   const jobs = yml.jobs;
+  // Collapse line continuations first so pins read like the shell they pin
+  // rather than like this file's indentation.
+  const oneLine = (script) =>
+    script.replace(/\\\n/g, '\n').replace(/\s+/g, ' ');
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
@@ -102,8 +106,6 @@ describe('main CI failure issue workflow', () => {
     // and every fragment of it stays green on its own when the wiring between
     // them is cut. Collapsing the line continuations first keeps the pins
     // reading like the shell they pin rather than like this file's indentation.
-    const oneLine = (script) =>
-      script.replace(/\\\n/g, '\n').replace(/\s+/g, ' ');
     const steps = jobs.analyze.steps;
     const download = oneLine(
       steps.find((step) => step.name === 'Download failed job logs').run,
@@ -149,6 +151,28 @@ describe('main CI failure issue workflow', () => {
     )?.[0];
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
+    );
+  });
+
+  it('retries a failed job-log download once before the per-commit fallback', () => {
+    // The download rides the same transient runner-to-blobstore path the
+    // E2E lane's upload retry exists for, and losing the only attempt files
+    // an unactionable per-commit issue for a run whose log names its failing
+    // tests (run 33982750226's macOS shard, #11131). Pin the retry's shape
+    // end to end: the per-job reset, exactly two attempts, the second
+    // attempted only after the first fails, and the warn-and-drop fallback
+    // reached only after both fail — a warning raised on a first-attempt
+    // failure would claim the opposite of what a successful retry just did.
+    const download = oneLine(
+      jobs.analyze.steps.find(
+        (step) => step.name === 'Download failed job logs',
+      ).run,
+    );
+    expect(download).toContain(
+      'for job_id in "${job_ids[@]}"; do downloaded=\'\' for attempt in 1 2; do if gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > "${log_dir}/${job_id}.log"; then downloaded=1 break fi done',
+    );
+    expect(download).toContain(
+      'if [[ -z "${downloaded}" ]]; then echo "::warning::Could not download the log of job ${job_id}" rm -f "${log_dir}/${job_id}.log" fi',
     );
   });
 

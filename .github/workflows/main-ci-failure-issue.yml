@@ -86,11 +86,23 @@ jobs:
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
+          # One bounded retry per log, the same contract the E2E lane's
+          # upload-artifact and sandbox-image retries carry for the transient
+          # runner-to-blobstore path this download rides. A single lost
+          # attempt files an unactionable per-commit issue for a run whose log
+          # does name the failing tests (run 33982750226's macOS shard,
+          # #11131). A log that still fails only costs precision: the plan
+          # below falls back to the per-commit issue as before.
           for job_id in "${job_ids[@]}"; do
-            if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
-              > "${log_dir}/${job_id}.log"; then
-              # A missing log only costs precision: with no identifiable test the
-              # plan below falls back to the per-commit issue.
+            downloaded=''
+            for attempt in 1 2; do
+              if gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
+                > "${log_dir}/${job_id}.log"; then
+                downloaded=1
+                break
+              fi
+            done
+            if [[ -z "${downloaded}" ]]; then
               echo "::warning::Could not download the log of job ${job_id}"
               rm -f "${log_dir}/${job_id}.log"
             fi
