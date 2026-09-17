@@ -767,12 +767,19 @@ describe('readMediaViaOmniDelivery result shape', () => {
     }));
     const { readMediaViaOmniDelivery } = await import('./index.js');
 
-    for (const [filePath, parentFragment] of [
+    // Each fixture is resolved into this platform's own spelling before it
+    // reaches the pipeline: fs reports the resolved path, so a POSIX spelling
+    // on Windows is a different input shape — scrubbing one is tracked in
+    // #12082, not asserted here.
+    const cases = [
       ['/Users/张三/视频/clip.mp4', '/Users/张三'],
       ['/Users/a/videos/~draft.mp4', '/Users/a/videos'],
       ["/Users/a/it's (v2)+final@x/clip.mp4", "it's (v2)+final@x"],
       ['C:\\Users\\björn\\clip.mp4', 'C:\\Users'],
-    ] as const) {
+    ] as const;
+    for (const [spelledPath, spelledParent] of cases) {
+      const filePath = path.resolve(spelledPath);
+      const parentFragment = path.resolve(spelledParent);
       const result = await readMediaViaOmniDelivery({
         filePath,
         config: deliveryConfig(),

@@ -154,17 +154,7 @@ export function sanitizeErrorMessage(
 ): string {
   let msg = err instanceof Error ? err.message : String(err);
   for (const known of knownPaths) {
-    if (!known) continue;
-    // The fs error carries the path as the platform resolved it, not as the
-    // caller spelled it: on Windows a `/`-separated `filePath` comes back
-    // `C:\…`-separated, so the raw spelling alone never matches and the
-    // parent directory survives the pattern pass (which stops at the first
-    // quote in a segment). Replace both spellings.
-    const normalized = path.normalize(known);
-    msg = msg.split(known).join(path.basename(known));
-    if (normalized !== known) {
-      msg = msg.split(normalized).join(path.basename(normalized));
-    }
+    if (known) msg = msg.split(known).join(path.basename(known));
   }
   return (
     msg
