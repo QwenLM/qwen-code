@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '../../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../../models/types.js';
+import type { ModelConfig, ModelProvidersConfig } from '../../models/types.js';
 import {
   applyProviderInstallPlan,
   buildInstallPlan,
@@ -14,6 +14,7 @@ import {
   generateCustomEnvKey,
   minimaxProvider,
   ProviderInstallError,
+  type ProviderConfig,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
 } from '../index.js';
@@ -514,6 +515,91 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
+  it.each(['conversation', 'service'] as const)(
+    'does not reject a %s preset over an owned model in a sibling route bucket it never rewrites',
+    async (installs) => {
+      const conversation = {
+        id: 'MiniMax-M2.7',
+        name: '[MiniMax] MiniMax-M2.7',
+        baseUrl: 'https://api.minimax.io/v1',
+        envKey: 'MINIMAX_API_KEY',
+      };
+      const service = {
+        id: 'image-01',
+        name: '[MiniMax] service',
+        baseUrl: 'https://api.minimax.io/v1',
+        envKey: 'MINIMAX_API_KEY',
+        imageOnly: true,
+        supportsImageGeneration: true,
+      };
+      // The owned model of the *other* purpose lives in a user-named bucket
+      // that merely resolves to the same protocol. The install rewrites only
+      // `modelProviders.openai`, so nothing here can drop it and the removal
+      // guards must not fire.
+      const sibling = installs === 'conversation' ? service : conversation;
+      const adapter = createAdapter({ myrouter: [sibling], openai: [] });
+      vi.mocked(adapter.getValue).mockImplementation((key) =>
+        key === 'providerProtocol' ? { myrouter: 'openai' } : undefined,
+      );
+      const plan = buildInstallPlan(minimaxProvider, {
+        baseUrl: sibling.baseUrl,
+        apiKey: 'test-only',
+        modelIds: installs === 'conversation' ? ['MiniMax-M2.7'] : ['image-01'],
+      });
+      delete plan.env;
+      expect(plan.modelProviders?.[0]?.ownsModel?.(sibling)).toBe(true);
+      const result = await applyProviderInstallPlan(plan, {
+        settings: adapter,
+      });
+      expect(adapter.getModelProviders()).toEqual({
+        myrouter: [sibling],
+        openai: plan.modelProviders![0]!.models,
+      });
+      expect(result.updatedModelProviders).toEqual(adapter.getModelProviders());
+      expect(adapter.setValue).not.toHaveBeenCalledWith(
+        'modelProviders.myrouter',
+        expect.anything(),
+      );
+      expect(adapter.persist).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('still rejects a purpose change for the same identity in a sibling Responses bucket', async () => {
+    // Unlike the removal guards, the purpose-change guard must keep its
+    // route-aware view: the legacy-bucket cleanup deletes an identity match
+    // from any bucket resolving to the Responses route, so replacing an
+    // image model there with a conversation model is a real removal.
+    const baseUrl = 'https://media.example/v1';
+    const existing: ModelProvidersConfig = {
+      myrouter: [{ id: 'main', baseUrl, imageOnly: true }],
+      openai: [],
+    };
+    const snapshot = structuredClone(existing);
+    const adapter = createAdapter(existing);
+    vi.mocked(adapter.getValue).mockImplementation((key) =>
+      key === 'providerProtocol' ? { myrouter: 'openai-responses' } : undefined,
+    );
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      wireApi: 'responses',
+      baseUrl,
+      apiKey: 'test-only',
+      modelIds: ['main'],
+    });
+    plan.env = { TEST_API_KEY: 'must-not-write' };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).rejects.toMatchObject({
+      step: 'modelPurpose',
+      message: expect.stringContaining('another purpose'),
+    });
+    expect(adapter.setValue).not.toHaveBeenCalled();
+    expect(adapter.backup).not.toHaveBeenCalled();
+    expect(adapter.persist).not.toHaveBeenCalled();
+    expect(process.env['TEST_API_KEY']).toBeUndefined();
+    expect(existing).toEqual(snapshot);
+  });
+
   it.each(['append-chat', 'reselect-service', 'reselect-chat'] as const)(
     'preserves intentional preset merge behavior (%s)',
     async (scenario) => {
@@ -971,6 +1057,395 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
+  it.each([false, true])(
+    'preserves the other API sibling when installing Responses (ownsModel=%s)',
+    async (owned) => {
+      const baseUrl = 'https://gateway.test/v1';
+      const chat = { id: 'same', baseUrl, envKey: 'TEST_API_KEY' };
+      const responses = {
+        id: 'same',
+        baseUrl,
+        wireApi: 'responses' as const,
+        envKey: 'TEST_API_KEY',
+      };
+      const adapter = createAdapter({
+        openai: [chat, { ...responses, name: 'old' }],
+      });
+      vi.mocked(adapter.getValue).mockImplementation(
+        (key) =>
+          (
+            ({
+              'security.auth.selectedType': AuthType.USE_OPENAI,
+              'model.name': 'same',
+              'model.baseUrl': baseUrl,
+            }) as Record<string, unknown>
+          )[key],
+      );
+      const syncAuthState = vi.fn();
+      await applyProviderInstallPlan(
+        {
+          providerId: 'test',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          modelSelection: { modelId: 'same', baseUrl },
+          modelProviders: [
+            {
+              authType: AuthType.USE_OPENAI,
+              models: [responses],
+              mergeStrategy: 'prepend-and-remove-owned',
+              ...(owned ? { ownsModel: () => true } : {}),
+            },
+          ],
+        },
+        { settings: adapter, syncAuthState },
+      );
+      expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+        responses,
+        chat,
+      ]);
+      expect(syncAuthState).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI_RESPONSES,
+        'same',
+        baseUrl,
+      );
+    },
+  );
+
+  it('preserves a non-first canonical Responses selection across reinstall', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const models = ['first', 'chosen'].map((id) => ({
+      id,
+      baseUrl,
+      wireApi: 'responses' as const,
+    }));
+    const adapter = createAdapter({ openai: models });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'chosen',
+            'model.baseUrl': baseUrl,
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const syncAuthState = vi.fn();
+    await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelSelection: { modelId: 'first', baseUrl },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models,
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter, syncAuthState },
+    );
+    // The reinstall still persists the merged providers map — preserving the
+    // selection must not silently skip the install itself.
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'modelProviders.openai',
+      models,
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(syncAuthState).not.toHaveBeenCalled();
+  });
+
+  it('keeps a non-first current model when reinstalling across an API route change', async () => {
+    const baseUrl = 'https://gateway.test/v1';
+    const chatModels = ['glm-4.6', 'qwen3-max', 'deepseek-v3'].map((id) => ({
+      id,
+      baseUrl,
+      envKey: 'TEST_API_KEY',
+    }));
+    const responsesModels = chatModels.map((model) => ({
+      ...model,
+      wireApi: 'responses' as const,
+    }));
+    const adapter = createAdapter({ openai: chatModels });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'qwen3-max',
+            'model.baseUrl': baseUrl,
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const syncAuthState = vi.fn();
+    await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        modelSelection: { modelId: 'glm-4.6', baseUrl },
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: responsesModels,
+            mergeStrategy: 'prepend-and-remove-owned',
+          },
+        ],
+      },
+      { settings: adapter, syncAuthState },
+    );
+    // The plan still offers the user's chosen model on the new route: keep it
+    // instead of adopting the plan's first model, but still re-sync the live
+    // session onto the new wire.
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(syncAuthState).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      'qwen3-max',
+      baseUrl,
+    );
+  });
+
+  it('does not throw when an owned stored entry has an invalid wireApi', async () => {
+    const invalid = {
+      id: 'old',
+      envKey: 'TEST_API_KEY',
+      wireApi: 'invalid' as ModelConfig['wireApi'],
+    };
+    const adapter = createAdapter({ openai: [invalid] });
+    const result = await applyProviderInstallPlan(
+      {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        modelProviders: [
+          {
+            authType: AuthType.USE_OPENAI,
+            models: [{ id: 'new', envKey: 'TEST_API_KEY' }],
+            mergeStrategy: 'prepend-and-remove-owned',
+            ownsModel: (model) => model.envKey === 'TEST_API_KEY',
+          },
+        ],
+      },
+      { settings: adapter },
+    );
+    expect(result.updatedModelProviders['openai']).toEqual([
+      { id: 'new', envKey: 'TEST_API_KEY' },
+      invalid,
+    ]);
+  });
+
+  it('does not let an invalid api elsewhere in settings abort a non-OpenAI install', async () => {
+    const adapter = createAdapter({
+      openai: [
+        { id: 'm', envKey: 'A', wireApi: 'response' as ModelConfig['wireApi'] },
+      ],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'm',
+          }) as Record<string, unknown>
+        )[key],
+    );
+    // The pre-install wire resolution scans every modelProviders entry, so an
+    // invalid `wireApi` in an unrelated bucket would throw ahead of the plan's own
+    // error contract. A non-OpenAI plan never consults it.
+    const plan: ProviderInstallPlan = {
+      providerId: 'anthropic',
+      authType: AuthType.USE_ANTHROPIC,
+      modelSelection: { modelId: 'm' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_ANTHROPIC,
+          models: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        anthropic: [{ id: 'm', envKey: 'ANTHROPIC_API_KEY' }],
+      },
+    });
+  });
+
+  it('does not let an invalid api elsewhere in settings abort an OpenAI-family install', async () => {
+    // The pre-install wire probe walks every bucket of the previous providers
+    // map with the throwing resolver; an invalid `wireApi` in a bucket the plan
+    // never touches must skip the probe, not refuse the install.
+    const adapter = createAdapter({
+      idealab: [
+        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
+      ],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            'model.name': 'q1',
+            providerProtocol: { idealab: 'openai' },
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const plan: ProviderInstallPlan = {
+      providerId: 'openai',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      modelSelection: { modelId: 'q1' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [
+            {
+              id: 'q1',
+              envKey: 'TEST_API_KEY',
+              wireApi: 'responses' as const,
+            },
+          ],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        openai: [{ id: 'q1', envKey: 'TEST_API_KEY', wireApi: 'responses' }],
+      },
+    });
+  });
+
+  it('does not let an invalid api elsewhere in settings abort a voice install', async () => {
+    // The voice-conflict probe rebuilds a registry over every bucket of the
+    // prospective providers map, and the registry constructor validates each
+    // entry. An invalid `wireApi` in a bucket the plan never touches must not
+    // refuse the install — least of all with a bare Error the daemon answers
+    // as a 500 instead of the 400 `model_purpose_conflict`.
+    const baseUrl = 'https://voice.example/v1';
+    const adapter = createAdapter({
+      idealab: [
+        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
+      ],
+      openai: [
+        {
+          id: 'qwen3-asr-flash',
+          baseUrl,
+          voiceOnly: true,
+          envKey: `${generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl)}_VOICE`,
+        },
+      ],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            providerProtocol: { idealab: 'openai' },
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const plan = buildInstallPlan(customProvider, {
+      baseUrl,
+      apiKey: 'unused',
+      modelIds: ['qwen3-asr-flash'],
+      advancedConfig: { purpose: 'voice' },
+    });
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        openai: [{ id: 'qwen3-asr-flash', baseUrl, voiceOnly: true }],
+      },
+    });
+  });
+
+  it('keeps the duplicate-voice refusal on its step next to an invalid api elsewhere', async () => {
+    // Same map, but the plan reconnects the voice id at another endpoint: the
+    // refusal must still be the `modelPurpose` ProviderInstallError the daemon
+    // maps to `model_purpose_conflict`, not the registry's validation Error.
+    const adapter = createAdapter({
+      idealab: [
+        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
+      ],
+      openai: [
+        {
+          id: 'qwen3-asr-flash',
+          baseUrl: 'https://first.example/v1',
+          voiceOnly: true,
+          envKey: 'FIRST',
+        },
+      ],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            providerProtocol: { idealab: 'openai' },
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const plan = buildInstallPlan(customProvider, {
+      baseUrl: 'https://second.example/v1',
+      apiKey: 'unused',
+      modelIds: ['qwen3-asr-flash'],
+      advancedConfig: { purpose: 'voice' },
+    });
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).rejects.toMatchObject({
+      name: 'ProviderInstallError',
+      step: 'modelPurpose',
+    });
+    expect(adapter.setValue).not.toHaveBeenCalled();
+  });
+
+  it('retires a recorded model-list version when reinstalling on the Responses route', async () => {
+    const preset: ProviderConfig = {
+      id: 'test',
+      label: 'Test',
+      description: 'Test',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.test.com/v1',
+      envKey: 'TEST_API_KEY',
+      models: [{ id: 'model-a' }],
+      modelNamePrefix: 'Test',
+    };
+    const adapter = createAdapter();
+    const defaultPlan = buildInstallPlan(preset, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+    expect(
+      defaultPlan.providerState?.['providerMetadata.test']?.['version'],
+    ).toBeDefined();
+
+    const responsesPlan = buildInstallPlan(preset, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      wireApi: 'responses',
+    });
+    await applyProviderInstallPlan(responsesPlan, { settings: adapter });
+
+    // The drift check's template rebuild can never reproduce an api-stamped
+    // install's version, so the reinstall must retire the version the
+    // default-route install recorded — otherwise the next template change
+    // prompts a spurious update whose accept path duplicates every model.
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'providerMetadata.test.version',
+      undefined,
+    );
+  });
+
   it('preserves existing custom provider models and selects the installed endpoint', async () => {
     const baseUrl = 'http://new.example/v1';
     const otherBaseUrl = 'http://192.168.100.100:8000/v1';
@@ -1017,7 +1492,12 @@ describe('applyProviderInstallPlan', () => {
     }
 
     expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'model-b', name: 'model-b', baseUrl, envKey },
+      {
+        id: 'model-b',
+        name: 'model-b',
+        baseUrl,
+        envKey,
+      },
       {
         id: 'model-b',
         name: 'model-b',
