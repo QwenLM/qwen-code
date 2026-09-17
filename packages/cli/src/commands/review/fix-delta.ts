@@ -62,6 +62,7 @@ import {
   gitWithInputRaw,
 } from './lib/git.js';
 import { repoRelativeOf } from './lib/paths.js';
+import { isPathProvablyAbsent } from './lib/local-anchor.js';
 import { promptRecordDir } from './lib/prompt-record.js';
 import { filterBlankEnv, screenForTree } from './lib/worktree.js';
 import { hasVerifiableInode } from '../../utils/conversation-directory-identity.js';
@@ -140,6 +141,25 @@ export interface FixSnapshot {
    */
   hiddenPaths: string[];
   /**
+   * The ignored NESTED REPOSITORIES the same moment's rules hid, by the
+   * name a tree entry gives them (`ls-files --others` prints `sub/` and
+   * does not descend). Kept apart from `hiddenPaths` because the two
+   * answer different additions: a rule removed in the window admits the
+   * repository to the second capture as a GITLINK, and only a gitlink
+   * addition at this name is that admission — a blob or a link recorded
+   * at the same name is a replacement the fix made, and rides the hunks.
+   */
+  hiddenRepos: string[];
+  /**
+   * The ignored SYMLINKS the same moment's rules hid, kept apart from
+   * `hiddenPaths` for the same reason `hiddenRepos` is: a rule removed in
+   * the window admits the link as a mode-120000 addition, and only a link
+   * added at this name is that admission — a blob recorded where a hidden
+   * link stood, or a link where a hidden file stood, is a replacement the
+   * fix made and rides the hunks.
+   */
+  hiddenLinks: string[];
+  /**
    * The family-named paths this capture RE-INCLUDED as user content — the
    * tracked half and the staged half together — keyed on the raw path bytes
    * (latin1-encoded) like `hiddenPaths`. The staged half is the ambiguous
@@ -152,6 +172,29 @@ export interface FixSnapshot {
    * a rewrite no outcome owns into the hunks.
    */
   reincluded: string[];
+  /**
+   * The commit HEAD named at snapshot time, or null under an unborn HEAD.
+   * `--since` seeds its capture from the snapshot's own TREE, never from
+   * HEAD, so a commit made between the moments moves nothing in the
+   * comparison; it is disclosed instead, because a change that landed by
+   * commit alone (an ignored path force-added, a tracked path untracked)
+   * leaves no hunk and is one this command cannot see. The head also
+   * names the paths the second capture re-admits: one HEAD tracked that
+   * was absent at the snapshot and is on disk again (see
+   * `restoreAbsentTrackedPaths`).
+   */
+  head: string | null;
+  /**
+   * The filesystem identity (`dev:ino`, or the lexical `p:` fallback) of
+   * every probed path, keyed like `digests`. One physical repository
+   * reached under two names — a link beside its target, a workspace link
+   * into a submodule — is one baseline entry however it was named, and
+   * `--since` uses these to recognise a name that arrived or left between
+   * the moments as the same repository, not as one that appeared or
+   * vanished. Absent from a record this command did not write; then no
+   * name is collapsed and the comparison over-warns, as elsewhere.
+   */
+  identities: Record<string, string>;
 }
 
 /**
@@ -507,6 +550,22 @@ function isInside(path: string, root: string): boolean {
  * The env pair that blanks the tree's repo-local content filters for one
  * spawn — or a refusal when the screen cannot certify there are none.
  *
+ * The ROOT's config is the whole surface this screens, because no spawn
+ * of this command runs inside a nested repository before that repository
+ * has been screened by its own probe (`probeNestedRepoState`), and the
+ * capture runs inside none at all: `git add -A` decides whether a gitlink
+ * is modified by running a `status` INSIDE every submodule checkout the
+ * index holds — a child that reads and EXECUTES the checkout's own
+ * `filter.<name>.clean|process` under `.git/modules/<name>/config`, which
+ * a screen of the root never enumerates and no `-c` on the parent reaches
+ * (measured: `diff.ignoreSubmodules`, `submodule.<name>.ignore` and
+ * `submodule.recurse` all left the inner status running) — so the seed's
+ * gitlinks are excluded from `add -A` and refreshed by hand off `rev-parse
+ * HEAD`, which reads no config a filter or hook rides on (see
+ * `refreshSeedGitlinks`), and both discovery statuses run with
+ * `--ignore-submodules=all`, which spawns nothing (measured: `none` ran
+ * the planted filter, `all` did not).
+ *
  * `screenForTree` answers in two halves and both are load-bearing here.
  * `unread` is every config file the walk could NOT read to the bottom:
  * another user's `~user/`, a non-regular target, a parse failure, an include
@@ -547,7 +606,6 @@ function blankedFilterEnv(root: string, what: string): Record<string, string> {
   }
   return filterBlankEnv(screen.filters) as Record<string, string>;
 }
-
 /**
  * Record the working tree under `root` as a tree object and return its sha,
  * with the family paths the capture re-included. Runs through a throwaway
@@ -557,13 +615,32 @@ function blankedFilterEnv(root: string, what: string): Record<string, string> {
  * and `reincludable` is the staged half's fail-closed gate: null at the
  * snapshot moment (nothing to gate against yet), the snapshot's own recorded
  * set at `--since`.
+ *
+ * `seed` is what the throwaway index starts from. The snapshot moment seeds
+ * from HEAD (the everyday meaning of "tracked"); the `--since` moment seeds
+ * from the SNAPSHOT'S OWN TREE, so the two captures differ only by what is
+ * on disk. Seeded from HEAD at both moments, the comparison also carried
+ * two things that are not edits — every path the seed's tracked set gained
+ * or lost between the moments (a commit in the window), and every path an
+ * ignore rule written or deleted in the window admitted to or hid from
+ * `add -A` — and a classifier had to guess, per record, whether the tree
+ * comparison or the fix had made it. With the first tree as the second
+ * seed, an entry the first capture recorded is an entry the second one
+ * holds, whatever the rules say about it now (ignore rules never touch an
+ * index entry), so a deletion in the hunks is a path that is GONE from the
+ * disk, and nothing else. What the seed cannot re-admit is a path HEAD
+ * tracked that was absent at the snapshot and is on disk again — that half
+ * is `restoreAbsentTrackedPaths`; the addition-side classifier
+ * (`ghostAdditions`) still rules on a rule REMOVED in the window, which
+ * admits pre-existing content the first capture never saw.
  */
 export function snapshotWorkingTree(
   root: string,
   sidePaths: readonly string[] = [],
   bookkeeping: readonly string[] = [],
   reincludable: ReadonlySet<string> | null = null,
-): { tree: string; reincluded: string[] } {
+  seed: { tree: string; head: string | null | undefined } | null = null,
+): { tree: string; reincluded: string[]; seedHeadMissing: boolean } {
   // The scratch index must live OUTSIDE anything the snapshot can capture:
   // os.tmpdir() honours TMPDIR, and a hermetic sandbox pointing it inside the
   // worktree made `add -A` record the scratch directory itself into the
@@ -583,20 +660,26 @@ export function snapshotWorkingTree(
   // instead of blanking nothing: it cannot certify the config holds no
   // filter, and an unblanked one executes. Screened before the scratch dir
   // exists so a refusal leaves nothing behind.
+  // Probed IN `root`, not in the process cwd: every other call here carries
+  // `-C root`, and a bare `rev-parse HEAD` answers for whatever repository
+  // the process happens to sit in.
+  const seedRef =
+    seed !== null
+      ? seed.tree
+      : gitOpt('-C', root, 'rev-parse', '--verify', '--quiet', 'HEAD') !== null
+        ? 'HEAD'
+        : null;
   const blankFilters = blankedFilterEnv(root, 'the capture');
   const gitDir = git('-C', root, 'rev-parse', '--absolute-git-dir');
   const scratch = mkdtempSync(join(gitDir, 'qwen-fix-delta-'));
   const env = { GIT_INDEX_FILE: join(scratch, 'index'), ...blankFilters };
   try {
+    // The `--since` moment starts from the snapshot's own tree (see the
+    // docblock); the snapshot moment from HEAD.
     // An unborn HEAD (a repo with no commit yet) has no tree to seed from —
     // start empty, and `add -A` records everything as added.
-    // Probed IN `root`, not in the process cwd: every other call here carries
-    // `-C root`, and a bare `rev-parse HEAD` answers for whatever repository
-    // the process happens to sit in.
-    if (
-      gitOpt('-C', root, 'rev-parse', '--verify', '--quiet', 'HEAD') !== null
-    ) {
-      gitWithEnv(env, ['-C', root, ...capturePins(root), 'read-tree', 'HEAD']);
+    if (seedRef !== null) {
+      gitWithEnv(env, ['-C', root, ...capturePins(root), 'read-tree', seedRef]);
     } else {
       gitWithEnv(env, [
         '-C',
@@ -622,10 +705,20 @@ export function snapshotWorkingTree(
     // those checkouts. The probe and the comparison keep every side path:
     // neither complains, and a tracked or staged side path is never
     // reported ignored BY THE INDEX-CONSULTING question below — the one
-    // that predicts what `add -A` accepts. (The ghost classifier in
-    // `ghostDeletions` asks the other question — whether the RULES alone
-    // hide a path, `--no-index` — because a rule that appeared between
-    // the moments is exactly what it tests for.)
+    // that predicts what `add -A` accepts.
+    // The seed's gitlinks are kept out of `add -A` and refreshed by hand
+    // (see `refreshSeedGitlinks`): the capture never runs a status inside
+    // a nested repository.
+    const seedGitlinks = gitlinkPathsIn(
+      gitWithEnvRaw(env, [
+        '-C',
+        root,
+        ...probePins(root),
+        'ls-files',
+        '-s',
+        '-z',
+      ]),
+    );
     const add = gitWithEnvReport(
       env,
       [
@@ -644,9 +737,14 @@ export function snapshotWorkingTree(
         '--pathspec-from-file=-',
         '--pathspec-file-nul',
       ],
-      capturePathspecBytes(root, capturableSidePaths(root, sidePaths)),
+      capturePathspecBytes(
+        root,
+        capturableSidePaths(root, sidePaths),
+        seedGitlinks,
+      ),
     );
     assertCompleteCapture(add);
+    refreshSeedGitlinks(env, root, seedGitlinks);
     // The families are excluded above because the flow WRITES them between
     // the two states — as untracked files. A path the repository TRACKS
     // under a family name is not that: the flow never tracks its side
@@ -775,6 +873,10 @@ export function snapshotWorkingTree(
       );
       assertCompleteCapture(update);
     }
+    const seedHeadMissing =
+      seed !== null && typeof seed.head === 'string'
+        ? !restoreAbsentTrackedPaths(env, root, seed.tree, seed.head, sidePaths)
+        : false;
     const tree = gitWithEnv(env, [
       '-C',
       root,
@@ -784,9 +886,265 @@ export function snapshotWorkingTree(
     // latin1, like every other path-keyed record field: a byte<->char
     // bijection, so the set `--since` gates on compares the RAW bytes and
     // a name the display decode cannot carry still round-trips.
-    return { tree, reincluded: reincluded.map((p) => p.toString('latin1')) };
+    return {
+      tree,
+      reincluded: reincluded.map((p) => p.toString('latin1')),
+      seedHeadMissing,
+    };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** The mode-160000 paths of an `ls-files -s -z` listing, as raw bytes. */
+function gitlinkPathsIn(listing: Buffer): Buffer[] {
+  const out: Buffer[] = [];
+  for (const entry of splitNul(listing)) {
+    if (!entry.subarray(0, 7).equals(GITLINK_MODE_PREFIX)) continue;
+    const tab = entry.indexOf(0x09);
+    if (tab !== -1) out.push(entry.subarray(tab + 1));
+  }
+  return out;
+}
+
+/**
+ * What `git add -A` would do to the seed's gitlinks, done by hand — and
+ * without the one thing `add -A` does on the way, which is to run a
+ * `status` inside every such checkout to decide whether it is modified. That
+ * child reads the checkout's OWN config and executes what it finds there:
+ * a `filter.<name>.clean|process` under `.git/modules/<name>/config`, a
+ * `core.fsmonitor` command, the hooks its `core.hooksPath` names — none of
+ * which the root's screen enumerates or a `-c` on the parent reaches. The
+ * gitlink's value is the checkout's HEAD, and `rev-parse HEAD` reads
+ * nothing a command rides on; so each entry is refreshed from that and
+ * written back with `update-index --index-info`, bytes through stdin.
+ *
+ * Entry for entry, git's own ruling: a checkout that is GONE is a removed
+ * entry (a deletion in the hunks, the fix's); one replaced by a file or a
+ * link is the replacement (removed here, then recorded by `add -f`); one
+ * that is empty, holds no `.git`, cannot be read, has no commit yet, or
+ * carries a name the spawn cannot carry stands as the seed recorded it —
+ * `add -A` leaves such a gitlink alone too (`ce_compare_gitlink` reads an
+ * unresolvable HEAD as unchanged), as does one whose `.git` git does not
+ * accept as its own, and the blind-spot probe is what answers for its
+ * state. A corrupt checkout that `add -A` would have DIED
+ * on ("'git status --porcelain=2' failed in submodule") stands the same
+ * way, and is disclosed by the probe as unresolved rather than costing the
+ * whole capture.
+ */
+function refreshSeedGitlinks(
+  env: Record<string, string>,
+  root: string,
+  gitlinks: readonly Buffer[],
+): void {
+  if (gitlinks.length === 0) return;
+  const rootBuf = Buffer.from(root);
+  const records: Buffer[] = [];
+  const replaced: Buffer[] = [];
+  const removal = (rel: Buffer): Buffer =>
+    Buffer.concat([
+      Buffer.from(`0 ${'0'.repeat(40)}\t`),
+      rel,
+      Buffer.from([0]),
+    ]);
+  for (const rel of gitlinks) {
+    const abs = joinBytes(rootBuf, rel);
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(abs);
+    } catch (err) {
+      if (errnoOf(err) === 'ENOENT') records.push(removal(rel));
+      continue;
+    }
+    if (!st.isDirectory()) {
+      records.push(removal(rel));
+      replaced.push(rel);
+      continue;
+    }
+    if (gitlinkCheckoutState(abs) !== 'repo') continue;
+    const path = abs.toString('utf8');
+    if (!Buffer.from(path, 'utf8').equals(abs)) continue;
+    // …and only a checkout whose `.git` git accepts as ITS OWN: over a
+    // hollow `.git` (an empty directory, a gitfile pointing back at the
+    // superproject) `rev-parse HEAD` walks up and answers with the
+    // superproject's commit, and recording that would put a `Subproject
+    // commit` hunk the fix never made in front of the auditor. The entry
+    // stands; the probe discloses the checkout as unresolved.
+    if (!answersForOwnGitDir(path)) continue;
+    const head = gitOpt(
+      '-C',
+      path,
+      ...probePins(path),
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      'HEAD',
+    );
+    if (head === null) continue;
+    records.push(
+      Buffer.concat([Buffer.from(`160000 ${head}\t`), rel, Buffer.from([0])]),
+    );
+  }
+  if (records.length > 0) {
+    const update = gitWithEnvReport(
+      env,
+      ['-C', root, ...capturePins(root), 'update-index', '-z', '--index-info'],
+      Buffer.concat(records),
+    );
+    if (!update.completed || update.status !== 0) {
+      throw new Error(
+        `fix-delta: git update-index could not refresh the gitlinks (exit ${update.status}): ` +
+          escapeNoteToken(update.stderr.trim()),
+      );
+    }
+  }
+  if (replaced.length > 0) {
+    const added = gitWithEnvReport(
+      env,
+      [
+        '-C',
+        root,
+        '--literal-pathspecs',
+        ...capturePins(root),
+        'add',
+        '-A',
+        '-f',
+        '--sparse',
+        '--ignore-errors',
+        '--pathspec-from-file=-',
+        '--pathspec-file-nul',
+      ],
+      Buffer.concat(replaced.flatMap((path) => [path, Buffer.from([0])])),
+    );
+    assertCompleteCapture(added);
+  }
+}
+
+/**
+ * The half of "tracked" the snapshot tree cannot carry into the second
+ * capture: a path HEAD tracked at snapshot time that was ABSENT from the
+ * disk then (deleted by the change under review and not staged, a build
+ * artifact cleaned away) is in no first tree, so a seed taken from that
+ * tree never asks `add -A` about it — and a fix that writes it back (a
+ * regenerated `dist/index.js` under an ignore rule, a file the fixer
+ * restored) would leave no hunk. Asked of the snapshot's HEAD, never of
+ * HEAD now: the paths are the ones the first tree LACKS beside that commit,
+ * and every one that is on disk now — a file or a link, never a directory,
+ * whose non-ignored content `add -A` already recorded — is recorded with
+ * `-f`, because the rule that hid it from the capture is exactly why it
+ * needs recording. Returns false when the recorded commit is no longer in
+ * the repository: the caller discloses that the half was not re-captured.
+ */
+function restoreAbsentTrackedPaths(
+  env: Record<string, string>,
+  root: string,
+  seedTree: string,
+  head: string,
+  sidePaths: readonly string[],
+): boolean {
+  if (gitOpt('-C', root, 'cat-file', '-e', `${head}^{commit}`) === null) {
+    return false;
+  }
+  const raw = gitRaw(
+    '-C',
+    root,
+    ...probePins(root),
+    'diff-tree',
+    '-r',
+    '--name-only',
+    '-z',
+    '--diff-filter=D',
+    head,
+    seedTree,
+  );
+  const side = new Set(sidePaths.map((p) => p.split(sep).join('/')));
+  const rootBuf = Buffer.from(root);
+  // The gitlinks the scratch index holds NOW — the seed's, refreshed, and
+  // every embedded repository `add -A` just recorded: a path beneath one
+  // is a pathspec git refuses (`is in submodule`), and its content is the
+  // blind-spot probe's to answer for, not this pass's.
+  const gitlinks = gitlinkPathsIn(
+    gitWithEnvRaw(env, [
+      '-C',
+      root,
+      ...probePins(root),
+      'ls-files',
+      '-s',
+      '-z',
+    ]),
+  );
+  const underGitlink = (rel: Buffer): boolean =>
+    gitlinks.some(
+      (g) =>
+        rel.length > g.length &&
+        rel[g.length] === 0x2f /* / */ &&
+        rel.subarray(0, g.length).equals(g),
+    );
+  const restore: Buffer[] = [];
+  for (const rel of splitNul(raw)) {
+    if (rel.length === 0 || side.has(rel.toString('utf8'))) continue;
+    // …and not behind a link or inside a repository: `lstat` follows every
+    // LEADING component, so a path whose directory the fix replaced with a
+    // symlink reads as present while `add` refuses the pathspec outright
+    // (`beyond a symbolic link`, `is in submodule`), and one unexplained
+    // refusal fails the whole capture. The link or the gitlink is what
+    // `add -A` recorded; what sits behind it is outside the tree this
+    // command measures.
+    if (behindSymlink(rootBuf, rel) || underGitlink(rel)) continue;
+    // Only an ENTRY that is a file or a link now is re-admitted. A leading
+    // component that became a plain file answers ENOTDIR; a directory is
+    // content `add -A` already walked; anything the probe cannot stat is
+    // not proven present. Each is a pathspec `add -f` would die on or
+    // record nothing for, so each is left out rather than tried.
+    try {
+      const st = lstatSync(joinBytes(rootBuf, rel));
+      if (!st.isFile() && !st.isSymbolicLink()) continue;
+    } catch {
+      continue;
+    }
+    restore.push(rel);
+  }
+  if (restore.length === 0) return true;
+  const added = gitWithEnvReport(
+    env,
+    [
+      '-C',
+      root,
+      '--literal-pathspecs',
+      ...capturePins(root),
+      'add',
+      '-A',
+      '-f',
+      '--sparse',
+      '--ignore-errors',
+      '--pathspec-from-file=-',
+      '--pathspec-file-nul',
+    ],
+    Buffer.concat(restore.flatMap((path) => [path, Buffer.from([0])])),
+  );
+  assertCompleteCapture(added);
+  return true;
+}
+
+/**
+ * Whether any LEADING component of `rel` is a symlink (or cannot be
+ * stat'd): the path then sits behind a link, and git's pathspec refuses it.
+ */
+function behindSymlink(rootBuf: Buffer, rel: Buffer): boolean {
+  let at = -1;
+  for (;;) {
+    const next = rel.indexOf(0x2f /* / */, at + 1);
+    if (next === -1) return false;
+    try {
+      if (
+        lstatSync(joinBytes(rootBuf, rel.subarray(0, next))).isSymbolicLink()
+      ) {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+    at = next;
   }
 }
 
@@ -797,9 +1155,7 @@ export function snapshotWorkingTree(
  * probe deliberately CONSULTS the index the way `add -A` itself does — it
  * predicts the capture's acceptance, and an answer git cannot give keeps
  * the path excluded: if it was ignored after all, the capture refuses as
- * before rather than recording the side file. (The ghost classifier asks
- * the rules-only question — `--no-index` — for the opposite reason: it
- * tests whether a rule, not the index, hides a path.)
+ * before rather than recording the side file.
  */
 function capturableSidePaths(
   root: string,
@@ -1016,9 +1372,11 @@ export function assertCompleteCapture(add: {
     );
   });
   if (unexplained.length > 0 || (add.status !== 0 && lines.length === 0)) {
+    // Escaped at the render boundary: a note is git's text around a path
+    // or a value the tree chose, and the fallback is the raw stream.
     throw new Error(
       `fix-delta: git add could not capture the whole tree (exit ${add.status}): ` +
-        (unexplained.join(' | ') || add.stderr.trim()),
+        escapeNoteToken(unexplained.join(' | ') || add.stderr.trim()),
     );
   }
 }
@@ -1059,6 +1417,7 @@ function literalExcludes(
 export function capturePathspecBytes(
   root: string,
   extraLiteral: readonly string[] = [],
+  extraLiteralBytes: readonly Buffer[] = [],
 ): Buffer {
   const specs: Buffer[] = [Buffer.from('.')];
   for (const family of FIX_DELTA_EXCLUDES) {
@@ -1073,6 +1432,11 @@ export function capturePathspecBytes(
   }
   for (const rel of extraLiteral) {
     specs.push(Buffer.from(`:(exclude,literal)${rel.split(sep).join('/')}`));
+  }
+  // The seed's gitlinks, as the bytes `ls-files -z` printed them (see
+  // `refreshSeedGitlinks`).
+  for (const rel of extraLiteralBytes) {
+    specs.push(Buffer.concat([Buffer.from(':(exclude,literal)'), rel]));
   }
   return Buffer.concat(specs.flatMap((s) => [s, Buffer.from([0])]));
 }
@@ -1321,110 +1685,6 @@ function renderSteeringPaths(root: string, files: readonly Buffer[]): Buffer[] {
 }
 
 /**
- * The paths the two trees record as DELETED whose file is still on disk
- * and that HEAD does not hold. Nothing was deleted: an ignore rule that
- * APPEARED between the moments — the `.gitignore` line a fix writes is the
- * ordinary carrier — hides an untracked path from the second capture, and
- * the tree comparison reads the absence as a deletion. Left in, the hunks
- * (the auditor's sole input) assert an edit the fix never made and the
- * changed-file count overstates its footprint; so they are dropped from
- * the diff and disclosed instead.
- * An unstaged family path takes the same shape and the same treatment.
- */
-function ghostDeletions(
-  root: string,
-  fromTree: string,
-  toTree: string,
-  sidePaths: readonly string[],
-): Buffer[] {
-  const raw = gitRaw(
-    '-C',
-    root,
-    ...probePins(root),
-    'diff-tree',
-    '-r',
-    '--name-status',
-    '-z',
-    '--diff-filter=D',
-    fromTree,
-    toTree,
-    '--',
-    ...literalPathspec(sidePaths),
-  );
-  const fields = splitNul(raw);
-  const ghosts: Buffer[] = [];
-  const rootBuf = Buffer.from(root);
-  for (let i = 0; i + 1 < fields.length; i += 2) {
-    if (fields[i][0] !== 0x44 /* D */) continue;
-    const rel = fields[i + 1];
-    let st: ReturnType<typeof lstatSync> | null = null;
-    try {
-      // `lstatSync`, not `existsSync`: git records a symlink (mode 120000)
-      // whether or not its target exists, and `existsSync` follows the
-      // link — a dangling one read as absent and skipped the classifier
-      // below, so the capture-invented deletion of it rode into the
-      // hunks as an edit the fix never made.
-      st = lstatSync(joinBytes(rootBuf, rel));
-    } catch (err) {
-      if (errnoOf(err) === 'ENOENT') continue;
-      // Any other error: not proven absent, so the path still reaches
-      // the classifier.
-    }
-    // The KIND answers before the rules do: a tree records no
-    // plain-directory entries, so a DIRECTORY under the name now is a
-    // replacement the fix made (`rm f && mkdir f`), not the capture's
-    // invention — and an ignore rule covering that name (`f/`) would
-    // otherwise classify the real deletion as a ghost and drop it from
-    // the hunks.
-    if (st !== null && st.isDirectory()) continue;
-    // Still on disk as the same kind is not enough either: the ghost is
-    // the path an ignore rule now HIDES — ask git, which is the only
-    // authority on its own rules.
-    const name = decodePath(rel);
-    // …and only a name a pathspec can carry: the exclusion and the HEAD
-    // probe below travel as spawn arguments, so a name the decode cannot
-    // round-trip would reach git as U+FFFD and exclude nothing while the
-    // note claimed it was dropped. Such a deletion stays in the hunks, as
-    // before.
-    if (!Buffer.from(name, 'utf8').equals(rel)) continue;
-    // …and only a path HEAD does NOT hold. The on-disk reading above is
-    // taken at a THIRD moment — after the second capture was written — and
-    // `--no-index` answers "ignored" for a TRACKED path too, so together
-    // they rule on a fact that was true at neither capture: `add -A`
-    // records a tracked file whatever the rules say, so a `D` record for
-    // one means it was ABSENT when the second capture looked, and the
-    // deletion is the fix's. Anything the reviewed code left running as
-    // this user — a watch-mode build, a dev server — can write the path
-    // back in between, and a real deletion rode out of the hunks as the
-    // capture's invention. Only a path HEAD does not hold is explained by
-    // "ignored now and on disk now": the rules hide it from `add -A`, so
-    // its absence from the second tree says nothing about the disk. A
-    // staged-but-uncommitted path is not in HEAD by definition, so the
-    // case `--no-index` was added for still reaches the classifier.
-    if (gitOpt('-C', root, 'cat-file', '-e', `HEAD:${name}`) !== null) {
-      continue;
-    }
-    const ignored = gitProbe(
-      '-C',
-      root,
-      ...probePins(root),
-      'check-ignore',
-      '-q',
-      // `--no-index`: the question is whether the RULES hide this path,
-      // not what `add` would do with it — without it the USER's index
-      // outranks the rules, and a staged-but-uncommitted file was never
-      // recognised as a ghost, so the capture-invented deletion of it
-      // rode into the hunks as an edit the fix never made.
-      '--no-index',
-      '--',
-      name.split(sep).join('/'),
-    );
-    if (ignored.status === 0) ghosts.push(rel);
-  }
-  return ghosts;
-}
-
-/**
  * The scope note for directory links reaching outside the audited
  * repository — `npm link`, a `file:../sibling` dependency, a hoisted
  * package store. Content out there is outside this command's model the
@@ -1454,7 +1714,11 @@ function outOfRootNote(paths: string[], fresh: boolean): string {
  * Listed individually; on a checkout with a package store ignored this is
  * the one list the snapshot pays for in proportion to the store.
  */
-function hiddenIgnoredPaths(root: string): string[] {
+function hiddenIgnoredPaths(root: string): {
+  files: string[];
+  links: string[];
+  repos: string[];
+} {
   // `--others` alone misses the index-resident half: a staged-but-never-
   // committed ignored file is in the USER's index, so it is not "other" —
   // yet the capture's throwaway index (seeded from HEAD) never held it,
@@ -1474,8 +1738,26 @@ function hiddenIgnoredPaths(root: string): string[] {
   // exactly that record, honestly. `--others` is on disk by construction.
   // The test is `lstatSync` with only ENOENT meaning absent, the module's
   // rule: the ENTRY, never its target.
-  const hidden: string[] = [];
+  const files: string[] = [];
+  const links: string[] = [];
+  const repos: string[] = [];
   const rootBuf = Buffer.from(root);
+  // The `--cached` half is typed off the user's index: `ls-files -s` with
+  // `--cached --ignored` prints nothing, and a staged-but-uncommitted
+  // gitlink under an ignore rule is printed by the plain listing WITHOUT
+  // the trailing slash `--others` gives a repository — so its mode is the
+  // only thing that tells it from a file.
+  const cachedModes = new Map<string, string>();
+  for (const entry of splitNul(
+    gitRaw('-C', root, ...probePins(root), 'ls-files', '-s', '-z'),
+  )) {
+    const tab = entry.indexOf(0x09);
+    if (tab === -1) continue;
+    cachedModes.set(
+      entry.subarray(tab + 1).toString('latin1'),
+      entry.subarray(0, 6).toString('latin1'),
+    );
+  }
   for (const selector of ['--others', '--cached'] as const) {
     const raw = gitRaw(
       '-C',
@@ -1487,20 +1769,48 @@ function hiddenIgnoredPaths(root: string): string[] {
       '--exclude-standard',
       '-z',
     );
-    for (const name of splitNul(raw)) {
-      if (name.length === 0) continue;
+    for (const listed of splitNul(raw)) {
+      if (listed.length === 0) continue;
+      // `--others` prints an ignored nested repository as `sub/` — it does
+      // not descend into one — while the capture records it as the
+      // gitlink `sub`, the spelling the classifier looks an `A` record up
+      // by. Such an entry goes on its own list, keyed as the tree spells
+      // it, and matches only a gitlink addition (see `FixSnapshot.
+      // hiddenRepos`); the byte/latin1 key space stays.
+      if (listed[listed.length - 1] === 0x2f /* / */) {
+        const name = listed.subarray(0, listed.length - 1);
+        if (name.length > 0) repos.push(name.toString('latin1'));
+        continue;
+      }
+      const key = listed.toString('latin1');
       if (selector === '--cached') {
+        const mode = cachedModes.get(key);
+        if (mode === '160000') {
+          repos.push(key);
+          continue;
+        }
         try {
-          lstatSync(joinBytes(rootBuf, name));
+          lstatSync(joinBytes(rootBuf, listed));
         } catch (err) {
           if (errnoOf(err) === 'ENOENT') continue;
           // Any other error: not proven absent, so it stays in the set.
         }
+        (mode === '120000' ? links : files).push(key);
+        continue;
       }
-      hidden.push(name.toString('latin1'));
+      // `--others` is on disk by construction; the ENTRY's kind decides
+      // which list, never its target's.
+      let link = false;
+      try {
+        link = lstatSync(joinBytes(rootBuf, listed)).isSymbolicLink();
+      } catch {
+        // Unreadable now: a file until proven otherwise (the addition-side
+        // lookup then over-matches a blob, never invents).
+      }
+      (link ? links : files).push(key);
     }
   }
-  return hidden;
+  return { files, links, repos };
 }
 
 /**
@@ -1508,9 +1818,12 @@ function hiddenIgnoredPaths(root: string): string[] {
  * rules hid: nothing was created — a rule REMOVED between the moments
  * (the `.gitignore` line a fix deletes is the ordinary carrier) admitted
  * pre-existing untracked content to the second capture, and the tree
- * comparison reads the admission as an addition. The mirror of
- * `ghostDeletions`, ruled against the snapshot's record because the
- * first moment's rule set is gone by the time the question is asked.
+ * comparison reads the admission as an addition. Ruled against the
+ * snapshot's record because the first moment's rule set is gone by the
+ * time the question is asked. There is no deletion-side mirror: the second
+ * capture is seeded from the first tree, so a rule that APPEARED in the
+ * window hides nothing the first capture recorded (see
+ * `snapshotWorkingTree`), and a `D` record is a path gone from the disk.
  * Left in, the hunks (the auditor's sole input) assert edits the fix
  * never made and the changed-file count overstates its footprint; so
  * they are dropped from the diff and disclosed instead.
@@ -1519,16 +1832,21 @@ function ghostAdditions(
   root: string,
   fromTree: string,
   toTree: string,
-  hidden: ReadonlySet<string>,
+  hiddenFiles: ReadonlySet<string>,
+  hiddenLinks: ReadonlySet<string>,
+  hiddenRepos: ReadonlySet<string>,
   sidePaths: readonly string[],
 ): Buffer[] {
+  // `--raw`, not `--name-status`: the record's KIND decides which list a
+  // name is looked up in. `:<src mode> <dst mode> <src sha> <dst sha> A`
+  // NUL `<path>` NUL, and only the destination mode is read.
   const raw = gitRaw(
     '-C',
     root,
     ...probePins(root),
     'diff-tree',
     '-r',
-    '--name-status',
+    '--raw',
     '-z',
     '--diff-filter=A',
     fromTree,
@@ -1539,9 +1857,23 @@ function ghostAdditions(
   const fields = splitNul(raw);
   const ghosts: Buffer[] = [];
   for (let i = 0; i + 1 < fields.length; i += 2) {
-    if (fields[i][0] !== 0x41 /* A */) continue;
+    const meta = fields[i].toString('latin1').split(' ');
+    if (meta.length < 5 || meta[4][0] !== 'A') continue;
     const rel = fields[i + 1];
-    if (!hidden.has(rel.toString('latin1'))) continue;
+    const key = rel.toString('latin1');
+    // The record's kind must match what the rules hid at that name: a
+    // gitlink where a REPOSITORY was hidden, a link where a LINK was, a
+    // blob where a FILE was — each is the rule's removal admitting what
+    // was already there. Any other pairing (a blob or link where the
+    // repository stood, a link where a file stood, a repository where a
+    // file stood) is a replacement the fix made, and rides the hunks.
+    const hidden =
+      meta[1] === '160000'
+        ? hiddenRepos
+        : meta[1] === '120000'
+          ? hiddenLinks
+          : hiddenFiles;
+    if (!hidden.has(key)) continue;
     // The same gate the deletion side keeps: the exclusion travels as a
     // spawn argument, so a name the decode cannot round-trip would reach
     // git as U+FFFD and exclude nothing while the note claimed it was
@@ -1551,20 +1883,6 @@ function ghostAdditions(
     ghosts.push(rel);
   }
   return ghosts;
-}
-
-/** The disclosure for a deletion the capture invented. */
-function ghostDeletionNote(paths: string[]): string {
-  const one = paths.length === 1;
-  return (
-    `fix-delta: ${paths.join(', ')} ${one ? 'is' : 'are'} recorded as ` +
-    `deleted between the two states but ${one ? 'is' : 'are'} still on ` +
-    'disk — an ignore rule that appeared since the snapshot (a ' +
-    '`.gitignore` line the fix wrote, an `info/exclude` entry) hides ' +
-    `${one ? 'it' : 'them'} from the second capture, so the deletion is ` +
-    "the capture's and not the fix's. It is left out of the hunks; the " +
-    "file's content is outside this model, as any ignored file's is."
-  );
 }
 
 /** The disclosure for an addition the capture invented. */
@@ -1936,40 +2254,7 @@ function probeNestedRepoState(
   // direction over-warns, it never silences a blind spot.
   const path = absPath.toString('utf8');
   if (!Buffer.from(path, 'utf8').equals(absPath)) return { state: 'failed' };
-  // A `.git` git itself rejects — an empty file, a gitfile pointing
-  // nowhere, a directory that is not a git dir — passes the `existsSync`
-  // gate every discovery route uses, and git's discovery then walks UP
-  // and answers with the SUPERPROJECT's status under this path's
-  // `--work-tree`: an answer about the wrong repository. The git dir git
-  // resolves from inside must be the one this path's own `.git` names.
-  const dotGit = join(path, '.git');
-  let expectedGitDir: string;
-  try {
-    // `statSync`, THROUGH a link: a `.git` symlink to a gitfile is a
-    // gitfile to git, and reading the link itself as the git dir refused
-    // such a repository on every run.
-    if (statSync(dotGit).isFile()) {
-      const pointer = /^gitdir:\s*(.+?)\s*$/.exec(
-        readFileSync(dotGit, 'utf8').split('\n')[0] ?? '',
-      );
-      if (pointer === null) return { state: 'failed' };
-      expectedGitDir = resolve(path, pointer[1]);
-    } else {
-      expectedGitDir = dotGit;
-    }
-  } catch {
-    return { state: 'failed' };
-  }
-  const discovered = gitOpt(
-    '-C',
-    path,
-    ...probePins(path),
-    'rev-parse',
-    '--absolute-git-dir',
-  );
-  if (discovered === null || !samePath(discovered, expectedGitDir)) {
-    return { state: 'failed' };
-  }
+  if (!answersForOwnGitDir(path)) return { state: 'failed' };
   // The repository's OWN config steers the status it answers with: a
   // repo-local `filter.<name>.clean`/`.process` canonicalises the worktree
   // bytes status hashes, so a size-preserving interior edit can answer
@@ -2059,7 +2344,12 @@ function probeNestedRepoState(
     // dropped below: a fetch nobody edited with moves them.
     '--branch',
     '--show-stash',
-    '--ignore-submodules=none',
+    // `=all` for the same reason the root's discovery status runs with it:
+    // under `none` this status spawns inside every level-2 checkout before
+    // that checkout's own config has been screened. The level-2 state is
+    // not lost — the interior gitlinks are swept below and each is probed
+    // (and screened) on its own, with a digest of its own.
+    '--ignore-submodules=all',
     // `--ignored=matching` so that a repository whose only uncommitted
     // content matches its OWN ignore rules still moves the digest — but
     // an ignored entry is not DIRT: `dist/`, `node_modules/` are the
@@ -2276,7 +2566,7 @@ function errnoOf(err: unknown): string {
  * and skip-worktree ones with `S`. A probe that cannot list the tags at all
  * answers true — unanswerable is never clean.
  *
- * The status this confirms ran with `--ignore-submodules=none`, whose
+ * The status this confirms ran with `--ignore-submodules=all`, whose
  * clean answer reaches THROUGH every submodule checkout below — and a bit
  * set one level down hides the entry from that inner run the same way:
  * the level-1 tags say nothing about it (the gitlink itself carries a
@@ -2291,14 +2581,23 @@ function errnoOf(err: unknown): string {
  * status above: `ls-files -v` executes `core.fsmonitor` too.
  */
 function indexBitsHideEntries(path: string, state: ProbeState): boolean {
-  const tags = gitOpt('-C', path, ...probePins(path), 'ls-files', '-v');
-  if (tags === null) return true;
-  if (
-    tags.split('\n').some((line) => {
-      const tag = line.charAt(0);
-      return tag === 'S' || (tag >= 'a' && tag <= 'z');
-    })
-  ) {
+  let tags: Buffer;
+  try {
+    tags = gitRaw('-C', path, ...probePins(path), 'ls-files', '-v', '-z');
+  } catch {
+    return true;
+  }
+  // `<tag> <path>` records: lowercase tags are the assume-unchanged family
+  // (the combined bits render lowercase `s`), `S` is skip-worktree alone.
+  const flagged: Buffer[] = [];
+  for (const record of splitNul(tags)) {
+    if (record.length < 2) continue;
+    const tag = record[0];
+    if (tag === 0x53 /* S */ || (tag >= 0x61 && tag <= 0x7a)) {
+      flagged.push(record.subarray(2));
+    }
+  }
+  if (flagged.length > 0 && !sparseCheckoutOwnsBits(path, flagged)) {
     return true;
   }
   let listing: Buffer;
@@ -2342,6 +2641,117 @@ function indexBitsHideEntries(path: string, state: ProbeState): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Whether EVERY flagged index entry is one a sparse checkout set the bit
+ * on: an out-of-cone tracked path is skip-worktree-tagged by design and
+ * absent from the worktree, so counting it wedged every sparse nested
+ * repository as unresolved on every run — and a disclosure that always
+ * fires is one nobody reads. The recipe is `local-anchor.ts`'s, paid for
+ * there one review round at a time: the flag is read `--worktree
+ * --type=bool` (a global `core.sparseCheckout=true` inherited through HOME
+ * must not switch the exemption on for a repository that is not sparse,
+ * and `--get` alone echoes `yes`/`on`/`1`); membership comes from
+ * `sparse-checkout check-rules`, not from the bit or the tag's case (git
+ * versions differ on whether a manual bit survives inside a cone); and
+ * only an ENOENT-proven ABSENT, out-of-rules path is exempt — an in-rules
+ * path absent with a bit set is a deletion the bit hides, a present
+ * out-of-rules path can hold an edit, and a name the spawn cannot carry
+ * (not valid UTF-8) or that the rules cannot be asked about (an older git)
+ * keeps the flag. Fail closed, never certified.
+ */
+function sparseCheckoutOwnsBits(
+  path: string,
+  flagged: readonly Buffer[],
+): boolean {
+  const sparse =
+    gitOpt(
+      '-C',
+      path,
+      ...probePins(path),
+      'config',
+      '--worktree',
+      '--type=bool',
+      '--get',
+      'core.sparseCheckout',
+    ) === 'true';
+  if (!sparse) return false;
+  const ancestorProbes = new Map<string, boolean>();
+  const absent: string[] = [];
+  for (const rel of flagged) {
+    const name = rel.toString('utf8');
+    if (!Buffer.from(name, 'utf8').equals(rel)) return false;
+    if (!isPathProvablyAbsent(path, name, ancestorProbes)) return false;
+    absent.push(name);
+  }
+  let inRules: Set<string>;
+  try {
+    const out = gitWithInputRaw(
+      Buffer.from(absent.map((name) => `${name}\0`).join(''), 'utf8'),
+      ['-C', path, ...probePins(path), 'sparse-checkout', 'check-rules', '-z'],
+    );
+    inRules = new Set(out.split('\0').filter((name) => name !== ''));
+  } catch {
+    return false;
+  }
+  return absent.every((name) => !inRules.has(name));
+}
+
+/**
+ * Whether git, run inside `path`, answers for the repository `path`'s own
+ * `.git` names — and not for an enclosing one. A `.git` git itself rejects
+ * — an empty directory, an empty file, a gitfile pointing nowhere or back
+ * at the superproject — passes the `.git`-exists gate every discovery
+ * route uses, and git's discovery then walks UP and answers with the
+ * SUPERPROJECT under this path: its status under `--work-tree`, or its
+ * HEAD as the checkout's own. The git dir git resolves from inside must be
+ * the one this path's own `.git` names.
+ */
+function answersForOwnGitDir(path: string): boolean {
+  const expectedGitDir = ownGitDirOf(path);
+  if (expectedGitDir === null) return false;
+  const discovered = gitOpt(
+    '-C',
+    path,
+    ...probePins(path),
+    'rev-parse',
+    '--absolute-git-dir',
+  );
+  if (discovered === null || !samePath(discovered, expectedGitDir)) {
+    return false;
+  }
+  // …and not an ENCLOSING checkout's git dir either: a gitfile reading
+  // `gitdir: ../.git` names the superproject's own git dir, so the two
+  // sides agree while every answer from inside — HEAD, status — is the
+  // superproject's, not this checkout's.
+  return !enclosingGitDirs(path).some((dir) => {
+    const theirs = ownGitDirOf(dir);
+    return theirs !== null && samePath(discovered, theirs);
+  });
+}
+
+/**
+ * The git dir a directory's own `.git` entry names — the directory
+ * itself, or a gitfile's `gitdir:` target resolved against the directory
+ * — or null when it holds none git could read.
+ */
+function ownGitDirOf(dir: string): string | null {
+  const dotGit = join(dir, '.git');
+  try {
+    // `statSync`, THROUGH a link: a `.git` symlink to a gitfile is a
+    // gitfile to git, and reading the link itself as the git dir refused
+    // such a repository on every run.
+    if (statSync(dotGit).isFile()) {
+      const pointer = /^gitdir:\s*(.+?)\s*$/.exec(
+        readFileSync(dotGit, 'utf8').split('\n')[0] ?? '',
+      );
+      return pointer === null ? null : resolve(dir, pointer[1]);
+    }
+    return dotGit;
+  } catch {
+    return null;
+  }
 }
 
 /** Join a relative path given as raw bytes onto an absolute path. */
@@ -2928,6 +3338,13 @@ interface ProbeState {
   visited: Set<string>;
   /** Filesystem identities of every repository already probed. */
   probed: Set<string>;
+  /**
+   * Key -> filesystem identity, for every name that reached a repository —
+   * the probed one and every later name that resolved to the same place.
+   * Persisted so `--since` can tell a route that changed from a repository
+   * that appeared or vanished (see `FixSnapshot.identities`).
+   */
+  identities: Record<string, string>;
   /** The walk budget left for this probe run — see `IGNORED_WALK_BUDGET`. */
   budget: number;
 }
@@ -2994,9 +3411,17 @@ function probeNestedRepo(
   state.seen.add(key);
   // …and on the physical repository: two names for one directory (a link
   // beside its target, a cycle's every spelling) are one probe and one
-  // baseline entry, under the first name that reached it.
+  // baseline entry, under the first name that reached it — but EVERY name
+  // that reached it is recorded against its identity, because which name
+  // reaches a repository first depends on the route, and the route can
+  // change between the moments (a link into a submodule that an install
+  // step created in the fix window is reached by the status route before
+  // the index sweep reaches the submodule). Keyed by name alone, one
+  // unchanged repository read as vanished under its old name and appeared
+  // under its new one; `--since` collapses the two by identity.
   const identity = identityOf(abs);
   if (identity !== null) {
+    state.identities[key] = identity;
     if (state.probed.has(identity)) return;
     state.probed.add(identity);
   }
@@ -3056,17 +3481,15 @@ function probeNestedInterior(
       probeNestedRepo(dirAbs, dirRel, ctx, state);
     }
   }
-  for (const name of probe.interiorLinks ?? []) {
-    probeLinkedRepo(rootBuf, joinRel(rel, name), ctx, state);
-  }
   // This repository's own gitlinks take the ROOT's index-sweep ruling
   // verbatim (see `probeBlindSpotState`): a checkout that does not exist
-  // holds no content an edit could hide in and is skipped — probing it
-  // answered 'failed' and over-warned on every run — one that EXISTS
-  // without its git dir is a dead gitlink nobody can answer for (the
-  // inner probe would walk UP into this repository and report it), and
-  // one with a git dir is a working tree nested in this one whose status
-  // the level-1 digest does not carry.
+  // or is empty holds no content an edit could hide in and is skipped —
+  // probing it answered 'failed' and over-warned on every run, and a
+  // non-recursive `submodule update --init` leaves every level-2 checkout
+  // empty — one that holds content without its git dir is a dead gitlink
+  // nobody can answer for (the inner probe would walk UP into this
+  // repository and report it), and one with a git dir is a working tree
+  // nested in this one whose status the level-1 digest does not carry.
   for (const name of probe.interiorGitlinks ?? []) {
     const gitlinkRel = joinRel(rel, name);
     const gitlinkAbs = joinBytes(rootBuf, gitlinkRel);
@@ -3076,13 +3499,38 @@ function probeNestedInterior(
       walkAndProbe(gitlinkAbs, gitlinkRel, ctx, state);
       continue;
     }
-    if (!existsSync(gitlinkAbs)) continue;
-    if (!existsSync(joinBytes(gitlinkAbs, DOT_GIT))) {
+    const checkout = gitlinkCheckoutState(gitlinkAbs);
+    if (checkout === 'absent' || checkout === 'empty') continue;
+    if (checkout !== 'repo') {
       state.unresolved.add(gitlinkRel.toString('latin1'));
       continue;
     }
     probeNestedRepo(gitlinkAbs, gitlinkRel, ctx, state);
   }
+  for (const name of probe.interiorLinks ?? []) {
+    probeLinkedRepo(rootBuf, joinRel(rel, name), ctx, state);
+  }
+}
+
+/**
+ * What a gitlink's checkout directory holds, read directly rather than
+ * through `existsSync` (which folds "cannot see" into "nothing there"):
+ * absent (ENOENT), empty (created and never populated — the shape a clone
+ * or a non-recursive `submodule update --init` leaves), a repository (a
+ * `.git` entry, file or directory), dead content (entries but no `.git`),
+ * or unreadable (any other error). Only the first two hold nothing.
+ */
+function gitlinkCheckoutState(
+  abs: Buffer,
+): 'absent' | 'empty' | 'repo' | 'dead' | 'unreadable' {
+  let entries: Buffer[];
+  try {
+    entries = readdirSync(abs, 'buffer');
+  } catch (err) {
+    return errnoOf(err) === 'ENOENT' ? 'absent' : 'unreadable';
+  }
+  if (entries.length === 0) return 'empty';
+  return entries.some((entry) => entry.equals(DOT_GIT)) ? 'repo' : 'dead';
 }
 
 /**
@@ -3282,6 +3730,7 @@ function probeBlindSpotState(
   unresolved: string[];
   outOfRoot: string[];
   digests: Record<string, string>;
+  identities: Record<string, string>;
 } {
   // `--no-optional-locks`: plain `status` opportunistically rewrites the
   // user's index to refresh its stat cache — a write this command promises
@@ -3308,7 +3757,14 @@ function probeBlindSpotState(
       '--no-optional-locks',
       'status',
       '--porcelain=v2',
-      '--ignore-submodules=none',
+      // `=all`, not `=none`: under `none` git runs a status INSIDE every
+      // submodule checkout to fill the `S.M.`/`S..U` flags, and that child
+      // executes the checkout's own repo-local filters, fsmonitor command
+      // and hooks — surfaces the root's screen never enumerates. Nothing
+      // is lost: every gitlink the index holds is probed by the index
+      // sweep below regardless of what status says, and the probe screens
+      // the checkout's own config BEFORE it spawns inside.
+      '--ignore-submodules=all',
       '--ignored=matching',
       '-z',
       '--',
@@ -3320,10 +3776,14 @@ function probeBlindSpotState(
     blankedFilterEnv(root, 'the discovery status'),
   );
   if (!statusRun.completed || statusRun.status !== 0) {
+    // Escaped at this render boundary like every other: git echoes a
+    // planted config VALUE back in its `fatal:` line, and a value holding
+    // a newline would otherwise put a standalone `fix-delta:` line of the
+    // planter's choosing — the all-clear wording included — on stderr.
     throw new Error(
       `fix-delta: the discovery status could not run (exit ${statusRun.status})` +
         (statusRun.stderr.length > 0
-          ? `: ${statusRun.stderr.toString('utf8').trim()}`
+          ? `: ${escapeNoteToken(statusRun.stderr.toString('utf8').trim())}`
           : ''),
     );
   }
@@ -3352,6 +3812,7 @@ function probeBlindSpotState(
     digests,
     visited: new Set<string>(),
     probed: new Set<string>(),
+    identities: Object.create(null) as Record<string, string>,
     budget: walkBudgets.perRun,
   };
   // The audited root is the first directory every walk must never
@@ -3470,7 +3931,10 @@ function probeBlindSpotState(
     // link pointing at it) probed again and the baseline carried it
     // under two names.
     const innerIdentity = identityOf(innerAbs);
-    if (innerIdentity !== null) state.probed.add(innerIdentity);
+    if (innerIdentity !== null) {
+      state.probed.add(innerIdentity);
+      state.identities[key] = innerIdentity;
+    }
     if (inner.state === 'failed') {
       unresolved.add(key);
       continue;
@@ -3488,19 +3952,24 @@ function probeBlindSpotState(
   // regardless of what status says about it — an unchanged tracked link
   // emits no entry of its own; `seen` keeps a status-discovered one from
   // a second probe.
-  const indexEntries = gitRaw(
-    '-C',
-    root,
-    ...probePins(root),
-    'ls-files',
-    '-s',
-    '-z',
+  const indexEntries = splitNul(
+    gitRaw('-C', root, ...probePins(root), 'ls-files', '-s', '-z'),
   );
-  for (const entry of splitNul(indexEntries)) {
-    const gitlink = entry.subarray(0, 7).equals(GITLINK_MODE_PREFIX);
-    if (!gitlink && !entry.subarray(0, 7).equals(SYMLINK_MODE_PREFIX)) {
-      continue;
-    }
+  // Gitlinks first, then symlinks: a repository reached under two names is
+  // one probe and one baseline entry under the FIRST name that reached it
+  // (`probeNestedRepo`), and its registered path is the name to answer
+  // under — a tracked link pointing at a submodule sorts wherever its
+  // spelling does, and the status no longer reaches the submodule ahead
+  // of this sweep (`--ignore-submodules=all`).
+  const isGitlink = (entry: Buffer): boolean =>
+    entry.subarray(0, 7).equals(GITLINK_MODE_PREFIX);
+  const isSymlink = (entry: Buffer): boolean =>
+    entry.subarray(0, 7).equals(SYMLINK_MODE_PREFIX);
+  for (const entry of [
+    ...indexEntries.filter(isGitlink),
+    ...indexEntries.filter(isSymlink),
+  ]) {
+    const gitlink = isGitlink(entry);
     // `<mode> <hash> <stage>\t<path>`: modes, hashes and the stage are
     // ASCII, so the first tab byte ends the fields exactly.
     const tab = entry.indexOf(0x09);
@@ -3517,18 +3986,22 @@ function probeBlindSpotState(
       probeLinkedRepo(rootBuf, rel, ctx, state);
       continue;
     }
-    // A gitlink whose checkout does not exist (a fresh clone that never
-    // ran `submodule update --init`) holds no content an edit could hide
-    // in; probing it answered 'failed' and over-warned on every run. A
-    // checkout that EXISTS without its git dir is a dead gitlink: `add -A`
-    // still records only the gitlink and no status entry names it, so an
-    // edit inside would leave no record in this model — disclose it as
-    // unresolved rather than skip it. The inner probe alone cannot answer
-    // the state: with the git dir gone, `git -C <checkout> status` walks
-    // UP into this repository and reports the superproject, not the
-    // checkout.
-    if (!existsSync(abs)) continue;
-    if (!existsSync(joinBytes(abs, DOT_GIT))) {
+    // A gitlink whose checkout does not exist, or exists EMPTY (a fresh
+    // clone that never ran `submodule update --init` — git creates the
+    // directory and leaves it bare, and `update --init` without
+    // `--recursive` leaves every level-2 checkout in that state), holds
+    // no content an edit could hide in; probing it answered 'failed' and
+    // over-warned on every run. A checkout that holds content without its
+    // git dir is a dead gitlink: `add -A` still records only the gitlink
+    // and no status entry names it, so an edit inside would leave no
+    // record in this model — disclose it as unresolved rather than skip
+    // it. The inner probe alone cannot answer the state: with the git dir
+    // gone, `git -C <checkout> status` walks UP into this repository and
+    // reports the superproject, not the checkout. One the probe cannot
+    // READ is unanswerable, never "nothing there".
+    const checkout = gitlinkCheckoutState(abs);
+    if (checkout === 'absent' || checkout === 'empty') continue;
+    if (checkout !== 'repo') {
       unresolved.add(rel.toString('latin1'));
       continue;
     }
@@ -3539,6 +4012,7 @@ function probeBlindSpotState(
     unresolved: [...unresolved],
     outOfRoot: [...outOfRoot],
     digests,
+    identities: state.identities,
   };
 }
 
@@ -3697,6 +4171,74 @@ function vanishedNote(paths: string[]): string {
 }
 
 /** Snapshot-time dirt that vanished: content changed between the two states. */
+/**
+ * Whether two root-relative keys (latin1-encoded bytes) resolve to the
+ * same physical path now — the test for a second route to one repository
+ * (a link beside its target, a link into a submodule). Either name failing
+ * to resolve is not a route.
+ */
+function sameTargetNow(rootBuf: Buffer, a: string, b: string): boolean {
+  try {
+    const ra = realpathSync.native(
+      joinBytes(rootBuf, Buffer.from(a, 'latin1')),
+      {
+        encoding: 'buffer',
+      },
+    );
+    const rb = realpathSync.native(
+      joinBytes(rootBuf, Buffer.from(b, 'latin1')),
+      {
+        encoding: 'buffer',
+      },
+    );
+    return ra.equals(rb);
+  } catch {
+    return false;
+  }
+}
+
+/** The tail every commit-side note ends on, phrased for the hunks file. */
+function commitSideTail(hunksEmpty: boolean): string {
+  return hunksEmpty
+    ? 'The hunks file stays empty; the audit cannot see the change.'
+    : 'The hunks file does not show it; the audit cannot see that change.';
+}
+
+function headMovedNote(
+  before: string | null,
+  now: string | null,
+  hunksEmpty: boolean,
+): string {
+  const name = (sha: string | null): string =>
+    sha === null ? 'an unborn HEAD' : sha.slice(0, 12);
+  return (
+    `fix-delta: HEAD moved between the two moments (${name(before)} → ` +
+    `${name(now)}) — a change that landed by commit alone (an ignored ` +
+    'path force-added, a tracked path untracked, a rebase) is one this ' +
+    'command cannot see: the capture records the working tree against ' +
+    "the snapshot's own tree, never the commits, so what those commits " +
+    `carry leaves no hunk. ${commitSideTail(hunksEmpty)}`
+  );
+}
+
+function headUnrecordedNote(hunksEmpty: boolean): string {
+  return (
+    'fix-delta: the snapshot records no HEAD, so a commit between the two ' +
+    'moments cannot be ruled out, and a path HEAD tracked that was absent ' +
+    'at the snapshot was not re-captured — either is a change this ' +
+    `command cannot see. ${commitSideTail(hunksEmpty)}`
+  );
+}
+
+function headGoneNote(head: string, hunksEmpty: boolean): string {
+  return (
+    `fix-delta: the commit the snapshot recorded as HEAD (${head.slice(0, 12)}) ` +
+    'is no longer in this repository, so a path it tracked that was absent ' +
+    'at the snapshot and is on disk again was not re-captured — an edit ' +
+    `there is one this command cannot see. ${commitSideTail(hunksEmpty)}`
+  );
+}
+
 function cleanedSubmoduleNote(cleaned: string[]): string {
   const one = cleaned.length === 1;
   return (
@@ -4167,12 +4709,26 @@ export function runFixDelta(args: FixDeltaArgs): void {
       digests: probe.digests,
       // What THIS moment's ignore rules hide: the addition-side classifier
       // at `--since` rules against it (see `ghostAdditions`).
-      hiddenPaths: hiddenIgnoredPaths(root),
+      ...(() => {
+        const hidden = hiddenIgnoredPaths(root);
+        return {
+          hiddenPaths: hidden.files,
+          hiddenLinks: hidden.links,
+          hiddenRepos: hidden.repos,
+        };
+      })(),
       // …and what THIS moment's capture re-included as user content: the
       // ambiguous (staged) half at `--since` is gated on it, because a
       // family path that entered the index between the moments is the
       // flow's own bookkeeping until proven otherwise.
       reincluded,
+      // The commit this moment sits on, for the `--since` seed and the
+      // moved-HEAD disclosure (see `FixSnapshot.head`); null when unborn.
+      head: gitOpt('-C', root, 'rev-parse', '--verify', '--quiet', 'HEAD'),
+      // …and the physical identity behind every digest, so a name that
+      // arrives or leaves between the moments can be told from a
+      // repository that did (see `FixSnapshot.identities`).
+      identities: probe.identities,
     };
     const record = Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`);
     // Re-checked here, after the capture ran the repository's filters and
@@ -4204,6 +4760,13 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // re-including what it finds — the pre-fix behaviour, and the permissive
   // side of a missing field, like `hiddenPaths` above.
   let reincludable: ReadonlySet<string> | null = null;
+  // The HEAD the record names: a sha, null for an unborn HEAD, or undefined
+  // when the record carries no such field at all. The last is NOT the
+  // permissive shape the fields above take: a record with no HEAD cannot
+  // say whether a commit landed in the window, and the second capture
+  // cannot re-admit what HEAD tracked, so both are disclosed and the bare
+  // all-clear is withheld — over-warning, the direction this module fails.
+  let recordedHead: string | null | undefined;
   try {
     const bytes = readFileSync(args.since as string);
     const actual = snapshotFingerprint(bytes);
@@ -4222,7 +4785,11 @@ export function runFixDelta(args: FixDeltaArgs): void {
       digests?: unknown;
       unresolved?: unknown;
       hiddenPaths?: unknown;
+      hiddenLinks?: unknown;
+      hiddenRepos?: unknown;
       reincluded?: unknown;
+      head?: unknown;
+      identities?: unknown;
     };
     if (
       typeof raw.root !== 'string' ||
@@ -4230,6 +4797,12 @@ export function runFixDelta(args: FixDeltaArgs): void {
     ) {
       throw new Error('not a fix-delta snapshot ({root, tree})');
     }
+    recordedHead =
+      raw.head === null
+        ? null
+        : typeof raw.head === 'string' && /^[0-9a-f]{40,64}$/.test(raw.head)
+          ? raw.head
+          : undefined;
     if (Array.isArray(raw.reincluded)) {
       reincludable = new Set(
         raw.reincluded.filter((p): p is string => typeof p === 'string'),
@@ -4253,10 +4826,31 @@ export function runFixDelta(args: FixDeltaArgs): void {
       hiddenPaths: Array.isArray(raw.hiddenPaths)
         ? raw.hiddenPaths.filter((p): p is string => typeof p === 'string')
         : [],
+      hiddenLinks: Array.isArray(raw.hiddenLinks)
+        ? raw.hiddenLinks.filter((p): p is string => typeof p === 'string')
+        : [],
+      hiddenRepos: Array.isArray(raw.hiddenRepos)
+        ? raw.hiddenRepos.filter((p): p is string => typeof p === 'string')
+        : [],
       // Read for the re-inclusion gate above; nothing else compares it.
       reincluded: Array.isArray(raw.reincluded)
         ? raw.reincluded.filter((p): p is string => typeof p === 'string')
         : [],
+      // Carried for the type; `recordedHead` above keeps the three-way
+      // answer (sha / unborn / not recorded) this field cannot.
+      head: recordedHead ?? null,
+      // Null-prototyped like `digests`, for the same `__proto__` reason. A
+      // record without the field collapses no name: over-warning.
+      identities: Object.assign(
+        Object.create(null) as Record<string, string>,
+        typeof raw.identities === 'object' && raw.identities !== null
+          ? Object.fromEntries(
+              Object.entries(raw.identities as Record<string, unknown>)
+                .filter(([, v]) => typeof v === 'string')
+                .map(([k, v]) => [k, v as string]),
+            )
+          : {},
+      ),
       // A record this run did not write — an older snapshot, a hand-edited
       // file — leaves every baseline path digest-less, and the comparison
       // below then reports all of them as blind spots. That is the
@@ -4303,19 +4897,34 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // moments, and this run takes its own `add -A` capture below.
   const steering = captureSteeringSurfaces(root);
   if (steering.length > 0) writeStderrLine(captureSteeringNote(steering));
-  const { tree: now } = snapshotWorkingTree(
+  // Seeded from the snapshot's own tree, never from HEAD now (see
+  // `snapshotWorkingTree`): the two captures then differ only by what is on
+  // disk, and a commit in the window moves nothing here — it is disclosed
+  // below instead.
+  const { tree: now, seedHeadMissing } = snapshotWorkingTree(
     root,
     sidePaths,
     bookkeeping,
     reincludable,
+    { tree: snapshot.tree, head: recordedHead },
   );
-  // A deletion the capture invented is not an edit — and neither is an
-  // addition: both are dropped from the hunks and from the count, and
-  // disclosed on their own lines.
-  const ghosts =
-    now === snapshot.tree
-      ? []
-      : ghostDeletions(root, snapshot.tree, now, sidePaths);
+  // A commit between the moments is not a working-tree edit: a path
+  // force-added and committed under an ignore rule, a tracked path
+  // untracked, a rebase — none of it moves a tree seeded from the first
+  // tree, so none of it is in the hunks, and the auditor must be told the
+  // hunks are not the whole change. Compared against the record, never
+  // against a re-derivation: HEAD now is the only side this run can see.
+  const headNow = gitOpt(
+    '-C',
+    root,
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    'HEAD',
+  );
+  const headMoved = recordedHead !== undefined && recordedHead !== headNow;
+  // An addition the capture invented is not an edit: dropped from the
+  // hunks and from the count, and disclosed on its own line.
   const ghostAdds =
     now === snapshot.tree
       ? []
@@ -4324,11 +4933,12 @@ export function runFixDelta(args: FixDeltaArgs): void {
           snapshot.tree,
           now,
           new Set(snapshot.hiddenPaths),
+          new Set(snapshot.hiddenLinks),
+          new Set(snapshot.hiddenRepos),
           sidePaths,
         );
   const diffPaths = [
     ...sidePaths,
-    ...ghosts.map((path) => decodePath(path)),
     ...ghostAdds.map((path) => decodePath(path)),
   ];
   const diff =
@@ -4366,8 +4976,54 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // pre-existing. A digest missing on either side answers "cannot tell",
   // which routes the same way: the failure direction over-warns, it never
   // silences a blind spot.
+  // The baseline, read by IDENTITY as well as by name. A repository the
+  // snapshot recorded under one name and the probe reaches under another
+  // now — a workspace link the fix window's install step created beside a
+  // submodule, a link and its target reached in the other order — is one
+  // repository: its baseline digest is read under the new name too, and
+  // the old name is not "vanished" while the identity behind it answers.
+  // A record without identities collapses nothing (over-warning).
+  const rootBuf = Buffer.from(root);
+  const baseDigests: Record<string, string> = Object.assign(
+    Object.create(null) as Record<string, string>,
+    snapshot.digests,
+  );
+  const baseDirty = new Set(snapshot.dirtySubmodules);
+  // Identity -> the snapshot key that HOLDS the answer for it (the probed
+  // name, which carries the digest); a name recorded against the identity
+  // without a digest of its own is a later route to the same place.
+  const snapshotKeyOf = new Map<string, string>();
+  for (const [key, identity] of Object.entries(snapshot.identities)) {
+    if (snapshot.digests[key] !== undefined) snapshotKeyOf.set(identity, key);
+  }
+  for (const [key, identity] of Object.entries(snapshot.identities)) {
+    if (!snapshotKeyOf.has(identity)) snapshotKeyOf.set(identity, key);
+  }
+  const aliased = new Set<string>();
+  for (const [key, identity] of Object.entries(probe.identities)) {
+    if (
+      snapshot.digests[key] !== undefined ||
+      snapshot.unresolved.includes(key)
+    ) {
+      continue;
+    }
+    const first = snapshotKeyOf.get(identity);
+    if (first === undefined || first === key) continue;
+    // A second ROUTE, never a move: both names must resolve to the same
+    // place now. A directory renamed keeps its inode, and a filesystem
+    // that reuses inode numbers can hand a repository cloned afresh the
+    // one a deleted repository just freed — neither is the snapshot's
+    // repository under a new name, and both stay disclosed as vanished
+    // and appeared.
+    if (!sameTargetNow(rootBuf, first, key)) continue;
+    if (snapshot.digests[first] !== undefined) {
+      baseDigests[key] = snapshot.digests[first];
+    }
+    if (baseDirty.has(first)) baseDirty.add(key);
+    aliased.add(first);
+  }
   const sameDirtAsBaseline = (p: string): boolean => {
-    const before = snapshot.digests[p];
+    const before = baseDigests[p];
     const now = probe.digests[p];
     return before !== undefined && now !== undefined && before === now;
   };
@@ -4390,22 +5046,22 @@ export function runFixDelta(args: FixDeltaArgs): void {
   const isOutOfRoot = (p: string): boolean =>
     snapshot.outOfRoot.includes(p) || outOfRootNow.includes(p);
   const freshDirt = dirtyNow.filter(
-    (p) => !snapshot.dirtySubmodules.includes(p) || !sameDirtAsBaseline(p),
+    (p) => !baseDirty.has(p) || !sameDirtAsBaseline(p),
   );
   const preExisting = dirtyNow.filter(
-    (p) =>
-      snapshot.dirtySubmodules.includes(p) &&
-      sameDirtAsBaseline(p) &&
-      !isOutOfRoot(p),
+    (p) => baseDirty.has(p) && sameDirtAsBaseline(p) && !isOutOfRoot(p),
   );
   // The third transition the baseline can see: dirt at snapshot time that is
   // GONE now necessarily changed on disk between the two states — a clean
   // submodule emits no status entry and the gitlink never moved, so without
   // this the all-clear claim would be provably false. A path the probe can
   // no longer ANSWER is not gone — it rides the unresolved disclosure.
-  const cleaned = snapshot.dirtySubmodules.filter(
+  const cleaned = [...baseDirty].filter(
     (p) =>
-      !dirtyNow.includes(p) && !unresolvedNow.includes(p) && !isOutOfRoot(p),
+      !dirtyNow.includes(p) &&
+      !unresolvedNow.includes(p) &&
+      !isOutOfRoot(p) &&
+      !aliased.has(p),
   );
   const files =
     diff.length === 0
@@ -4425,15 +5081,15 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // moment could not answer for is not compared here: it rides the
   // unresolved disclosure.
   const recorded = new Set(files.map((name) => name.toString('latin1')));
-  const movedInside = Object.keys(snapshot.digests).filter(
+  const movedInside = Object.keys(baseDigests).filter(
     (p) =>
-      !snapshot.dirtySubmodules.includes(p) &&
+      !baseDirty.has(p) &&
       !dirtyNow.includes(p) &&
       !unresolvedNow.includes(p) &&
       !recorded.has(p) &&
       !outOfRootNow.includes(p) &&
       probe.digests[p] !== undefined &&
-      probe.digests[p] !== snapshot.digests[p],
+      probe.digests[p] !== baseDigests[p],
   );
   // The fifth and sixth transitions close the set: a repository answered
   // for now with no baseline at all, and a baseline repository with no
@@ -4445,7 +5101,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // added or removed) is visible there and stays out, as elsewhere.
   const appeared = Object.keys(probe.digests).filter(
     (p) =>
-      snapshot.digests[p] === undefined &&
+      baseDigests[p] === undefined &&
       !dirtyNow.includes(p) &&
       !unresolvedNow.includes(p) &&
       !outOfRootNow.includes(p) &&
@@ -4489,7 +5145,8 @@ export function runFixDelta(args: FixDeltaArgs): void {
   const vanished = [
     ...Object.keys(snapshot.digests).filter(
       (p) =>
-        !snapshot.dirtySubmodules.includes(p) &&
+        !baseDirty.has(p) &&
+        !aliased.has(p) &&
         probe.digests[p] === undefined &&
         !dirtyNow.includes(p) &&
         !unresolvedNow.includes(p) &&
@@ -4498,6 +5155,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     ),
     ...snapshot.unresolved.filter(
       (p) =>
+        !aliased.has(p) &&
         probe.digests[p] === undefined &&
         !dirtyNow.includes(p) &&
         !unresolvedNow.includes(p) &&
@@ -4505,13 +5163,6 @@ export function runFixDelta(args: FixDeltaArgs): void {
         !recorded.has(p),
     ),
   ];
-  if (ghosts.length > 0) {
-    writeStderrLine(
-      ghostDeletionNote(
-        ghosts.map((name) => escapeNoteToken(decodePath(name))),
-      ),
-    );
-  }
   if (ghostAdds.length > 0) {
     writeStderrLine(
       ghostAdditionNote(
@@ -4519,13 +5170,24 @@ export function runFixDelta(args: FixDeltaArgs): void {
       ),
     );
   }
-  if ((ghosts.length > 0 || ghostAdds.length > 0) && diff.length === 0) {
+  if (ghostAdds.length > 0 && diff.length === 0) {
     writeStderrLine(
       'fix-delta: nothing else differs between the two states — every ' +
-        'difference the trees carry is one of the invented deletions or ' +
-        'additions above, so this run makes no claim about what the fix ' +
-        'applied.',
+        'difference the trees carry is one of the invented additions ' +
+        'above, so this run makes no claim about what the fix applied.',
     );
+  }
+  // The commit-side disclosures, on both paths: a moved HEAD, a record
+  // that names none, and a recorded HEAD the repository no longer holds
+  // (the re-admission of what it tracked could not run). Each is a change
+  // the hunks cannot carry, so each withholds the bare all-clear.
+  if (recordedHead === undefined) {
+    writeStderrLine(headUnrecordedNote(diff.length === 0));
+  } else if (headMoved) {
+    writeStderrLine(headMovedNote(recordedHead, headNow, diff.length === 0));
+  }
+  if (seedHeadMissing && recordedHead) {
+    writeStderrLine(headGoneNote(recordedHead, diff.length === 0));
   }
   if (diff.length === 0) {
     if (preExisting.length > 0) {
@@ -4562,8 +5224,10 @@ export function runFixDelta(args: FixDeltaArgs): void {
       movedInside.length === 0 &&
       appeared.length === 0 &&
       vanished.length === 0 &&
-      ghosts.length === 0 &&
-      ghostAdds.length === 0
+      ghostAdds.length === 0 &&
+      recordedHead !== undefined &&
+      !headMoved &&
+      !seedHeadMissing
     ) {
       // The scope is stated with the all-clear: the model is the working
       // tree and the working trees nested in it. Plain gitignored files and

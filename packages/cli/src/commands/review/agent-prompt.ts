@@ -2885,7 +2885,7 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
       throw new Error(
         'agent-prompt: --role fix-audit: the ledger records no `fixed` ' +
           `outcome, but --hunks carries edits (${hunkPaths.length} path(s)` +
-          `${hunkPaths.length > 0 ? `: ${hunkPaths.slice(0, 5).join(', ')}${hunkPaths.length > 5 ? ', …' : ''}` : ''}). ` +
+          `${hunkPaths.length > 0 ? `: ${hunkPaths.slice(0, 5).map(inertPath).join(', ')}${hunkPaths.length > 5 ? ', …' : ''}` : ''}). ` +
           'That is a ledger/tree mismatch, not an empty fix round: edits ' +
           'landed that no outcome owns, so "nothing was applied" would be ' +
           'false. A write from outside this flow (a watcher, a formatter, a ' +
@@ -2917,10 +2917,19 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
         'that is the cause, and the outcomes stand.',
     );
   }
+  // The display copy of a PR-controlled path goes through `inertPath`,
+  // like every other prompt sink in this file: `parseLocations` accepts
+  // any non-empty string as a file, and git permits a newline in a name,
+  // so a raw render let a path end the heading early and open a forged
+  // section — the `applied hunks end` fence included — in the auditor's
+  // one input file. The MATCH in `findingTouchesHunks` stays on the raw
+  // `loc.file`: flattening it there would stop a control-character path
+  // matching its own hunk header and turn a corroborated finding into a
+  // spurious `unattested:` line.
   const where = (f: Finding): string => {
     const first = f.locations[0];
     const loc = first
-      ? `${first.file}${first.line !== undefined ? `:${first.line}` : ''}`
+      ? `${inertPath(first.file)}${first.line !== undefined ? `:${first.line}` : ''}`
       : '(no location)';
     const more = f.locations.length - 1;
     return more > 0 ? `${loc} (+${more} more location(s))` : loc;

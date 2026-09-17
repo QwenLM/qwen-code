@@ -1867,6 +1867,38 @@ describe('fix-delta', () => {
   );
 
   it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
+    "escapes git's own stderr in the capture refusal",
+    () => {
+      // The note git prints carries the NAME the tree chose. The notes are
+      // split on `\n` before they are ruled on, so a newline cannot forge a
+      // line, and git itself prints every other control byte as `?` —
+      // except a TAB, which rides inside the note verbatim and reaches the
+      // refusal; the render boundary escapes it like every other note.
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      const blocked = join(
+        repo,
+        'blocked\tfix-delta: the tree is unchanged since the snapshot',
+      );
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, 'fix.txt'), 'the fix\n');
+      chmodSync(blocked, 0o000);
+      let message = '';
+      try {
+        runSince();
+      } catch (err) {
+        message = (err as Error).message;
+      } finally {
+        chmodSync(blocked, 0o755);
+      }
+      expect(message).toContain('could not capture the whole tree');
+      expect(message).toContain('\\x09');
+      expect(message).not.toContain('\t');
+      expect(message.split('\n')).toHaveLength(1);
+      expect(message.match(/^fix-delta: /gm)).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
     'refuses a capture an unreadable directory silently truncated',
     () => {
       // `git add` prints `warning: could not open directory ... Permission
@@ -4874,10 +4906,18 @@ describe('fix-delta', () => {
     expect(Object.keys(snap.digests)).toContain('vendor/R');
     expect(snap.unresolved).not.toContain('vendor/R/S');
 
-    // The dead-gitlink arm: the checkout exists and holds content, its
-    // git dir is gone.
+    // …and an EMPTY checkout is the same silence: the directory a clone
+    // creates, or a non-recursive `submodule update --init` leaves at
+    // level 2, holds nothing an edit could hide in.
     const sub = join(nested, 'S');
     mkdirSync(sub);
+    runSnapshot();
+    snap = JSON.parse(readFileSync(snapshotFile(), 'utf8')) as FixSnapshot;
+    expect(snap.unresolved).not.toContain('vendor/R/S');
+    expect(Object.keys(snap.digests)).toContain('vendor/R');
+
+    // The dead-gitlink arm: the checkout exists and holds content, its
+    // git dir is gone.
     gitAt(sub, 'init', '-q', '-b', 'main');
     gitAt(sub, 'config', 'user.email', 't@t.t');
     gitAt(sub, 'config', 'user.name', 't');
@@ -5957,13 +5997,7 @@ describe('fix-delta', () => {
     }
   });
 
-  it('never reports a deletion the capture invented from a new ignore rule', () => {
-    // The two captures run under whatever ignore rules exist at each
-    // moment. A `.gitignore` line the fix writes — the most ordinary thing
-    // a fix does — hides a pre-existing untracked file from the SECOND
-    // capture, and the tree comparison read the absence as a deletion: the
-    // hunks asserted an edit the fix never made and the count overstated
-    // its footprint.
+  it('keeps a path the first capture recorded when a new ignore rule hides it', () => {
     mkdirSync(join(repo, 'coverage'), { recursive: true });
     writeFileSync(join(repo, 'coverage', 'lcov.info'), 'report\n');
 
@@ -5972,21 +6006,21 @@ describe('fix-delta', () => {
     writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
     runSince();
 
+    // Seeded from the first tree, the second capture HOLDS the entry the
+    // first one recorded whatever the rules say now (ignore rules never
+    // touch an index entry): there is no deletion to classify away, and
+    // no note to print about one.
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).not.toContain('coverage/lcov.info');
+    expect(hunks).not.toContain('deleted file mode');
     expect(hunks).toContain('a.ts');
     expect(existsSync(join(repo, 'coverage', 'lcov.info'))).toBe(true);
     const lines = stderr();
+    expect(lines.some((l) => l.includes('coverage/lcov.info'))).toBe(false);
     expect(
-      lines.some(
-        (l) =>
-          l.includes('coverage/lcov.info') &&
-          l.includes('still on') &&
-          l.includes('disk'),
+      lines.some((l) =>
+        /2 file\(s\) changed since the snapshot — \.gitignore, a\.ts/.test(l),
       ),
-    ).toBe(true);
-    expect(
-      lines.some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
     ).toBe(true);
   });
 
@@ -6027,12 +6061,7 @@ describe('fix-delta', () => {
     ).toBe(true);
   });
 
-  it('classifies a ghost for a file staged in the user index, never committed', () => {
-    // `check-ignore` without `--no-index` lets the USER's index outrank
-    // the rules: a staged-but-uncommitted file is never reported ignored,
-    // so it was never recognised as a ghost and the invented deletion
-    // rode into the hunks as an edit the fix never made. The classifier
-    // asks the rules-only question, which is the one the capture answers.
+  it('keeps a staged path the first capture recorded when a new ignore rule hides it', () => {
     writeFileSync(join(repo, 'foo.log'), 'a\n');
     git('add', '--', 'foo.log'); // staged, never committed
 
@@ -6047,15 +6076,7 @@ describe('fix-delta', () => {
     expect(hunks).toContain('.gitignore');
     expect(hunks).toContain('a.ts');
     const lines = stderr();
-    expect(
-      lines.some(
-        (l) =>
-          /\bfoo\.log\b/.test(l) &&
-          l.includes('still on') &&
-          l.includes('disk'),
-      ),
-    ).toBe(true);
-    // The count names only the real changes: `.gitignore` and `a.ts`.
+    expect(lines.some((l) => /\bfoo\.log\b/.test(l))).toBe(false);
     expect(
       lines.some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
     ).toBe(true);
@@ -6193,11 +6214,7 @@ describe('fix-delta', () => {
     ).toBe(true);
   });
 
-  it('classifies a capture-invented deletion of a dangling symlink as a ghost', () => {
-    // The on-disk test used `existsSync`, which FOLLOWS the link: a
-    // dangling symlink — on disk by every lstat meaning, recorded by git
-    // as mode 120000 — failed the test and skipped the classifier, so the
-    // invented deletion rode into the hunks as an edit the fix never made.
+  it('keeps a dangling symlink the first capture recorded when a new ignore rule hides it', () => {
     symlinkSync('gone-target', join(repo, 'v'));
 
     runSnapshot();
@@ -6207,12 +6224,731 @@ describe('fix-delta', () => {
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).not.toContain('deleted file mode 120000');
     expect(hunks).not.toContain('gone-target');
+    expect(hunks).toContain('.gitignore');
+    const lines = stderr();
+    expect(lines.some((l) => /\bv\b/.test(l) && l.includes('disk'))).toBe(
+      false,
+    );
+    expect(
+      lines.some((l) =>
+        /1 file\(s\) changed since the snapshot — \.gitignore/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps an embedded repository the first capture recorded when a new ignore rule hides it', () => {
+    const nested = join(repo, 'sub');
+    mkdirSync(nested);
+    initNestedRepoSh(Buffer.from(nested));
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(git('ls-tree', snap.tree, '--', 'sub')).toMatch(/^160000 commit/);
+    // The `.gitignore` line a fix writes: the everyday carrier. A tree DOES
+    // record directory-shaped entries — the gitlink the first capture
+    // stored for this repository — and a seed taken from that tree holds
+    // it whatever the rules say now.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nsub/\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('deleted file mode 160000');
+    expect(hunks).not.toContain('Subproject commit');
+    expect(hunks).toContain('.gitignore');
+    expect(hunks).toContain('a.ts');
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bsub\b/.test(l) && l.includes('recorded as')),
+    ).toBe(false);
+    expect(
+      lines.some((l) =>
+        /2 file\(s\) changed since the snapshot — \.gitignore, a\.ts/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it('never reports an addition the capture invented from a removed rule that hid an embedded repository', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nsub/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore sub');
+    const nested = join(repo, 'sub');
+    mkdirSync(nested);
+    initNestedRepoSh(Buffer.from(nested));
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    // `ls-files --others` prints an ignored nested repository as `sub/`;
+    // the record keeps it on its own list, keyed the way a tree entry
+    // spells it, to match a gitlink addition and nothing else.
+    expect(snap.hiddenRepos).toContain('sub');
+    expect(snap.hiddenPaths).not.toContain('sub');
+    expect(snap.hiddenPaths).not.toContain('sub/');
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('new file mode 160000');
+    expect(hunks).not.toContain('Subproject commit');
+    expect(hunks).toContain('.gitignore');
+    expect(hunks).toContain('a.ts');
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bsub\b/.test(l) && l.includes('already on disk')),
+    ).toBe(true);
+    expect(
+      lines.some((l) =>
+        /2 file\(s\) changed since the snapshot — \.gitignore, a\.ts/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it('discloses a HEAD that moved instead of reading the commit as an edit', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\ndist/\n');
+    mkdirSync(join(repo, 'dist'));
+    writeFileSync(join(repo, 'dist', 'index.js'), 'v1\n');
+    git('add', '-A');
+    git('add', '-f', '--', 'dist/index.js');
+    git('commit', '-qm', 'commit the artifact');
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.head).toBe(git('rev-parse', 'HEAD'));
+    // The "fix" stops tracking the artifact and commits: a change that
+    // lands by commit alone — the file's bytes never moved on disk — and
+    // one the second capture, seeded from the snapshot's tree rather than
+    // from HEAD now, does not read as a deletion.
+    git('rm', '-q', '--cached', '--', 'dist/index.js');
+    git('commit', '-qm', 'untrack the artifact');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('dist/index.js');
+    expect(hunks).toContain('a.ts');
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('recorded as deleted'))).toBe(false);
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('HEAD moved between the two moments') &&
+          l.includes(snap.head!.slice(0, 12)) &&
+          l.includes(git('rev-parse', 'HEAD').slice(0, 12)) &&
+          l.includes('cannot see'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) =>
+        /1 file\(s\) changed since the snapshot — a\.ts/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it('withholds the all-clear when HEAD moved and nothing on disk did', () => {
+    runSnapshot();
+    git('commit', '-q', '--allow-empty', '-m', 'a commit in the window');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
     expect(
       lines.some(
-        (l) => /\bv\b/.test(l) && l.includes('still on') && l.includes('disk'),
+        (l) =>
+          l.includes('HEAD moved between the two moments') &&
+          l.includes('The hunks file stays empty'),
       ),
     ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it('never reads an ignored file force-added and committed in the window as an addition', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\ndist/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore dist');
+    mkdirSync(join(repo, 'dist'));
+    writeFileSync(join(repo, 'dist', 'gen.js'), 'generated\n');
+
+    runSnapshot();
+    // Start tracking the generated file, by commit: its bytes were on disk
+    // at the snapshot, so nothing about the working tree changed.
+    git('add', '-f', '--', 'dist/gen.js');
+    git('commit', '-qm', 'start tracking the generated file');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('dist/gen.js');
+    expect(hunks).toContain('a.ts');
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('dist/gen.js'))).toBe(false);
+    expect(
+      lines.some((l) => l.includes('HEAD moved between the two moments')),
+    ).toBe(true);
+    expect(
+      lines.some((l) =>
+        /1 file\(s\) changed since the snapshot — a\.ts/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it('withholds the all-clear over a snapshot that records no HEAD', () => {
+    runSnapshot();
+    const snap = JSON.parse(readFileSync(snapshotFile(), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete snap['head'];
+    writeFileSync(snapshotFile(), `${JSON.stringify(snap, null, 2)}\n`);
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('records no HEAD') && l.includes('cannot see'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it('discloses a recorded HEAD the repository no longer holds', () => {
+    runSnapshot();
+    const snap = JSON.parse(readFileSync(snapshotFile(), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    snap['head'] = '0123456789abcdef0123456789abcdef01234567';
+    writeFileSync(snapshotFile(), `${JSON.stringify(snap, null, 2)}\n`);
+    runSince();
+
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('0123456789ab') &&
+          l.includes('is no longer in this repository') &&
+          l.includes('cannot see'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('HEAD moved between the two moments')),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it("escapes git's own stderr in the discovery-status refusal", () => {
+    git(
+      'config',
+      'status.renames',
+      'bogus\nfix-delta: the tree is unchanged since the snapshot',
+    );
+    let message = '';
+    try {
+      runSnapshot();
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('discovery status could not run');
+    expect(message).toContain('\\x0a');
+    expect(message.split('\n')).toHaveLength(1);
+    expect(message.match(/^fix-delta: /gm)).toHaveLength(1);
+  });
+
+  it("never runs a submodule's own repo-local filter: the capture spawns inside no nested repository", () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      const sub = join(repo, 'sub');
+      writeFileSync(join(sub, '.gitattributes'), '* filter=evil\n');
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'wire the filter');
+      const canary = join(out, 'sub-filter-ran');
+      // Planted in the checkout's OWN git dir (`.git/modules/sub/config`),
+      // which a screen of the root never enumerates.
+      gitAt(sub, 'config', 'filter.evil.clean', `touch '${canary}'; cat`);
+      expect(gitAt(sub, 'rev-parse', '--absolute-git-dir')).toContain(
+        join('.git', 'modules', 'sub'),
+      );
+      // A SAME-SIZE edit: a size change decides "modified" off the stat
+      // data alone, and only a content comparison runs the clean filter —
+      // which is what `add -A`'s status inside the checkout does.
+      writeFileSync(join(sub, 'f.txt'), 'BEFORE\n');
+
+      runSnapshot();
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+      runSince();
+
+      expect(existsSync(canary)).toBe(false);
+      expect(readFileSync(hunksFile(), 'utf8')).toContain('a.ts');
+      // …and the checkout is not certified either: its own config steers
+      // its status, so the probe answers unresolved, as for any nested
+      // repository carrying a repo-local filter.
+      expect(
+        stderr().some(
+          (l) => /\bsub\b/.test(l) && l.includes('could not resolve'),
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('records a submodule checkout that moved, was removed, or was replaced, without entering it', () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runSnapshot();
+      // Moved: a commit inside moves the gitlink — an edit the hunks carry.
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'moved\n');
+      gitAt(join(repo, 'sub'), 'add', '-A');
+      gitAt(join(repo, 'sub'), 'commit', '-qm', 'move');
+      runSince();
+      let hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toContain('-Subproject commit');
+      expect(hunks).toContain(
+        `+Subproject commit ${gitAt(join(repo, 'sub'), 'rev-parse', 'HEAD')}`,
+      );
+
+      // Removed: the checkout is gone — a deletion, the fix's.
+      (writeStderrLine as unknown as Mock).mockClear();
+      runSnapshot();
+      rmSync(join(repo, 'sub'), { recursive: true, force: true });
+      runSince();
+      hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toContain('deleted file mode 160000');
+
+      // Replaced by a plain file: the replacement is recorded.
+      (writeStderrLine as unknown as Mock).mockClear();
+      mkdirSync(join(repo, 'sub'));
+      gitAt(join(repo, 'sub'), 'init', '-q', '-b', 'main');
+      writeFileSync(join(repo, 'sub', 'g.txt'), 'g\n');
+      gitAt(join(repo, 'sub'), 'add', '-A');
+      gitAt(
+        join(repo, 'sub'),
+        '-c',
+        'user.email=t@t.t',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-qm',
+        'again',
+      );
+      runSnapshot();
+      rmSync(join(repo, 'sub'), { recursive: true, force: true });
+      writeFileSync(join(repo, 'sub'), 'a file where the checkout was\n');
+      runSince();
+      hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toContain('deleted file mode 160000');
+      expect(hunks).toContain('new file mode 100644');
+      expect(hunks).toContain('+a file where the checkout was');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a file the fix put in an ignored nested repository's place in the hunks", () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nvendor/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore vendor');
+    const nested = join(repo, 'vendor');
+    mkdirSync(nested);
+    initNestedRepoSh(Buffer.from(nested));
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.hiddenRepos).toContain('vendor');
+    expect(snap.hiddenPaths).not.toContain('vendor');
+    // The directory-only rule `vendor/` never covered a FILE named
+    // `vendor`: the fix replaced the repository with one, and the blob the
+    // capture records is the fix's, not a rule's removal admitting the
+    // repository — only a gitlink at that name would be.
+    rmSync(nested, { recursive: true, force: true });
+    writeFileSync(nested, 'a file where the repository was\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('diff --git a/vendor b/vendor');
+    expect(hunks).toContain('new file mode 100644');
+    expect(hunks).toContain('+a file where the repository was');
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bvendor\b/.test(l) && l.includes('already on disk')),
+    ).toBe(false);
+    expect(
+      lines.some((l) =>
+        /1 file\(s\) changed since the snapshot — vendor/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves a seed gitlink standing over a hollow checkout instead of recording the superproject's HEAD", () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runSnapshot();
+      // A hollowed checkout: the directory and an EMPTY `.git` remain, the
+      // repository is gone. Git's discovery walks up from inside it and
+      // answers with the superproject — its HEAD is not this gitlink's.
+      rmSync(join(repo, 'sub'), { recursive: true, force: true });
+      mkdirSync(join(repo, 'sub', '.git'), { recursive: true });
+      writeFileSync(join(repo, 'sub', 'y'), 'y\n');
+      runSince();
+
+      const hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toBe('');
+      expect(hunks).not.toContain(git('rev-parse', 'HEAD'));
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('Subproject commit'))).toBe(false);
+      expect(
+        lines.some((l) => /\bsub\b/.test(l) && l.includes('cannot see')),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('skips the re-admission of a tracked path that now sits behind a link, without failing the capture', () => {
+    mkdirSync(join(repo, 'dir'));
+    writeFileSync(join(repo, 'dir', 'f'), 'f\n');
+    git('add', '-A');
+    git('commit', '-qm', 'track dir/f');
+    rmSync(join(repo, 'dir'), { recursive: true, force: true });
+
+    runSnapshot();
+    // The fix vendors `dir` as a link: `dir/f` reads as present through it,
+    // but git refuses the pathspec (`beyond a symbolic link`), and the
+    // link itself is what the capture records.
+    mkdirSync(join(repo, 'shared'));
+    writeFileSync(join(repo, 'shared', 'f'), 'f\n');
+    symlinkSync('shared', join(repo, 'dir'));
+    expect(() => runSince()).not.toThrow();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('diff --git a/dir b/dir');
+    expect(hunks).toContain('new file mode 120000');
+    expect(hunks).toContain('diff --git a/shared/f b/shared/f');
+    expect(hunks).not.toContain('a/dir/f');
+    expect(
+      stderr().some((l) => /2 file\(s\) changed since the snapshot/.test(l)),
+    ).toBe(true);
+  });
+
+  it('discloses a nested repository the fix renamed, even though its inode is the same', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nvendor/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore vendor');
+    const nested = join(repo, 'vendor', 'lib');
+    mkdirSync(nested, { recursive: true });
+    initNestedRepoSh(Buffer.from(nested));
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(Object.keys(snap.digests)).toContain('vendor/lib');
+    // A rename keeps the inode; it is not a second route to the same
+    // place, so the identity must not collapse the two names.
+    renameSync(nested, join(repo, 'vendor', 'lib2'));
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('vendor/lib') &&
+          l.includes('finds nothing to answer for now'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('vendor/lib2') &&
+          l.includes('the snapshot never recorded'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it('skips the re-admission of a tracked path whose directory is now a plain file, without failing the capture', () => {
+    mkdirSync(join(repo, 'dir'));
+    writeFileSync(join(repo, 'dir', 'f'), 'f\n');
+    git('add', '-A');
+    git('commit', '-qm', 'track dir/f');
+    rmSync(join(repo, 'dir'), { recursive: true, force: true });
+
+    runSnapshot();
+    // `dir/f` reads ENOTDIR through the file, and git refuses the pathspec
+    // (`did not match any files`): the file is what the capture records.
+    writeFileSync(join(repo, 'dir'), 'a file where the directory was\n');
+    expect(() => runSince()).not.toThrow();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('diff --git a/dir b/dir');
+    expect(hunks).toContain('new file mode 100644');
+    expect(hunks).not.toContain('a/dir/f');
+  });
+
+  it('skips the re-admission of a tracked path that now sits inside a nested repository, without failing the capture', () => {
+    mkdirSync(join(repo, 'third_party', 'x'), { recursive: true });
+    writeFileSync(join(repo, 'third_party', 'x', 'file'), 'v\n');
+    git('add', '-A');
+    git('commit', '-qm', 'vendor x');
+    rmSync(join(repo, 'third_party'), { recursive: true, force: true });
+
+    runSnapshot();
+    // The fix re-vendors `x` as a clone: `add -A` records the gitlink, and
+    // `third_party/x/file` is a pathspec git refuses (`is in submodule`).
+    const nested = join(repo, 'third_party', 'x');
+    mkdirSync(nested, { recursive: true });
+    initNestedRepoSh(Buffer.from(nested));
+    // …with the tracked name present INSIDE it, so only the gitlink gate
+    // keeps the path out of the pathspec (an absent one is skipped anyway).
+    writeFileSync(join(nested, 'file'), 'v2\n');
+    expect(() => runSince()).not.toThrow();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('diff --git a/third_party/x b/third_party/x');
+    expect(hunks).toContain('new file mode 160000');
+    expect(hunks).not.toContain('third_party/x/file');
+  });
+
+  it('never reports a staged gitlink the capture invented from a removed ignore rule', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nvendor/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore vendor');
+    const nested = join(repo, 'vendor', 'lib');
+    mkdirSync(nested, { recursive: true });
+    initNestedRepoSh(Buffer.from(nested));
+    // Staged under the rule, never committed: `--cached --ignored` prints
+    // it WITHOUT the slash `--others` gives a repository, so only its
+    // index mode tells it from a file.
+    git('add', '-f', '--', 'vendor/lib');
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.hiddenRepos).toContain('vendor/lib');
+    expect(snap.hiddenPaths).not.toContain('vendor/lib');
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).not.toContain('new file mode 160000');
+    expect(hunks).not.toContain('Subproject commit');
+    expect(hunks).toContain('a.ts');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('vendor/lib') && l.includes('already on disk'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) =>
+        /2 file\(s\) changed since the snapshot — \.gitignore, a\.ts/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves a seed gitlink standing over a checkout whose gitfile points back at the superproject', () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runSnapshot();
+      // The gitfile now names the SUPERPROJECT's git dir: discovery from
+      // inside agrees with it, and every answer from inside — HEAD, status
+      // — is the superproject's.
+      writeFileSync(join(repo, 'sub', '.git'), 'gitdir: ../.git\n');
+      runSince();
+
+      const hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toBe('');
+      expect(hunks).not.toContain(git('rev-parse', 'HEAD'));
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('Subproject commit'))).toBe(false);
+      expect(
+        lines.some((l) => /\bsub\b/.test(l) && l.includes('cannot see')),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a link the fix put in an ignored file's place in the hunks, and drops a hidden link's re-admission", () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nfoo\nbar\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore foo and bar');
+    writeFileSync(join(repo, 'foo'), 'a file\n');
+    symlinkSync('a.ts', join(repo, 'bar'));
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.hiddenPaths).toContain('foo');
+    expect(snap.hiddenLinks).toContain('bar');
+    expect(snap.hiddenLinks).not.toContain('foo');
+    expect(snap.hiddenPaths).not.toContain('bar');
+    // The fix replaces the FILE `foo` with a link, leaves the LINK `bar`
+    // as it was, and removes both rules: the link at `foo` is an edit the
+    // fix made; the link at `bar` is the rule's removal admitting what
+    // was already there.
+    rmSync(join(repo, 'foo'));
+    symlinkSync('a.ts', join(repo, 'foo'));
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('diff --git a/foo b/foo');
+    expect(hunks).toContain('new file mode 120000');
+    expect(hunks).not.toContain('diff --git a/bar b/bar');
+    const lines = stderr();
+    expect(
+      lines.some((l) => /\bfoo\b/.test(l) && l.includes('already on disk')),
+    ).toBe(false);
+    expect(
+      lines.some((l) => /\bbar\b/.test(l) && l.includes('already on disk')),
+    ).toBe(true);
+    expect(
+      lines.some((l) =>
+        /2 file\(s\) changed since the snapshot — \.gitignore, foo/.test(l),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the all-clear for a submodule checked out sparsely, and keeps flagging a hand-set bit', () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      const sub = join(repo, 'sub');
+      mkdirSync(join(sub, 'a'));
+      mkdirSync(join(sub, 'b'));
+      writeFileSync(join(sub, 'a', 'one.txt'), 'one\n');
+      writeFileSync(join(sub, 'b', 'two.txt'), 'two\n');
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'two directories');
+      gitAt(sub, 'sparse-checkout', 'init', '--cone');
+      gitAt(sub, 'sparse-checkout', 'set', 'a');
+      // The out-of-cone path is skip-worktree-tagged by design and absent.
+      expect(existsSync(join(sub, 'b', 'two.txt'))).toBe(false);
+      expect(gitAt(sub, 'ls-files', '-v')).toMatch(/^S b\/two\.txt$/m);
+      git('add', '-A');
+      git('commit', '-qm', 'record the moved gitlink');
+
+      runSnapshot();
+      runSince();
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      let lines = stderr();
+      expect(lines.some((l) => l.includes('could not resolve'))).toBe(false);
+      expect(lines.at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
+
+      // A bit set by hand on an IN-CONE file still hides a DELETION: the
+      // file is gone, status prints nothing for a skip-worktree entry, and
+      // the path is inside the rules — so it is not the sparse checkout's
+      // to exempt, and the guard, not fresh dirt, is what names `sub`. (An
+      // EDIT under the bit is re-cleared by git 2.47+ inside the cone and
+      // would surface as fresh dirt instead, proving nothing about the
+      // guard.)
+      (writeStderrLine as unknown as Mock).mockClear();
+      gitAt(sub, 'update-index', '--skip-worktree', 'f.txt');
+      rmSync(join(sub, 'f.txt'));
+      expect(gitAt(sub, 'status', '--porcelain=v2')).toBe('');
+      runSince();
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      lines = stderr();
+      expect(
+        lines.some((l) => /\bsub\b/.test(l) && l.includes('could not resolve')),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('reads one repository reached under two names as one baseline entry', () => {
+    const subSrc = plantCommittedSubmodule('vendor/lib');
+    try {
+      runSnapshot();
+      const snap = JSON.parse(
+        readFileSync(snapshotFile(), 'utf8'),
+      ) as FixSnapshot;
+      expect(Object.keys(snap.digests)).toContain('vendor/lib');
+      expect(snap.identities['vendor/lib']).toBeDefined();
+      // The fix window's install step links the workspace package into an
+      // ignored store: a second name for the same physical repository, and
+      // the one the status route reaches first at `--since`.
+      mkdirSync(join(repo, 'node_modules'));
+      symlinkSync(
+        join('..', 'vendor', 'lib'),
+        join(repo, 'node_modules', 'dep'),
+      );
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('finds nothing to answer for now')),
+      ).toBe(false);
+      expect(lines.some((l) => l.includes('the snapshot never recorded'))).toBe(
+        false,
+      );
+      expect(lines.at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the all-clear for a gitlink whose checkout exists but was never populated', () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      // The empty directory a clone leaves for a submodule nobody ran
+      // `update --init` on.
+      rmSync(join(repo, 'sub'), { recursive: true, force: true });
+      mkdirSync(join(repo, 'sub'));
+      runSnapshot();
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('could not resolve'))).toBe(false);
+      expect(lines.at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
   });
 
   it('runs from a cwd whose own empty .git directory git climbs past', () => {
