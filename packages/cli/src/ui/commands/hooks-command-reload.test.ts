@@ -133,7 +133,7 @@ describe('/hooks reload with real settings files', () => {
     expect(context.ui.addItem).not.toHaveBeenCalled();
   });
 
-  it.each(['user', 'workspace', 'system', 'systemDefaults'] as const)(
+  it.each(['user', 'workspace'] as const)(
     'preserves both scopes and active hooks when %s JSON is malformed',
     async (scope) => {
       const { settings, context, entries, setHooks } = await setup();
@@ -159,6 +159,57 @@ describe('/hooks reload with real settings files', () => {
       expect(setHooks).not.toHaveBeenCalled();
       expect(context.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'error' }),
+        expect.any(Number),
+      );
+    },
+  );
+
+  it.each(['system', 'systemDefaults'] as const)(
+    'applies user edits but keeps the previous system hooks when %s JSON is malformed',
+    async (scope) => {
+      const { settings, context, entries } = await setup(false, true, {
+        hooks: { SessionStart: hook('echo system') },
+      });
+      const systemBefore = structuredClone(settings[scope].settings);
+      const malformed = '{"hooks": INVALID EDIT';
+      fs.writeFileSync(settings[scope].path, malformed);
+      fs.writeFileSync(
+        settings.user.path,
+        JSON.stringify({ hooks: { PostToolUse: hook('echo edited') } }),
+      );
+
+      expect(await hooksCommand.action!(context, '')).toEqual({
+        type: 'dialog',
+        dialog: 'hooks',
+      });
+
+      expect(fs.readFileSync(settings[scope].path, 'utf8')).toBe(malformed);
+      expect(fs.existsSync(`${settings[scope].path}.corrupted`)).toBe(false);
+      expect(settings[scope].settings).toEqual(systemBefore);
+      expect(
+        entries().map(({ eventName, source, config }) => ({
+          eventName,
+          source,
+          command: (config as { command?: string }).command,
+        })),
+      ).toEqual(
+        expect.arrayContaining([
+          {
+            eventName: 'SessionStart',
+            source: 'system',
+            command: 'echo system',
+          },
+          { eventName: 'PostToolUse', source: 'user', command: 'echo edited' },
+        ]),
+      );
+      expect(entries().some(({ eventName }) => eventName === 'Stop')).toBe(
+        false,
+      );
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: expect.stringContaining(settings[scope].path),
+        }),
         expect.any(Number),
       );
     },

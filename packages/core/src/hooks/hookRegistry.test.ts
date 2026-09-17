@@ -120,7 +120,7 @@ describe('HookRegistry', () => {
         ]);
       });
 
-      it('runs hooks for an event in source priority order: project, user, system, extensions', async () => {
+      it('orders the hooks planned for an event by source priority: project, user, system, extensions', async () => {
         mockConfig.getSystemHooks = vi
           .fn()
           .mockReturnValue(commandHooks('echo system', 'system-hook'));

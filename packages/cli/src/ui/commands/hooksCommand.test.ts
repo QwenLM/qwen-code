@@ -62,11 +62,12 @@ describe('hooksCommand', () => {
       });
       expect(
         mockContext.services.settings.reloadScopesFromDiskAtomically,
-      ).toHaveBeenCalledWith([
+      ).toHaveBeenNthCalledWith(1, [SettingScope.User, SettingScope.Workspace]);
+      expect(
+        mockContext.services.settings.reloadScopesFromDiskAtomically,
+      ).toHaveBeenNthCalledWith(2, [
         SettingScope.System,
         SettingScope.SystemDefaults,
-        SettingScope.User,
-        SettingScope.Workspace,
       ]);
       expect(mockConfig.setHooksFromSettings).toHaveBeenCalledTimes(1);
       expect(mockConfig.getHookSystem().reload).toHaveBeenCalledTimes(1);
@@ -159,11 +160,9 @@ describe('hooksCommand', () => {
       const result = await hooksCommand.action!(context, '');
 
       expect(result).toEqual({ type: 'dialog', dialog: 'hooks' });
-      expect(reloadSettings).toHaveBeenCalledWith([
-        SettingScope.System,
-        SettingScope.SystemDefaults,
-        SettingScope.User,
-        SettingScope.Workspace,
+      expect(reloadSettings.mock.calls).toEqual([
+        [[SettingScope.User, SettingScope.Workspace]],
+        [[SettingScope.System, SettingScope.SystemDefaults]],
       ]);
       expect(config.getWorkingDir).not.toHaveBeenCalled();
       expect(config.setHooksFromSettings).toHaveBeenCalledWith({
