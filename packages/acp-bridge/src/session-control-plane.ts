@@ -3754,7 +3754,11 @@ export function createSessionControlPlane(
   let runtimeStopToken = randomUUID();
   let lastRuntimeStop: BridgeRuntimeStopResult | undefined;
   let runtimeStop:
-    | { channel: ChannelInfo; promise: Promise<BridgeRuntimeStopResult> }
+    | {
+        channel: ChannelInfo;
+        promise: Promise<BridgeRuntimeStopResult>;
+        completion: Promise<BridgeRuntimeStopResult>;
+      }
     | undefined;
 
   function assertRuntimeNotStopping(): void {
@@ -8691,12 +8695,16 @@ export function createSessionControlPlane(
     runtimeStopToken = randomUUID();
     harness.cancelIdleTimer();
     const deadline = Date.now() + timeoutMs;
-    const operation = { channel: ci, promise: Promise.resolve(receipt) };
+    const operation = {
+      channel: ci,
+      promise: Promise.resolve(receipt),
+      completion: Promise.resolve(receipt),
+    };
     runtimeStop = operation;
     void released.then(() => {
       receipt.released = true;
     });
-    operation.promise = Promise.resolve().then(async () => {
+    operation.completion = Promise.resolve().then(async () => {
       try {
         for (const sessionId of ids) {
           const remainingMs = deadline - Date.now();
@@ -8745,6 +8753,19 @@ export function createSessionControlPlane(
         if (runtimeStop === operation) runtimeStop = undefined;
       }
     });
+    let timer: ReturnType<typeof setTimeout>;
+    operation.promise = Promise.race([
+      operation.completion,
+      new Promise<BridgeRuntimeStopResult>((resolve) => {
+        timer = setTimeout(() => {
+          receipt.state = 'failed';
+          receipt.error ??=
+            'Workspace stop timed out before cleanup completed.';
+          resolve(copyRuntimeStop(receipt));
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]).finally(() => clearTimeout(timer));
     return operation.promise;
   }
 
@@ -9129,6 +9150,7 @@ export function createSessionControlPlane(
     },
 
     getRuntimeStopSnapshot: runtimeStopSnapshot,
+    getRuntimeStopCompletion: () => runtimeStop?.completion,
     stopWorkspaceRuntime,
 
     getIdleChannelCandidate() {

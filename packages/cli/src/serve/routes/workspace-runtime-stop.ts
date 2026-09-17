@@ -100,6 +100,7 @@ export function registerWorkspaceRuntimeStopRoutes(
     if (
       !deps.ownsBridge(runtime) ||
       !runtime.bridge.getRuntimeStopSnapshot ||
+      !runtime.bridge.getRuntimeStopCompletion ||
       !runtime.bridge.stopWorkspaceRuntime
     )
       reasons.push('unsupported');
@@ -211,6 +212,7 @@ export function registerWorkspaceRuntimeStopRoutes(
       if (
         !coordinator ||
         !deps.ownsBridge(runtime) ||
+        !runtime.bridge.getRuntimeStopCompletion ||
         !runtime.bridge.stopWorkspaceRuntime
       ) {
         unavailable(res);
@@ -279,9 +281,16 @@ export function registerWorkspaceRuntimeStopRoutes(
             throw new WorkspaceRuntimeStopError(
               'workspace_runtime_stop_blocked',
             );
-          operation = runtime.bridge
-            .stopWorkspaceRuntime(confirmation)
-            .finally(finish);
+          operation = runtime.bridge.stopWorkspaceRuntime(confirmation);
+          const completion = runtime.bridge.getRuntimeStopCompletion();
+          if (completion) void completion.then(finish, finish);
+          else
+            void operation.then(
+              (result) => {
+                if (result.released) finish();
+              },
+              () => undefined,
+            );
         } catch (error) {
           finish();
           throw error;

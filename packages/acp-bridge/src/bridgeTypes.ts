@@ -2670,6 +2670,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
 
   getRuntimeStopSnapshot?(): BridgeRuntimeStopSnapshot;
+  /** Captured cleanup completion; may outlive a failed stop response. */
+  getRuntimeStopCompletion?(): Promise<BridgeRuntimeStopResult> | undefined;
   stopWorkspaceRuntime?(
     request: BridgeRuntimeStopRequest,
     timeoutMs?: number,

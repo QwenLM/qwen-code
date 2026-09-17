@@ -3567,6 +3567,7 @@ export function createServeApp(
       .some(
         (runtime) =>
           typeof runtime.bridge.stopWorkspaceRuntime === 'function' &&
+          typeof runtime.bridge.getRuntimeStopCompletion === 'function' &&
           typeof runtime.bridge.getRuntimeStopSnapshot === 'function',
       )
   );

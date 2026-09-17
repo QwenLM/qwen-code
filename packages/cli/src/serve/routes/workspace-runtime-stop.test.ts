@@ -18,6 +18,7 @@ import type {
   WorkspaceRegistry,
 } from '../workspace-registry.js';
 import type { BridgeRuntimeStopResult } from '@qwen-code/acp-bridge/bridgeTypes';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 vi.mock(
   '@qwen-code/qwen-code-core/services/cronTasksFile.js',
   async (importOriginal) => ({
@@ -54,8 +55,9 @@ function setup() {
     blockedReasons: [] as string[],
     lastStop: undefined as BridgeRuntimeStopResult | undefined,
   };
-  const stop = vi.fn(
-    async (): Promise<BridgeRuntimeStopResult> => ({
+  let completion: Promise<BridgeRuntimeStopResult> | undefined;
+  const stop = vi.fn((): Promise<BridgeRuntimeStopResult> => {
+    completion = Promise.resolve({
       channelId: 'child',
       runtimeEpoch: 2,
       stopToken: 'token',
@@ -66,8 +68,9 @@ function setup() {
       closedSessionIds: ['s1'],
       interruptedSessionIds: ['s1'],
       remainingSessionIds: [],
-    }),
-  );
+    });
+    return completion;
+  });
   const runtime = {
     workspaceId: 'selected',
     workspaceCwd: '/selected',
@@ -78,6 +81,7 @@ function setup() {
       sessionCount: 1,
       activePromptCount: 1,
       getRuntimeStopSnapshot: () => snapshot,
+      getRuntimeStopCompletion: () => completion,
       stopWorkspaceRuntime: stop,
       getWorkspaceRuntimeLifecycleSnapshot: () => ({
         state: 'busy',
@@ -230,6 +234,93 @@ describe('workspace runtime stop routes', () => {
     expect(h.stop).not.toHaveBeenCalled();
     expect(h.deps.stopKeepalive).not.toHaveBeenCalled();
   });
+  it('does not accept a bridge without separate cleanup completion', async () => {
+    const h = setup();
+    delete h.runtime.bridge.getRuntimeStopCompletion;
+    const listed = await request(h.app).get('/workspaces/runtime-stop-options');
+    expect(listed.body.workspaces[0].blockedReasons).toContain('unsupported');
+    const response = await request(h.app)
+      .post('/workspaces/selected/runtime/stop')
+      .send(confirmation);
+    expect(response.status).toBe(501);
+    expect(h.stop).not.toHaveBeenCalled();
+  });
+  it('keeps guards when an accepted stop has no cleanup completion proof', async () => {
+    const h = setup();
+    const failed: BridgeRuntimeStopResult = {
+      ...(await h.stop()),
+      state: 'failed',
+      stopped: false,
+      released: false,
+    };
+    h.stop.mockClear();
+    h.stop.mockResolvedValue(failed);
+    h.runtime.bridge.getRuntimeStopCompletion = () => undefined;
+    const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+    const response = await request(h.app)
+      .post('/workspaces/selected/runtime/stop')
+      .send(confirmation);
+    expect(response.status).toBe(503);
+    expect(h.deps.startKeepalive).not.toHaveBeenCalled();
+    await expect(coordinator.ensure()).rejects.toMatchObject({
+      code: 'workspace_draining',
+    });
+  });
+  it.each(['active', 'removed', 'untrusted', 'draining'])(
+    'retains coordinator and keepalive guards after failure until cleanup (%s)',
+    async (state) => {
+      const h = setup();
+      const failed: BridgeRuntimeStopResult = {
+        ...(await h.stop()),
+        state: 'failed',
+        stopped: false,
+        released: false,
+      };
+      h.stop.mockClear();
+      h.stop.mockResolvedValue(failed);
+      h.runtime.bridge.preheat = vi.fn(async () => {});
+      let release!: (value: BridgeRuntimeStopResult) => void;
+      const completion = new Promise<BridgeRuntimeStopResult>((resolve) => {
+        release = resolve;
+      });
+      h.runtime.bridge.getRuntimeStopCompletion = () => completion;
+      const coordinator = getWorkspaceRuntimeCoordinator(h.runtime);
+      const response = await request(h.app)
+        .post('/workspaces/selected/runtime/stop')
+        .send(confirmation);
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({
+        code: 'workspace_runtime_stop_failed',
+        released: false,
+        committedAcpChildren: 1,
+      });
+      expect(h.deps.startKeepalive).not.toHaveBeenCalled();
+      await expect(coordinator.ensure()).rejects.toMatchObject({
+        code: 'workspace_draining',
+      });
+      if (state === 'removed') h.entry.state = 'removed';
+      if (state === 'untrusted')
+        Object.defineProperty(h.runtime, 'trusted', { value: false });
+      if (state === 'draining') coordinator.beginDrain();
+      release({ ...failed, state: 'stopped', stopped: true, released: true });
+      await completion;
+      if (state === 'active') {
+        expect(h.deps.startKeepalive).toHaveBeenCalledExactlyOnceWith(
+          h.runtime,
+        );
+        await expect(coordinator.ensure()).resolves.toMatchObject({
+          runtimeLive: true,
+        });
+      } else {
+        expect(h.deps.startKeepalive).not.toHaveBeenCalled();
+      }
+      if (state === 'draining')
+        await expect(coordinator.ensure()).rejects.toMatchObject({
+          code: 'workspace_draining',
+        });
+      expect(h.stop).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 it('legacy conditional cron cannot run or block explicit stop', async () => {

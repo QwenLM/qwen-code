@@ -27,6 +27,10 @@ const EN: Messages = {
     'The draft, session or daemon has changed. Cancel and try the original operation again.',
   'capacityChoice.inProgress':
     'The selected stop is still being resolved. Refresh its status before continuing.',
+  'capacityChoice.failedUnreleased':
+    'The stop failed. This workspace remains unavailable until its old processes are confirmed stopped. Capacity is still reserved. Refresh to check cleanup.',
+  'capacityChoice.failedUnknownCleanup':
+    'The stop failed. Cleanup could not be confirmed. Refresh its status before continuing.',
   'capacityChoice.workspaces': 'Workspace to stop',
   'capacityChoice.requester':
     'This workspace owns the operation you are trying to continue.',
@@ -3907,6 +3911,10 @@ const ZH: Messages = {
   'capacityChoice.outdated':
     '草稿、会话或 daemon 已变化，请取消后重新执行原操作。',
   'capacityChoice.inProgress': '所选停止仍在处理，请刷新状态后再继续。',
+  'capacityChoice.failedUnreleased':
+    '停止失败。确认旧进程全部退出前，此工作区暂不可用，容量仍被占用。可刷新查看清理结果。',
+  'capacityChoice.failedUnknownCleanup':
+    '停止失败，清理结果尚未确认。请刷新状态后再继续。',
   'capacityChoice.workspaces': '要停止的工作区',
   'capacityChoice.requester': '此工作区属于正在尝试继续的原操作。',
   'capacityChoice.running': '运行中',

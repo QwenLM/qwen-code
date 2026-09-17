@@ -72,14 +72,16 @@ UI 消费这些字段用于候选选择、影响展示和确认。同时展示�
 
 ### 进行中与失败结果
 
-每个 bridge 保留一个不透明 stop token，以及最多一个 stop promise 和它的最近结果。Token 随 bridge 创建，在接受 stop 时同步更换；回执记录已消费 token 与 channel 身份/epoch。重复提交最近已接受的 token 时观察同一操作，不重复副作用；更早的 token 返回 stale。部分失败已收敛后，重新预览并确认可以消费当前 token，对同 channel 的剩余 session 重试；仍需复查 session 集合和阻塞项，不能以旧确认关闭替换后的 channel。通过候选接口暴露这个小型内存回执，不建立持久操作队列。重建 bridge/daemon 会产生新 token，使旧确认失效。回执仅在所属 runtime 仍为当前可信实例时可读；移除、信任变化或 daemon 重建可能使回执不可用。缺失回执仍按结果未知处理，不能据此继续原操作。
+每个 bridge 保留一个不透明 stop token，以及最多一个已接受的 stop；分别保存其有界响应 promise、清理完成 promise 和最近回执。Token 随 bridge 创建，在接受 stop 时同步更换；回执记录已消费 token 与 channel 身份/epoch。重复提交最近已接受的 token 时观察同一操作，不重复副作用；更早的 token 返回 stale。部分失败已收敛后，重新预览并确认可以消费当前 token，对同 channel 的剩余 session 重试；仍需复查 session 集合和阻塞项，不能以旧确认关闭替换后的 channel。通过候选接口暴露这个小型内存回执，不建立持久操作队列。重建 bridge/daemon 会产生新 token，使旧确认失效。回执仅在所属 runtime 仍为当前可信实例时可读；移除、信任变化或 daemon 重建可能使回执不可用。缺失回执仍按结果未知处理，不能据此继续原操作。
+
+现有总预算耗尽时，响应 promise 以 `state: failed` 收敛，即使清理仍无法证明释放。这不解除容量计数或 workspace 隔离。Bridge 向所选 runtime 路由单独提供捕获的清理完成信号，路由在清理真正收敛前保留 coordinator 门禁并暂停 keepalive。稍后确认释放时，只有全部 session close 已确认才能将最近回执更新为 `stopped`，否则报告 `incomplete`；已返回的失败快照不变。只读刷新可观察稍后的结果，不再次提交 stop POST。释放仍未确认时，展示停止失败及工作区暂不可用，不能一直展示操作处理中。
 
 | 结果                                          | 契约                                                                                                                                   |
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Capability/runtime 不支持                     | `501 workspace_runtime_stop_not_supported`，无副作用。                                                                                 |
 | 身份/session 集合变化                         | `409 workspace_runtime_stop_stale`，尚未开始关闭。                                                                                     |
 | 存在独立活动或观测未知                        | `409 workspace_runtime_stop_blocked`，尚未开始关闭。初始预览携带原因；后续门禁复查可能只返回 code/error，需要刷新预览。                |
-| 已接受的停止在观测 deadline 后仍执行          | `503 workspace_runtime_stop_in_progress`，携带目标身份及部分事实；刷新只读状态，不重新提交 stop 或重放发起操作。                       |
+| 已接受的停止超过总预算                        | `503 workspace_runtime_stop_failed`，携带目标身份及部分事实；清理收敛前保留隔离及 registry 计数。只读刷新状态，不重新提交。            |
 | Close 被拒、flush 失败或下次 close 前预算耗尽 | `409 workspace_runtime_stop_incomplete`，包含已关闭/已中断/剩余 ID，以及已知的释放状态。不能声称没有发生操作，也不自动 kill 绕过拒绝。 |
 | Teardown 无法证明释放                         | `503 workspace_runtime_stop_failed`，保留捕获的 child 跟踪并显示清理状态，不手工减 registry。                                          |
 | 网络响应丢失                                  | 按结果未知处理；读取对应回执/状态后，才允许显式继续或再次确认。仅根进程不再存活不是成功。                                              |
@@ -97,7 +99,7 @@ Unknown/untrusted/ambiguous/bootstrap/draining/removed 等既有 resolver 错误
 4. 发出既有 `session_closed`，保留 `reason: client_close`，新增 `cause: workspace_runtime_stop`。扩展受控 close options 和 SDK 事件类型/校验。对于 stop 关联的致命 channel 退出，也要给受影响 session 保留终态用户停止信号，并单独报告未确认的持久化/teardown；不能让普通崩溃重连分支悄悄撤销用户操作。不发 `workspace_removed`。
 5. 已确认 session 全部关闭且无意外工作后，清理捕获 channel 的软保温，走 PR2 相同的自有 teardown。复用内部机制，不放宽 PR2 零 session 条件，也不永久 shutdown bridge。
 6. 仅为 tracked-child handle 增加 `registryReleased: Promise<void>`，并在 daemon-owned channel 上可选透传。只在已有 registry release 函数删除计数项之后 resolve。不能在根进程退出、发 kill 信号、termination `finally` 或吞掉退出错误时 resolve。即使根退出清理已从 live-channel 集合移除它，也要保留捕获的 channel 引用。
-7. 只有该 child 的释放 promise 完成、session-close 结果明确后才能报告成功。清理可以晚于 HTTP 观测超时完成；后台完成回调核验当前 stop-promise 身份，只解除自身门禁，不清理后续操作的门禁。所选 child 资源尚未确认时继续保留 stopping 状态。
+7. 只有该 child 的释放 promise 完成、session-close 结果明确后才能报告成功。响应与现有总预算竞争，失败响应后仍继续捕获的清理。通过 bridge 内部契约暴露清理完成信号，只有该信号才能解除 bridge/coordinator 门禁并恢复 keepalive。完成回调核验当前操作身份，不能解除后续操作的门禁。所选 child 资源尚未确认时继续保留生命周期 `stopping` 和容量计数，即使响应回执已是 `failed`。没有触发 teardown 的明确 close 拒绝仍正常收敛清理并解除自身门禁。
 8. 保留注册、generation 身份、bridge/coordinator/service 对象、文件、已保存历史、环境/存储根目录及无关 terminal。Session close 沿用 catalog invalidation；MCP/Skills 通过原 epoch 机制变为 stale。仅在 stop/门禁收敛、捕获 runtime 仍是当前可信 active 注册、且没有 removal/trust drain 或 daemon shutdown 时，才恢复 keepalive 观测；操作不修改持久任务启用状态。后续用户主动使用时正常冷启动，并加载原保存 session 身份。
 
 此局部门禁防止同一个 bridge 在已接受停止期间接收冲突工作。它不承诺全局原子快照、不停止无关 daemon 服务、不预留释放的名额，也不永久阻止其他调用方稍后使用该 workspace。
@@ -156,7 +158,7 @@ E2E 计划位于 `.qwen/e2e-tests/daemon-acp-capacity-choice-pr3.md`。2026-09-1
 2. 明确确认后，分别关闭已加载空闲 session、活跃 turn/tool/授权/问题等待；保存历史和 workspace 身份保留，所选 child 释放后才启动 B，且 B 只提交一次。
 3. 同 ACP 的多个 session 全部预览并计入。预览至确认期间新增 session 或替换 channel，返回 stale 且不关闭新目标。部分 flush/拒绝准确返回已中断/已关闭/剩余 session。
 4. 启用 cron、在途 scheduler revive、ACP connection、memory job、worker、voice、MCP/control、pending start/restore 分别返回规定禁用原因；列表不会启动 child，任务读取失败不能成为空列表。
-5. 根/后代延迟退出、SIGKILL/非零退出、进程树状态不确定和竞争请求覆盖单 child release promise。HTTP 超时不能释放计数或触发迟到的不安全继续。两次 session close 之间预算耗尽，不能发送无超时的下一次 RPC，也不能绕过拒绝。宣称跨平台前必须完成 Linux/Windows 自有进程树验证。
+5. 根/后代延迟退出、SIGKILL/非零退出、进程树状态不确定和竞争请求覆盖单 child release promise。两条等待释放路径都必须在总 deadline 以失败响应收敛；清理前仍禁止准入、coordinator 工作与 keepalive，并保留 registry 计数。重复确认不能再次启动清理；迟到释放更新回执，但不修改已返回的失败快照，也不将未确认 flush 提升为成功。选择器的两种语言均区分失败后隔离与操作处理中。HTTP 超时不能释放计数或触发迟到的不安全继续。两次 session close 之间预算耗尽，不能发送无超时的下一次 RPC，也不能绕过拒绝。宣称跨平台前必须完成 Linux/Windows 自有进程树验证。
 6. 双击、相同 POST 重复提交、响应丢失、接受后取消、daemon 重启和新 channel epoch 都不能关闭第二个目标。部分拒绝后重新确认可以重试同 channel 的剩余 session；重放更早已消费 token 不可以。同目标回执区分已释放、部分失败和未知。并发 removal/trust drain 及其 rollback 不能清掉 stop 门禁；stop 完成也不能清掉其他 drain，或重新启动已移除 runtime 的 keepalive。
 7. Primary/secondary/dynamic 构建及直接托管 embed 路径保持 runtime 归属；不可信、未知、已移除/draining、不支持的 runtime 都不回落 primary；内部目标不可选。
 8. 新提交、精确 restore、已确认 standalone rollback 和未知 creation 分别遵循继续操作表。Owner/草稿变化及远端 daemon 切换使旧意图失效。没有重复消息、空替代 session 或自动连锁关闭活跃 workspace。

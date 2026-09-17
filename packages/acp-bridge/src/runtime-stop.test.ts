@@ -16,6 +16,7 @@ import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 const bridges: AcpSessionBridge[] = [];
 afterEach(async () => {
   await Promise.all(bridges.splice(0).map((bridge) => bridge.shutdown()));
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -185,29 +186,94 @@ describe('explicit workspace runtime stop', () => {
     vi.restoreAllMocks();
   });
 
-  it('keeps an unknown close outcome pending until release and never claims it was flushed', async () => {
+  it('bounds an unknown close outcome while retaining isolation until release', async () => {
     const { bridge, channels } = setup(() => new Promise(() => {}));
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     let release!: () => void;
     channels[0].channel.registryReleased = new Promise<void>((resolve) => {
       release = resolve;
     });
+    vi.useFakeTimers();
     const stopping = bridge.stopWorkspaceRuntime!(confirmation(bridge), 50);
-    await vi.waitFor(() => expect(channels[0].killed).toBe(true));
-    expect(bridge.getRuntimeStopSnapshot!().lastStop).toMatchObject({
-      state: 'stopping',
+    const completion = bridge.getRuntimeStopCompletion!()!;
+    await vi.advanceTimersByTimeAsync(100);
+    const failed = await stopping;
+    expect(channels[0].killed).toBe(true);
+    expect(failed).toMatchObject({
+      state: 'failed',
       released: false,
       closedSessionIds: [],
     });
+    await expect(bridge.preheat()).rejects.toThrow();
     release();
-    expect(await stopping).toMatchObject({
+    expect(await completion).toMatchObject({
       state: 'incomplete',
       stopped: false,
       released: true,
       closedSessionIds: [],
       interruptedSessionIds: [session.sessionId],
     });
+    expect(failed).toMatchObject({ state: 'failed', released: false });
+    expect(bridge.getRuntimeStopSnapshot!().blockedReasons).not.toContain(
+      'stopping',
+    );
   });
+
+  it.each([false, true])(
+    'settles the response but retains quarantine until release (teardown rejects: %s)',
+    async (rejectTeardown) => {
+      const { bridge, channels, factory } = setup();
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      let release!: () => void;
+      channels[0].channel.registryReleased = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      if (rejectTeardown) {
+        const kill = channels[0].channel.kill;
+        channels[0].channel.kill = async () => {
+          await kill();
+          throw new Error('teardown failed');
+        };
+      }
+      vi.useFakeTimers();
+      const request = confirmation(bridge);
+      const stop = bridge.stopWorkspaceRuntime!(request, 50);
+      const completion = bridge.getRuntimeStopCompletion!()!;
+      const completed = vi.fn();
+      void completion.then(completed);
+      await vi.advanceTimersByTimeAsync(50);
+      const failed = await stop;
+      expect(failed).toMatchObject({
+        state: 'failed',
+        stopped: false,
+        released: false,
+        closedSessionIds: [session.sessionId],
+      });
+      expect(completed).not.toHaveBeenCalled();
+      expect(bridge.stopWorkspaceRuntime!(request)).toBe(stop);
+      await expect(bridge.stopWorkspaceRuntime!(request)).resolves.toEqual(
+        failed,
+      );
+      await expect(bridge.preheat()).rejects.toThrow();
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow();
+      expect(factory).toHaveBeenCalledOnce();
+      expect(bridge.getRuntimeStopSnapshot!().blockedReasons).toContain(
+        'stopping',
+      );
+      release();
+      expect(await completion).toMatchObject({
+        state: 'stopped',
+        stopped: true,
+        released: true,
+      });
+      expect(failed).toMatchObject({ state: 'failed', released: false });
+      expect(bridge.getRuntimeStopCompletion!()).toBeUndefined();
+      await bridge.preheat();
+      expect(factory).toHaveBeenCalledTimes(2);
+    },
+  );
   it('does not let a concurrent cleanup kill bypass the confirmed session flush', async () => {
     let acknowledge!: (value: Record<string, unknown>) => void;
     const close = vi.fn(

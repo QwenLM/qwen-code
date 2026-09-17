@@ -43,7 +43,7 @@ async function mount(
     runtimeEpoch: 1,
     stopToken: 'token',
     canStop: true,
-    blockedReasons: [],
+    blockedReasons: [] as string[],
     sessions: [{ sessionId: 's1', hasActivePrompt: true, queuedPrompts: 2 }],
     lastStop: undefined as DaemonRuntimeStopResult | undefined,
   };
@@ -206,6 +206,103 @@ describe('CapacityRecoveryDialog', () => {
     expect(button('Stop these sessions and continue').disabled).toBe(true);
     expect(h.resume).not.toHaveBeenCalled();
   });
+  it.each(['en', 'zh-CN'] as const)(
+    'preserves a known failed response when status refresh fails (%s)',
+    async (language) => {
+      const h = await mount(
+        vi
+          .fn()
+          .mockRejectedValue(
+            new DaemonHttpError(
+              503,
+              { code: 'workspace_runtime_stop_failed' },
+              'Stop failed',
+            ),
+          ),
+        language,
+      );
+      h.runtimeStopOptions.mockRejectedValueOnce(new Error('offline'));
+      await choose();
+      const confirm =
+        language === 'en'
+          ? 'Stop these sessions and continue'
+          : '停止这些会话并继续';
+      await click(button(confirm));
+      expect(document.body.textContent).toContain(
+        language === 'en'
+          ? 'The stop failed. Cleanup could not be confirmed.'
+          : '停止失败，清理结果尚未确认',
+      );
+      expect(document.body.textContent).not.toContain(
+        language === 'en'
+          ? 'The selected stop is still being resolved.'
+          : '所选停止仍在处理',
+      );
+      expect(button(confirm).disabled).toBe(true);
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(h.stop).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(['en', 'zh-CN'] as const)(
+    'shows failed quarantine until late release without another stop (%s)',
+    async (language) => {
+      const failed: DaemonRuntimeStopResult = {
+        ...result,
+        state: 'failed',
+        stopped: false,
+        released: false,
+        error: 'Stop timed out',
+      };
+      const h = await mount(
+        vi
+          .fn()
+          .mockRejectedValue(
+            new DaemonHttpError(
+              503,
+              { ...failed, code: 'workspace_runtime_stop_failed' },
+              'Stop timed out',
+            ),
+          ),
+        language,
+      );
+      const confirm =
+        language === 'en'
+          ? 'Stop these sessions and continue'
+          : '停止这些会话并继续';
+      const refresh = language === 'en' ? 'Refresh status' : '刷新状态';
+      await choose();
+      h.workspace.lastStop = failed;
+      await click(button(confirm));
+      h.workspace.canStop = false;
+      h.workspace.blockedReasons = ['stopping'];
+      expect(document.body.textContent).toContain(
+        language === 'en'
+          ? 'The stop failed. This workspace remains unavailable'
+          : '停止失败。确认旧进程全部退出前，此工作区暂不可用',
+      );
+      expect(document.body.textContent).not.toContain(
+        language === 'en'
+          ? 'The selected stop is still being resolved.'
+          : '所选停止仍在处理',
+      );
+      expect(button(confirm).disabled).toBe(true);
+      expect(button(refresh).disabled).toBe(false);
+      expect(h.resume).not.toHaveBeenCalled();
+      await click(button(refresh));
+      expect(h.stop).toHaveBeenCalledOnce();
+      h.workspace.lastStop = result;
+      await click(button(refresh));
+      expect(document.body.textContent).not.toContain('Stop timed out');
+      expect(h.resume).not.toHaveBeenCalled();
+      await click(
+        button(
+          language === 'en' ? 'Continue original operation' : '继续原操作',
+        ),
+      );
+      expect(h.resume).toHaveBeenCalledOnce();
+      expect(h.stop).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 it.each([401, 403, 404])(

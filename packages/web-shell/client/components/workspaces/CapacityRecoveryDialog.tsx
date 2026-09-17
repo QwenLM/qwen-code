@@ -35,6 +35,7 @@ export function CapacityRecoveryDialog({
   const [error, setError] = useState<string>();
   const [outcome, setOutcome] = useState<DaemonRuntimeStopResult>();
   const [unknownOutcome, setUnknownOutcome] = useState(false);
+  const [failedResponse, setFailedResponse] = useState(false);
   const [continued, setContinued] = useState(false);
   const mounted = useRef(true);
   const inFlight = useRef(false);
@@ -42,10 +43,9 @@ export function CapacityRecoveryDialog({
   const target = useRef<{ workspaceId: string; token: string } | undefined>(
     undefined,
   );
+  const releasePending = outcome?.state === 'failed' && !outcome.released;
   const remotePending =
-    unknownOutcome ||
-    outcome?.state === 'stopping' ||
-    (outcome?.state === 'failed' && !outcome.released);
+    unknownOutcome || outcome?.state === 'stopping' || releasePending;
   const current = intent.isCurrent();
   const candidate = options?.workspaces.find(
     (workspace) => workspace.workspaceId === selected,
@@ -56,6 +56,7 @@ export function CapacityRecoveryDialog({
     try {
       const next = await intent.client.runtimeStopOptions();
       if (!mounted.current) return;
+      setError(undefined);
       setOptions(next);
       setSelected('');
       const receipt = next.workspaces.find(
@@ -107,6 +108,7 @@ export function CapacityRecoveryDialog({
     setBusy(true);
     setError(undefined);
     setUnknownOutcome(true);
+    setFailedResponse(false);
     setOutcome(undefined);
     target.current = {
       workspaceId: candidate.workspaceId,
@@ -131,6 +133,11 @@ export function CapacityRecoveryDialog({
     } catch (cause) {
       if (!mounted.current) return;
       setError(cause instanceof Error ? cause.message : String(cause));
+      setFailedResponse(
+        cause instanceof DaemonHttpError &&
+          isRecord(cause.body) &&
+          cause.body.code === 'workspace_runtime_stop_failed',
+      );
       if (
         cause instanceof DaemonHttpError &&
         ([401, 403, 404].includes(cause.status) ||
@@ -187,7 +194,17 @@ export function CapacityRecoveryDialog({
             {outcome.error ?? ''}
           </p>
         )}
-        {remotePending && <p role="status">{t('capacityChoice.inProgress')}</p>}
+        {remotePending && (
+          <p role="status">
+            {t(
+              releasePending
+                ? 'capacityChoice.failedUnreleased'
+                : failedResponse && unknownOutcome
+                  ? 'capacityChoice.failedUnknownCleanup'
+                  : 'capacityChoice.inProgress',
+            )}
+          </p>
+        )}
         <RadioGroup
           value={selected}
           onValueChange={setSelected}
