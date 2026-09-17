@@ -833,6 +833,25 @@ export class LoadedSettings {
   }
 
   /**
+   * Get system-scope hooks: the SystemDefaults and System settings files,
+   * merged with the same strategy as the full merge (each `hooks.<Event>` list
+   * is concatenated), SystemDefaults first. Administrator configuration is not
+   * gated by folder trust, exactly like user hooks. Returns undefined, not an
+   * empty object, when neither file configures hooks, so callers can tell a
+   * scope with no data apart from one with data.
+   */
+  getSystemHooks(): Record<string, unknown> | undefined {
+    const merged = customDeepMerge(
+      getMergeStrategyForPath,
+      {},
+      { hooks: this.systemDefaults.settings.hooks ?? {} },
+      { hooks: this.system.settings.hooks ?? {} },
+    ) as Settings;
+    const hooks = merged.hooks;
+    return hooks && Object.keys(hooks).length > 0 ? hooks : undefined;
+  }
+
+  /**
    * Get user-level hooks from user settings (not merged with workspace).
    * These hooks should always be loaded regardless of folder trust.
    */

@@ -1466,6 +1466,12 @@ export interface ConfigParameters {
    */
   stopHookBlockingCap?: number;
   /**
+   * System-level hooks configuration (from the System and SystemDefaults
+   * settings files). Administrator configuration, so these hooks are loaded
+   * regardless of folder trust status.
+   */
+  systemHooks?: Record<string, unknown>;
+  /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
    */
@@ -1477,6 +1483,11 @@ export interface ConfigParameters {
    */
   projectHooks?: Record<string, unknown>;
 
+  /**
+   * Legacy merged hooks, read only when none of `systemHooks`, `userHooks`
+   * and `projectHooks` is supplied (a Config built straight from merged
+   * settings). It carries no scope, so it never counts as system hooks.
+   */
   hooks?: Record<string, unknown>;
   /** Glob patterns to exclude from .qwen/rules/ loading. */
   contextRuleExcludes?: string[];
@@ -3019,6 +3030,8 @@ export class Config {
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
+  /** System-level hooks (always loaded regardless of trust) */
+  private systemHooks?: Record<string, unknown>;
   /** User-level hooks (always loaded regardless of trust) */
   private userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -3598,10 +3611,12 @@ export class Config {
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
     );
-    // Store user and project hooks separately for proper source attribution
+    // Store system, user and project hooks separately for proper source
+    // attribution
+    this.systemHooks = params.systemHooks;
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
-    // Legacy: fall back to merged hooks if new fields are not provided
+    // Legacy: merged hooks, read only if no per-scope hooks are provided
     this.hooks = params.hooks;
     this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
@@ -9606,8 +9621,9 @@ export class Config {
     if (!this.isTrustedFolder()) {
       return undefined;
     }
-    // Prefer new projectHooks field, fall back to hooks for backward compatibility
-    const hooks = this.projectHooks ?? this.hooks;
+    // The legacy merged `hooks` stands in only when no scope was supplied.
+    const hooks =
+      this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
@@ -9620,24 +9636,56 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Prefer new userHooks field, fall back to hooks for backward compatibility
-    const hooks = this.userHooks ?? this.hooks;
+    // The legacy merged `hooks` stands in only when no scope was supplied.
+    const hooks =
+      this.userHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
+  /**
+   * Get system-level hooks configuration.
+   * Returns hooks from the System and SystemDefaults settings files, always
+   * available regardless of folder trust. There is deliberately no fallback to
+   * the legacy merged `hooks`: it carries no scope, and reading it here would
+   * promote user or project hooks to administrator hooks.
+   */
+  getSystemHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode() || this.isSafeMode()) {
+      return undefined;
+    }
+    return this.systemHooks as
+      | { [K in HookEventName]?: HookDefinition[] }
+      | undefined;
+  }
+
+  /**
+   * True when the caller supplied per-scope hooks, so the legacy merged
+   * `hooks` must not be read as a second copy of them: the registry's
+   * duplicate key includes the source, so each copy would register again.
+   */
+  private hasScopedHooks(): boolean {
+    return (
+      this.systemHooks !== undefined ||
+      this.userHooks !== undefined ||
+      this.projectHooks !== undefined
+    );
   }
 
   /**
    * Replaces the settings-derived hook maps captured at construction. The CLI
    * calls this after re-reading the settings files so that
-   * `HookSystem.reload()` sees edits made since startup. All three fields are
+   * `HookSystem.reload()` sees edits made since startup. All four fields are
    * replaced together, as at construction, so a stale legacy `hooks` snapshot
    * can never resurface through the fallback in the getters. The bare, safe
    * mode and folder trust gates in the getters still apply.
    */
   setHooksFromSettings(hooks: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
     hooks?: Record<string, unknown>;
   }): void {
+    this.systemHooks = hooks.systemHooks;
     this.userHooks = hooks.userHooks;
     this.projectHooks = hooks.projectHooks;
     this.hooks = hooks.hooks;

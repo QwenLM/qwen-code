@@ -1468,7 +1468,7 @@ It fires when the session starts, when context files are reloaded during the ses
 
 ## Hook Configuration
 
-Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files:
+Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks run in this order: System, User, Project, Extension.
 
 ```json
 {
@@ -1505,7 +1505,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 
 ### Browsing your hooks
 
-Run `/hooks` to browse the configured hooks. Opening the interactive menu reloads hook definitions from the user and workspace settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If either file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
+Run `/hooks` to browse the configured hooks. Opening the interactive menu reloads hook definitions from the user, workspace, System and SystemDefaults settings files used by this session, including when the session runs in a worktree. Added, changed or removed hook definitions then take effect without a restart. If any of these files cannot be read or parsed, all previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown.
 
 Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
 

@@ -4106,6 +4106,7 @@ class QwenAgent implements Agent {
           cwd,
           undefined,
           {
+            systemHooks: settings.getSystemHooks(),
             userHooks: settings.getUserHooks(),
             projectHooks: settings.getProjectHooks(),
           },
@@ -14774,6 +14775,7 @@ class QwenAgent implements Agent {
       undefined,
       // Pass separated hooks for proper source attribution
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },

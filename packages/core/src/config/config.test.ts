@@ -145,6 +145,8 @@ import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { createHookOutput, HookSystem } from '../hooks/index.js';
+import { HookRegistry } from '../hooks/hookRegistry.js';
+import { HookPlanner } from '../hooks/hookPlanner.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -930,6 +932,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('setHooksFromSettings', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
     const userHooks = {
       PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
     };
@@ -988,6 +993,142 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getProjectHooks()).toBeUndefined();
       expect(config.getUserHooks()).toBe(userHooks);
+    });
+
+    it('replaces system hooks together with the other fields', () => {
+      const config = new Config({ ...baseParams, systemHooks });
+
+      config.setHooksFromSettings({ userHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBe(userHooks);
+    });
+  });
+
+  describe('per-scope hooks and the legacy merged fallback', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
+    const userHooks = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    const projectHooks = {
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'echo project' }] }],
+    };
+    const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+
+    it('does not read the merged hooks as project hooks when only user hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        userHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getUserHooks()).toBe(userHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('does not read the merged hooks as user hooks when only project hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        projectHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBeUndefined();
+    });
+
+    it('still serves the merged hooks as user and project hooks when no scope is supplied', () => {
+      const config = new Config({ ...baseParams, hooks: mergedHooks });
+
+      expect(config.getUserHooks()).toBe(mergedHooks);
+      expect(config.getProjectHooks()).toBe(mergedHooks);
+      expect(config.getSystemHooks()).toBeUndefined();
+    });
+
+    it('serves system hooks without promoting the merged hooks to system hooks', () => {
+      const withSystem = new Config({
+        ...baseParams,
+        systemHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(withSystem.getSystemHooks()).toBe(systemHooks);
+      expect(withSystem.getUserHooks()).toBeUndefined();
+      expect(withSystem.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['safe mode', { safeMode: true }],
+      ['bare mode', { bareMode: true }],
+    ])('loads no system hooks in %s', (_label, mode) => {
+      const config = new Config({ ...baseParams, ...mode, systemHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+    });
+
+    describe('registration through the hook registry', () => {
+      // What the CLI handed Config before system hooks had their own channel:
+      // a user settings hook, no workspace hooks, and the merged settings
+      // (which then held only that user hook) as the legacy field.
+      const lintHook = {
+        PreToolUse: [
+          {
+            hooks: [{ type: 'command', command: './lint.sh', name: 'lint' }],
+          },
+        ],
+      };
+
+      async function registryFor(params: Partial<ConfigParameters>) {
+        const config = new Config({ ...baseParams, ...params });
+        const registry = new HookRegistry(config);
+        await registry.initialize();
+        return registry;
+      }
+
+      it('registers a user settings hook once, under the user source', async () => {
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        expect(
+          registry.getAllHooks().map(({ eventName, source }) => ({
+            eventName,
+            source,
+          })),
+        ).toEqual([{ eventName: HookEventName.PreToolUse, source: 'user' }]);
+      });
+
+      it('runs that hook once per event, as it did while it was registered twice', async () => {
+        // The planner dedups by hook identity regardless of source, so the
+        // double registration never doubled execution; this pins that the
+        // change above does not alter how many times the hook runs.
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+    });
+
+    it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
+      const config = new Config({
+        ...baseParams,
+        trustedFolder: false,
+        systemHooks,
+        projectHooks,
+      });
+
+      expect(config.getSystemHooks()).toBe(systemHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
     });
   });
 

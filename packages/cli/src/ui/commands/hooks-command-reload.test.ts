@@ -60,10 +60,14 @@ describe('/hooks reload with real settings files', () => {
     };
   }
 
-  async function setup(worktree = false, trusted = true) {
+  async function setup(
+    worktree = false,
+    trusted = true,
+    systemSettings: Record<string, unknown> = {},
+  ) {
     const repo = path.join(directory, 'repo');
     const settings = new LoadedSettings(
-      settingsFile(path.join(directory, 'system.json'), {}),
+      settingsFile(path.join(directory, 'system.json'), systemSettings),
       settingsFile(path.join(directory, 'defaults.json'), {}),
       settingsFile(path.join(directory, 'user/settings.json'), {
         hooks: { Stop: hook('echo user') },
@@ -86,6 +90,7 @@ describe('/hooks reload with real settings files', () => {
       ...resolveHookSettingsForConfig(
         settings.merged.hooks,
         {
+          systemHooks: settings.getSystemHooks(),
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
@@ -128,7 +133,7 @@ describe('/hooks reload with real settings files', () => {
     expect(context.ui.addItem).not.toHaveBeenCalled();
   });
 
-  it.each(['user', 'workspace'] as const)(
+  it.each(['user', 'workspace', 'system', 'systemDefaults'] as const)(
     'preserves both scopes and active hooks when %s JSON is malformed',
     async (scope) => {
       const { settings, context, entries, setHooks } = await setup();
@@ -158,6 +163,53 @@ describe('/hooks reload with real settings files', () => {
       );
     },
   );
+
+  const sources = (
+    entries: () => Array<{ eventName: string; source: string }>,
+  ) => entries().map(({ eventName, source }) => ({ eventName, source }));
+
+  it('loads system hooks under their own source alongside user and workspace hooks', async () => {
+    // Before system hooks had their own channel, this configuration dropped
+    // the system hook: user and workspace both had hooks, so the merged
+    // settings that carried it were never read.
+    const { entries } = await setup(false, true, {
+      hooks: { SessionStart: hook('echo system') },
+    });
+
+    expect(sources(entries)).toEqual([
+      { eventName: 'SessionStart', source: 'system' },
+      { eventName: 'Stop', source: 'user' },
+      { eventName: 'PreToolUse', source: 'project' },
+    ]);
+  });
+
+  it('loads system hooks in an untrusted folder, where workspace hooks are withheld', async () => {
+    const { entries } = await setup(false, false, {
+      hooks: { SessionStart: hook('echo system') },
+    });
+
+    expect(sources(entries)).toEqual([
+      { eventName: 'SessionStart', source: 'system' },
+      { eventName: 'Stop', source: 'user' },
+    ]);
+  });
+
+  it('reloads edited system hooks when the menu opens', async () => {
+    const { settings, context, entries } = await setup(false, true, {
+      hooks: { SessionStart: hook('echo system') },
+    });
+    fs.writeFileSync(
+      settings.system.path,
+      JSON.stringify({ hooks: { SessionStart: hook('echo system edited') } }),
+    );
+
+    await hooksCommand.action!(context, '');
+
+    const system = entries().filter(({ source }) => source === 'system');
+    expect(system.map(({ config }) => config)).toEqual([
+      expect.objectContaining({ command: 'echo system edited' }),
+    ]);
+  });
 
   it('removes deleted project hooks from the live registry', async () => {
     const { settings, context, entries } = await setup();

@@ -46,6 +46,8 @@ async function reloadHooksFromSettings(
   // run startup corruption recovery while refreshing an active session.
   if (
     !settings.reloadScopesFromDiskAtomically([
+      SettingScope.System,
+      SettingScope.SystemDefaults,
       SettingScope.User,
       SettingScope.Workspace,
     ])
@@ -58,6 +60,7 @@ async function reloadHooksFromSettings(
     resolveHookSettingsForConfig(
       settings.merged.hooks,
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
