@@ -1257,7 +1257,10 @@ try {
           const ns = (await fs.readFile(nsFile, 'utf8')).trim();
           assert.match(ns, /^pid:\[\d+\]$/);
           assert.notEqual(ns, await fs.readlink('/proc/self/ns/pid'));
-          assert.match(screen, /Read-only file system|Permission denied/i);
+          assert.match(
+            screen,
+            /Read-only\s+file\s+system|Permission\s+denied/i,
+          );
           return {
             fixture: f.dir,
             renderer,

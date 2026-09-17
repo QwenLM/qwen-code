@@ -44,4 +44,4 @@ Core 覆盖策略准入、Config 初始化/registry、Monitor/嵌套调度及未
 
 ## 交付验证
 
-合入 main 后最终公开 bundled CLI 的 62 组真实 Linux 验收全部通过，覆盖严格选择的 Ink/OpenTUI 执行、操作者优先级、只读/YOLO、Monitor、提示词插值、Code Mode 与普通嵌套代理、迁移、后端不可用拒绝、技能命令在参数和使用记录副作用前拒绝，原生验证，以及 settings/environment 启用 Omni 的回归用例。运行前后 1,159 个打包产物及原生依赖均保持不变。已有 runtime 与 adapter 测试分别通过 31 组和 34 组。验证环境为 Linux aarch64 7.0.0-31-generic、Node 22.22.1、bwrap 0.11.1；OpenTUI 使用 Bun 1.3.13。构建、类型检查、打包及定向单测在 macOS 上运行，Linux 强制约束在 Lima 中验证。未实测 Windows 或原生 Linux x64 环境。详细证据、fixture 哈希和测试脚本修正记录在 `.qwen/e2e-tests/bwrap-public-integration.md`。
+合入 main 后最终公开 bundled CLI 的 62 组真实 Linux 验收全部通过，覆盖严格选择的 Ink/OpenTUI 执行、操作者优先级、只读/YOLO、Monitor、提示词插值、Code Mode 与普通嵌套代理、迁移、后端不可用拒绝、技能命令在参数和使用记录副作用前拒绝，原生验证，以及 settings/environment 启用 Omni 的回归用例。运行前后 1,159 个打包产物及原生依赖均保持不变。已有 runtime 与 adapter 测试分别通过 31 组和 34 组。验证环境为 Linux aarch64 7.0.0-31-generic、Node 22.22.1、bwrap 0.11.1；OpenTUI 使用 Bun 1.3.13。构建、类型检查、打包及定向单测在 macOS 上运行，Linux 强制约束在 Lima 中验证。未在本地测试 Windows。托管 Linux x64/ARM64 的结果（包括失败尝试）由 PR workflow 保留；本地 ARM64 证据本身不能证明托管环境覆盖。详细证据、fixture 哈希和测试脚本修正记录在 `.qwen/e2e-tests/bwrap-public-integration.md`。
