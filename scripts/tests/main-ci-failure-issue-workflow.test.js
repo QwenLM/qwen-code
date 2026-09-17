@@ -230,4 +230,38 @@ describe('main CI failure issue workflow', () => {
     });
     expect(privilegedJobs[0][1].needs).toBe('analyze');
   });
+
+  it('gates the bash-execution log-download suite on the host capability probe', () => {
+    // scripts/tests/main-ci-failure-log-download.test.js spawns the real
+    // download step, which dies at its `mapfile` on a bash 3.2 host (the
+    // nightly macOS lane) before any assertion runs; a dropped or neutered
+    // gate turns that lane red on a script it cannot execute. The pin lives
+    // here rather than in the gated file because that file is excluded from
+    // the Windows lanes, while this YAML-parse suite runs on every host.
+    const suite = readFileSync(
+      'scripts/tests/main-ci-failure-log-download.test.js',
+      'utf8',
+    );
+    // Pin the probe's expression, not just its name: reducing it to `true`
+    // or flipping the `&&` to `||` opens the suite on exactly the host it
+    // exists for — jq is present on bash 3.2, mapfile is not.
+    expect(suite).toMatch(
+      /const canRunStep =\s+spawnSync\('bash', \['-c', 'mapfile -t x <<< y'\][\s\S]*?\.status === 0 &&\s+spawnSync\('jq', \['--version'\][\s\S]*?\.status === 0;/,
+    );
+    // Anchor the gate to the suite title, so the spelling only ever survives
+    // as the live wrapper: a plain describe plus a quoted comment fails too.
+    expect(suite).toMatch(
+      /describe\.skipIf\(!canRunStep\)\(\s*'main CI failure issue log-download execution'/,
+    );
+    // And every bash-spawning case stays behind the gate.
+    const gate = suite.indexOf('describe.skipIf(!canRunStep)(');
+    expect(suite.slice(0, gate)).not.toContain('it(');
+    for (const title of [
+      'downloads the colourised log because the step passes --allow-escape-sequences',
+      'warns and drops the log when the download genuinely fails',
+      'models gh refusing the escape-carrying log on every attempt without the flag',
+    ]) {
+      expect(suite.indexOf(title), title).toBeGreaterThan(gate);
+    }
+  });
 });

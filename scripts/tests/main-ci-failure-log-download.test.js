@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -16,7 +16,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -106,25 +105,23 @@ describe.skipIf(!canRunStep)(
         const runnerTemp = join(dir, 'rt');
         mkdirSync(runnerTemp, { recursive: true });
 
-        let exitCode = 0;
-        let output = '';
-        try {
-          output = execFileSync('bash', ['-e', stepFile], {
-            env: {
-              ...process.env,
-              PATH: `${dir}:${process.env.PATH}`,
-              GH_LOG_CALL_COUNT_FILE: callCountFile,
-              GH_LOG_HTTP_FAIL: httpFail ? '1' : '',
-              RUNNER_TEMP: runnerTemp,
-              REPO: 'o/r',
-              WORKFLOW_RUN_ID: '999',
-            },
-            encoding: 'utf8',
-          });
-        } catch (err) {
-          exitCode = err.status;
-          output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
-        }
+        // stderr carries the stub's refusal, so merge it into the captured
+        // output: a stdout-only capture leaves the refusal pin below unable
+        // to fail.
+        const res = spawnSync('bash', ['-e', stepFile], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GH_LOG_CALL_COUNT_FILE: callCountFile,
+            GH_LOG_HTTP_FAIL: httpFail ? '1' : '',
+            RUNNER_TEMP: runnerTemp,
+            REPO: 'o/r',
+            WORKFLOW_RUN_ID: '999',
+          },
+          encoding: 'utf8',
+        });
+        const exitCode = res.status ?? -1;
+        const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
         const logFile = join(runnerTemp, 'failed-logs', '123.log');
         return {
           exitCode,
@@ -211,12 +208,3 @@ describe.skipIf(!canRunStep)(
     });
   },
 );
-
-it('gates the bash-execution suite on the host capability probe', () => {
-  // The suite above spawns the real step, which dies at its `mapfile` on a
-  // bash 3.2 host (the nightly macOS lane) before any assertion runs. A
-  // dropped gate turns that lane red on a script it cannot execute, so the
-  // gate's presence is pinned here, on every host.
-  const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
-  expect(self).toMatch(/describe\.skipIf\(!canRunStep\)\(/);
-});
