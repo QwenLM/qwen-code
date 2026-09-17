@@ -552,24 +552,28 @@ export class Logger {
     }
     const doomed = new Set(sessionIds);
     const belongsToSession = (e: LogEntry): boolean => doomed.has(e.sessionId);
-    const isSameRow = (a: LogEntry, b: LogEntry): boolean =>
-      a.sessionId === b.sessionId &&
-      a.messageId === b.messageId &&
-      a.timestamp === b.timestamp &&
-      a.message === b.message &&
-      a.type === b.type;
+    const rowKey = (e: LogEntry): string =>
+      JSON.stringify([
+        e.sessionId,
+        e.messageId,
+        e.timestamp,
+        e.message,
+        e.type,
+      ]);
 
     // Optimistic in-memory removal BEFORE the async serialize queue runs,
     // for the same reason as removeLastUserMessage: AppContainer's
     // userMessages effect re-runs on the history item the delete flow adds
     // and reads `this.logs` through getPreviousUserMessages().
+    const beforeRemoval = this.logs;
     const optimisticallyRemoved: Array<[number, LogEntry]> = [];
-    this.logs.forEach((entry, index) => {
+    beforeRemoval.forEach((entry, index) => {
       if (belongsToSession(entry)) optimisticallyRemoved.push([index, entry]);
     });
     if (optimisticallyRemoved.length > 0) {
-      this.logs = this.logs.filter((entry) => !belongsToSession(entry));
+      this.logs = beforeRemoval.filter((entry) => !belongsToSession(entry));
     }
+    const afterRemoval = this.logs;
     for (const id of doomed) this.pendingPurgeSessions.add(id);
     // An undo target from a purged session died with it; leaving it would
     // point removeLastUserMessage at a row that no longer exists.
@@ -583,17 +587,24 @@ export class Logger {
     }
 
     const restoreOptimistic = () => {
-      // Re-insert each removed row at its original index unless a concurrent
-      // path already put an identical row back. Ascending index order keeps
-      // the restored rows in their original relative order.
-      for (const [index, entry] of optimisticallyRemoved) {
-        if (this.logs.some((e) => isSameRow(e, entry))) continue;
-        const insertAt = Math.min(index, this.logs.length);
-        this.logs = [
-          ...this.logs.slice(0, insertAt),
-          entry,
-          ...this.logs.slice(insertAt),
-        ];
+      if (this.logs === afterRemoval) {
+        // Nothing replaced the cache since the removal.
+        this.logs = beforeRemoval;
+      } else {
+        // Another op adopted a disk snapshot in between. Re-insert each removed
+        // row at its original index unless that snapshot already has it, in one
+        // pass: inserting row by row copies the whole cache once per row.
+        const present = new Set(this.logs.map(rowKey));
+        const restored: LogEntry[] = [];
+        let next = 0;
+        for (const [index, entry] of optimisticallyRemoved) {
+          if (present.has(rowKey(entry))) continue;
+          while (restored.length < index && next < this.logs.length) {
+            restored.push(this.logs[next++]);
+          }
+          restored.push(entry);
+        }
+        this.logs = restored.concat(this.logs.slice(next));
       }
       if (droppedUndoTarget !== null && this.lastLoggedUserEntry === null) {
         this.lastLoggedUserEntry = droppedUndoTarget;
