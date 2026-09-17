@@ -1136,7 +1136,7 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(2);
   });
 
-  it('stops continuations when completion evidence exceeds the catalog', async () => {
+  it('stops as evidence-limited when a completion is proposed on an exhausted catalog and no checkpoint can relieve it', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
     const evidenceSource = fakeEvidenceSource(() => records);

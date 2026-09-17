@@ -231,6 +231,14 @@ export interface GoalWorkerView {
   objective: string;
   evidenceCursor: TranscriptCursor;
   evidenceCatalog?: GoalEvidenceCatalog;
+  /**
+   * Whether this runtime compresses an overflowing catalog between turns.
+   * Without a checkpoint verifier nothing relieves a truncated catalog, so
+   * a tool that would otherwise end the turn to wait for a checkpoint must
+   * record the proposal instead and let verification stop the Goal as
+   * evidence-limited, which is the stop a resume can recover from.
+   */
+  compactsEvidence: boolean;
   verifierFeedback?: string;
 }
 
@@ -2102,12 +2110,14 @@ export function createGoalRuntime(
       const goal = structuredClone(snapshot.goal);
       const verifierFeedback = currentTurnFeedback;
       const evidenceSource = options.evidenceSource;
+      const compactsEvidence = Boolean(options.checkpointVerifier);
       if (!evidenceSource) {
         return {
           goalId: goal.goalId,
           revision: goal.revision,
           objective: goal.objective,
           evidenceCursor: structuredClone(goal.evidenceCursor),
+          compactsEvidence,
           ...(verifierFeedback ? { verifierFeedback } : {}),
         };
       }
@@ -2127,6 +2137,7 @@ export function createGoalRuntime(
         objective: goal.objective,
         evidenceCursor: structuredClone(goal.evidenceCursor),
         evidenceCatalog,
+        compactsEvidence,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       };
     },

@@ -808,8 +808,9 @@ describe('UpdateGoalTool', () => {
       'end the turn without additional user-facing text',
     );
     expect(tool.description).toContain(
-      'readyForVerification or checkpointRequired',
+      'If this tool reports readyForVerification, end the turn',
     );
+    expect(tool.description).not.toContain('checkpointRequired');
     expect(tool.description).not.toContain(
       'say the proposal is awaiting independent verification',
     );
@@ -1144,6 +1145,7 @@ describe('UpdateGoalTool', () => {
           lineageTurnIds: [permit.turnId],
           truncated: true,
         },
+        compactsEvidence: true,
       }),
       getSnapshotForPermit: vi.fn(() => ({
         v: 2 as const,
@@ -1186,6 +1188,58 @@ describe('UpdateGoalTool', () => {
     });
     expect(result.terminateTurn).toBe(true);
     expect(recordTerminalProposal).not.toHaveBeenCalled();
+  });
+
+  it('records a completion on a truncated catalog when the runtime compresses nothing', async () => {
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: true,
+    }));
+    const runtime = {
+      getGoalForWorker: vi.fn().mockResolvedValue({
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'Ship Goal v3',
+        evidenceCursor: { recordId: 'goal-created' },
+        evidenceCatalog: {
+          entries: [
+            {
+              uuid: 'output',
+              provenance: 'assistant_output',
+              turnId: permit.turnId,
+              preview: 'done',
+              proofKind: 'delivered_output',
+            },
+          ],
+          lineageTurnIds: [permit.turnId],
+          truncated: true,
+        },
+        compactsEvidence: false,
+      }),
+      getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+      recordTerminalProposal,
+    };
+    const tool = new UpdateGoalTool(makeConfig(runtime));
+    const invocation = goalTurnContext.run(permit, () =>
+      tool.build({
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['output'],
+      }),
+    );
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    // No checkpoint will ever relieve this catalog, so waiting for one would
+    // repeat every turn until the no-progress pause; the proposal is
+    // recorded and verification reports the exhausted catalog instead.
+    expect(recordTerminalProposal).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      proposalRecorded: true,
+      readyForVerification: true,
+    });
+    expect(String(result.llmContent)).not.toContain('checkpointRequired');
+    expect(result.terminateTurn).toBe(true);
   });
 
   it('keeps truncated repeated blockers eligible for coverage validation', async () => {
@@ -1544,6 +1598,7 @@ describe('UpdateGoalTool', () => {
       revision: number;
       objective: string;
       evidenceCursor: { recordId: string };
+      compactsEvidence: boolean;
     }>();
     const recordTerminalProposal = vi.fn();
     const getGoalForWorker = vi.fn(() => workerRead.promise);
@@ -1571,6 +1626,7 @@ describe('UpdateGoalTool', () => {
       revision: permit.revision,
       objective: 'Ship Goal v3',
       evidenceCursor: { recordId: 'cursor' },
+      compactsEvidence: false,
     });
     await Promise.resolve();
     expect(recordTerminalProposal).not.toHaveBeenCalled();
