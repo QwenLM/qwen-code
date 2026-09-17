@@ -176,9 +176,10 @@ say explicitly what each one should read and whether it may edit files.
   names no tool, such as `'Bash'`, resolves the call to null with the reason
   recorded, and so does a list that shares no tool with the `agentType`'s own
   allowlist or whose every tool is denied. A `schema` agent is also given
-  `structured_output`. A correctly named tool this session does not have is
-  simply not given, as with an `agentType` allowlist. Built-in spellings, order
-  and duplicates do not change the resume key; other spellings do.
+  `structured_output`. A correctly named tool this session does not have, or one
+  no subagent may use (such as `todo_write`), is simply not given, as with an
+  `agentType` allowlist. Built-in spellings, order and duplicates do not change
+  the resume key; other spellings do.
 
 Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
 EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType` or

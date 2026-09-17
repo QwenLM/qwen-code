@@ -223,6 +223,7 @@ describe('bundled workflow-authoring skill', () => {
     ],
     ['also given `structured_output`'],
     ['is simply not given, as with an `agentType` allowlist'],
+    ['or one no subagent may use (such as `todo_write`)'],
     [
       'Built-in spellings, order and duplicates do not change the resume key; other spellings do',
     ],

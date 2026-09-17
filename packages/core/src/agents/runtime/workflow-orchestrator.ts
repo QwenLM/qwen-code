@@ -1171,9 +1171,24 @@ async function runOverridePath(
     const agentHasOwnMcpServers =
       baseConfig.mcpServers !== undefined &&
       Object.keys(baseConfig.mcpServers).length > 0;
+    const checkMcpNames = !agentHasOwnMcpServers;
+    // MCP servers are discovered in the background, and their tools are not
+    // in the registry until discovery settles. A name that only the registry
+    // can vouch for is judged after that, so a dispatch issued right after the
+    // session starts is not refused for a tool about to appear. The wait is
+    // bounded by discovery's own timeout; a list of built-in names never waits.
+    if (
+      requestedAllows.some(
+        (name) =>
+          resolveBuiltinToolName(name) === undefined &&
+          (checkMcpNames || !name.startsWith('mcp__')),
+      )
+    ) {
+      await config.waitForMcpReady();
+    }
     const unmatchedAllows = await subagentMgr.findUnmatchedToolNames(
       requestedAllows,
-      { checkMcpNames: !agentHasOwnMcpServers },
+      { checkMcpNames },
     );
     if (unmatchedAllows.length > 0) {
       throw new Error(
