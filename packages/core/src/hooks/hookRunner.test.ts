@@ -657,6 +657,43 @@ describe('HookRunner', () => {
   });
 
   describe('executeHooksParallel', () => {
+    it('ends an async hook whose hand-off throws instead of rejecting the batch', async () => {
+      vi.spyOn(
+        hookRunner.getAsyncRegistry(),
+        'canAcceptMore',
+      ).mockImplementation(() => {
+        throw new Error('registry unavailable');
+      });
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo background',
+          async: true,
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const onHookStart = vi.fn();
+      const onHookEnd = vi.fn();
+
+      const results = await hookRunner.executeHooksParallel(
+        hookConfigs,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        onHookStart,
+        onHookEnd,
+      );
+
+      expect(onHookStart).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledWith(
+        hookConfigs[0],
+        expect.objectContaining({ success: false }),
+        0,
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].error?.message).toContain('registry unavailable');
+    });
+
     it('should execute multiple hooks in parallel', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);

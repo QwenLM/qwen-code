@@ -3029,6 +3029,7 @@ export class Config {
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
@@ -4139,6 +4140,9 @@ export class Config {
         },
       );
 
+      // Announce only now that the HOOK_EXECUTION_REQUEST subscription is in
+      // place: an observer that receives a bus must be able to run hooks on it.
+      this.announceMessageBus(this.messageBus);
       this.debugLogger.debug('MessageBus initialized with hook subscription');
     } else {
       this.debugLogger.debug('Hook system disabled, skipping initialization');
@@ -9604,10 +9608,61 @@ export class Config {
 
   /**
    * Set the message bus instance.
-   * This is called by the CLI layer to inject the MessageBus.
+   * This is called by the CLI layer to inject the MessageBus. The caller must
+   * install the bus's HOOK_EXECUTION_REQUEST subscription BEFORE calling this,
+   * because observers registered with {@link onMessageBusChange} are notified
+   * here and may use the bus right away.
    */
   setMessageBus(messageBus: MessageBus): void {
+    if (this.messageBus === messageBus) {
+      return;
+    }
     this.messageBus = messageBus;
+    this.announceMessageBus(messageBus);
+  }
+
+  /**
+   * Observes the hook MessageBus. The listener is called immediately when a
+   * bus already exists, and again whenever a different bus replaces it.
+   *
+   * A bus is only ever announced AFTER its HOOK_EXECUTION_REQUEST subscription
+   * is installed, so "I have a bus" always implies "this bus can run hooks".
+   * Returns a disposer; a throwing listener is logged and ignored, because a
+   * progress observer must never break hook initialization.
+   */
+  onMessageBusChange(listener: (bus: MessageBus) => void): () => void {
+    this.messageBusListeners.add(listener);
+    if (this.messageBus) {
+      this.notifyMessageBusListener(listener, this.messageBus);
+    }
+    return () => {
+      this.messageBusListeners.delete(listener);
+    };
+  }
+
+  private notifyMessageBusListener(
+    listener: (bus: MessageBus) => void,
+    bus: MessageBus,
+  ): void {
+    try {
+      // An async function is assignable to this listener type, and it runs
+      // from inside initialize(), so a rejection must be handled here too.
+      const result: unknown = listener(bus);
+      if (result instanceof Promise) {
+        result.catch((error: unknown) => {
+          this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+        });
+      }
+    } catch (error) {
+      this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+    }
+  }
+
+  private announceMessageBus(bus: MessageBus): void {
+    // Copy first: a listener may dispose itself (or another) while notified.
+    for (const listener of [...this.messageBusListeners]) {
+      this.notifyMessageBusListener(listener, bus);
+    }
   }
 
   /**
