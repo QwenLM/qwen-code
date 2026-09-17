@@ -7,13 +7,11 @@
 import { randomUUID } from 'node:crypto';
 import {
   buildGoalEvidenceCheckpointWindow,
-  buildGoalEvidenceCatalog,
+  buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
-  InvalidGoalEvidenceReferenceError,
-  validateGoalEvidenceReferences,
-  type GoalEvidenceCatalog,
   type GoalEvidenceCheckpointWindow,
   type GoalEvidenceRecord,
+  type GoalVerifierEvidenceWindow,
 } from './goal-evidence.js';
 import {
   checkpointBatchRecordLimit,
@@ -230,7 +228,6 @@ export interface GoalWorkerView {
   revision: number;
   objective: string;
   evidenceCursor: TranscriptCursor;
-  evidenceCatalog?: GoalEvidenceCatalog;
   verifierFeedback?: string;
 }
 
@@ -903,15 +900,8 @@ export function createGoalRuntime(
 
   const verifierInput = (
     attempt: VerificationAttempt,
-    evidence: ReturnType<typeof validateGoalEvidenceReferences>,
+    window: GoalVerifierEvidenceWindow,
   ): GoalVerifierInput => {
-    const currentDeliveredOutput = evidence.citedRecords
-      .filter(
-        (record) =>
-          record.proofKind === 'delivered_output' &&
-          record.turnId === attempt.permit.turnId,
-      )
-      .map((record) => record.content);
     const base = {
       goal: {
         goalId: attempt.goal.goalId,
@@ -919,8 +909,11 @@ export function createGoalRuntime(
         objective: attempt.goal.objective,
       },
       currentTurnId: attempt.permit.turnId,
-      evidence: evidence.citedRecords,
-      ...(currentDeliveredOutput.length > 0 ? { currentDeliveredOutput } : {}),
+      evidence: window.evidence,
+      evidenceTurnIds: window.turnIds,
+      ...(window.omittedEarlier > 0
+        ? { omittedEarlier: window.omittedEarlier }
+        : {}),
     };
     if (attempt.proposal.status === 'complete') {
       return {
@@ -1148,41 +1141,27 @@ export function createGoalRuntime(
       if (attempt.controller.signal.aborted) return;
       const records = await evidenceSource.readActiveTranscriptChain();
       if (attempt.controller.signal.aborted) return;
-      const evidence = validateGoalEvidenceReferences({
+      const window = buildGoalVerifierEvidenceWindow({
         records,
         goal: attempt.goal,
         permit: attempt.permit,
         proposal: attempt.proposal,
       });
       const result = await verifier(
-        verifierInput(attempt, evidence),
+        verifierInput(attempt, window),
         attempt.controller.signal,
       );
       if (attempt.controller.signal.aborted) return;
       outcome = { kind: 'decision', result };
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
-      if (error instanceof InvalidGoalEvidenceReferenceError) {
-        outcome =
-          error.code === 'catalog_truncated'
-            ? {
-                kind: 'usage_limited',
-                reason: error.message,
-                limitKind: 'evidence_catalog',
-              }
-            : {
-                kind: 'decision',
-                result: { decision: 'reject', reason: error.message },
-              };
-      } else {
-        const reason =
-          error instanceof EvidenceSourceUnavailableError
+      const reason =
+        error instanceof EvidenceSourceUnavailableError
+          ? error.message
+          : error instanceof Error
             ? error.message
-            : error instanceof Error
-              ? error.message
-              : String(error);
-        outcome = { kind: 'usage_limited', reason };
-      }
+            : String(error);
+      outcome = { kind: 'usage_limited', reason };
     }
     const checkpoint = await recordVerificationOutcome(attempt, outcome);
     if (!checkpoint) return;
@@ -1919,10 +1898,9 @@ export function createGoalRuntime(
           // continuation gate owes that Goal its wind-down hand-off before
           // the matching stop; pausing here would skip both. A Goal
           // carrying a checkpoint stall streak is drowning in evidence, not
-          // idling -- its prose overflowed the window and `update_goal`
-          // answers `checkpointRequired` without recording a proposal -- so
-          // its checkpoint runs and the stall breaker stops it with the
-          // reason that fits, instead of a pause whose remedy (resume) would
+          // idling -- its records overflowed the checkpoint window -- so its
+          // checkpoint runs and the stall breaker stops it with the reason
+          // that fits, instead of a pause whose remedy (resume) would
           // re-enter the same overflowing window.
           const noProgressLimitReached =
             noProgressTurns !== undefined &&
@@ -2080,34 +2058,13 @@ export function createGoalRuntime(
       if (!isCurrentPermit(permit) || !snapshot.goal) {
         throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
-      const goal = structuredClone(snapshot.goal);
+      const goal = snapshot.goal;
       const verifierFeedback = currentTurnFeedback;
-      const evidenceSource = options.evidenceSource;
-      if (!evidenceSource) {
-        return {
-          goalId: goal.goalId,
-          revision: goal.revision,
-          objective: goal.objective,
-          evidenceCursor: structuredClone(goal.evidenceCursor),
-          ...(verifierFeedback ? { verifierFeedback } : {}),
-        };
-      }
-      await evidenceSource.flush();
-      const records = await evidenceSource.readActiveTranscriptChain();
-      const evidenceCatalog = buildGoalEvidenceCatalog({
-        records,
-        goal,
-        permit,
-      });
-      if (!isCurrentPermit(permit) || !snapshot.goal) {
-        throw new Error(STALE_GOAL_TURN_MESSAGE);
-      }
       return {
         goalId: goal.goalId,
         revision: goal.revision,
         objective: goal.objective,
         evidenceCursor: structuredClone(goal.evidenceCursor),
-        evidenceCatalog,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       };
     },

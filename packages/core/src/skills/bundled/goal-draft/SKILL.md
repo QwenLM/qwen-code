@@ -17,14 +17,14 @@ You are drafting the text for `/goal set`. You are NOT doing the work the goal d
 
 ## How Goals are judged (why the format below matters)
 
-An active Goal is re-fed to the model every turn, and its completion is judged by an independent verifier that sees ONLY transcript evidence:
+An active Goal is re-fed to the model every turn, and its completion is judged by an independent verifier that sees ONLY transcript evidence, and only from the turn that proposes completion:
 
-- Visible assistant output and tool results count as evidence. The objective itself, user prompts, and hidden reasoning do not.
+- Visible assistant output and tool results of that turn count as evidence. The objective itself, user prompts, hidden reasoning, and anything printed in earlier turns do not.
 - `delivered_output` evidence proves only that text was printed. It cannot prove that tests passed, files changed, or remote state changed — those need a tool result in the transcript (an `external_fact`).
 - A claim that the user confirmed, chose, or approved something needs a real user message as evidence; otherwise the completion proposal is rejected.
-- Vague, subjective, or open-ended conditions never accumulate enough evidence; the loop then runs until a limit is hit.
+- Vague, subjective, or open-ended conditions never produce decisive evidence; the loop then runs until a limit is hit.
 
-So a good objective makes the agent PRODUCE evidence: run the named check and paste the decisive output line.
+So a good objective makes the agent PRODUCE evidence in the closing turn: run the named check and paste the decisive output line. A check that ran earlier has to run again when completion is proposed.
 
 ## Step 0 — should this be a Goal at all?
 
@@ -79,7 +79,7 @@ Rules of thumb:
 - For audits and exploratory work, agree on bounded coverage and require evidence for each conclusion. Zero defects is a valid result: never require a positive defect count. Do not invent minimum scenario counts, evidence-file counts, or exploration-round quotas; include them only when the user requested them.
 - Prefer "the smallest safe change in `<scope>`" over open-ended refactors.
 - Put anything that must not change on the way into Must not — this is what stops the loop from deleting a failing test to "pass".
-- Keep it short: everything the agent can derive from the workspace stays out. Aim for under ~1200 characters.
+- Keep it short: everything the agent can derive from the workspace stays out. Aim for under ~1200 characters; `propose_goal` refuses an objective over 1500.
 - `Budget` is a stopping agreement for the model, not a runtime-enforced turn or wall-clock limit. Do not claim that writing it configures a timer or changes the Goal token budget. When the user needs an enforced ceiling, tell them to set `model.goalMaxTurns` or `model.goalMaxActiveMinutes` in their settings -- never write the setting into the objective, which the Goal's own model cannot act on -- and say that either takes effect after a restart and only for Goals created afterwards -- neither bounds a Goal that is already running. Preserve a user-specified budget; otherwise mark the default `[ASSUMPTION]` in Context.
 
 For example, an audit's Done-when checks can require a report covering the agreed scenarios, observed results and evidence for each scenario, and reproduction steps for each confirmed defect (or an explicit "no confirmed defects" result). Ground the scenarios and report destination before offering the objective for use.
@@ -104,7 +104,7 @@ Check every line before printing:
 5. Budget or On block is present.
 6. Exactly one Outcome.
 7. Every path and command in Context was verified in the workspace; an unverified path or command is essential and stays `<TODO: …>`.
-8. Under ~1200 characters.
+8. Under ~1200 characters (`propose_goal` refuses more than 1500).
 9. Irreversible actions (push, delete, publish) are listed in Must not, or the user explicitly allowed them.
 10. No invented coverage quotas, required defect findings, or claims that a prose budget is enforced by the runtime; an unrequested default Budget is marked `[ASSUMPTION]` in Context.
 

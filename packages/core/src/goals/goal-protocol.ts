@@ -566,7 +566,13 @@ export type GoalBlockerKind =
 export interface GoalTerminalProposal {
   status: 'complete' | 'blocked';
   reason: string;
-  evidenceRefs: string[];
+  /**
+   * @deprecated The verifier judges a proposal from the records of the turn
+   * that made it (and, for a blocked proposal, the two turns before), not
+   * from references the model cites. Accepted and ignored so a model still
+   * following the older contract is not refused.
+   */
+  evidenceRefs?: string[];
   blockerKind?: GoalBlockerKind;
 }
 

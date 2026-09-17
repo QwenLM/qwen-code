@@ -952,7 +952,14 @@ describe('goal runtime', () => {
     expect(verifier).toHaveBeenCalledWith(
       expect.objectContaining({
         currentTurnId: permit.turnId,
-        currentDeliveredOutput: ['Delivered result'],
+        evidenceTurnIds: [permit.turnId],
+        evidence: [
+          expect.objectContaining({
+            uuid: 'assistant-evidence',
+            proofKind: 'delivered_output',
+            content: 'Delivered result',
+          }),
+        ],
       }),
       expect.any(AbortSignal),
     );
@@ -1098,164 +1105,120 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
-  it('rejects an invalid evidence reference without calling the verifier', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0];
-    records = verifierEvidenceRecords(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-    );
-    runtime.recordTerminalProposal(permit, {
-      status: 'complete',
-      reason: 'Delivered',
-      evidenceRefs: ['missing-evidence'],
-    });
-    const causes: Array<GoalStateCause | undefined> = [];
-    runtime.subscribe((_snapshot, cause) => causes.push(cause));
-
-    await runtime.finishTurn(permit);
-
-    expect(verifier).not.toHaveBeenCalled();
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'verifier_reject',
-    ]);
-    expect(causes).toEqual(['turn_finished', 'verifier_reject']);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
-    });
-    expect(host.started).toHaveLength(2);
-  });
-
-  it('stops continuations when completion evidence exceeds the catalog', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0];
-    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    records = verifierEvidenceWindow(permit, cursorId, 101);
-    runtime.recordTerminalProposal(permit, {
-      status: 'complete',
-      reason: 'Delivered',
-      evidenceRefs: ['assistant-evidence-100'],
-    });
-    const causes: Array<GoalStateCause | undefined> = [];
-    runtime.subscribe((_snapshot, cause) => causes.push(cause));
-
-    await runtime.finishTurn(permit);
-
-    expect(verifier).not.toHaveBeenCalled();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        lastReason: expect.stringContaining('bounded evidence catalog'),
-        limitKind: 'evidence_catalog',
-      },
-    });
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'usage_limited',
-    ]);
-    expect(causes).toEqual(['turn_finished', 'usage_limited']);
-    expect(host.started).toHaveLength(1);
-
-    // Resuming restarts the evidence window rather than being refused, so the
-    // Goal keeps its objective and picks up from a cursor that fits.
-    const tailBeforeResume = journal.records.at(-1)!.uuid;
-    const resumed = await runtime.dispatch({
-      action: 'resume',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    expect(resumed.snapshot.goal).toMatchObject({
-      status: 'active',
-      revision: permit.revision,
-    });
-    expect(resumed.snapshot.goal?.evidenceCheckpoint).toBeUndefined();
-    expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
-    expect(host.started).toHaveLength(2);
-
-    // The window really moved, and to a live position: the resumed Goal cites
-    // the transcript tail, not the cursor the exhausted catalog was measured
-    // against and not the null the evidence pipeline would reject.
-    expect(resumed.snapshot.goal?.evidenceCursor.recordId).toBe(
-      tailBeforeResume,
-    );
-    expect(tailBeforeResume).not.toBe(cursorId);
-
-    // Editing still works from there and still keeps the Goal running, which
-    // is the escape hatch that used to be the only one.
-    const edited = await runtime.dispatch({
-      action: 'edit',
-      objective: 'deliver result',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    expect(edited.snapshot.goal).toMatchObject({
-      status: 'active',
-      revision: 2,
-      lastReason: undefined,
-    });
-  });
-
-  it('does not accept catalog exhaustion as an external blocker', async () => {
+  it("sends the verifier this turn's records newest first, without references", async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
     const evidenceSource = fakeEvidenceSource(() => records);
     const verifier: GoalVerifier = vi.fn(async () => ({
       decision: 'accept' as const,
-      reason: 'External blocker accepted',
+      reason: 'The suite passed in this turn',
     }));
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
+    const permit = host.started[0];
     const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    const base = verifierEvidenceRecords(permit, cursorId);
     records = [
-      ...verifierEvidenceWindow(permit, cursorId, 100),
-      verifierUserEvidenceRecords(permit, cursorId, 'blocker-evidence')[1]!,
+      ...base,
+      {
+        ...base[1]!,
+        uuid: 'tool-evidence',
+        type: 'tool_result',
+        provenance: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'shell',
+                response: { output: '18 tests passed' },
+              },
+            },
+          ],
+        },
+      },
     ];
     runtime.recordTerminalProposal(permit, {
-      status: 'blocked',
-      blockerKind: 'external',
-      reason: 'The evidence catalog is truncated',
-      evidenceRefs: ['blocker-evidence'],
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['a-reference-the-runtime-ignores'],
     });
 
     await runtime.finishTurn(permit);
 
-    expect(verifier).not.toHaveBeenCalled();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        lastReason: expect.stringContaining('bounded evidence catalog'),
-        limitKind: 'evidence_catalog',
-      },
+    expect(verifier).toHaveBeenCalledOnce();
+    const input = vi.mocked(verifier).mock.calls[0]![0];
+    expect(input).toMatchObject({
+      currentTurnId: permit.turnId,
+      evidenceTurnIds: [permit.turnId],
+      proposal: { status: 'complete', reason: 'Delivered' },
     });
+    expect(input).not.toHaveProperty('omittedEarlier');
+    expect(input.evidence.map((record) => record.uuid)).toEqual([
+      'tool-evidence',
+      'assistant-evidence',
+    ]);
+    expect(input.evidence[0]).toMatchObject({
+      provenance: 'tool_result',
+      proofKind: 'external_fact',
+      turnId: permit.turnId,
+    });
+    expect(input.evidence[0]!.content).toContain('18 tests passed');
+    expect(input.evidence[1]).toMatchObject({
+      provenance: 'assistant_output',
+      proofKind: 'delivered_output',
+      content: 'Delivered result',
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'complete' });
+  });
+
+  it('keeps the newest records of the turn and reports the ones the verifier limit left out', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The newest output proves it',
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    // 140 records of 2 000 capped bytes against a 256 000-byte request: the
+    // newest 128 are sent and the 12 oldest are counted, so a turn that ran
+    // a hundred tools no longer stops the Goal -- it is judged from its tail.
+    records = verifierEvidenceWindow(permit, cursorId, 140).map((record) =>
+      record.type === 'assistant'
+        ? {
+            ...record,
+            message: { role: 'model', parts: [{ text: 'x'.repeat(2_100) }] },
+          }
+        : record,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).toHaveBeenCalledOnce();
+    const input = vi.mocked(verifier).mock.calls[0]![0];
+    expect(input.evidence).toHaveLength(128);
+    expect(input.evidence[0]!.uuid).toBe('assistant-evidence-139');
+    expect(input.evidence.at(-1)!.uuid).toBe('assistant-evidence-12');
+    expect(input.omittedEarlier).toBe(12);
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'complete' });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
-      'usage_limited',
+      'verifier_accept',
+      'complete',
     ]);
-    expect(host.started).toHaveLength(1);
   });
 
   it('lets a repeated blocker streak reach the verifier when the catalog truncates', async () => {
@@ -1431,48 +1394,33 @@ describe('goal runtime', () => {
       },
     ];
 
-    await expect(runtime.getGoalForWorker(nextPermit)).resolves.toMatchObject({
-      evidenceCatalog: {
-        entries: [
-          {
-            uuid: checkpoint.claims[0]!.id,
-            proofKind: 'delivered_output',
-            preview: 'The implementation result was delivered.',
-          },
-          { uuid: 'next-turn-output' },
-        ],
-        truncated: false,
-      },
-    });
+    // The checkpoint is bookkeeping on the record; the worker view carries
+    // no catalog, and the verifier is handed only the new turn's records.
+    await expect(
+      runtime.getGoalForWorker(nextPermit),
+    ).resolves.not.toHaveProperty('evidenceCatalog');
 
     vi.mocked(verifier).mockResolvedValue({
       decision: 'accept',
-      reason: 'Checkpoint and current evidence satisfy the objective',
+      reason: 'The current turn satisfies the objective',
     });
     runtime.recordTerminalProposal(nextPermit, {
       status: 'complete',
-      reason: 'Delivered across both evidence windows',
-      evidenceRefs: [checkpoint.claims[0]!.id, 'next-turn-output'],
+      reason: 'Delivered in this turn',
     });
 
     await runtime.finishTurn(nextPermit);
 
     expect(verifier).toHaveBeenCalledWith(
       expect.objectContaining({
-        evidence: [
-          expect.objectContaining({
-            uuid: checkpoint.claims[0]!.id,
-            provenance: 'goal_checkpoint',
-            content: 'The implementation result was delivered.',
-          }),
-          expect.objectContaining({ uuid: 'next-turn-output' }),
-        ],
+        evidenceTurnIds: [nextPermit.turnId],
+        evidence: [expect.objectContaining({ uuid: 'next-turn-output' })],
       }),
       expect.any(AbortSignal),
     );
     expect(runtime.getSnapshot().goal).toMatchObject({
       status: 'complete',
-      lastReason: 'Checkpoint and current evidence satisfy the objective',
+      lastReason: 'The current turn satisfies the objective',
     });
   });
 
@@ -3811,7 +3759,7 @@ describe('goal runtime', () => {
   it.each([
     ['flush', new Error('flush failed')],
     ['read', new Error('read failed')],
-    ['cursor', new Error('not in the active transcript chain')],
+    ['lineage', new Error('not the tail of the active transcript lineage')],
     ['provider', new Error('provider failed')],
   ] as const)(
     'moves to usage_limited when verification %s fails',
@@ -3839,7 +3787,18 @@ describe('goal runtime', () => {
         permit,
         runtime.getSnapshot().goal!.evidenceCursor.recordId!,
       );
-      if (failurePoint === 'cursor') records = records.slice(1);
+      if (failurePoint === 'lineage') {
+        // A Goal-owned record from a later turn means this permit is not
+        // the lineage tail, so the window cannot be attributed to it.
+        records = [
+          ...records,
+          {
+            ...records[1]!,
+            uuid: 'later-turn-output',
+            goalContext: { ...permit, turnId: 'later-turn' },
+          },
+        ];
+      }
       runtime.recordTerminalProposal(permit, {
         status: 'complete',
         reason: 'Delivered',
@@ -4291,12 +4250,10 @@ describe('goal runtime', () => {
     },
   );
 
-  it('returns only a bounded evidence catalog and rejects it after stale I/O', async () => {
-    const flushGate = deferred<void>();
+  it('returns the worker view without reading the transcript', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
     const evidenceSource = fakeEvidenceSource(() => records);
-    evidenceSource.flush.mockImplementationOnce(() => flushGate.promise);
     const verifier: GoalVerifier = vi.fn();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
@@ -4308,20 +4265,17 @@ describe('goal runtime', () => {
       runtime.getSnapshot().goal!.evidenceCursor.recordId!,
     );
 
-    const reading = runtime.getGoalForWorker(permit);
-    await vi.waitFor(() => expect(evidenceSource.flush).toHaveBeenCalledOnce());
-    const editing = runtime.dispatch({
-      action: 'edit',
-      objective: 'ship revised',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    await expect(editing).resolves.toBeDefined();
-    flushGate.resolve();
+    const view = await runtime.getGoalForWorker(permit);
 
-    await expect(reading).rejects.toThrow(
-      'Goal turn permit is no longer valid',
-    );
+    expect(evidenceSource.flush).not.toHaveBeenCalled();
+    expect(evidenceSource.readActiveTranscriptChain).not.toHaveBeenCalled();
+    expect(view).toEqual({
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: 'ship',
+      evidenceCursor: runtime.getSnapshot().goal!.evidenceCursor,
+    });
+    expect(view).not.toHaveProperty('evidenceCatalog');
   });
 
   it.each(['accept', 'reject', 'usage_limited'] as const)(
@@ -4483,39 +4437,6 @@ describe('goal runtime', () => {
       activity: 'running',
       goal: { status: 'active', turnCount: FORMER_GOAL_CONTINUATION_LIMIT + 1 },
     });
-  });
-
-  it('returns a bounded catalog without exposing full evidence content', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'ship' });
-    const permit = host.started[0];
-    records = verifierEvidenceRecords(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-    );
-
-    const view = await runtime.getGoalForWorker(permit);
-
-    expect(view.evidenceCatalog).toEqual({
-      entries: [
-        {
-          uuid: 'assistant-evidence',
-          provenance: 'assistant_output',
-          turnId: permit.turnId,
-          preview: 'Delivered result',
-          proofKind: 'delivered_output',
-        },
-      ],
-      lineageTurnIds: [permit.turnId],
-      truncated: false,
-    });
-    expect(view.evidenceCatalog?.entries[0]).not.toHaveProperty('content');
   });
 
   it('keeps verification live when a pausing lifecycle append fails', async () => {

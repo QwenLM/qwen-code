@@ -89,6 +89,39 @@ export interface ValidatedGoalEvidence {
   citedRecords: ValidatedGoalEvidenceRecord[];
 }
 
+/** One transcript record as the terminal verifier receives it. */
+export interface GoalVerifierEvidenceRecord {
+  uuid: string;
+  provenance: GoalEvidenceProvenance;
+  turnId: string;
+  proofKind: GoalEvidenceProofKind;
+  content: string;
+}
+
+/**
+ * The evidence a terminal proposal is judged from: the records of the Goal
+ * turns the proposal's policy speaks about, newest first, bounded by
+ * {@link VERIFIER_EVIDENCE_BYTE_LIMIT}.
+ *
+ * A completion is judged from the turn that proposed it, so the decisive
+ * checks have to run in that turn. A blocked proposal is judged from the
+ * current turn and the two before it, the span the repeated-blocker policy
+ * names. Nothing older is ever sent: the deliverable is in the workspace
+ * and the check that proves it can be run again, which is cheaper and more
+ * reliable than keeping a citable ledger of everything a long Goal did.
+ */
+export interface GoalVerifierEvidenceWindow {
+  /** Newest record first. */
+  evidence: GoalVerifierEvidenceRecord[];
+  /** The Goal turns the window covers, oldest first; the current turn is last. */
+  turnIds: string[];
+  /**
+   * Eligible records of those turns left out because the window reached its
+   * byte limit. Always the oldest ones: the newest record is admitted first.
+   */
+  omittedEarlier: number;
+}
+
 export interface GoalEvidenceContext {
   records: readonly GoalEvidenceRecord[];
   goal: GoalRecord;
@@ -515,7 +548,7 @@ export class GoalEvidenceCheckpointAccumulator {
       turnId: context.turnId,
       preview,
       proofKind: proofKindOf(provenance),
-      content: capCheckpointContent(content),
+      content: capEvidenceContent(content),
     });
   }
 
@@ -583,7 +616,7 @@ export function buildGoalEvidenceCheckpointWindow(
 export function validateGoalEvidenceReferences(
   input: GoalEvidenceValidationInput,
 ): ValidatedGoalEvidence {
-  const references = input.proposal.evidenceRefs;
+  const references = input.proposal.evidenceRefs ?? [];
   if (references.length === 0) {
     throw new InvalidGoalEvidenceReferenceError(
       'no_evidence_references',
@@ -638,6 +671,121 @@ export function validateGoalEvidenceReferences(
   return {
     citedRecords: citedRecords.map((entry) => ({ ...entry })),
   };
+}
+
+/**
+ * Builds the evidence window a terminal proposal is verified against.
+ *
+ * Throws {@link EvidenceSourceUnavailableError} when the transcript cannot be
+ * attributed to this permit: a permit that does not match the Goal revision,
+ * a Goal-owned record with malformed turn context, a turn that re-enters the
+ * lineage, or a current turn that is not the lineage's tail.
+ */
+export function buildGoalVerifierEvidenceWindow(
+  input: GoalEvidenceValidationInput,
+): GoalVerifierEvidenceWindow {
+  if (
+    input.permit.goalId !== input.goal.goalId ||
+    input.permit.revision !== input.goal.revision ||
+    !isNonEmptyString(input.permit.turnId)
+  ) {
+    throw new EvidenceSourceUnavailableError(
+      'permit_goal_mismatch',
+      'The current Goal permit does not match the Goal evidence revision.',
+    );
+  }
+  const lineageTurnIds = collectGoalTurnLineage(input);
+  if (lineageTurnIds.at(-1) !== input.permit.turnId) {
+    throw new EvidenceSourceUnavailableError(
+      'current_turn_not_tail',
+      'The current Goal permit is not the tail of the active transcript lineage.',
+    );
+  }
+  const turnIds =
+    input.proposal.status === 'blocked'
+      ? lineageTurnIds.slice(-3)
+      : lineageTurnIds.slice(-1);
+  const windowTurnIds = new Set(turnIds);
+
+  const evidence: GoalVerifierEvidenceRecord[] = [];
+  let omittedEarlier = 0;
+  let bytes = 0;
+  let full = false;
+  for (let index = input.records.length - 1; index >= 0; index -= 1) {
+    const record = input.records[index]!;
+    const provenance = coherentEvidenceProvenance(record);
+    if (!provenance) continue;
+    const context = parseGoalContext(record.goalContext);
+    if (
+      !context ||
+      context.goalId !== input.goal.goalId ||
+      context.revision !== input.goal.revision ||
+      !windowTurnIds.has(context.turnId)
+    ) {
+      continue;
+    }
+    const content = capEvidenceContent(evidenceContent(record, provenance));
+    if (!content) continue;
+    if (full) {
+      omittedEarlier += 1;
+      continue;
+    }
+    const contentBytes = Buffer.byteLength(content, 'utf8');
+    if (bytes + contentBytes > VERIFIER_EVIDENCE_BYTE_LIMIT) {
+      full = true;
+      omittedEarlier += 1;
+      continue;
+    }
+    bytes += contentBytes;
+    evidence.push({
+      uuid: record.uuid,
+      provenance,
+      turnId: context.turnId,
+      proofKind: proofKindOf(provenance),
+      content,
+    });
+  }
+  return { evidence, turnIds, omittedEarlier };
+}
+
+/**
+ * The Goal turns this revision has recorded, oldest first, read from the
+ * turn context stamped on every Goal-owned record rather than from the
+ * evidence cursor: the window is defined by turns, not by a position.
+ */
+function collectGoalTurnLineage(input: GoalEvidenceContext): string[] {
+  const lineageTurnIds: string[] = [];
+  const seenTurnIds = new Set<string>();
+  let currentTurnId: string | undefined;
+  for (const record of input.records) {
+    const context = parseGoalContext(record.goalContext);
+    if (!context) {
+      if (claimsGoalRevision(record.goalContext, input.goal)) {
+        throw new EvidenceSourceUnavailableError(
+          'malformed_turn_context',
+          `Goal-owned transcript record ${record.uuid} has malformed turn context.`,
+        );
+      }
+      continue;
+    }
+    if (
+      context.goalId !== input.goal.goalId ||
+      context.revision !== input.goal.revision
+    ) {
+      continue;
+    }
+    if (context.turnId === currentTurnId) continue;
+    if (seenTurnIds.has(context.turnId)) {
+      throw new EvidenceSourceUnavailableError(
+        'turn_reentry',
+        `Goal turn ${context.turnId} re-enters the active transcript lineage.`,
+      );
+    }
+    seenTurnIds.add(context.turnId);
+    lineageTurnIds.push(context.turnId);
+    currentTurnId = context.turnId;
+  }
+  return lineageTurnIds;
 }
 
 function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
@@ -1103,7 +1251,7 @@ export function capPreviewBytes(value: string, limit: number): string {
   return value.slice(0, cutoff);
 }
 
-function capCheckpointContent(content: string): string {
+function capEvidenceContent(content: string): string {
   if (Buffer.byteLength(content, 'utf8') <= CHECKPOINT_CONTENT_BYTE_LIMIT) {
     return content;
   }

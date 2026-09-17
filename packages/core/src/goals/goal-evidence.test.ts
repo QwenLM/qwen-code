@@ -14,6 +14,7 @@ import type {
 import {
   buildGoalEvidenceCheckpointWindow,
   buildGoalEvidenceCatalog,
+  buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
   InvalidGoalEvidenceReferenceError,
   validateGoalEvidenceReferences,
@@ -1210,5 +1211,139 @@ describe('Goal evidence errors', () => {
         'missing',
       ),
     ).toBeInstanceOf(InvalidGoalEvidenceReferenceError);
+  });
+});
+
+describe('Goal verifier evidence window', () => {
+  const build = (
+    records: GoalEvidenceRecord[],
+    proposal: GoalTerminalProposal,
+    currentPermit = permit(),
+    currentGoal = goal(),
+  ) =>
+    buildGoalVerifierEvidenceWindow({
+      records,
+      goal: currentGoal,
+      permit: currentPermit,
+      proposal,
+    });
+
+  it("sends the proposing turn's records newest first and nothing older", () => {
+    const records = [
+      record('cursor', 'system', { provenance: 'goal_control' }),
+      record('earlier-tool', 'tool_result', {
+        turnId: 'turn-2',
+        toolResponse: { output: 'earlier pass' },
+      }),
+      record('earlier-text', 'assistant', {
+        turnId: 'turn-2',
+        text: 'earlier',
+      }),
+      record('runtime-read', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'goal_runtime',
+        toolResponse: { active: true },
+      }),
+      record('text', 'assistant', {
+        turnId: 'turn-3',
+        text: 'Running the suite',
+        thought: 'hidden reasoning',
+      }),
+      record('tool', 'tool_result', {
+        turnId: 'turn-3',
+        toolResponse: { output: '18 tests passed' },
+      }),
+    ];
+
+    const window = build(records, complete([]));
+
+    expect(window.turnIds).toEqual(['turn-3']);
+    expect(window.omittedEarlier).toBe(0);
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual([
+      'tool',
+      'text',
+    ]);
+    expect(window.evidence[0]).toMatchObject({
+      provenance: 'tool_result',
+      proofKind: 'external_fact',
+      turnId: 'turn-3',
+    });
+    expect(window.evidence[0]!.content).toContain('18 tests passed');
+    expect(window.evidence[1]).toMatchObject({
+      provenance: 'assistant_output',
+      proofKind: 'delivered_output',
+      content: 'Running the suite',
+    });
+    expect(JSON.stringify(window)).not.toContain('hidden reasoning');
+    expect(JSON.stringify(window)).not.toContain('earlier');
+  });
+
+  it('covers the current and two preceding turns for a blocked proposal', () => {
+    const records = ['turn-1', 'turn-2', 'turn-3', 'turn-4'].map((turnId) =>
+      record(`${turnId}-tool`, 'tool_result', {
+        turnId,
+        toolResponse: { output: `${turnId} still blocked` },
+      }),
+    );
+
+    const window = build(records, blocked('repeated', []), permit('turn-4'));
+
+    expect(window.turnIds).toEqual(['turn-2', 'turn-3', 'turn-4']);
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual([
+      'turn-4-tool',
+      'turn-3-tool',
+      'turn-2-tool',
+    ]);
+    expect(window.omittedEarlier).toBe(0);
+  });
+
+  it('caps each record and leaves out the oldest records past the request limit', () => {
+    const records = Array.from({ length: 140 }, (_, index) =>
+      record(`a-${index}`, 'assistant', {
+        turnId: 'turn-3',
+        text: 'x'.repeat(2_100),
+      }),
+    );
+
+    const window = build(records, complete([]));
+
+    // 2 000 bytes per capped record, 256 000 bytes per request: the newest
+    // 128 fit and the 12 oldest are reported, never silently dropped.
+    expect(window.evidence).toHaveLength(128);
+    expect(window.omittedEarlier).toBe(12);
+    expect(window.evidence[0]!.uuid).toBe('a-139');
+    expect(window.evidence.at(-1)!.uuid).toBe('a-12');
+    expect(window.evidence[0]!.content.endsWith('…[truncated]')).toBe(true);
+    expect(Buffer.byteLength(window.evidence[0]!.content, 'utf8')).toBe(2_000);
+  });
+
+  it('rejects a permit that does not match the Goal or is not the lineage tail', () => {
+    const records = [
+      record('t2', 'assistant', { turnId: 'turn-2', text: 'earlier' }),
+      record('t3', 'assistant', { turnId: 'turn-3', text: 'current' }),
+    ];
+
+    expect(() => build(records, complete([]), permit('turn-2'))).toThrow(
+      expect.objectContaining({ code: 'current_turn_not_tail' }),
+    );
+    expect(() =>
+      build(records, complete([]), { ...permit(), revision: REVISION + 1 }),
+    ).toThrow(expect.objectContaining({ code: 'permit_goal_mismatch' }));
+    expect(() =>
+      build(
+        [
+          ...records,
+          record('bad', 'assistant', {
+            text: 'claims the goal',
+            goalContext: { goalId: GOAL_ID, revision: REVISION },
+          }),
+        ],
+        complete([]),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'malformed_turn_context' }));
+    expect(() => build(records, complete([]))).not.toThrow();
+    expect(() => build(records, complete([]))).not.toThrow(
+      EvidenceSourceUnavailableError,
+    );
   });
 });

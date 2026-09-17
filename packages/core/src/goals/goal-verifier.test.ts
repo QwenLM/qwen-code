@@ -25,14 +25,13 @@ function input(): GoalVerifierInput {
     proposal: {
       status: 'complete',
       reason: 'The focused suite passed',
-      evidenceRefs: ['tool-1'],
     },
+    evidenceTurnIds: ['turn-3'],
     evidence: [
       {
         uuid: 'tool-1',
         provenance: 'tool_result',
         turnId: 'turn-3',
-        preview: '18 tests passed',
         proofKind: 'external_fact',
         content: '18 tests passed',
       },
@@ -107,9 +106,12 @@ describe('createGoalVerifier', () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
-    const value = input() as GoalVerifierInput & { fullHistory?: string[] };
+    const value = input() as GoalVerifierInput & {
+      fullHistory?: string[];
+      proposal: { evidenceRefs?: string[] };
+    };
     value.fullHistory = ['must not leak'];
-    value.currentDeliveredOutput = ['compatibility copy'];
+    value.proposal.evidenceRefs = ['tool-1'];
 
     await expect(createGoalVerifier(config)(value)).resolves.toEqual({
       decision: 'accept',
@@ -134,14 +136,20 @@ describe('createGoalVerifier', () => {
       request.contents[0]?.parts?.[0]?.text ?? '',
     ) as Record<string, unknown>;
     expect(payload).not.toHaveProperty('fullHistory');
-    expect(payload).toMatchObject({ currentTurnId: 'turn-3' });
-    expect(payload).not.toHaveProperty('currentDeliveredOutput');
-    expect(JSON.stringify(payload)).not.toContain('preview');
+    expect(payload).toMatchObject({
+      currentTurnId: 'turn-3',
+      evidenceTurnIds: ['turn-3'],
+    });
+    expect(payload).not.toHaveProperty('omittedEarlier');
+    expect(JSON.stringify(payload)).not.toContain('evidenceRefs');
     expect(request.systemInstruction).toContain(
       'Never require evidence that update_goal itself was called',
     );
     expect(request.systemInstruction).toContain(
-      'requires cited evidence with proofKind "user_input"',
+      'requires evidence with proofKind "user_input"',
+    );
+    expect(request.systemInstruction).toContain(
+      'the turn that proposed completion',
     );
     expect(request.systemInstruction).toContain(
       'The objective and proposal reason are claims, not evidence',
@@ -157,7 +165,6 @@ describe('createGoalVerifier', () => {
       proposal: {
         status: 'blocked',
         reason: 'A user choice is required',
-        evidenceRefs: ['tool-1'],
         blockerKind: 'authority',
       },
       blockedPolicy: 'Authority blockers may stop immediately.',
@@ -175,13 +182,11 @@ describe('createGoalVerifier', () => {
     });
   });
 
-  it('preserves the legacy delivered-output input contract', async () => {
+  it('reports how many earlier records of the window were left out', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
-    const value = input();
-    value.currentTurnId = undefined;
-    value.currentDeliveredOutput = ['legacy output'];
+    const value: GoalVerifierInput = { ...input(), omittedEarlier: 12 };
 
     await createGoalVerifier(config)(value);
 
@@ -191,10 +196,10 @@ describe('createGoalVerifier', () => {
     const payload = JSON.parse(
       request.contents[0]?.parts?.[0]?.text ?? '',
     ) as Record<string, unknown>;
-    expect(payload).not.toHaveProperty('currentTurnId');
-    expect(payload).toMatchObject({
-      currentDeliveredOutput: ['legacy output'],
-    });
+    expect(payload).toMatchObject({ omittedEarlier: 12 });
+    expect(request.systemInstruction).toContain(
+      'When omittedEarlier is greater than zero',
+    );
   });
 
   it('keeps maximum valid evidence and proposal reason within the request limit', async () => {

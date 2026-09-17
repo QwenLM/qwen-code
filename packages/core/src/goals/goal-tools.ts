@@ -21,10 +21,6 @@ import {
   GoalInvalidTransitionError,
 } from './goal-reducer.js';
 import {
-  capPreviewBytes,
-  GOAL_EVIDENCE_REFERENCE_LIMIT,
-} from './goal-evidence.js';
-import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
@@ -46,7 +42,6 @@ import {
   type GoalSnapshotV2,
   type GoalTerminalProposal,
   type GoalTurnPermit,
-  isRepeatedBlockerProposal,
   validateGoalProposalReason,
 } from './goal-protocol.js';
 
@@ -56,27 +51,21 @@ export interface GoalToolConfig {
 
 export interface GetGoalToolParams {
   /**
-   * `summary` (default) keeps the payload small on every read: checkpoint
-   * claims collapse to a count (their previews are already catalog entries),
-   * and entries from earlier turns carry previews capped at
-   * SUMMARY_PREVIEW_BYTE_LIMIT. `full` returns the whole catalog and the
-   * checkpoint verbatim. Entry uuids are identical in both views.
+   * @deprecated `get_goal` no longer returns an evidence catalog, so there is
+   * nothing for a view to select. Accepted and ignored so a model still
+   * following the older contract is not refused.
    */
   view?: 'summary' | 'full';
 }
 
-/**
- * Preview bytes an earlier-turn entry keeps in the summary view. Enough to
- * recognise what a record is ("12 tests passed", "wrote src/x.ts") without
- * re-sending the 240-byte preview on every read of a Goal that has been
- * running for a while -- one call used to cost the whole bounded catalog.
- */
-const SUMMARY_PREVIEW_BYTE_LIMIT = 80;
-
 export interface UpdateGoalToolParams {
   status: 'complete' | 'blocked';
   reason: string;
-  evidenceRefs: string[];
+  /**
+   * @deprecated The verifier judges a proposal from the records of the turn
+   * that made it, not from references the model cites. Accepted and ignored.
+   */
+  evidenceRefs?: string[];
   blockerKind?: GoalBlockerKind;
 }
 
@@ -140,12 +129,7 @@ class GetGoalInvocation extends BaseToolInvocation<
     ) {
       throw staleGoalTurnError();
     }
-    const payload = projectWorkerView(
-      view,
-      snapshot,
-      this.permit,
-      this.params.view ?? 'summary',
-    );
+    const payload = projectWorkerView(view, snapshot);
     return {
       llmContent: JSON.stringify(payload),
       returnDisplay: `Active goal · revision ${view.revision}`,
@@ -163,7 +147,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget, turnBudget, activeTimeBudgetMs and lastReason when recorded, and checkpointStalls and lastCheckpointFailure while a stall streak stands, while the Goal is active, or when an oversized checkpoint request stopped it, never for a completed Goal) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. The Goal record's checkpointStalls counts consecutive evidence checkpoints that failed to relieve an overflowing catalog (the Goal stops at three), and lastCheckpointFailure says what the most recent check that gave no relief ran into (a thrown error, or a full claim list on an overflowing window). It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
+      `Read the current Goal for this permitted Goal turn: its identity, objective, status, budget figures (tokens, turns, active time and their ceilings when set), and the independent verifier's feedback on the previous proposal when there is any. It returns no transcript history: the verifier judges a terminal proposal from the visible output and tool results of the turn that makes it, so there is nothing to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget, turnBudget, activeTimeBudgetMs and lastReason when recorded, and checkpointStalls and lastCheckpointFailure while a stall streak stands, while the Goal is active, or when an oversized checkpoint request stopped it, never for a completed Goal) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
       Kind.Read,
       {
         type: 'object',
@@ -171,7 +155,8 @@ export class GetGoalTool extends BaseDeclarativeTool<
           view: {
             type: 'string',
             enum: ['summary', 'full'],
-            description: `summary (default): checkpoint claims as a count, full previews only for this turn and checkpoint entries, ${SUMMARY_PREVIEW_BYTE_LIMIT}-byte previews for earlier turns. full: the whole catalog and checkpoint verbatim. Uuids are identical in both.`,
+            description:
+              'Deprecated and ignored: get_goal returns no evidence catalog, so there is no view to choose.',
           },
         },
         additionalProperties: false,
@@ -291,89 +276,14 @@ class UpdateGoalInvocation extends BaseToolInvocation<
     ) {
       throw staleGoalTurnError();
     }
-    let autoCitedCurrentDeliveredOutput: string[] = [];
-    const evidenceEntries = view.evidenceCatalog?.entries;
-    if (evidenceEntries) {
-      const normalizedEvidenceRefs = this.params.evidenceRefs.map((reference) =>
-        reference.trim(),
-      );
-      const validEvidenceRefs = new Set(
-        evidenceEntries.map((entry) => entry.uuid),
-      );
-      const invalidEvidenceRefs = normalizedEvidenceRefs.filter(
-        (reference) => !validEvidenceRefs.has(reference),
-      );
-      if (invalidEvidenceRefs.length > 0) {
-        const error =
-          'evidenceRefs must use values from the latest get_goal evidenceCatalog.entries[].uuid; call get_goal and retry. Do not use goalId, turnId, or lineageTurnIds.';
-        return {
-          llmContent: JSON.stringify({
-            proposalRecorded: false,
-            readyForVerification: false,
-            goalLifecycleChanged: false,
-            invalidEvidenceRefs,
-            error,
-          }),
-          returnDisplay:
-            'Goal proposal was not recorded because its evidence is not current. Read the current Goal and retry.',
-        };
-      }
-      const citedEvidenceRefs = new Set(normalizedEvidenceRefs);
-      // The verifier judges a completion against this turn's delivered output,
-      // so it has to be cited. Asking the model to cite it cannot converge:
-      // assistant output is `delivered_output` stamped with this same turn, so
-      // every attempt to comply — reading the catalog, then calling back —
-      // emits text that becomes another uncited entry, and the required set
-      // grows by one per retry. Refusing produced runs that proposed
-      // completion until a human paused them.
-      //
-      // Nothing about the list needs the model's judgment: it is exactly the
-      // entries computed here. Fold them in instead of demanding they be
-      // repeated back. Both sets are drawn from the same catalog and are
-      // disjoint by construction, so the union cannot exceed
-      // GOAL_EVIDENCE_REFERENCE_LIMIT, which is that catalog's own entry cap.
-      autoCitedCurrentDeliveredOutput =
-        this.params.status === 'complete'
-          ? evidenceEntries
-              .filter(
-                (entry) =>
-                  entry.proofKind === 'delivered_output' &&
-                  entry.turnId === permit.turnId &&
-                  !citedEvidenceRefs.has(entry.uuid),
-              )
-              .map((entry) => entry.uuid)
-          : [];
-    }
     const proposal: GoalTerminalProposal = {
       status: this.params.status,
       reason: this.params.reason.trim(),
-      evidenceRefs: [
-        ...this.params.evidenceRefs.map((reference) => reference.trim()),
-        ...autoCitedCurrentDeliveredOutput,
-      ],
       ...(this.params.blockerKind
         ? { blockerKind: this.params.blockerKind }
         : {}),
     };
     signal.throwIfAborted();
-    if (
-      view.evidenceCatalog?.truncated &&
-      !isRepeatedBlockerProposal(proposal)
-    ) {
-      return {
-        llmContent: JSON.stringify({
-          proposalRecorded: false,
-          readyForVerification: false,
-          goalLifecycleChanged: false,
-          checkpointRequired: true,
-          nextAction:
-            'End this turn without user-facing text so the runtime can checkpoint the evidence catalog. In the next Goal turn, call get_goal first and retry the terminal proposal with the UUIDs it returns before running any other tool: every new tool result can push an older entry out of the bounded catalog and invalidate a UUID you meant to cite.',
-        }),
-        returnDisplay:
-          'Goal evidence reached its bounded catalog; ending the turn to checkpoint before terminal verification.',
-        terminateTurn: true,
-      };
-    }
     const receipt = recordTerminalProposalForPermit(
       this.runtime,
       this.permit,
@@ -384,15 +294,9 @@ class UpdateGoalInvocation extends BaseToolInvocation<
       proposalRecorded: receipt.recorded,
       readyForVerification: receipt.readyForVerification,
       goalLifecycleChanged: false,
-      // Reported so the proposal the verifier sees is not a surprise, and so a
-      // model that wants to cite this turn's output explicitly can see it was
-      // already covered rather than calling back to add it.
-      ...(autoCitedCurrentDeliveredOutput.length > 0
-        ? { autoCitedCurrentDeliveredOutput }
-        : {}),
       nextAction: receipt.readyForVerification
         ? 'End this turn without user-facing text. Do not claim the Goal is complete or blocked. The Goal status card will report the independent verification result.'
-        : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, with current evidence cited on each turn.',
+        : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, each of which must show the blocker in its own tool results.',
     };
     let returnDisplay: string;
     if (!receipt.recorded) {
@@ -429,7 +333,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a cited external_fact (a tool result, not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification or checkpointRequired, end the turn without additional user-facing text; after checkpointRequired, call get_goal first in the next Goal turn and retry before running any other tool, because every new tool result can push a cited entry out of the bounded catalog. Otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
+      'Propose that the current Goal is complete or blocked. The independent verifier judges the proposal from the visible output and tool results of this Goal turn (for a blocked proposal, this turn and the two before it), so run the checks that prove every objective condition in this turn before calling: output printed earlier in the session is not seen. If completion depends on user-facing content delivered in this turn, emit only the content required by the objective before calling update_goal, and do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a tool result (not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
       Kind.Think,
       {
         type: 'object',
@@ -442,17 +346,9 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
           },
           evidenceRefs: {
             type: 'array',
-            minItems: 1,
-            uniqueItems: true,
-            maxItems: GOAL_EVIDENCE_REFERENCE_LIMIT,
             description:
-              'Exact values from the latest get_goal evidenceCatalog.entries[].uuid.',
-            items: {
-              type: 'string',
-              minLength: 1,
-              description:
-                'A transcript record uuid from evidenceCatalog.entries, not a turnId or lineageTurnId.',
-            },
+              "Deprecated and ignored: the verifier reads this turn's records directly, so nothing needs to be cited.",
+            items: { type: 'string' },
           },
           blockerKind: {
             type: 'string',
@@ -461,7 +357,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
               'authority: a user or maintainer decision or permission is required; external: an evidenced external resource or capability is unavailable; repeated: the same evidenced blocker with the exact same reason text across three consecutive Goal turns; infeasible: a cited external_fact shows the objective cannot be satisfied as written (self-contradictory, names a target that verifiably does not exist, or needs an action no tool can perform) -- not difficulty, uncertainty, or obtainable information. Omission uses the repeated-blocker audit.',
           },
         },
-        required: ['status', 'reason', 'evidenceRefs'],
+        required: ['status', 'reason'],
         additionalProperties: false,
       },
     );
@@ -470,21 +366,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: UpdateGoalToolParams,
   ): string | null {
-    const reasonError = validateGoalProposalReason(params.reason);
-    if (reasonError) return reasonError;
-    if (
-      params.evidenceRefs.length === 0 ||
-      params.evidenceRefs.some((reference) => !reference.trim())
-    ) {
-      return 'evidenceRefs must contain non-empty stable evidence references';
-    }
-    const normalizedReferences = params.evidenceRefs.map((reference) =>
-      reference.trim(),
-    );
-    if (new Set(normalizedReferences).size !== normalizedReferences.length) {
-      return 'evidenceRefs must contain unique stable evidence references';
-    }
-    return null;
+    return validateGoalProposalReason(params.reason);
   }
 
   protected createInvocation(
@@ -562,24 +444,10 @@ function staleGoalTurnError(): Error {
   return new Error(STALE_GOAL_TURN_MESSAGE);
 }
 
-function projectWorkerView(
-  view: GoalWorkerView,
-  snapshot: GoalSnapshotV2,
-  permit: GoalTurnPermit,
-  detail: NonNullable<GetGoalToolParams['view']>,
-) {
-  const full = detail === 'full';
+function projectWorkerView(view: GoalWorkerView, snapshot: GoalSnapshotV2) {
   return {
     active: true,
-    view: detail,
-    snapshot: full ? structuredClone(snapshot) : summarizeSnapshot(snapshot),
-    ...(view.evidenceCatalog
-      ? {
-          evidenceCatalog: full
-            ? structuredClone(view.evidenceCatalog)
-            : summarizeCatalog(view.evidenceCatalog, permit),
-        }
-      : {}),
+    snapshot: summarizeSnapshot(snapshot),
     ...(view.verifierFeedback
       ? { verifierFeedback: view.verifierFeedback }
       : {}),
@@ -588,9 +456,9 @@ function projectWorkerView(
 
 /**
  * The checkpoint's claims are the largest thing a Goal record carries -- up to
- * 32 claims of up to 2,000 characters -- and every one of them is already in
- * the catalog as a `goal_checkpoint` entry with a preview and the same uuid.
- * The summary keeps the checkpoint's identity and drops the duplicate text.
+ * 32 claims of up to 2,000 characters -- and none of them is something the
+ * model can act on: the verifier no longer reads them. The summary keeps the
+ * checkpoint's identity and drops the text.
  */
 function summarizeSnapshot(snapshot: GoalSnapshotV2) {
   const goal = snapshot.goal;
@@ -606,35 +474,6 @@ function summarizeSnapshot(snapshot: GoalSnapshotV2) {
       evidenceCheckpoint: { ...checkpointRest, claimCount: claims.length },
     },
   });
-}
-
-function summarizeCatalog(
-  catalog: NonNullable<GoalWorkerView['evidenceCatalog']>,
-  permit: GoalTurnPermit,
-) {
-  let shortenedPreviews = 0;
-  const entries = catalog.entries.map((entry) => {
-    // Checkpoint claims are the compacted proof of everything before the
-    // window, and this turn's entries are the ones a proposal cites next; both
-    // keep their full preview. Earlier turns only need to be recognisable.
-    if (
-      entry.provenance === 'goal_checkpoint' ||
-      entry.turnId === permit.turnId
-    ) {
-      return { ...entry };
-    }
-    const preview = capPreviewBytes(entry.preview, SUMMARY_PREVIEW_BYTE_LIMIT);
-    if (preview !== entry.preview) shortenedPreviews += 1;
-    return { ...entry, preview };
-  });
-  // Clone only what survives the summary; the entries above are rebuilt from
-  // the originals, so cloning them first would allocate and drop the copy.
-  const { entries: _entries, ...catalogRest } = catalog;
-  return {
-    ...structuredClone(catalogRest),
-    entries,
-    ...(shortenedPreviews > 0 ? { shortenedPreviews } : {}),
-  };
 }
 
 // ── propose_goal ────────────────────────────────────────────────────────────
