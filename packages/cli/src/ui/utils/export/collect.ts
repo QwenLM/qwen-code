@@ -474,11 +474,7 @@ class ExportSessionContext implements SessionContext {
   private readonly recordPositions: Map<string, number>;
   private readonly pendingGoalStates: GoalStateExportRecord[];
 
-  constructor(
-    sessionId: string,
-    config: ExportConfig,
-    records: ChatRecord[] = [],
-  ) {
+  constructor(sessionId: string, config: ExportConfig, records: ChatRecord[]) {
     this.sessionId = sessionId;
     this.config = createExportSessionConfig(config);
     const { positions, goalStates } = indexGoalStateRecords(records);
@@ -562,7 +558,11 @@ class ExportSessionContext implements SessionContext {
       this.pendingGoalStates[0]!.index < position
     ) {
       const { uuid, timestamp, payload } = this.pendingGoalStates.shift()!;
-      this.flushCurrentMessage();
+      // The buffered text may have been replayed from this very record (its
+      // `/goal …` line). The record's uuid belongs to the transition, which
+      // is what a snapshot's record references resolve to, so the text does
+      // not take it as well.
+      this.flushCurrentMessage(this.activeRecordId === uuid);
       this.messages.push({
         uuid,
         sessionId: this.sessionId,
@@ -572,7 +572,7 @@ class ExportSessionContext implements SessionContext {
           role: 'system',
           parts: [{ text: describeGoalState(payload) }],
         },
-        goalState: { cause: payload.cause, snapshot: payload.snapshot },
+        goalState: payload,
       });
     }
   }
@@ -717,10 +717,10 @@ class ExportSessionContext implements SessionContext {
     });
   }
 
-  private flushCurrentMessage(): void {
+  private flushCurrentMessage(freshUuid = false): void {
     if (!this.currentMessage) return;
 
-    const uuid = this.getMessageUuid();
+    const uuid = freshUuid ? randomUUID() : this.getMessageUuid();
     const exportMessage: ExportMessage = {
       uuid,
       sessionId: this.sessionId,

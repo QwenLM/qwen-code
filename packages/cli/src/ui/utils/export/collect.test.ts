@@ -338,6 +338,21 @@ describe('collectSessionData', () => {
         ['assistant', 'assistant assistant-2'],
       ]);
 
+      // One uuid, one entry: the text replayed from the transition's own
+      // record keeps that record's timestamp but not its uuid, so a record
+      // reference in a snapshot resolves to the transition alone.
+      const uuids = data.messages.map((message) => message.uuid);
+      expect(new Set(uuids).size).toBe(uuids.length);
+      expect(data.messages[0]).toMatchObject({
+        type: 'user',
+        timestamp: '2026-09-17T00:00:01.000Z',
+      });
+      expect(data.messages[0]!.uuid).not.toBe('goal-create');
+      expect(data.messages[1]).toMatchObject({
+        uuid: 'goal-create',
+        goalState: { v: 2, cause: 'create' },
+      });
+
       const reject = data.messages.find(
         (message) => message.goalState?.cause === 'verifier_reject',
       );
@@ -381,6 +396,33 @@ describe('collectSessionData', () => {
       expect(
         lines.filter((line) => line.goalState).map((line) => line.uuid),
       ).toEqual(['goal-create', 'goal-clear']);
+    });
+
+    it('carries the whole journaled payload, blocked audit included', async () => {
+      const audited = goalState('goal-turn', 1, 'turn_finished', turned);
+      const blockedAudit = {
+        fingerprint: 'external\nregistry is down',
+        count: 2,
+        turnIds: ['turn-1', 'turn-2'],
+      };
+      (audited.systemPayload as Record<string, unknown>)['blockedAudit'] =
+        blockedAudit;
+
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-goal-state',
+          startTime: '2026-09-17T00:00:00.000Z',
+          messages: [text('user-1', 0, 'user'), audited],
+        },
+        config,
+      );
+
+      expect(data.messages.at(-1)?.goalState).toEqual({
+        v: 2,
+        cause: 'turn_finished',
+        snapshot: { v: 2, activity: 'idle', goal: turned },
+        blockedAudit,
+      });
     });
 
     it('leaves out a goal_state record it cannot parse', async () => {
