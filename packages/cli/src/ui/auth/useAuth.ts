@@ -11,6 +11,7 @@ import {
   logAuth,
   type Config,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   applyProviderInstallPlan,
   type ProviderConfig,
   type ProviderSetupInputs,
@@ -166,7 +167,7 @@ export const useAuthCommand = (
       // AuthEvent telemetry on pendingAuthType being defined) can record the
       // failure under the right AuthType bucket instead of silently dropping
       // it.
-      const protocol = inputs.protocol ?? providerConfig.protocol;
+      let protocol = inputs.protocol ?? providerConfig.protocol;
       try {
         setPendingAuthType(protocol);
         setIsAuthenticating(true);
@@ -175,17 +176,24 @@ export const useAuthCommand = (
         const plan = buildInstallPlan(
           providerConfig,
           inputs,
-          settings.merged.modelProviders?.[
-            inputs.protocol ?? providerConfig.protocol
-          ],
+          getModelsForProviderProtocol(
+            settings.merged.modelProviders,
+            inputs.protocol ?? providerConfig.protocol,
+            settings.merged.providerProtocol,
+          ),
+          {
+            authType: settings.merged.security?.auth?.selectedType,
+            id: settings.merged.model?.name,
+            baseUrl: settings.merged.model?.baseUrl,
+          },
         );
+        protocol = plan.authType;
+        setPendingAuthType(protocol);
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+            config.syncModelSelection(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
 

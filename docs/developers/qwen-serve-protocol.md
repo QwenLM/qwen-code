@@ -2306,7 +2306,10 @@ errors carry `workflow_invalid_params` and retain the rejection message.
 
 `workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
 `runSavedArgs` and `runScript`; a daemon without them accepts neither the start
-input nor the `run-script` action.
+input nor the `run-script` action. It also carries `nameOnly`, true when the
+session's model may run named workflows only (`tools.workflowNameOnly`): the
+model's own `script` and `scriptPath` calls are refused, while every action
+above, `run-script` included, still starts runs.
 
 ### `GET /session/:id/lsp`
 
