@@ -649,6 +649,7 @@ it.each([false, true])(
           maxSessions: 1,
           serveWebShell: false,
           experimentalManagedRuntimeWorker: true,
+          ...(owned ? { requireAuth: true } : {}),
         },
         {
           bridge: makeRuntimeBridge(),
@@ -674,6 +675,28 @@ it.each([false, true])(
         },
       );
       await handle.runtimeReady;
+      if (owned) {
+        expect((await fetch(`${handle.url}/health`)).status).toBe(401);
+        const health = await fetch(`${handle.url}/health`, {
+          headers: { authorization: 'Bearer runtime-worker-secret' },
+        });
+        expect(health.status).toBe(200);
+        await expect(health.json()).resolves.toEqual({ status: 'ok' });
+        expect(
+          (
+            await fetch(`${handle.url}/health?deep=1`, {
+              headers: { authorization: 'Bearer runtime-worker-secret' },
+            })
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await fetch(`${handle.url}/capabilities`, {
+              headers: { authorization: 'Bearer runtime-worker-secret' },
+            })
+          ).status,
+        ).toBe(404);
+      }
       await fetch(`${handle.url}${MANAGED_RUNTIME_ROUTE_PREFIX}/prepare`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

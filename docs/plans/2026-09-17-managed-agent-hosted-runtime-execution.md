@@ -6,7 +6,7 @@
 
 设计依据：[Java Runtime Broker MVP](../design/2026-09-17-managed-agent-java-runtime-broker-mvp.zh-CN.md)
 
-当前完成范围：P1、P2、P4、P5a 和 P5b；Hosted Harness、Java Broker 以及冷启动、幂等、取消、多 Session 隔离、独立 worker 文件握手和 Java 自有本地 Runtime 生命周期均已有实现与测试证据。
+当前完成范围：P1、P2、P4 和 P5；Hosted Harness、Java Broker 以及冷启动、幂等、取消、多 Session 隔离、独立 worker 文件握手、Java 自有本地 Runtime 生命周期和故障收敛均已有实现与测试证据。
 
 ## 1. 结论
 
@@ -357,12 +357,12 @@ P4 已自动化并接入 Java CI：
 
 ## 12. 紧接着执行的工作
 
-P1、P2、P4、P5a 和 P5b 已经闭环。下一条产品关键路径是 P3，同时在 qwen-code 内完成 P5c：
+P1、P2、P4 和 P5 已经闭环。下一条产品关键路径是 P3：
 
 1. 在真实 Java 产品服务定位 Prompt admission 事务、Session owner 表和 SSE event store 接缝。
 2. 实现 `ManagedAgentCoordinator`：事务提交后并行调用 `runtimeBroker.warm()` 与 `harnessClient.submitPrompt()`，禁止串行等待 Runtime。
 3. 把 Harness event 投影为带单调 `eventSequence` 的公共事件，并实现 `Last-Event-ID` 重连。
-4. 将真实 E2E 改为由 Java `LocalProcessRuntimeProvisioner` 直接启动 Runtime，并闭环 timeout、invalid ready、ready 后 crash 和 shutdown。
-5. P3/P5 通过后再进入持久化恢复；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
+4. 在产品接入测试中复用已经完成的 Java 自有 Runtime E2E，不再保留 endpoint 测试注入或 Harness 启动 Runtime 的旁路。
+5. P3 通过后再进入持久化恢复；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
 
 P3 的最小上线判断只有三个：首个模型事件不等待 Runtime、同 Turn 的工具只执行一次、Java/Harness/Runtime 任一失败都不回落 Legacy。持久化 schema、Kubernetes 调度和完整 Agent API 兼容不能阻塞这三个判断的第一次产品验证。

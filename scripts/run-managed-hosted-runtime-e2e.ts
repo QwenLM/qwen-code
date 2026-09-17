@@ -11,15 +11,11 @@ import {
 import { tmpdir } from 'node:os';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
-import {
-  readManagedWorkerReadyRecord,
-  type ManagedWorkerFileBoot,
-} from '../packages/cli/src/serve/managed-runtime-worker-bootstrap.js';
 
 const root = process.cwd();
 const argumentsList = process.argv.slice(2);
@@ -53,7 +49,7 @@ const temporary = realpathSync(
 const workspace = path.join(temporary, 'workspace');
 const harnessHome = path.join(temporary, 'harness-home');
 const runtimeHome = path.join(temporary, 'runtime-home');
-const runtimeOutput = path.join(temporary, 'runtime-output');
+const runtimeState = path.join(temporary, 'runtime-state');
 const trustedFolders = path.join(temporary, 'trusted-folders.json');
 const activeCancelScript = path.join(workspace, 'active-cancel.cjs');
 const activeCancelStarted = path.join(workspace, 'active-cancel-started.json');
@@ -61,8 +57,6 @@ const activeCancelDelayedWrite = path.join(
   workspace,
   'active-cancel-delayed.txt',
 );
-const runtimeBootConfig = path.join(runtimeOutput, 'boot.json');
-const runtimeReadyRecord = path.join(runtimeOutput, 'ready.json');
 const workspaceId = createHash('sha256')
   .update(workspace)
   .digest('hex')
@@ -74,12 +68,10 @@ const runtimeDelayMs = cancelAfterStart || twoSessions ? 0 : 15_000;
 const harnessToken = 'managed-hosted-harness-token';
 const brokerToken = 'managed-hosted-broker-token';
 const controlToken = 'managed-hosted-control-token';
-const runtimeToken = 'managed-hosted-runtime-token';
-const leaseId = 'managed-hosted-lease';
 mkdirSync(workspace, { recursive: true });
 mkdirSync(path.join(harnessHome, '.qwen'), { recursive: true });
 mkdirSync(path.join(runtimeHome, '.qwen'), { recursive: true });
-mkdirSync(runtimeOutput, { recursive: true });
+mkdirSync(runtimeState, { recursive: true });
 writeFileSync(
   activeCancelScript,
   `const { spawn } = require('node:child_process');
@@ -273,79 +265,6 @@ async function waitForProvisionStart(
   throw new Error('Runtime provisioning did not start within 30 seconds');
 }
 
-async function waitUntil(timestamp: number): Promise<void> {
-  const remaining = timestamp - Date.now();
-  if (remaining <= 0) return;
-  await Promise.race([
-    new Promise<void>((resolve) => setTimeout(resolve, remaining)),
-    signalFailure,
-  ]);
-}
-
-async function verifyInvalidFileBootRejected(): Promise<void> {
-  writeFileSync(runtimeBootConfig, 'x'.repeat(32_769), { mode: 0o600 });
-  let stderr = '';
-  const worker = register(
-    spawn(
-      process.execPath,
-      [
-        runtimeWorker,
-        '--boot-config',
-        runtimeBootConfig,
-        '--ready-record',
-        runtimeReadyRecord,
-      ],
-      {
-        cwd: root,
-        detached: process.platform !== 'win32',
-        env: commonEnvironment,
-        stdio: ['ignore', 'ignore', 'pipe'],
-      },
-    ),
-    'Invalid Managed Runtime worker',
-  );
-  worker.stderr?.on('data', (chunk) => {
-    stderr += chunk.toString();
-  });
-  const code = await waitForExit(
-    worker,
-    'Invalid Managed Runtime worker',
-    5_000,
-  );
-  if (code !== 1 || existsSync(runtimeReadyRecord)) {
-    throw new Error(
-      `Managed Runtime worker accepted an invalid boot config (code=${code})\n${stderr}`,
-    );
-  }
-}
-
-async function waitForManagedWorkerReady(
-  worker: ChildProcess,
-  boot: ManagedWorkerFileBoot,
-  stderr: () => string,
-): Promise<Awaited<ReturnType<typeof readManagedWorkerReadyRecord>>> {
-  const workerFailure = new Promise<never>((_resolve, reject) => {
-    worker.once('error', reject);
-    worker.once('exit', (code) => {
-      reject(new Error(`Managed Runtime exited with ${code}\n${stderr()}`));
-    });
-  });
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    try {
-      return await readManagedWorkerReadyRecord(runtimeReadyRecord, boot);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    await Promise.race([
-      new Promise((resolve) => setTimeout(resolve, 50)),
-      workerFailure,
-      signalFailure,
-    ]);
-  }
-  throw new Error(`Managed Runtime startup timed out\n${stderr()}`);
-}
-
 async function startBrokerResponseLossProxy(
   targetOrigin: string,
   dropFirstExecutionResponse: boolean,
@@ -440,9 +359,6 @@ let brokerProxy:
   | undefined;
 let runFailure: unknown;
 try {
-  if (!cancelBeforeReady && !cancelAfterStart && !twoSessions) {
-    await verifyInvalidFileBootRejected();
-  }
   fake = await startFakeOpenAIServer(({ body }) => {
     const messages = Array.isArray(body['messages']) ? body['messages'] : [];
     const serializedMessages = JSON.stringify(messages);
@@ -484,7 +400,6 @@ try {
     return { content: finalText };
   });
 
-  let runtimeStderr = '';
   let brokerStderr = '';
   const broker = register(
     spawn(
@@ -505,10 +420,15 @@ try {
           ...commonEnvironment,
           QWEN_BROKER_FIXTURE_TOKEN: brokerToken,
           QWEN_BROKER_FIXTURE_CONTROL_TOKEN: controlToken,
-          QWEN_BROKER_FIXTURE_RUNTIME_TOKEN: runtimeToken,
-          QWEN_BROKER_FIXTURE_LEASE_ID: leaseId,
           QWEN_BROKER_FIXTURE_WORKSPACE: workspace,
           QWEN_BROKER_FIXTURE_WORKSPACE_ID: workspaceId,
+          QWEN_BROKER_FIXTURE_NODE: process.execPath,
+          QWEN_BROKER_FIXTURE_WORKER_ENTRY: runtimeWorker,
+          QWEN_BROKER_FIXTURE_CLI_ENTRY: cliBundle,
+          QWEN_BROKER_FIXTURE_STATE_DIRECTORY: runtimeState,
+          QWEN_BROKER_FIXTURE_START_DELAY_MS: String(runtimeDelayMs),
+          HOME: runtimeHome,
+          QWEN_HOME: path.join(runtimeHome, '.qwen'),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -635,84 +555,15 @@ try {
     ),
     'Managed Hosted Java E2E',
   );
-  const coldRuntimeStartup = (async () => {
-    const provisionStartedAt = await waitForProvisionStart(
-      controlUrl,
-      controlToken,
-    );
-    await waitUntil(provisionStartedAt + runtimeDelayMs);
-
-    const boot: ManagedWorkerFileBoot = {
-      type: 'boot',
-      version: 1,
-      runtimeInstanceId: randomUUID(),
-      gatewayIncarnation: randomUUID(),
-      leaseId,
-      epoch: 1,
-      tenantId: 'tenant-e2e',
-      workspaceId,
-      workspaceCwd: workspace,
-      token: runtimeToken,
-      outputRoot: runtimeOutput,
-      cliEntry: cliBundle,
-    };
-    writeFileSync(runtimeBootConfig, JSON.stringify(boot), { mode: 0o600 });
-    const runtime = register(
-      spawn(
-        process.execPath,
-        [
-          runtimeWorker,
-          '--boot-config',
-          runtimeBootConfig,
-          '--ready-record',
-          runtimeReadyRecord,
-        ],
-        {
-          cwd: root,
-          detached: process.platform !== 'win32',
-          env: {
-            ...commonEnvironment,
-            HOME: runtimeHome,
-            QWEN_HOME: path.join(runtimeHome, '.qwen'),
-            QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFolders,
-          },
-          stdio: ['ignore', 'pipe', 'pipe'],
-        },
-      ),
-      'Managed Runtime worker',
-    );
-    runtime.stderr?.on('data', (chunk) => {
-      runtimeStderr += chunk.toString();
-    });
-    const runtimeReady = await waitForManagedWorkerReady(
-      runtime,
-      boot,
-      () => runtimeStderr,
-    );
-    const runtimeUrl = runtimeReady.url;
-    const response = await fetch(
-      new URL('/fixture/runtime-ready', controlUrl),
-      {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${controlToken}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ runtimeUrl }),
-      },
-    );
-    if (!response.ok) {
-      throw new Error(
-        `Runtime Broker ready notification returned ${response.status}: ${await response.text()}`,
-      );
-    }
-  })();
-  const [result] = await Promise.all([
-    waitForExit(javaTest, 'Managed Hosted Java E2E', 2 * 60_000),
-    coldRuntimeStartup,
-  ]);
+  await waitForProvisionStart(controlUrl, controlToken);
+  const result = await waitForExit(
+    javaTest,
+    'Managed Hosted Java E2E',
+    2 * 60_000,
+  );
   if (result !== 0) {
     let harnessLog = '';
+    let brokerStatus = '(Runtime Broker status unavailable)';
     try {
       harnessLog = readFileSync(
         path.join(harnessHome, '.qwen', 'debug', 'daemon', 'daemon.log'),
@@ -721,8 +572,19 @@ try {
     } catch {
       harnessLog = '(Harness daemon log unavailable)';
     }
+    try {
+      const statusResponse = await fetch(
+        new URL('/fixture/status', controlUrl),
+        {
+          headers: { authorization: `Bearer ${controlToken}` },
+        },
+      );
+      brokerStatus = `${statusResponse.status} ${await statusResponse.text()}`;
+    } catch {
+      brokerStatus = '(Runtime Broker status unavailable)';
+    }
     throw new Error(
-      `Managed Hosted Java E2E failed with ${result}; fake requests=${fake.requests.length}\n${harnessStderr}\n${brokerStderr}\n${runtimeStderr}\n${harnessLog}`,
+      `Managed Hosted Java E2E failed with ${result}; fake requests=${fake.requests.length}; broker status=${brokerStatus}\n${harnessStderr}\n${brokerStderr}\n${harnessLog}`,
     );
   }
   const minimumModelRequests =

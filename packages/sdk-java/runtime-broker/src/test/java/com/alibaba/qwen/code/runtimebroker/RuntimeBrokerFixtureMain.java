@@ -5,8 +5,11 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,18 +34,23 @@ public final class RuntimeBrokerFixtureMain {
         String brokerToken = requiredEnvironment("QWEN_BROKER_FIXTURE_TOKEN");
         String controlToken = requiredEnvironment(
                 "QWEN_BROKER_FIXTURE_CONTROL_TOKEN");
-        String runtimeToken = requiredEnvironment(
-                "QWEN_BROKER_FIXTURE_RUNTIME_TOKEN");
-        String leaseId = requiredEnvironment("QWEN_BROKER_FIXTURE_LEASE_ID");
         String workspace = requiredEnvironment(
                 "QWEN_BROKER_FIXTURE_WORKSPACE");
         String workspaceId = requiredEnvironment(
                 "QWEN_BROKER_FIXTURE_WORKSPACE_ID");
+        Path nodeExecutable = Path.of(requiredEnvironment(
+                "QWEN_BROKER_FIXTURE_NODE"));
+        Path workerEntry = Path.of(requiredEnvironment(
+                "QWEN_BROKER_FIXTURE_WORKER_ENTRY"));
+        Path cliEntry = Path.of(requiredEnvironment(
+                "QWEN_BROKER_FIXTURE_CLI_ENTRY"));
+        Path stateDirectory = Path.of(requiredEnvironment(
+                "QWEN_BROKER_FIXTURE_STATE_DIRECTORY"));
+        long startupDelayMillis = Long.parseLong(requiredEnvironment(
+                "QWEN_BROKER_FIXTURE_START_DELAY_MS"));
 
         RuntimeScope scope = new RuntimeScope("tenant-e2e", workspaceId,
                 "generation-e2e", workspace, "capability-e2e", "workspace");
-        CompletableFuture<RuntimeLease> runtimeReady =
-                new CompletableFuture<>();
         AtomicInteger provisionCount = new AtomicInteger();
         AtomicInteger warmRequests = new AtomicInteger();
         AtomicInteger physicalAcquireCount = new AtomicInteger();
@@ -54,11 +62,24 @@ public final class RuntimeBrokerFixtureMain {
                 ConcurrentHashMap.newKeySet();
         AtomicLong provisionStartedAt = new AtomicLong(-1);
         AtomicLong runtimeReadyAt = new AtomicLong(-1);
+        ExecutorService runtimeExecutor = Executors.newCachedThreadPool(
+                runnable -> daemonThread(runnable, "runtime-fixture-worker"));
+        LocalProcessRuntimeProvisioner localProvisioner =
+                new LocalProcessRuntimeProvisioner(stateDirectory,
+                        delayedWorkerCommand(startupDelayMillis,
+                                nodeExecutable, workerEntry), cliEntry,
+                        runtimeEnvironment(), 4, Duration.ofSeconds(60),
+                        Duration.ofSeconds(2), Duration.ofSeconds(5),
+                        Duration.ofSeconds(5), HttpClient.newBuilder()
+                                .version(HttpClient.Version.HTTP_1_1)
+                                .connectTimeout(Duration.ofSeconds(2))
+                                .followRedirects(HttpClient.Redirect.NEVER)
+                                .build(), runtimeExecutor);
 
         RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(scope),
-                ignored -> provision(runtimeReady, provisionCount,
-                        provisionStartedAt),
+                observedProvisioner(localProvisioner, provisionCount,
+                        provisionStartedAt, runtimeReadyAt),
                 observedTransport(new HttpRuntimeTransport(),
                         physicalAcquireCount, physicalExecutionCount,
                         physicalCancelCount, acquiredHarnessSessionIds,
@@ -73,15 +94,12 @@ public final class RuntimeBrokerFixtureMain {
         control.setExecutor(controlExecutor);
         control.createContext("/fixture/warm", exchange -> warm(exchange,
                 expectedAuthorization, service, warmRequests));
-        control.createContext("/fixture/runtime-ready", exchange ->
-                runtimeReady(exchange, expectedAuthorization, runtimeReady,
-                        runtimeToken, leaseId, runtimeReadyAt));
         control.createContext("/fixture/status", exchange -> status(exchange,
                 expectedAuthorization, provisionCount, warmRequests,
                 physicalAcquireCount, physicalExecutionCount,
                 physicalCancelCount,
                 acquiredHarnessSessionIds, executedHarnessSessionIds,
-                provisionStartedAt, runtimeReadyAt));
+                provisionStartedAt, runtimeReadyAt, localProvisioner));
 
         broker.start();
         control.start();
@@ -100,12 +118,53 @@ public final class RuntimeBrokerFixtureMain {
         new CountDownLatch(1).await();
     }
 
-    private static CompletableFuture<RuntimeLease> provision(
-            CompletableFuture<RuntimeLease> runtimeReady,
-            AtomicInteger provisionCount, AtomicLong provisionStartedAt) {
-        provisionCount.incrementAndGet();
-        provisionStartedAt.compareAndSet(-1, System.currentTimeMillis());
-        return runtimeReady;
+    private static RuntimeProvisioner observedProvisioner(
+            LocalProcessRuntimeProvisioner delegate,
+            AtomicInteger provisionCount, AtomicLong provisionStartedAt,
+            AtomicLong runtimeReadyAt) {
+        return new RuntimeProvisioner() {
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                provisionCount.incrementAndGet();
+                provisionStartedAt.compareAndSet(-1,
+                        System.currentTimeMillis());
+                return delegate.provision(request).whenComplete(
+                        (lease, error) -> {
+                            if (error == null) {
+                                runtimeReadyAt.compareAndSet(-1,
+                                        System.currentTimeMillis());
+                            } else {
+                                System.err.println(
+                                        "QWEN_RUNTIME_BROKER_PROVISION_FAILED");
+                                error.printStackTrace(System.err);
+                                System.err.flush();
+                            }
+                        });
+            }
+
+            @Override
+            public CompletionStage<Void> drain(
+                    RuntimeProvisionRequest request, RuntimeLease lease) {
+                return delegate.drain(request, lease);
+            }
+
+            @Override
+            public CompletionStage<Void> release(
+                    RuntimeProvisionRequest request, RuntimeLease lease) {
+                return delegate.release(request, lease);
+            }
+
+            @Override
+            public CompletionStage<Boolean> health(RuntimeLease lease) {
+                return delegate.health(lease);
+            }
+
+            @Override
+            public void close() {
+                delegate.close();
+            }
+        };
     }
 
     private static RuntimeTransport observedTransport(
@@ -211,46 +270,6 @@ public final class RuntimeBrokerFixtureMain {
         }
     }
 
-    private static void runtimeReady(HttpExchange exchange,
-            byte[] expectedAuthorization,
-            CompletableFuture<RuntimeLease> runtimeReady,
-            String runtimeToken, String leaseId, AtomicLong runtimeReadyAt)
-            throws IOException {
-        try {
-            authorize(exchange, expectedAuthorization);
-            if (!"POST".equals(exchange.getRequestMethod())) {
-                send(exchange, 405, Map.of("error", "method_not_allowed"));
-                return;
-            }
-            byte[] bytes = exchange.getRequestBody().readNBytes(
-                    MAXIMUM_CONTROL_BYTES + 1);
-            if (bytes.length > MAXIMUM_CONTROL_BYTES) {
-                send(exchange, 413, Map.of("error", "request_too_large"));
-                return;
-            }
-            Map<String, Object> body = JsonCodec.parseObject(bytes,
-                    "fixture runtime-ready request");
-            URI runtimeUrl = URI.create(JsonCodec.requiredString(body,
-                    "runtimeUrl", "fixture runtime-ready request"));
-            long readyAt = System.currentTimeMillis();
-            if (!runtimeReadyAt.compareAndSet(-1, readyAt)) {
-                send(exchange, 409,
-                        Map.of("error", "runtime_already_ready"));
-                return;
-            }
-            runtimeReady.complete(new RuntimeLease("runtime-e2e", runtimeUrl,
-                    runtimeToken, leaseId, 1));
-            System.out.println("QWEN_RUNTIME_BROKER_RUNTIME_READY " + readyAt);
-            System.out.flush();
-            send(exchange, 200, Map.of("ready", true));
-        } catch (RuntimeBrokerException error) {
-            send(exchange, error.getStatusCode(),
-                    Map.of("error", error.getCode()));
-        } catch (IllegalArgumentException error) {
-            send(exchange, 400, Map.of("error", "invalid_request"));
-        }
-    }
-
     private static void status(HttpExchange exchange,
             byte[] expectedAuthorization, AtomicInteger provisionCount,
             AtomicInteger warmRequests, AtomicInteger physicalAcquireCount,
@@ -258,7 +277,8 @@ public final class RuntimeBrokerFixtureMain {
             AtomicInteger physicalCancelCount,
             Set<String> acquiredHarnessSessionIds,
             Set<String> executedHarnessSessionIds,
-            AtomicLong provisionStartedAt, AtomicLong runtimeReadyAt)
+            AtomicLong provisionStartedAt, AtomicLong runtimeReadyAt,
+            LocalProcessRuntimeProvisioner provisioner)
             throws IOException {
         try {
             authorize(exchange, expectedAuthorization);
@@ -279,6 +299,12 @@ public final class RuntimeBrokerFixtureMain {
             body.put("provisionStartedAtEpochMillis",
                     provisionStartedAt.get());
             body.put("runtimeReadyAtEpochMillis", runtimeReadyAt.get());
+            body.put("physicalStartCount",
+                    provisioner.getPhysicalStartCount());
+            body.put("physicalStopCount",
+                    provisioner.getPhysicalStopCount());
+            body.put("liveProcessIds",
+                    List.copyOf(provisioner.getLiveProcessIds()));
             send(exchange, 200, body);
         } catch (RuntimeBrokerException error) {
             send(exchange, 401, Map.of("error", "unauthorized"));
@@ -308,6 +334,49 @@ public final class RuntimeBrokerFixtureMain {
 
     private static URI origin(InetSocketAddress address) {
         return URI.create("http://127.0.0.1:" + address.getPort() + "/");
+    }
+
+    private static List<String> delayedWorkerCommand(long delayMillis,
+            Path nodeExecutable, Path workerEntry) {
+        if (delayMillis < 0) {
+            throw new IllegalArgumentException(
+                    "startup delay must be non-negative");
+        }
+        return List.of("/bin/sh", "-c",
+                "sleep \"$1\"; shift; exec \"$@\"",
+                "managed-runtime-delay",
+                Double.toString(delayMillis / 1000.0),
+                nodeExecutable.toString(), workerEntry.toString());
+    }
+
+    private static Map<String, String> runtimeEnvironment() {
+        Map<String, String> environment = new LinkedHashMap<>();
+        copyEnvironment(environment, "HOME");
+        copyEnvironment(environment, "QWEN_HOME");
+        copyEnvironment(environment, "PATH");
+        copyEnvironment(environment, "TMPDIR");
+        copyEnvironment(environment, "LANG");
+        copyEnvironment(environment, "LC_ALL");
+        copyEnvironment(environment, "SHELL");
+        copyEnvironment(environment, "USER");
+        copyEnvironment(environment, "LOGNAME");
+        copyEnvironment(environment, "NO_PROXY");
+        copyEnvironment(environment, "no_proxy");
+        return environment;
+    }
+
+    private static void copyEnvironment(Map<String, String> target,
+            String name) {
+        String value = System.getenv(name);
+        if (value != null) {
+            target.put(name, value);
+        }
+    }
+
+    private static Thread daemonThread(Runnable runnable, String name) {
+        Thread thread = new Thread(runnable, name);
+        thread.setDaemon(true);
+        return thread;
     }
 
     private static String requiredEnvironment(String name) {

@@ -83,6 +83,7 @@ public final class LocalProcessRuntimeProvisioner
                 cliEntry, environment, 4, Duration.ofSeconds(60),
                 Duration.ofSeconds(2), Duration.ofSeconds(5),
                 Duration.ofSeconds(5), HttpClient.newBuilder()
+                        .version(HttpClient.Version.HTTP_1_1)
                         .connectTimeout(Duration.ofSeconds(2))
                         .followRedirects(HttpClient.Redirect.NEVER).build(),
                 daemonExecutor());
@@ -263,11 +264,10 @@ public final class LocalProcessRuntimeProvisioner
             executor.execute(new StreamTail(process.getInputStream()));
             executor.execute(new StreamTail(process.getErrorStream()));
             physicalStarts.incrementAndGet();
-            RuntimeLease lease = waitForReady(generation);
-            if (!checkHealth(lease)) {
-                throw failure("runtime_broker_health_failed",
-                        "Managed Runtime health check failed.", true, null);
-            }
+            long startupDeadline = System.nanoTime()
+                    + startupTimeout.toNanos();
+            RuntimeLease lease = waitForReady(generation, startupDeadline);
+            waitForHealthy(generation, lease, startupDeadline);
             Files.deleteIfExists(generation.bootConfig);
             generation.ready.complete(lease);
         } catch (Throwable error) {
@@ -283,9 +283,8 @@ public final class LocalProcessRuntimeProvisioner
         }
     }
 
-    private RuntimeLease waitForReady(Generation generation)
+    private RuntimeLease waitForReady(Generation generation, long deadline)
             throws IOException, InterruptedException {
-        long deadline = System.nanoTime() + startupTimeout.toNanos();
         while (System.nanoTime() < deadline) {
             if (generation.isStopping()) {
                 throw failure("runtime_broker_closed",
@@ -303,6 +302,35 @@ public final class LocalProcessRuntimeProvisioner
         }
         throw failure("runtime_broker_start_timeout",
                 "Managed Runtime startup timed out.", true, null);
+    }
+
+    private void waitForHealthy(Generation generation, RuntimeLease lease,
+            long deadline) throws InterruptedException {
+        Throwable lastFailure = null;
+        while (System.nanoTime() < deadline) {
+            if (generation.isStopping()) {
+                throw failure("runtime_broker_closed",
+                        "Runtime Broker is closed.", false, null);
+            }
+            if (!generation.process.isAlive()) {
+                throw failure("runtime_broker_process_exited",
+                        "Managed Runtime exited during startup.", true,
+                        lastFailure);
+            }
+            try {
+                verifyHealth(lease, remainingTimeout(deadline));
+                return;
+            } catch (IOException | RuntimeException exception) {
+                lastFailure = exception;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos > 0) {
+                TimeUnit.NANOSECONDS.sleep(Math.min(
+                        TimeUnit.MILLISECONDS.toNanos(25), remainingNanos));
+            }
+        }
+        throw failure("runtime_broker_health_failed",
+                "Managed Runtime health check failed.", true, lastFailure);
     }
 
     private RuntimeLease readReady(Generation generation) throws IOException {
@@ -369,36 +397,55 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     private boolean checkHealth(RuntimeLease lease) {
+        try {
+            verifyHealth(lease, healthTimeout);
+            return true;
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException | RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private void verifyHealth(RuntimeLease lease, Duration timeout)
+            throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(
                 lease.getEndpoint().resolve("/health"))
-                .timeout(healthTimeout)
+                .timeout(timeout)
                 .header("Authorization", "Bearer " + lease.getToken())
                 .header("X-Qwen-Managed-Lease-Id", lease.getLeaseId())
                 .header("X-Qwen-Managed-Lease-Epoch",
                         Long.toString(lease.getEpoch()))
                 .GET().build();
-        try {
-            HttpResponse<InputStream> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofInputStream());
-            byte[] bytes;
-            try (InputStream body = response.body()) {
-                bytes = body.readNBytes(HEALTH_MAXIMUM_BYTES + 1);
-            }
-            if (response.statusCode() != 200
-                    || bytes.length > HEALTH_MAXIMUM_BYTES) {
-                return false;
-            }
-            Map<String, Object> body = JsonCodec.parseObject(bytes,
-                    "Runtime health response");
-            return body.size() == 1 && "ok".equals(body.get("status"));
-        } catch (IOException exception) {
-            return false;
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            return false;
-        } catch (RuntimeException exception) {
-            return false;
+        HttpResponse<InputStream> response = httpClient.send(request,
+                HttpResponse.BodyHandlers.ofInputStream());
+        byte[] bytes;
+        try (InputStream body = response.body()) {
+            bytes = body.readNBytes(HEALTH_MAXIMUM_BYTES + 1);
         }
+        if (response.statusCode() != 200) {
+            throw new IOException("health returned HTTP "
+                    + response.statusCode());
+        }
+        if (bytes.length > HEALTH_MAXIMUM_BYTES) {
+            throw new IOException("health response exceeds its limit");
+        }
+        Map<String, Object> body;
+        try {
+            body = JsonCodec.parseObject(bytes, "Runtime health response");
+        } catch (RuntimeException exception) {
+            throw new IOException("health response is invalid", exception);
+        }
+        if (body.size() != 1 || !"ok".equals(body.get("status"))) {
+            throw new IOException("health response is not ok");
+        }
+    }
+
+    private Duration remainingTimeout(long deadline) {
+        long remainingNanos = Math.max(1, deadline - System.nanoTime());
+        return Duration.ofNanos(Math.min(healthTimeout.toNanos(),
+                remainingNanos));
     }
 
     private void writeBoot(Generation generation, Path workspace)

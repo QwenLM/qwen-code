@@ -1,6 +1,6 @@
 # Managed Agent Java 自有 Runtime 生命周期执行方案
 
-状态：执行中（P5a、P5b 已完成，下一步 P5c）
+状态：已完成（P5a、P5b、P5c）
 
 更新日期：2026-09-18
 
@@ -254,7 +254,7 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 
 提交：`feat(java): own local runtime lifecycle`
 
-### P5c：故障与真实进程 E2E
+### P5c：故障与真实进程 E2E（已完成）
 
 改动：
 
@@ -272,6 +272,10 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 
 提交：`test(managed): verify java-owned runtime lifecycle`
 
+2026-09-18 证据：真实 E2E 已删除 Runtime 手工 fork 和 `/fixture/runtime-ready` endpoint 注入，Java fixture 直接构造 `LocalProcessRuntimeProvisioner`。正常 15 秒冷启动链路的 Prompt accepted 为 12 ms、首个模型事件 267 ms、Runtime ready 15,559 ms、Tool 等待 Runtime 15,292 ms、Turn 完成 16,427 ms，丢失一次 execution 响应后 physical execute 仍为 1。ready 前取消在 280 ms 发出，Runtime 15,566 ms ready，physical execute 为 0；执行中取消的 physical execute 和 physical cancel 均为 1；双 Session 使用一次 physical provision、两次 acquire 和两次 execute且无身份串流。
+
+Java 故障测试共 8 个通过，覆盖首次 health 连接中断重试、startup timeout 后进程与 generation 目录收敛并以 epoch 2 重试、invalid ready fail closed、ready 后 crash 可观测且新 generation 使用更高 epoch、Broker close 回收 worker 与子进程。Runtime worker 的底层 listener 只额外开放鉴权后的精确 `GET /health`，深度 health 和其他外部路由仍返回 404；Java 到 worker 固定使用 HTTP/1.1。
+
 ## 8. 可执行测试矩阵
 
 | 场景                         | 必须断言                                                           |
@@ -287,7 +291,7 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 | last Session release         | READY -> DRAINING -> RELEASED；新 acquire 使用更高 epoch           |
 | Java close                   | 拒绝新请求；全部 Runtime 进程树退出                                |
 
-每个真实进程用例输出：`runtime_start_ms`、`runtime_health_ms`、`runtime_instance_id`、`lease_epoch`、`physical_start_count`、`physical_stop_count` 和仍存活 PID 列表。CI 只允许仍存活 PID 列表为空时通过。
+Hosted E2E 输出 TTFT、Runtime ready、Tool wait、Turn total 和 physical operation count；Java 故障测试直接断言 epoch、physical start/stop count、generation 目录和仍存活 PID 列表。CI 只允许故障路径资源收敛且仍存活 PID 列表为空时通过。
 
 ## 9. 稳定错误码
 
@@ -315,12 +319,11 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 
 ## 11. 执行与发布顺序
 
-严格按 P5a -> P5b -> P5c 执行。P5a 合入前不写 Java ProcessBuilder；P5b 的单测和假 worker 全绿前不改真实 E2E；五类故障 E2E 未闭环前，不进入 Kubernetes 或 P6 持久化。
+P5 已按 P5a -> P5b -> P5c 完成。产品 Java 服务现在可以接入固定构造参数；灰度期可保留 Static Provisioner 作为部署级回滚路径，但单次 execution 仍禁止跨 generation 自动重放。
 
-当前只执行 P5c，顺序固定为：
+下一阶段按以下顺序执行：
 
-1. Java E2E fixture 改为直接构造 `LocalProcessRuntimeProvisioner`，删除 Runtime endpoint 测试注入。
-2. 正常链路证明模型首事件不等待 Runtime ready，并记录启动、health 和物理进程计数。
-3. 依次加入 startup timeout、invalid ready、ready 后 crash、Broker shutdown；每类故障先证明进程和目录收敛，再检查错误码。
-4. 最后运行 Java Broker 全量测试、CLI build/typecheck、Managed Agent 四条真实 E2E，并做两轮 clean diff 审计。
-5. P5c 全绿后才允许产品 Java 服务接入构造参数；灰度期保留 Static Provisioner 回退，但单次 execution 禁止跨 generation 自动重放。
+1. 在真实 Java 产品服务定位 Prompt admission、Session owner、SSE event store 和 tenant/workspace 鉴权接缝。
+2. 接入 `RuntimeBrokerService` 与 Hosted Harness，事务提交后并行 warm Runtime 和提交 Prompt。
+3. 用现有四条真实 E2E 作为产品接入回归，证明 TTFT、幂等、取消和多 Session 隔离不退化。
+4. P3 通过后进入 P6 持久化与重启恢复；Kubernetes Provisioner 不与首次产品接入并行扩面。

@@ -652,7 +652,7 @@ Trace 至少关联 `publicSessionId`、`publicTurnId`、`publicItemId`、`harnes
 
 ## 21. 进入运行链路实现前的硬门槛
 
-- A0 的接口和 schema 设计可以先行；进入 A1 前，P5c 的 Java 自有 Runtime 故障 E2E 必须完成，能够证明 timeout/crash/shutdown 后资源收敛；
+- P5c 的 Java 自有 Runtime 故障 E2E 已完成，timeout、invalid ready、crash 和 shutdown 后资源均可观察并收敛；
 - 产品 Java 仓已确认 Prompt admission 事务、Session 表、SSE 和鉴权接缝；
 - `AgentSessionApplicationService` 和 Repository schema 评审通过；
 - Hosted Harness 私有协议带版本和 capability digest；
