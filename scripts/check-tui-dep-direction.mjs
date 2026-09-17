@@ -90,10 +90,9 @@ const VI_MODULE_METHODS = new Set([
  * skipped-directory names (node_modules/dist/.git — none belong inside a
  * protected source root, and content hidden there would escape the scan)
  * are collected as diagnostics for the caller to fail on. The one exception
- * is a skipped-directory name under one of `stagedRoots`: those are
- * git-ignored build artifacts staged inside a protected root (see
- * STAGED_ARTIFACT_ROOTS), they cannot hold committed source, and they are
- * skipped without a diagnostic.
+ * is a directory under one of `stagedRoots`: those are git-ignored build
+ * artifacts staged inside a protected root (see STAGED_ARTIFACT_ROOTS). They
+ * are not source, cannot hold committed code, and are not walked at all.
  *
  * Symlinks fail closed. `checkRule` resolves a file's relative imports from
  * the path the file was reached at, but a symlink's bytes live wherever the
@@ -124,8 +123,9 @@ function listSourceFiles(root, stagedRoots = STAGED_ARTIFACT_ROOTS) {
         continue;
       }
       if (entry.isDirectory()) {
+        if (isWithin(full, stagedRoots)) continue;
         if (SKIP_DIRS.has(entry.name)) {
-          if (!isWithin(full, stagedRoots)) skippedDirs.push(full);
+          skippedDirs.push(full);
         } else {
           walk(full);
         }

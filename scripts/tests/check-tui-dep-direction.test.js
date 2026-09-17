@@ -469,12 +469,13 @@ describe('listSourceFiles', () => {
     expect(unreadableDirs).toEqual([]);
   });
 
-  it('reports a node_modules inside the root unless it is a staged artifact', () => {
+  it('does not walk a staged artifact root, but still reports other node_modules', () => {
     // The Browser Use build stages the bundled skill runtime, node_modules
     // included, under packages/core/src; that root is declared as a staged
-    // artifact and skipped silently. Any other node_modules still fails.
+    // artifact and left alone entirely. Any other node_modules still fails.
     const root = makeTemporaryDirectory();
     mkdirSync(join(root, 'staged', 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'staged', 'index.js'), "import 'ink';\n");
     writeFileSync(join(root, 'staged', 'node_modules', 'a.ts'), 'export {};\n');
     mkdirSync(join(root, 'stray', 'node_modules'), { recursive: true });
     writeFileSync(join(root, 'stray', 'node_modules', 'b.ts'), 'export {};\n');
@@ -483,8 +484,11 @@ describe('listSourceFiles', () => {
     expect(scoped.files).toEqual([]);
     expect(scoped.skippedDirs).toEqual([join(root, 'stray', 'node_modules')]);
 
-    // Without the declaration both are diagnostics.
-    expect(listSourceFiles(root).skippedDirs).toHaveLength(2);
+    // Without the declaration the staged tree is ordinary source: its file is
+    // scanned and both node_modules are diagnostics.
+    const plain = listSourceFiles(root);
+    expect(plain.files).toEqual([join(root, 'staged', 'index.js')]);
+    expect(plain.skippedDirs).toHaveLength(2);
   });
 });
 
