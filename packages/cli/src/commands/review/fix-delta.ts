@@ -47,6 +47,7 @@ import {
   statSync,
   writeSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -670,8 +671,7 @@ export function snapshotWorkingTree(
         ? 'HEAD'
         : null;
   const blankFilters = blankedFilterEnv(root, 'the capture');
-  const gitDir = git('-C', root, 'rev-parse', '--absolute-git-dir');
-  const scratch = mkdtempSync(join(gitDir, 'qwen-fix-delta-'));
+  const scratch = mkdtempSync(join(scratchParent(root), 'qwen-fix-delta-'));
   const env = { GIT_INDEX_FILE: join(scratch, 'index'), ...blankFilters };
   try {
     // The `--since` moment starts from the snapshot's own tree (see the
@@ -767,25 +767,66 @@ export function snapshotWorkingTree(
     // index, recorded by path with `-f` (the flow's families sit under
     // paths repositories commonly ignore, and these paths are user content
     // by the same contract that admits the committed half).
-    const stagedNow = stagedFamilyPaths(
+    const stagedListing = stagedFamilyPaths(
       root,
       sidePaths,
-      tracked,
+      [...tracked.paths, ...tracked.gitlinks],
       bookkeeping,
-    ).filter((path) => {
+    );
+    // A gitlink under a family name is a nested repository, never handed
+    // to `add -u`/`add -f` as an explicit pathspec — that spawn runs a
+    // status inside the checkout and executes its config (measured, for
+    // both `-u` and `-A -f`), the channel this capture keeps closed. One
+    // the SEED holds is refreshed off its HEAD by `refreshSeedGitlinks`;
+    // one only the user's index holds is in neither tree, and its interior
+    // is the blind-spot probe's to answer for. Named on stderr either way,
+    // once each: the staged listing excludes what the tracked one holds.
+    const gitlinksHeld = [...tracked.gitlinks, ...stagedListing.gitlinks];
+    if (gitlinksHeld.length > 0) {
+      writeStderrLine(
+        `fix-delta: left ${gitlinksHeld.length} nested repositor${gitlinksHeld.length === 1 ? 'y' : 'ies'} ` +
+          'under a review name family out of the re-inclusion: ' +
+          gitlinksHeld
+            .map((path) => escapeNoteToken(decodePath(path)))
+            .join(', ') +
+          ' — a gitlink the seed holds is refreshed off its HEAD by the seed ' +
+          'pass, one only the index holds is in neither tree, and the ' +
+          "interior of either is the blind-spot probe's to answer for; the " +
+          'capture never runs inside it.',
+      );
+    }
+    const unaddable: Buffer[] = [];
+    const stagedNow = stagedListing.paths.filter((path) => {
       // The ENTRY, never its target: git records a symlink (mode 120000)
       // whether or not the target exists, and `existsSync` follows the
       // link — a staged DANGLING link was filtered out of both trees,
       // and its later deletion produced no hunk over the bare
-      // all-clear. Only ENOENT means absent; any other error keeps the
-      // path and lets `add -f` rule on it.
+      // all-clear. Only a path that LSTATS is handed to `add -f`: git
+      // runs the same lstat as this user, so any error here is a pathspec
+      // it dies on (`did not match any files` — a family directory
+      // replaced by a plain file answers ENOTDIR), and one unexplained
+      // refusal fails the whole capture. What is not handed over is
+      // named on stderr, never dropped in silence.
       try {
         lstatSync(joinBytes(Buffer.from(root), path));
         return true;
-      } catch (err) {
-        return errnoOf(err) !== 'ENOENT';
+      } catch {
+        unaddable.push(path);
+        return false;
       }
     });
+    if (unaddable.length > 0) {
+      writeStderrLine(
+        `fix-delta: left ${unaddable.length} staged path(s) under a review ` +
+          'name family out of this capture: ' +
+          unaddable
+            .map((path) => escapeNoteToken(decodePath(path)))
+            .join(', ') +
+          ' — staged, but nothing the capture can stat sits at the name ' +
+          'now (its directory replaced, or unreadable), so `add` would ' +
+          'refuse the pathspec; an edit there rides no hunk.',
+      );
+    }
     // This half is the AMBIGUOUS one, and it fails closed: a family path
     // the snapshot did not re-include is not re-included here either. The
     // committed half needs no gate — the flow writes its side files
@@ -805,7 +846,7 @@ export function snapshotWorkingTree(
     // on the family name alone it is indistinguishable from the flow's
     // own bookkeeping arriving through the user's index, so what rides
     // the capture this way is named, never silent.
-    const reincluded = [...tracked, ...stagedOnly];
+    const reincluded = [...tracked.paths, ...stagedOnly];
     if (reincluded.length > 0) {
       writeStderrLine(
         `fix-delta: re-included ${reincluded.length} tracked/staged ` +
@@ -851,7 +892,7 @@ export function snapshotWorkingTree(
       );
       assertCompleteCapture(staged);
     }
-    if (tracked.length > 0) {
+    if (tracked.paths.length > 0) {
       const update = gitWithEnvReport(
         env,
         [
@@ -869,7 +910,9 @@ export function snapshotWorkingTree(
           '--pathspec-from-file=-',
           '--pathspec-file-nul',
         ],
-        Buffer.concat(tracked.flatMap((path) => [path, Buffer.from([0])])),
+        Buffer.concat(
+          tracked.paths.flatMap((path) => [path, Buffer.from([0])]),
+        ),
       );
       assertCompleteCapture(update);
     }
@@ -894,6 +937,50 @@ export function snapshotWorkingTree(
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+/**
+ * Where the capture's scratch directory goes: the git dir, which no capture
+ * can record. Read as BYTES — `rev-parse --absolute-git-dir` prints the
+ * name as it is on disk, and a `--separate-git-dir` holding a byte that is
+ * not valid UTF-8 decoded to U+FFFD and named a directory that does not
+ * exist, so every capture died on ENOENT. `GIT_INDEX_FILE` is an
+ * environment string, which cannot carry such a byte at all; when the git
+ * dir's name cannot be spelled as a string the scratch goes to the system
+ * temp directory instead — provided that is OUTSIDE the working tree (a
+ * hermetic sandbox pointing it inside made the scratch itself a captured
+ * path) — and otherwise the capture refuses, disclosed, rather than run
+ * against a location it cannot name.
+ */
+function scratchParent(root: string): string {
+  const raw = gitRaw('-C', root, 'rev-parse', '--absolute-git-dir');
+  // One trailing newline is git's line end; an interior one is part of the
+  // name (a `--separate-git-dir` can hold one), never a place to cut.
+  const gitDirBytes =
+    raw.length > 0 && raw[raw.length - 1] === 0x0a
+      ? raw.subarray(0, raw.length - 1)
+      : raw;
+  const gitDir = gitDirBytes.toString('utf8');
+  if (Buffer.from(gitDir, 'utf8').equals(gitDirBytes)) return gitDir;
+  let temp: string;
+  try {
+    temp = realpathSync(tmpdir());
+  } catch {
+    temp = tmpdir();
+  }
+  let rootReal = root;
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    // Compared as spelled.
+  }
+  if (!isInside(temp, rootReal)) return temp;
+  throw new Error(
+    "fix-delta: the capture cannot run — the git dir's name is not valid " +
+      'UTF-8, so the throwaway index cannot be placed in it, and the ' +
+      'system temp directory sits inside the working tree, where the ' +
+      'capture would record it.',
+  );
 }
 
 /** The mode-160000 paths of an `ls-files -s -z` listing, as raw bytes. */
@@ -941,12 +1028,18 @@ function refreshSeedGitlinks(
   const rootBuf = Buffer.from(root);
   const records: Buffer[] = [];
   const replaced: Buffer[] = [];
+  // The null OID is as long as the repository's object names: 64 hex in
+  // a `--object-format=sha256` repository, where `update-index` rejects a
+  // 40-hex record as malformed and the whole capture would have died on
+  // the first removed checkout. `--show-object-format` arrived with
+  // `--object-format` (git 2.29); a git that cannot answer is SHA-1.
+  const zeros = '0'.repeat(
+    gitOpt('-C', root, 'rev-parse', '--show-object-format') === 'sha256'
+      ? 64
+      : 40,
+  );
   const removal = (rel: Buffer): Buffer =>
-    Buffer.concat([
-      Buffer.from(`0 ${'0'.repeat(40)}\t`),
-      rel,
-      Buffer.from([0]),
-    ]);
+    Buffer.concat([Buffer.from(`0 ${zeros}\t`), rel, Buffer.from([0])]);
   for (const rel of gitlinks) {
     const abs = joinBytes(rootBuf, rel);
     let st: ReturnType<typeof lstatSync>;
@@ -981,6 +1074,11 @@ function refreshSeedGitlinks(
       'HEAD',
     );
     if (head === null) continue;
+    // A checkout of the OTHER hash algorithm names its HEAD at the other
+    // length, and `update-index` rejects the record as malformed (as
+    // `add -A` refuses "a submodule of a different hash algorithm"): the
+    // entry stands, and the probe answers for the checkout.
+    if (head.length !== zeros.length) continue;
     records.push(
       Buffer.concat([Buffer.from(`160000 ${head}\t`), rel, Buffer.from([0])]),
     );
@@ -1193,7 +1291,7 @@ function trackedFamilyPaths(
   root: string,
   sidePaths: readonly string[],
   bookkeeping: readonly string[],
-): Buffer[] {
+): FamilyListing {
   const specs: string[] = [];
   for (const family of FIX_DELTA_EXCLUDES) {
     specs.push(`:(glob)**/${family}`, `:(glob)**/${family}/**`);
@@ -1203,14 +1301,47 @@ function trackedFamilyPaths(
     root,
     ...probePins(root),
     'ls-files',
+    '-s',
     '-z',
     '--',
     ...specs,
     ...literalExcludes(root, sidePaths),
   ]);
-  return splitNul(raw).filter(
-    (path) => path.length > 0 && !isFlowBookkeeping(path, bookkeeping),
-  );
+  return splitFamilyListing(raw, bookkeeping);
+}
+
+/** A family listing split by recorded mode: the paths to re-include, and the gitlinks never to. */
+interface FamilyListing {
+  paths: Buffer[];
+  gitlinks: Buffer[];
+}
+
+/**
+ * Split an `ls-files -s -z` family listing on git's RECORDED mode — never
+ * the filesystem's, which follows a link (fix-delta keeps the entry, not
+ * the target): a mode-160000 entry is a nested repository and goes to
+ * `gitlinks`; every other path that is not the flow's own bookkeeping goes
+ * to `paths`.
+ */
+function splitFamilyListing(
+  raw: Buffer,
+  bookkeeping: readonly string[],
+): FamilyListing {
+  const paths: Buffer[] = [];
+  const gitlinks: Buffer[] = [];
+  for (const entry of splitNul(raw)) {
+    const tab = entry.indexOf(0x09);
+    if (tab === -1) continue;
+    const path = entry.subarray(tab + 1);
+    if (path.length === 0) continue;
+    if (entry.subarray(0, 7).equals(GITLINK_MODE_PREFIX)) {
+      gitlinks.push(path);
+      continue;
+    }
+    if (isFlowBookkeeping(path, bookkeeping)) continue;
+    paths.push(path);
+  }
+  return { paths, gitlinks };
 }
 
 /**
@@ -1223,7 +1354,7 @@ function stagedFamilyPaths(
   sidePaths: readonly string[],
   inHeadTree: readonly Buffer[],
   bookkeeping: readonly string[],
-): Buffer[] {
+): FamilyListing {
   const specs: string[] = [];
   for (const family of FIX_DELTA_EXCLUDES) {
     specs.push(`:(glob)**/${family}`, `:(glob)**/${family}/**`);
@@ -1233,18 +1364,19 @@ function stagedFamilyPaths(
     root,
     ...probePins(root),
     'ls-files',
+    '-s',
     '-z',
     '--',
     ...specs,
     ...literalExcludes(root, sidePaths),
   );
   const seen = new Set(inHeadTree.map((path) => path.toString('latin1')));
-  return splitNul(raw).filter(
-    (path) =>
-      path.length > 0 &&
-      !seen.has(path.toString('latin1')) &&
-      !isFlowBookkeeping(path, bookkeeping),
-  );
+  const listing = splitFamilyListing(raw, bookkeeping);
+  const staged = (path: Buffer): boolean => !seen.has(path.toString('latin1'));
+  return {
+    paths: listing.paths.filter(staged),
+    gitlinks: listing.gitlinks.filter(staged),
+  };
 }
 
 /**
@@ -1784,18 +1916,20 @@ function hiddenIgnoredPaths(root: string): {
       }
       const key = listed.toString('latin1');
       if (selector === '--cached') {
-        const mode = cachedModes.get(key);
-        if (mode === '160000') {
-          repos.push(key);
-          continue;
-        }
+        // Membership means "on disk at snapshot time", for a gitlink as
+        // for a file: a staged checkout whose directory is gone would
+        // otherwise attest a repository re-created in the window as
+        // pre-existing, and drop that addition from the hunks.
         try {
           lstatSync(joinBytes(rootBuf, listed));
         } catch (err) {
           if (errnoOf(err) === 'ENOENT') continue;
           // Any other error: not proven absent, so it stays in the set.
         }
-        (mode === '120000' ? links : files).push(key);
+        const mode = cachedModes.get(key);
+        (mode === '160000' ? repos : mode === '120000' ? links : files).push(
+          key,
+        );
         continue;
       }
       // `--others` is on disk by construction; the ENTRY's kind decides
@@ -2153,6 +2287,20 @@ function probePins(path: string): string[] {
     // git's own way to run none.
     '-c',
     `core.hooksPath=${NO_HOOKS_PATH}`,
+    // `core.ignoreCase=false` wherever the filesystem is case-SENSITIVE: git
+    // sets the key true only where it detects a case-insensitive filesystem,
+    // so a `true` on a sensitive one is a plant (or a linked worktree on a
+    // sensitive volume inheriting the main checkout's key), and under it
+    // `add -A` folds a case-colliding sibling (`A.txt` tracked, `a.txt`
+    // edited) into the tracked name — both captures identical, a bare
+    // all-clear over the edit — and a nested repository's `status` folds
+    // the same sibling into silence. Unlike `autocrlf`, the pin changes
+    // nothing for a legitimate repository on such a filesystem (git never
+    // writes `true` there), so the probes carry it too. On a
+    // case-insensitive filesystem the key is git's own and stays
+    // (DESIGN.md: a case-only rename is invisible to git itself there).
+    // Probed once per path, read-only, on the repository's own volume.
+    ...(filesystemIsCaseSensitive(path) ? ['-c', 'core.ignoreCase=false'] : []),
   ];
 }
 
@@ -2208,6 +2356,57 @@ function capturePins(path: string): string[] {
   ];
 }
 
+const caseSensitivity = new Map<string, boolean>();
+
+/**
+ * Whether the filesystem the WORKING TREE sits on tells `Aa` from `aA`,
+ * read-only and once per root: the tree's own `.git` entry (a directory,
+ * or a linked worktree's gitfile — every root has one) is lstat'd under
+ * its case-swapped spelling `.GIT`. ENOENT is a sensitive filesystem; an
+ * entry that is the SAME inode is an insensitive one — provided the inode
+ * could not have been given a second name: a directory cannot be hard-
+ * linked, and a gitfile (a linked worktree's or a submodule's `.git`) with
+ * a link count of one has none, while one with more has been `ln`'d, and
+ * a `.GIT` hard-linked to it on a sensitive filesystem would otherwise
+ * read as the same entry; an entry that is a DIFFERENT inode is two names
+ * differing only by case coexisting, which only a sensitive filesystem
+ * can hold — so a planted `.GIT` cannot pass the probe off as
+ * insensitive either way. Nothing is written, and the probe is on
+ * the volume `add -A` walks, not the git dir's (a linked worktree's git
+ * dir is under the main checkout, a `--separate-git-dir` wherever the user
+ * put it). A probe that cannot run answers SENSITIVE: the pin then only
+ * over-reports a case-only rename as a deletion and an addition on an
+ * insensitive filesystem, where silence over a fold is the direction this
+ * module never fails in.
+ */
+function filesystemIsCaseSensitive(root: string): boolean {
+  const known = caseSensitivity.get(root);
+  if (known !== undefined) return known;
+  let sensitive = true;
+  try {
+    const own = lstatSync(join(root, '.git'));
+    try {
+      const swapped = lstatSync(join(root, '.GIT'));
+      // An inode the filesystem cannot vouch for (0 on both sides) is no
+      // proof the two spellings are one entry, and neither is one a
+      // gitfile shares with a hard link: sensitive, and pinned.
+      const oneName = own.isDirectory() || (own.isFile() && own.nlink === 1);
+      sensitive = !(
+        oneName &&
+        hasVerifiableInode(own.ino) &&
+        swapped.dev === own.dev &&
+        swapped.ino === own.ino
+      );
+    } catch {
+      sensitive = true;
+    }
+  } catch {
+    sensitive = true;
+  }
+  caseSensitivity.set(root, sensitive);
+  return sensitive;
+}
+
 /**
  * The state of a nested repository's own uncommitted content, and — when it
  * could be read at all — a DIGEST of that state.
@@ -2227,6 +2426,7 @@ function capturePins(path: string): string[] {
 function probeNestedRepoState(
   absPath: Buffer,
   probeState: ProbeState,
+  display?: string,
 ): {
   state: 'clean' | 'dirty' | 'failed';
   digest?: string;
@@ -2447,6 +2647,15 @@ function probeNestedRepoState(
   // Dirt is what is NOT a header and NOT an ignored entry: with
   // `--branch` the output is never empty, so emptiness is no longer the
   // clean test, and `! ` lines ride the digest without counting.
+  // The bits are asked about BEFORE dirt is ruled on: a hand-set
+  // skip-worktree or assume-unchanged bit hides an edit from this status
+  // whether or not some other file is dirty, and a repository already
+  // dirty at the snapshot would otherwise file the hidden edit as
+  // "pre-existing dirt, nothing newly dirtied it" — the same status text
+  // at both moments, the same digest.
+  if (indexBitsHideEntries(path, probeState, display ?? path)) {
+    return { state: 'failed' };
+  }
   if (lines.some((line) => !line.startsWith('# ') && !line.startsWith('! '))) {
     return {
       state: 'dirty',
@@ -2464,16 +2673,14 @@ function probeNestedRepoState(
   // on disk. Confirm the empty answer against the index's own tags; an
   // unconfirmable state is failed, never clean: the failure direction
   // over-warns, it never silences a blind spot.
-  return indexBitsHideEntries(path, probeState)
-    ? { state: 'failed' }
-    : {
-        state: 'clean',
-        digest,
-        interiorDirs,
-        interiorLinks,
-        interiorGitlinks,
-        undecodable,
-      };
+  return {
+    state: 'clean',
+    digest,
+    interiorDirs,
+    interiorLinks,
+    interiorGitlinks,
+    undecodable,
+  };
 }
 
 /**
@@ -2580,30 +2787,55 @@ function errnoOf(err: unknown): string {
  * Takes the VALIDATED path, and carries the same de-steering pins as the
  * status above: `ls-files -v` executes `core.fsmonitor` too.
  */
-function indexBitsHideEntries(path: string, state: ProbeState): boolean {
+function indexBitsHideEntries(
+  path: string,
+  state: ProbeState,
+  display: string,
+): boolean {
   let tags: Buffer;
   try {
     tags = gitRaw('-C', path, ...probePins(path), 'ls-files', '-v', '-z');
   } catch {
     return true;
   }
-  // `<tag> <path>` records: lowercase tags are the assume-unchanged family
-  // (the combined bits render lowercase `s`), `S` is skip-worktree alone.
-  const flagged: Buffer[] = [];
-  for (const record of splitNul(tags)) {
-    if (record.length < 2) continue;
-    const tag = record[0];
-    if (tag === 0x53 /* S */ || (tag >= 0x61 && tag <= 0x7a)) {
-      flagged.push(record.subarray(2));
-    }
-  }
-  if (flagged.length > 0 && !sparseCheckoutOwnsBits(path, flagged)) {
-    return true;
-  }
   let listing: Buffer;
   try {
     listing = gitRaw('-C', path, ...probePins(path), 'ls-files', '-s', '-z');
   } catch {
+    return true;
+  }
+  // The index's gitlinks, by name: git never sets a sparse bit on one
+  // (`sparse-checkout set` leaves an out-of-cone submodule present and
+  // `H`), so a submodule inside a sparse checkout would read as an
+  // unflagged out-of-rules path — an ungoverned control — on every run.
+  // They are neither controls nor candidates below; the interior sweep
+  // further down probes them.
+  const gitlinkNames = new Set<string>();
+  for (const entry of splitNul(listing)) {
+    if (!entry.subarray(0, 7).equals(GITLINK_MODE_PREFIX)) continue;
+    const tab = entry.indexOf(0x09);
+    if (tab !== -1)
+      gitlinkNames.add(entry.subarray(tab + 1).toString('latin1'));
+  }
+  // `<tag> <path>` records: lowercase tags are the assume-unchanged family
+  // (the combined bits render lowercase `s`), `S` is skip-worktree alone.
+  const flagged: Buffer[] = [];
+  const unflagged: Buffer[] = [];
+  for (const record of splitNul(tags)) {
+    if (record.length < 2) continue;
+    const name = record.subarray(2);
+    if (gitlinkNames.has(name.toString('latin1'))) continue;
+    const tag = record[0];
+    if (tag === 0x53 /* S */ || (tag >= 0x61 && tag <= 0x7a)) {
+      flagged.push(name);
+    } else {
+      unflagged.push(name);
+    }
+  }
+  if (
+    flagged.length > 0 &&
+    !sparseCheckoutOwnsBits(path, flagged, unflagged, state, display)
+  ) {
     return true;
   }
   for (const entry of splitNul(listing)) {
@@ -2633,7 +2865,13 @@ function indexBitsHideEntries(path: string, state: ProbeState): boolean {
     }
     if (!markVisited(subPath, state)) continue;
     try {
-      if (indexBitsHideEntries(subPath.toString('utf8'), state)) {
+      if (
+        indexBitsHideEntries(
+          subPath.toString('utf8'),
+          state,
+          `${display}/${decodePath(name)}`,
+        )
+      ) {
         return true;
       }
     } finally {
@@ -2664,6 +2902,9 @@ function indexBitsHideEntries(path: string, state: ProbeState): boolean {
 function sparseCheckoutOwnsBits(
   path: string,
   flagged: readonly Buffer[],
+  unflagged: readonly Buffer[],
+  state: ProbeState,
+  display: string,
 ): boolean {
   const sparse =
     gitOpt(
@@ -2677,22 +2918,74 @@ function sparseCheckoutOwnsBits(
       'core.sparseCheckout',
     ) === 'true';
   if (!sparse) return false;
+  // A name the spawn cannot carry (not valid UTF-8) cannot be asked about
+  // at all: the exemption is not granted, and the reader is told which
+  // name kept it — the generic unresolved note names none of this.
+  const unaskable = (rel: Buffer): boolean =>
+    !Buffer.from(rel.toString('utf8'), 'utf8').equals(rel);
+  const cannotAsk = [...flagged, ...unflagged].find(unaskable);
+  if (cannotAsk !== undefined) {
+    const note =
+      `fix-delta: the sparse-checkout rules of ${escapeNoteToken(display)} ` +
+      `cannot be asked about ${escapeNoteToken(decodePath(cannotAsk))} — the ` +
+      'name is not valid UTF-8 and cannot reach `sparse-checkout ' +
+      'check-rules` — so its skip-worktree bits are read as hand-set.';
+    if (!state.notes.includes(note)) state.notes.push(note);
+    return false;
+  }
   const ancestorProbes = new Map<string, boolean>();
   const absent: string[] = [];
   for (const rel of flagged) {
     const name = rel.toString('utf8');
-    if (!Buffer.from(name, 'utf8').equals(rel)) return false;
     if (!isPathProvablyAbsent(path, name, ancestorProbes)) return false;
     absent.push(name);
   }
+  // `check-rules` answers about the RULES, not about who set a bit. The
+  // rules are proof only where they govern the worktree — where every
+  // out-of-rules tracked path is flagged, as git leaves a sparse checkout.
+  // A repository whose rules exist but were never applied (a
+  // `sparse-checkout` file written by hand, `core.sparseCheckout` flipped
+  // on) has out-of-rules paths PRESENT and unflagged, and there a bit over
+  // a deleted file is a hand's, so the whole set keeps its flag. The
+  // control is the unflagged set: one out-of-rules member and the rules
+  // govern nothing.
+  const controls = unflagged.map((rel) => rel.toString('utf8'));
   let inRules: Set<string>;
   try {
     const out = gitWithInputRaw(
-      Buffer.from(absent.map((name) => `${name}\0`).join(''), 'utf8'),
+      Buffer.from(
+        [...absent, ...controls].map((name) => `${name}\0`).join(''),
+        'utf8',
+      ),
       ['-C', path, ...probePins(path), 'sparse-checkout', 'check-rules', '-z'],
     );
     inRules = new Set(out.split('\0').filter((name) => name !== ''));
   } catch {
+    return false;
+  }
+  const ungoverned = controls.filter((name) => !inRules.has(name));
+  if (ungoverned.length > 0) {
+    // Say WHY, and what would end it: the generic unresolved note names a
+    // directory that cannot be opened, a config that steers — not this. A
+    // `sparse-checkout set` leaves an out-of-cone file with local edits
+    // present and unflagged ("left despite sparse patterns"), and until a
+    // `reapply` the checkout reads as ungoverned on every run.
+    // Named the way every other note names a path — root-relative, never
+    // the absolute spelling — and once, however many routes reach the
+    // repository.
+    const note =
+      `fix-delta: the sparse-checkout rules of ${escapeNoteToken(display)} do ` +
+      `not govern its worktree — ${ungoverned
+        .slice(0, 5)
+        .map((name) => escapeNoteToken(name))
+        .join(
+          ', ',
+        )}${ungoverned.length > 5 ? `, and ${ungoverned.length - 5} more` : ''} ` +
+      `${ungoverned.length === 1 ? 'is' : 'are'} tracked, present and outside the rules ` +
+      '(what `sparse-checkout set` leaves behind when a file has local ' +
+      'edits), so its skip-worktree bits are read as hand-set until ' +
+      '`git sparse-checkout reapply` runs there.';
+    if (!state.notes.includes(note)) state.notes.push(note);
     return false;
   }
   return absent.every((name) => !inRules.has(name));
@@ -3345,6 +3638,14 @@ interface ProbeState {
    * that appeared or vanished (see `FixSnapshot.identities`).
    */
   identities: Record<string, string>;
+  /**
+   * Free-form disclosure lines a probe wants printed beside its verdict —
+   * the WHY of an unresolved answer where the generic note would send the
+   * reader hunting (a sparse checkout whose rules do not govern its
+   * worktree, and what would make them). Printed by the caller at both
+   * moments, never persisted.
+   */
+  notes: string[];
   /** The walk budget left for this probe run — see `IGNORED_WALK_BUDGET`. */
   budget: number;
 }
@@ -3425,7 +3726,7 @@ function probeNestedRepo(
     if (state.probed.has(identity)) return;
     state.probed.add(identity);
   }
-  const result = probeNestedRepoState(abs, state);
+  const result = probeNestedRepoState(abs, state, decodePath(rel));
   if (result.digest !== undefined) state.digests[key] = result.digest;
   if (result.state === 'dirty') state.dirty.add(key);
   else if (result.state === 'failed') state.unresolved.add(key);
@@ -3731,6 +4032,7 @@ function probeBlindSpotState(
   outOfRoot: string[];
   digests: Record<string, string>;
   identities: Record<string, string>;
+  notes: string[];
 } {
   // `--no-optional-locks`: plain `status` opportunistically rewrites the
   // user's index to refresh its stat cache — a write this command promises
@@ -3813,6 +4115,7 @@ function probeBlindSpotState(
     visited: new Set<string>(),
     probed: new Set<string>(),
     identities: Object.create(null) as Record<string, string>,
+    notes: [],
     budget: walkBudgets.perRun,
   };
   // The audited root is the first directory every walk must never
@@ -3924,7 +4227,7 @@ function probeBlindSpotState(
     // config steers its status was named dirty rather than named as a
     // state this command could not answer for).
     const innerAbs = joinBytes(rootBuf, relBytes);
-    const inner = probeNestedRepoState(innerAbs, state);
+    const inner = probeNestedRepoState(innerAbs, state, decodePath(relBytes));
     // Register the physical repository the way `probeNestedRepo` does:
     // the status route records `dirty`/`digests` directly, and without
     // the registration a second route to the SAME repository (a tracked
@@ -4013,6 +4316,7 @@ function probeBlindSpotState(
     outOfRoot: [...outOfRoot],
     digests,
     identities: state.identities,
+    notes: state.notes,
   };
 }
 
@@ -4688,6 +4992,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
       bookkeeping,
     );
     const probe = probeBlindSpotState(root, sidePaths, reviewWorktrees);
+    for (const note of probe.notes) writeStderrLine(note);
     const snapshot: FixSnapshot = {
       root,
       tree,
@@ -4967,6 +5272,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // EVERY comparison: the baseline never recorded one, and silence over a
   // path the probe cannot answer is a false all-clear.
   const probe = probeBlindSpotState(root, sidePaths, reviewWorktrees);
+  for (const note of probe.notes) writeStderrLine(note);
   const dirtyNow = probe.dirty;
   const unresolvedNow = probe.unresolved;
   // "Already dirty" is not the question; "the same dirt" is. A path in the
@@ -4999,6 +5305,20 @@ export function runFixDelta(args: FixDeltaArgs): void {
   for (const [key, identity] of Object.entries(snapshot.identities)) {
     if (!snapshotKeyOf.has(identity)) snapshotKeyOf.set(identity, key);
   }
+  // A baseline recorded through a link OUT of the tree is a baseline for
+  // the repository behind that link, not for whatever answers under the
+  // name now. When the probe no longer reaches the name as scope — the
+  // link removed (an `npm ci` in the fix window), or replaced by an
+  // in-tree repository — that entry is withdrawn, so the name routes like
+  // any other: gone, it is `vanished`; answered for by an in-tree
+  // repository now, it is `appeared`. Left in, a DIRTY external baseline
+  // was exempted from every transition list on scope and named nowhere.
+  const outOfRootNow = probe.outOfRoot;
+  for (const p of snapshot.outOfRoot) {
+    if (outOfRootNow.includes(p)) continue;
+    delete baseDigests[p];
+    baseDirty.delete(p);
+  }
   const aliased = new Set<string>();
   for (const [key, identity] of Object.entries(probe.identities)) {
     if (
@@ -5016,9 +5336,14 @@ export function runFixDelta(args: FixDeltaArgs): void {
     // repository under a new name, and both stay disclosed as vanished
     // and appeared.
     if (!sameTargetNow(rootBuf, first, key)) continue;
-    if (snapshot.digests[first] !== undefined) {
-      baseDigests[key] = snapshot.digests[first];
-    }
+    // Read off the baseline as it stands AFTER the withdrawal above, never
+    // off the snapshot: a baseline withdrawn because its name was a link out
+    // of the tree must not come back under a new name (a repository moved
+    // INTO the tree in the window keeps its inode, and the retargeted link
+    // still resolves to it — that is `appeared`, not the all-clear).
+    const inherited = baseDigests[first];
+    if (inherited === undefined) continue;
+    baseDigests[key] = inherited;
     if (baseDirty.has(first)) baseDirty.add(key);
     aliased.add(first);
   }
@@ -5042,7 +5367,6 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // in-tree repository now is content of THIS tree at this moment, and
   // exempting it on the baseline's say-so all-cleared an edit committed
   // inside the audited tree.
-  const outOfRootNow = probe.outOfRoot;
   const isOutOfRoot = (p: string): boolean =>
     snapshot.outOfRoot.includes(p) || outOfRootNow.includes(p);
   const freshDirt = dirtyNow.filter(

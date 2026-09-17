@@ -1351,6 +1351,23 @@ describe('bundled review skill', () => {
     expect(step).toContain(
       'correct the ledger, re-run `review findings --outcomes`, and re-issue `report_findings` with the corrected outcomes',
     );
+    // One routing for "edits no outcome owns": a foreign write leaves the
+    // ledger alone; only an unrecorded fix of a finding is a ledger error.
+    expect(step).not.toContain(
+      'or shows edits that no outcome owns, are the outcomes wrong',
+    );
+    expect(step).toContain(
+      "or shows an edit that IS a finding's fix the ledger never recorded, are the outcomes wrong",
+    );
+    expect(step).toContain(
+      "An edit no outcome owns that is NOT a finding's fix is the foreign write above, and the ledger stays as it is.",
+    );
+    expect(step).not.toContain(
+      'Follow that refusal the way you follow the empty-hunks one: correct the ledger',
+    );
+    expect(step).toContain(
+      "only an edit that IS a finding's fix the ledger never recorded is a ledger to correct",
+    );
     // …and the blanket rule it carves out of still stands for every other
     // refusal.
     expect(step).toContain(

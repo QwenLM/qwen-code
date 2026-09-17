@@ -155,6 +155,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -191,6 +193,24 @@ import { isolateHostGitConfig } from './lib/test-utils.js';
 // Windows is excluded for its own path-byte rules. Same convention as
 // lib/worktree.test.ts.
 const itWhereRawByteNamesExist = it.skipIf(process.platform !== 'linux');
+// Whether the volume the fixtures live on tells `Aa` from `aA` — the case
+// pin only has work to do there, and a test that returns early on an
+// insensitive volume reports as passed rather than skipped.
+const tmpIsCaseSensitive = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'qwen-fix-delta-case-'));
+  try {
+    writeFileSync(join(probe, 'Aa'), '');
+    try {
+      lstatSync(join(probe, 'aA'));
+      return false;
+    } catch {
+      return true;
+    }
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+const itWhereCaseMatters = tmpIsCaseSensitive ? it : it.skip;
 
 describe('fix-delta', () => {
   let repo: string;
@@ -273,6 +293,34 @@ describe('fix-delta', () => {
   /** Init + commit inside a nested repo whose NAME spawn args cannot
    * carry (invalid UTF-8): the shell's stdin is the one byte-exact
    * channel, as in the non-UTF-8 test above. */
+  /**
+   * Whether `sparse-checkout check-rules` (git 2.42+) can answer in `cwd` —
+   * it also dies when the repository holds no `info/sparse-checkout` file,
+   * so call it only where the rules exist, as every caller here does.
+   */
+  function sparseCheckRulesAnswers(cwd: string): boolean {
+    try {
+      execFileSync('git', ['sparse-checkout', 'check-rules', '-z'], {
+        cwd,
+        input: '',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** `initNestedRepoSh` for an ordinary (spawnable) path: no `/bin/sh`. */
+  function initNestedRepo(abs: string): void {
+    gitAt(abs, 'init', '-q', '-b', 'main');
+    gitAt(abs, 'config', 'user.email', 't@t.t');
+    gitAt(abs, 'config', 'user.name', 't');
+    writeFileSync(join(abs, 'f.txt'), 'before');
+    gitAt(abs, 'add', '-A');
+    gitAt(abs, 'commit', '-qm', 'init');
+  }
+
   function initNestedRepoSh(abs: Buffer): void {
     execFileSync('/bin/sh', [], {
       input: Buffer.concat([
@@ -3395,28 +3443,31 @@ describe('fix-delta', () => {
     expect(existsSync(snapshotFile())).toBe(false);
   });
 
-  it('keeps a root-derivation refusal on one protocol line', () => {
-    // The refusal renders the paths git reported — and a directory NAME can
-    // carry a raw control byte. Unescaped, a name holding `\n` splits the
-    // message across two lines, so a planted directory name forges a second
-    // `fix-delta:` protocol line the run never printed (the same forgery
-    // `escapeNoteToken` already closes on the notes). Render-boundary only:
-    // the containment and identity comparisons stay on the raw strings.
-    const decoy = join(repo, '.de\ncoy');
-    mkdirSync(decoy);
-    git('config', 'core.worktree', decoy);
+  it.skipIf(process.platform === 'win32')(
+    'keeps a root-derivation refusal on one protocol line',
+    () => {
+      // The refusal renders the paths git reported — and a directory NAME can
+      // carry a raw control byte. Unescaped, a name holding `\n` splits the
+      // message across two lines, so a planted directory name forges a second
+      // `fix-delta:` protocol line the run never printed (the same forgery
+      // `escapeNoteToken` already closes on the notes). Render-boundary only:
+      // the containment and identity comparisons stay on the raw strings.
+      const decoy = join(repo, '.de\ncoy');
+      mkdirSync(decoy);
+      git('config', 'core.worktree', decoy);
 
-    let message = '';
-    try {
-      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-    } catch (err) {
-      message = (err as Error).message;
-    }
-    expect(message).toMatch(/core\.worktree/);
-    expect(message.split('\n')).toHaveLength(1);
-    expect(message).toContain('\\x0a');
-    expect(existsSync(snapshotFile())).toBe(false);
-  });
+      let message = '';
+      try {
+        runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toMatch(/core\.worktree/);
+      expect(message.split('\n')).toHaveLength(1);
+      expect(message).toContain('\\x0a');
+      expect(existsSync(snapshotFile())).toBe(false);
+    },
+  );
 
   it('records a fix to a tracked path under a family name', () => {
     // The families are excluded because the flow writes them between the
@@ -4342,29 +4393,32 @@ describe('fix-delta', () => {
     );
   });
 
-  it('records an edit confined to the exec bit under core.fileMode=false', () => {
-    // A `core.fileMode=false` in the audited repository's OWN config makes
-    // git read no mode difference at all, so a landed `chmod +x` left the two
-    // captured trees identical and the run all-cleared over an edit that was
-    // applied — the same bare all-clear `core.autocrlf` needed its pin for.
-    // Pinned at the CAPTURE only: the nested-repository probes keep git's own
-    // view of "modified", where the pin would fabricate permanent dirt.
-    const script = join(repo, 'script.sh');
-    writeFileSync(script, '#!/bin/sh\n');
-    chmodSync(script, 0o644);
-    git('add', '-A');
-    git('commit', '-qm', 'a non-executable script');
-    git('config', 'core.fileMode', 'false');
+  it.skipIf(process.platform === 'win32')(
+    'records an edit confined to the exec bit under core.fileMode=false',
+    () => {
+      // A `core.fileMode=false` in the audited repository's OWN config makes
+      // git read no mode difference at all, so a landed `chmod +x` left the two
+      // captured trees identical and the run all-cleared over an edit that was
+      // applied — the same bare all-clear `core.autocrlf` needed its pin for.
+      // Pinned at the CAPTURE only: the nested-repository probes keep git's own
+      // view of "modified", where the pin would fabricate permanent dirt.
+      const script = join(repo, 'script.sh');
+      writeFileSync(script, '#!/bin/sh\n');
+      chmodSync(script, 0o644);
+      git('add', '-A');
+      git('commit', '-qm', 'a non-executable script');
+      git('config', 'core.fileMode', 'false');
 
-    runSnapshot();
-    chmodSync(script, 0o755);
-    runSince();
+      runSnapshot();
+      chmodSync(script, 0o755);
+      runSince();
 
-    expect(readFileSync(hunksFile(), 'utf8')).toContain('new mode 100755');
-    expect(stderr().at(-1)).toBe(
-      'fix-delta: 1 file(s) changed since the snapshot — script.sh',
-    );
-  });
+      expect(readFileSync(hunksFile(), 'utf8')).toContain('new mode 100755');
+      expect(stderr().at(-1)).toBe(
+        'fix-delta: 1 file(s) changed since the snapshot — script.sh',
+      );
+    },
+  );
 
   it('probes a directory recreated over a stale registry entry', () => {
     // The squat: a worktree is registered, its directory removed (the
@@ -6239,7 +6293,7 @@ describe('fix-delta', () => {
   it('keeps an embedded repository the first capture recorded when a new ignore rule hides it', () => {
     const nested = join(repo, 'sub');
     mkdirSync(nested);
-    initNestedRepoSh(Buffer.from(nested));
+    initNestedRepo(nested);
 
     runSnapshot();
     const snap = JSON.parse(
@@ -6276,7 +6330,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'ignore sub');
     const nested = join(repo, 'sub');
     mkdirSync(nested);
-    initNestedRepoSh(Buffer.from(nested));
+    initNestedRepo(nested);
 
     runSnapshot();
     const snap = JSON.parse(
@@ -6563,7 +6617,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'ignore vendor');
     const nested = join(repo, 'vendor');
     mkdirSync(nested);
-    initNestedRepoSh(Buffer.from(nested));
+    initNestedRepo(nested);
 
     runSnapshot();
     const snap = JSON.parse(
@@ -6656,7 +6710,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'ignore vendor');
     const nested = join(repo, 'vendor', 'lib');
     mkdirSync(nested, { recursive: true });
-    initNestedRepoSh(Buffer.from(nested));
+    initNestedRepo(nested);
 
     runSnapshot();
     const snap = JSON.parse(
@@ -6720,7 +6774,7 @@ describe('fix-delta', () => {
     // `third_party/x/file` is a pathspec git refuses (`is in submodule`).
     const nested = join(repo, 'third_party', 'x');
     mkdirSync(nested, { recursive: true });
-    initNestedRepoSh(Buffer.from(nested));
+    initNestedRepo(nested);
     // …with the tracked name present INSIDE it, so only the gitlink gate
     // keeps the path out of the pathspec (an absent one is skipped anyway).
     writeFileSync(join(nested, 'file'), 'v2\n');
@@ -6738,7 +6792,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'ignore vendor');
     const nested = join(repo, 'vendor', 'lib');
     mkdirSync(nested, { recursive: true });
-    initNestedRepoSh(Buffer.from(nested));
+    initNestedRepo(nested);
     // Staged under the rule, never committed: `--cached --ignored` prints
     // it WITHOUT the slash `--others` gives a repository, so only its
     // index mode tells it from a file.
@@ -6841,6 +6895,717 @@ describe('fix-delta', () => {
     ).toBe(true);
   });
 
+  it('removes a seed gitlink in a sha256 repository with a null OID of its own length', () => {
+    // A SHA-256 superproject names objects in 64 hex; `update-index
+    // --index-info` rejects a 40-zero removal record as malformed, and the
+    // whole `--since` capture died on the first removed checkout.
+    const top = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-256-')),
+    );
+    const cwdHere = process.cwd();
+    try {
+      gitAt(top, 'init', '-q', '-b', 'main', '--object-format=sha256');
+      gitAt(top, 'config', 'user.email', 't@t.t');
+      gitAt(top, 'config', 'user.name', 't');
+      writeFileSync(join(top, 'a.ts'), 'export const x = 1;\n');
+      const nested = join(top, 'sub');
+      mkdirSync(nested);
+      gitAt(nested, 'init', '-q', '-b', 'main', '--object-format=sha256');
+      gitAt(nested, 'config', 'user.email', 't@t.t');
+      gitAt(nested, 'config', 'user.name', 't');
+      writeFileSync(join(nested, 's.txt'), 's\n');
+      gitAt(nested, 'add', '-A');
+      gitAt(nested, 'commit', '-qm', 'init');
+      gitAt(top, 'add', '-A');
+      gitAt(top, 'commit', '-qm', 'head with gitlink');
+      expect(gitAt(top, 'ls-files', '-s', '--', 'sub')).toMatch(
+        /^160000 [0-9a-f]{64} /,
+      );
+      mkdirSync(join(top, '.qwen', 'tmp'), { recursive: true });
+      process.chdir(top);
+      runSnapshot();
+      rmSync(nested, { recursive: true, force: true });
+      expect(() => runSince()).not.toThrow();
+
+      const hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toContain('deleted file mode 160000');
+      expect(hunks).toContain('-Subproject commit');
+    } finally {
+      process.chdir(cwdHere);
+      rmSync(top, { recursive: true, force: true });
+    }
+  });
+
+  itWhereCaseMatters(
+    'records a case-colliding edit that a planted core.ignoreCase would fold away',
+    () => {
+      // The command's own probe agrees: the `.git` entry under `.GIT`.
+      expect(() => lstatSync(join(repo, '.GIT'))).toThrow();
+      writeFileSync(join(repo, 'A.txt'), 'upper\n');
+      git('add', '-A');
+      git('commit', '-qm', 'track A.txt');
+      git('config', 'core.ignoreCase', 'true');
+      writeFileSync(join(repo, 'a.txt'), 'v1\n');
+
+      runSnapshot();
+      writeFileSync(join(repo, 'a.txt'), 'v2\n');
+      runSince();
+
+      const hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toContain('diff --git a/a.txt b/a.txt');
+      expect(hunks).toContain('-v1');
+      expect(hunks).toContain('+v2');
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('repo-local surfaces'))).toBe(false);
+      expect(
+        lines.some((l) =>
+          /1 file\(s\) changed since the snapshot — a\.txt/.test(l),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('never records a staged gitlink whose checkout is gone as hidden-and-on-disk', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nign/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ign');
+    const nested = join(repo, 'ign', 'nested');
+    mkdirSync(nested, { recursive: true });
+    initNestedRepo(nested);
+    git('add', '-f', '--', 'ign/nested');
+    rmSync(nested, { recursive: true, force: true });
+    expect(git('ls-files', '--cached', '--ignored', '--exclude-standard')).toBe(
+      'ign/nested',
+    );
+
+    runSnapshot();
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(snap.hiddenRepos).not.toContain('ign/nested');
+    expect(snap.hiddenPaths).not.toContain('ign/nested');
+    // The window re-creates a repository at that name and drops the rule:
+    // a real addition, not the rule's removal admitting what stood there.
+    mkdirSync(nested, { recursive: true });
+    initNestedRepo(nested);
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('new file mode 160000');
+    expect(stderr().some((l) => l.includes('already on disk'))).toBe(false);
+  });
+
+  it('leaves a staged family path nothing can stat out of the capture, disclosed, instead of failing it', () => {
+    const dir = join(repo, '.qwen', 'tmp', 'qwen-review-notes');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'plan.md'), 'staged, never committed\n');
+    git('add', '--', '.qwen/tmp/qwen-review-notes/plan.md');
+    // The family directory becomes a plain FILE before the snapshot: the
+    // staged path lstats ENOTDIR, and `add -f` would die on the pathspec.
+    rmSync(dir, { recursive: true, force: true });
+    writeFileSync(dir, 'a file where the directory was\n');
+
+    expect(() => runSnapshot()).not.toThrow();
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('qwen-review-notes/plan.md') &&
+          l.includes('nothing the capture can stat'),
+      ),
+    ).toBe(true);
+  });
+
+  it('names a dirty out-of-root baseline the probe no longer reaches', () => {
+    const ext = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-ext-')),
+    );
+    try {
+      initNestedRepo(ext);
+      writeFileSync(join(ext, 'dirty.txt'), 'uncommitted\n');
+      mkdirSync(join(repo, 'node_modules'));
+      symlinkSync(ext, join(repo, 'node_modules', 'pkg'));
+
+      runSnapshot();
+      const snap = JSON.parse(
+        readFileSync(snapshotFile(), 'utf8'),
+      ) as FixSnapshot;
+      expect(snap.outOfRoot).toContain('node_modules/pkg');
+      expect(snap.dirtySubmodules).toContain('node_modules/pkg');
+      // The fix window's `npm ci` removes the link: the baseline was about
+      // the repository behind it, and the name is gone from this tree.
+      rmSync(join(repo, 'node_modules', 'pkg'));
+      runSince();
+
+      let lines = stderr();
+      expect(
+        lines.some(
+          (l) =>
+            l.includes('node_modules/pkg') &&
+            l.includes('finds nothing to answer for now'),
+        ),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+
+      // …or replaced by an in-tree repository: a repository this tree never
+      // recorded as its own, so it appeared.
+      (writeStderrLine as unknown as Mock).mockClear();
+      symlinkSync(ext, join(repo, 'node_modules', 'pkg'));
+      runSnapshot();
+      rmSync(join(repo, 'node_modules', 'pkg'));
+      mkdirSync(join(repo, 'node_modules', 'pkg'));
+      initNestedRepo(join(repo, 'node_modules', 'pkg'));
+      runSince();
+      lines = stderr();
+      expect(
+        lines.some(
+          (l) =>
+            l.includes('node_modules/pkg') &&
+            l.includes('the snapshot never recorded'),
+        ),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(ext, { recursive: true, force: true });
+    }
+  });
+
+  it("never runs a family-named nested repository's own filter through the re-inclusion spawns", () => {
+    // A gitlink under a review name family, tracked: the tracked half of
+    // the re-inclusion would hand it to `add -u` as an explicit pathspec,
+    // and a staged one to `add -A -f` — both run a status inside the
+    // checkout (measured), executing its own config.
+    const nested = join(repo, '.qwen', 'tmp', 'qwen-review-x', 'sub');
+    mkdirSync(nested, { recursive: true });
+    initNestedRepo(nested);
+    writeFileSync(join(nested, '.gitattributes'), '* filter=evil\n');
+    gitAt(nested, 'add', '-A');
+    gitAt(nested, 'commit', '-qm', 'wire the filter');
+    const canary = join(out, 'family-filter-ran');
+    gitAt(nested, 'config', 'filter.evil.clean', `touch '${canary}'; cat`);
+    git('add', '-f', '--', '.qwen/tmp/qwen-review-x/sub');
+    git('commit', '-qm', 'track the family gitlink');
+    // …and a staged sibling under another family name.
+    const staged = join(repo, '.qwen', 'tmp', 'review-pr-9', 'dep');
+    mkdirSync(staged, { recursive: true });
+    initNestedRepo(staged);
+    writeFileSync(join(staged, '.gitattributes'), '* filter=evil\n');
+    gitAt(staged, 'add', '-A');
+    gitAt(staged, 'commit', '-qm', 'wire the filter');
+    gitAt(staged, 'config', 'filter.evil.clean', `touch '${canary}'; cat`);
+    git('add', '-f', '--', '.qwen/tmp/review-pr-9/dep');
+    // Same-size edits: only a content comparison runs the clean filter.
+    writeFileSync(join(nested, 'f.txt'), 'BEFORE');
+    writeFileSync(join(staged, 'f.txt'), 'BEFORE');
+
+    runSnapshot();
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
+    runSince();
+
+    expect(existsSync(canary)).toBe(false);
+    expect(readFileSync(hunksFile(), 'utf8')).toContain('a.ts');
+    const lines = stderr();
+    // Named once each: a committed family gitlink is in the throwaway index
+    // AND the user's index, and must not be counted from both.
+    expect(
+      lines.some(
+        (l) =>
+          l.startsWith('fix-delta: left 2 nested repositories') &&
+          l.includes('qwen-review-x/sub') &&
+          l.includes('review-pr-9/dep') &&
+          l.includes('out of the re-inclusion'),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps flagging a hand-set bit where the sparse rules exist but do not govern the worktree', () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      const sub = join(repo, 'sub');
+      writeFileSync(join(sub, 'keep.txt'), 'keep\n');
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'two files');
+      git('add', '-A');
+      git('commit', '-qm', 'record the moved gitlink');
+      // Rules written by hand and never applied: `a/one.txt` is inside them
+      // and `keep.txt`/`f.txt` outside, yet every tracked path is present
+      // and unflagged — one unflagged out-of-rules path is enough to say
+      // the rules govern nothing here (and enough to tell "every control
+      // in-rules" from "no control in-rules").
+      mkdirSync(join(sub, 'a'));
+      writeFileSync(join(sub, 'a', 'one.txt'), 'one\n');
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'a/one.txt');
+      git('add', '-A');
+      git('commit', '-qm', 'record the moved gitlink again');
+      gitAt(sub, 'config', 'core.sparseCheckout', 'true');
+      writeFileSync(
+        join(
+          gitAt(sub, 'rev-parse', '--absolute-git-dir'),
+          'info',
+          'sparse-checkout',
+        ),
+        '/a/\n',
+      );
+      expect(gitAt(sub, 'ls-files', '-v')).toMatch(/^H f\.txt$/m);
+      expect(gitAt(sub, 'ls-files', '-v')).toMatch(/^H keep\.txt$/m);
+
+      runSnapshot();
+      gitAt(sub, 'update-index', '--skip-worktree', 'f.txt');
+      rmSync(join(sub, 'f.txt'));
+      expect(gitAt(sub, 'status', '--porcelain=v2')).toBe('');
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => /\bsub\b/.test(l) && l.includes('could not resolve')),
+      ).toBe(true);
+      if (sparseCheckRulesAnswers(sub)) {
+        // …and the reader is told why, and what ends it.
+        expect(
+          lines.some(
+            (l) =>
+              l.includes('do not govern its worktree') &&
+              l.includes('keep.txt') &&
+              !l.includes('a/one.txt') &&
+              l.includes('git sparse-checkout reapply'),
+          ),
+        ).toBe(true);
+      }
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  itWhereRawByteNamesExist(
+    'captures a repository whose separate git dir carries a byte that is not UTF-8',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-fix-delta-gd-')),
+      );
+      const cwdHere = process.cwd();
+      try {
+        const work = join(base, 'work');
+        mkdirSync(work);
+        execFileSync('/bin/sh', [], {
+          input: Buffer.concat([
+            Buffer.from(
+              `set -e\ncd -- '${work}'\ngit init -q -b main --separate-git-dir='../gd-`,
+            ),
+            Buffer.from([0xe9]),
+            Buffer.from(
+              "' .\ngit config user.email t@t.t\ngit config user.name t\n" +
+                "printf 'export const x = 1;\\n' > a.ts\ngit add -A\ngit commit -qm head\n",
+            ),
+          ]),
+        });
+        mkdirSync(join(work, '.qwen', 'tmp'), { recursive: true });
+        process.chdir(work);
+        expect(() => runSnapshot()).not.toThrow();
+        writeFileSync(join(work, 'a.ts'), 'export const x = 2;\n');
+        expect(() => runSince()).not.toThrow();
+        expect(readFileSync(hunksFile(), 'utf8')).toContain(
+          '+export const x = 2;',
+        );
+      } finally {
+        process.chdir(cwdHere);
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('discloses a repository moved into the tree behind a retargeted link', () => {
+    // At the snapshot `node_modules/pkg` reached an EXTERNAL repository
+    // (scope, digest recorded, identity recorded). The window moves that
+    // repository into the tree — same inode — and retargets the link at
+    // it, under an ignored directory the walk reaches BEFORE the link. The
+    // withdrawn external baseline must not come back under the new name
+    // through the identity alias: this is a repository this tree never
+    // recorded as its own, so it appeared.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\naaa/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore aaa');
+    const ext = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-ext-')),
+    );
+    try {
+      initNestedRepo(ext);
+      mkdirSync(join(repo, 'node_modules'));
+      symlinkSync(ext, join(repo, 'node_modules', 'pkg'));
+
+      runSnapshot();
+      const snap = JSON.parse(
+        readFileSync(snapshotFile(), 'utf8'),
+      ) as FixSnapshot;
+      expect(snap.outOfRoot).toContain('node_modules/pkg');
+      expect(Object.keys(snap.digests)).toContain('node_modules/pkg');
+
+      mkdirSync(join(repo, 'aaa'));
+      renameSync(ext, join(repo, 'aaa', 'ext'));
+      rmSync(join(repo, 'node_modules', 'pkg'));
+      symlinkSync(join('..', 'aaa', 'ext'), join(repo, 'node_modules', 'pkg'));
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('the snapshot never recorded'))).toBe(
+        true,
+      );
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(ext, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a seed gitlink standing over a checkout of the other hash algorithm', () => {
+    // A sha256 superproject whose checkout the window replaced by a SHA-1
+    // clone: its HEAD is 40 hex, and a `160000 <40 hex>` record is
+    // malformed in a sha256 index — `add -A` refuses "a submodule of a
+    // different hash algorithm" too — so the entry stands and the probe
+    // answers for the checkout, rather than the capture dying on it.
+    const top = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-256b-')),
+    );
+    const cwdHere = process.cwd();
+    try {
+      gitAt(top, 'init', '-q', '-b', 'main', '--object-format=sha256');
+      gitAt(top, 'config', 'user.email', 't@t.t');
+      gitAt(top, 'config', 'user.name', 't');
+      writeFileSync(join(top, 'a.ts'), 'export const x = 1;\n');
+      const nested = join(top, 'sub');
+      mkdirSync(nested);
+      gitAt(nested, 'init', '-q', '-b', 'main', '--object-format=sha256');
+      gitAt(nested, 'config', 'user.email', 't@t.t');
+      gitAt(nested, 'config', 'user.name', 't');
+      writeFileSync(join(nested, 's.txt'), 's\n');
+      gitAt(nested, 'add', '-A');
+      gitAt(nested, 'commit', '-qm', 'init');
+      gitAt(top, 'add', '-A');
+      gitAt(top, 'commit', '-qm', 'head with gitlink');
+      mkdirSync(join(top, '.qwen', 'tmp'), { recursive: true });
+      process.chdir(top);
+      runSnapshot();
+      rmSync(nested, { recursive: true, force: true });
+      mkdirSync(nested);
+      initNestedRepo(nested); // SHA-1
+      expect(gitAt(nested, 'rev-parse', 'HEAD')).toMatch(/^[0-9a-f]{40}$/);
+      expect(() => runSince()).not.toThrow();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(lines.some((l) => /\bsub\b/.test(l))).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      process.chdir(cwdHere);
+      rmSync(top, { recursive: true, force: true });
+    }
+  });
+
+  itWhereCaseMatters(
+    'still pins a case-sensitive filesystem when a .GIT entry is planted beside .git',
+    () => {
+      // Two entries differing only by case can coexist only on a sensitive
+      // filesystem, so a planted `.GIT` is a different inode and cannot pass
+      // the probe off as insensitive.
+      mkdirSync(join(repo, '.GIT'));
+      expect(lstatSync(join(repo, '.GIT')).ino).not.toBe(
+        lstatSync(join(repo, '.git')).ino,
+      );
+      writeFileSync(join(repo, 'A.txt'), 'upper\n');
+      git('add', '-A');
+      git('commit', '-qm', 'track A.txt');
+      git('config', 'core.ignoreCase', 'true');
+      writeFileSync(join(repo, 'a.txt'), 'v1\n');
+
+      runSnapshot();
+      writeFileSync(join(repo, 'a.txt'), 'v2\n');
+      runSince();
+
+      const hunks = readFileSync(hunksFile(), 'utf8');
+      expect(hunks).toContain('diff --git a/a.txt b/a.txt');
+      expect(hunks).toContain('+v2');
+    },
+  );
+
+  itWhereCaseMatters(
+    'still pins a case-sensitive filesystem when .GIT is hard-linked to a gitfile .git',
+    () => {
+      // A gitfile can be given a second name: `ln .git .GIT` shares the
+      // inode, so equal inodes prove nothing there — only a link count of
+      // one does. (`.GIT` is untrackable by git, so the plant ignores it.)
+      const base = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-fix-delta-hl-')),
+      );
+      const cwdHere = process.cwd();
+      try {
+        const work = join(base, 'work');
+        mkdirSync(work);
+        gitAt(
+          work,
+          'init',
+          '-q',
+          '-b',
+          'main',
+          `--separate-git-dir=${join(base, 'gd')}`,
+          '.',
+        );
+        gitAt(work, 'config', 'user.email', 't@t.t');
+        gitAt(work, 'config', 'user.name', 't');
+        expect(lstatSync(join(work, '.git')).isFile()).toBe(true);
+        linkSync(join(work, '.git'), join(work, '.GIT'));
+        expect(lstatSync(join(work, '.GIT')).ino).toBe(
+          lstatSync(join(work, '.git')).ino,
+        );
+        writeFileSync(join(work, '.gitignore'), '.GIT\n');
+        writeFileSync(join(work, 'A.txt'), 'upper\n');
+        gitAt(work, 'add', '-A');
+        gitAt(work, 'commit', '-qm', 'track A.txt');
+        gitAt(work, 'config', 'core.ignoreCase', 'true');
+        writeFileSync(join(work, 'a.txt'), 'v1\n');
+        mkdirSync(join(work, '.qwen', 'tmp'), { recursive: true });
+        process.chdir(work);
+
+        runSnapshot();
+        writeFileSync(join(work, 'a.txt'), 'v2\n');
+        runSince();
+
+        const hunks = readFileSync(hunksFile(), 'utf8');
+        expect(hunks).toContain('diff --git a/a.txt b/a.txt');
+        expect(hunks).toContain('+v2');
+      } finally {
+        process.chdir(cwdHere);
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itWhereCaseMatters(
+    'names a case-colliding edit inside a nested repository that a planted core.ignoreCase would fold away',
+    () => {
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nvendor/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore vendor');
+      const nested = join(repo, 'vendor', 'lib');
+      mkdirSync(nested, { recursive: true });
+      initNestedRepo(nested);
+      writeFileSync(join(nested, 'A.txt'), 'upper\n');
+      gitAt(nested, 'add', '-A');
+      gitAt(nested, 'commit', '-qm', 'track A.txt');
+      gitAt(nested, 'config', 'core.ignoreCase', 'true');
+
+      runSnapshot();
+      // Under the planted key the nested status folds `a.txt` into the
+      // tracked `A.txt` and prints nothing: the same digest at both moments.
+      writeFileSync(join(nested, 'a.txt'), 'lower\n');
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('vendor/lib') && l.includes('cannot see')),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('never files a fix edit hidden by a hand-set bit as pre-existing dirt', () => {
+    const subSrc = plantCommittedSubmodule();
+    try {
+      // Dirty at the snapshot (an untracked file), with a hand-set bit on a
+      // tracked file: the status text is the same at both moments whatever
+      // happens to the bit-hidden file.
+      writeFileSync(join(repo, 'sub', 'g.txt'), 'untracked dirt\n');
+      gitAt(join(repo, 'sub'), 'update-index', '--skip-worktree', 'f.txt');
+      runSnapshot();
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'the fix — bit-hidden\n');
+      runSince();
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => /\bsub\b/.test(l) && l.includes('could not resolve')),
+      ).toBe(true);
+      expect(
+        lines.some((l) => l.includes('already held uncommitted content')),
+      ).toBe(false);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the all-clear for a sparse nested repository that holds a submodule', () => {
+    const subSrc = plantCommittedSubmodule();
+    const depSrc = makeSubmoduleSource();
+    try {
+      const sub = join(repo, 'sub');
+      mkdirSync(join(sub, 'a'));
+      mkdirSync(join(sub, 'd'));
+      writeFileSync(join(sub, 'a', 'one.txt'), 'one\n');
+      writeFileSync(join(sub, 'd', 'two.txt'), 'two\n');
+      gitAt(
+        sub,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        depSrc,
+        'd/dep',
+      );
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'two directories and a submodule');
+      gitAt(sub, 'sparse-checkout', 'init', '--cone');
+      gitAt(sub, 'sparse-checkout', 'set', 'a');
+      // git never sets a sparse bit on a gitlink: `d/dep` stays `H` and
+      // present while `d/two.txt` is `S` and gone.
+      expect(gitAt(sub, 'ls-files', '-v')).toMatch(/^S d\/two\.txt$/m);
+      expect(gitAt(sub, 'ls-files', '-v')).toMatch(/^H d\/dep$/m);
+      git('add', '-A');
+      git('commit', '-qm', 'record the moved gitlink');
+
+      runSnapshot();
+      runSince();
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      if (!sparseCheckRulesAnswers(sub)) {
+        expect(
+          lines.some(
+            (l) => /\bsub\b/.test(l) && l.includes('could not resolve'),
+          ),
+        ).toBe(true);
+        return;
+      }
+      expect(lines.some((l) => l.includes('do not govern'))).toBe(false);
+      expect(lines.some((l) => l.includes('could not resolve'))).toBe(false);
+      expect(lines.at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+      rmSync(depSrc, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'captures a repository whose separate git dir carries a newline in its name',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-fix-delta-gdnl-')),
+      );
+      const cwdHere = process.cwd();
+      try {
+        const work = join(base, 'work');
+        mkdirSync(work);
+        gitAt(
+          work,
+          'init',
+          '-q',
+          '-b',
+          'main',
+          `--separate-git-dir=${join(base, 'gd\nnl')}`,
+          '.',
+        );
+        gitAt(work, 'config', 'user.email', 't@t.t');
+        gitAt(work, 'config', 'user.name', 't');
+        writeFileSync(join(work, 'a.ts'), 'export const x = 1;\n');
+        gitAt(work, 'add', '-A');
+        gitAt(work, 'commit', '-qm', 'head');
+        mkdirSync(join(work, '.qwen', 'tmp'), { recursive: true });
+        process.chdir(work);
+        expect(() => runSnapshot()).not.toThrow();
+        writeFileSync(join(work, 'a.ts'), 'export const x = 2;\n');
+        expect(() => runSince()).not.toThrow();
+        expect(readFileSync(hunksFile(), 'utf8')).toContain(
+          '+export const x = 2;',
+        );
+      } finally {
+        process.chdir(cwdHere);
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itWhereRawByteNamesExist(
+    'names the tracked path a sparse checkout cannot be asked about when its name is not UTF-8',
+    () => {
+      // A name the spawn cannot carry cannot reach `check-rules`: the
+      // exemption is not granted, and the reader is told which name kept
+      // it rather than left with the generic unresolved note.
+      const subSrc = plantCommittedSubmodule();
+      try {
+        const sub = join(repo, 'sub');
+        mkdirSync(join(sub, 'a'));
+        writeFileSync(join(sub, 'a', 'one.txt'), 'one\n');
+        overwriteSh(
+          Buffer.concat([
+            Buffer.from(join(sub, 'a') + '/'),
+            Buffer.from([0xe9]),
+          ]),
+          'latin1 name',
+        );
+        gitAt(sub, 'add', '-A');
+        gitAt(sub, 'commit', '-qm', 'a/one.txt and a latin-1 name');
+        gitAt(sub, 'sparse-checkout', 'init', '--cone');
+        gitAt(sub, 'sparse-checkout', 'set', 'a');
+        git('add', '-A');
+        git('commit', '-qm', 'record the moved gitlink');
+        // A bit set by hand on a file git left alone.
+        gitAt(sub, 'update-index', '--skip-worktree', 'f.txt');
+        rmSync(join(sub, 'f.txt'));
+
+        runSnapshot();
+        runSince();
+
+        const lines = stderr();
+        expect(
+          lines.some(
+            (l) =>
+              l.includes('cannot be asked about') && l.includes('a/\u00e9'),
+          ),
+        ).toBe(true);
+        expect(
+          lines.some(
+            (l) => /\bsub\b/.test(l) && l.includes('could not resolve'),
+          ),
+        ).toBe(true);
+      } finally {
+        rmSync(subSrc, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('keeps the all-clear for a submodule checked out sparsely, and keeps flagging a hand-set bit', () => {
     const subSrc = plantCommittedSubmodule();
     try {
@@ -6863,6 +7628,17 @@ describe('fix-delta', () => {
       runSince();
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       let lines = stderr();
+      if (!sparseCheckRulesAnswers(sub)) {
+        // A git without `sparse-checkout check-rules` (before 2.42) cannot
+        // be asked which paths its rules cover, and the exemption fails
+        // closed: the pre-exemption wedge, disclosed, never a certification.
+        expect(
+          lines.some(
+            (l) => /\bsub\b/.test(l) && l.includes('could not resolve'),
+          ),
+        ).toBe(true);
+        return;
+      }
       expect(lines.some((l) => l.includes('could not resolve'))).toBe(false);
       expect(lines.at(-1)).toContain(
         'the tree is unchanged since the snapshot',
