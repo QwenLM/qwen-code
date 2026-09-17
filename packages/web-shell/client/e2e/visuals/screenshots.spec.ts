@@ -1460,6 +1460,15 @@ for (const theme of THEMES) {
       await expect(page.getByText('Chat width', { exact: true })).toHaveCount(
         0,
       );
+      // General lost only `setting:timestamps`, so the category keeps its nav
+      // button and its surviving rows while the excluded row leaves.
+      await nav.getByRole('button', { name: /^General/ }).click();
+      await expect(
+        page.getByText('Auto-update', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText('Show Timestamps', { exact: true }),
+      ).toHaveCount(0);
       await nav.getByRole('button', { name: /^Model/ }).click();
       await expect(
         page.getByText('Model Fallbacks', { exact: true }),
