@@ -287,9 +287,9 @@ function readDaemonPids() {
     }
   }
   if (pids.size === 0 && fs.existsSync(daemonDir)) {
-    // Windows resolves the daemon log from the real profile, so this only fires
-    // where the daemon did write under the smoke's HOME and we failed to read
-    // it — the teardown then falls back to the delete retries.
+    // QWEN_HOME pins the daemon log inside the isolated workspace on every
+    // platform, so this fires only when the log dir exists but yielded no
+    // pid line — the teardown then falls back to the delete retries.
     console.warn(`smoke: no packaged runtime pid found in ${daemonDir}`);
   }
   return [...pids];
