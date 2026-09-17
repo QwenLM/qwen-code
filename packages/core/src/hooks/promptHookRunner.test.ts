@@ -364,7 +364,7 @@ describe('PromptHookRunner', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.outcome).toBe('cancelled');
+      expect(result.outcome).toBe('timeout');
     });
 
     it('should time out while resolving an override model', async () => {
@@ -391,7 +391,7 @@ describe('PromptHookRunner', () => {
         await vi.advanceTimersByTimeAsync(100);
         const result = await execution;
 
-        expect(result.outcome).toBe('cancelled');
+        expect(result.outcome).toBe('timeout');
         finishResolution?.();
         await Promise.resolve();
         expect(mockGenerateContent).not.toHaveBeenCalled();
@@ -642,6 +642,104 @@ describe('PromptHookRunner', () => {
 
       expect(result.success).toBe(true);
       expect(result.output?.decision).toBe('allow');
+    });
+  });
+
+  describe('outcome', () => {
+    /** A generateContent that settles only when its request is aborted. */
+    const rejectOnRequestAbort = (message: string) =>
+      mockGenerateContent.mockImplementation(
+        (request: { config: { abortSignal: AbortSignal } }) =>
+          new Promise((_, reject) => {
+            request.config.abortSignal.addEventListener('abort', () =>
+              reject(new Error(message)),
+            );
+          }),
+      );
+
+    it('reports its own timeout as timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        mockGenerateContent.mockReturnValue(new Promise(() => {}));
+
+        const execution = promptRunner.execute(
+          createMockConfig({ timeout: 0.1 }),
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await execution;
+
+        expect(result.outcome).toBe('timeout');
+        expect(result.success).toBe(false);
+        expect(result.error?.message).toBe('Prompt hook timed out after 100ms');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a timeout as timeout even when the aborted request rejects first', async () => {
+      vi.useFakeTimers();
+      try {
+        rejectOnRequestAbort('Request was aborted.');
+
+        const execution = promptRunner.execute(
+          createMockConfig({ timeout: 0.1 }),
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await execution;
+
+        expect(result.outcome).toBe('timeout');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a caller abort during the request as cancelled', async () => {
+      rejectOnRequestAbort('Request was aborted.');
+      const controller = new AbortController();
+
+      const execution = promptRunner.execute(
+        createMockConfig({ timeout: 60 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+      await vi.waitFor(() => expect(mockGenerateContent).toHaveBeenCalled());
+      controller.abort();
+      const result = await execution;
+
+      expect(result.outcome).toBe('cancelled');
+      expect(result.success).toBe(false);
+    });
+
+    it('reports a provider error that mentions an abort as a failure, not a cancel', async () => {
+      mockGenerateContent.mockRejectedValue(
+        new Error('Request aborted by server'),
+      );
+
+      const result = await promptRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        new AbortController().signal,
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('reports a provider error that mentions a timeout as a failure, not a timeout', async () => {
+      mockGenerateContent.mockRejectedValue(new Error('upstream timed out'));
+
+      const result = await promptRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
     });
   });
 
