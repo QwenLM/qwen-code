@@ -18,6 +18,7 @@ import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import type { Config } from '../config/config.js';
 import type { CallableTool, Part } from '@google/genai';
+import { SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
 import { ToolErrorType } from './tool-error.js';
 import {
   MCPServerStatus,
@@ -31,6 +32,18 @@ import {
 } from '../utils/invocation-context.js';
 
 vi.mock('node:fs/promises');
+
+const { mockDebugWarn } = vi.hoisted(() => ({ mockDebugWarn: vi.fn() }));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => ({
+    isEnabled: () => false,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: mockDebugWarn,
+    error: vi.fn(),
+  }),
+}));
 
 // Mock @google/genai mcpToTool and CallableTool
 // We only need to mock the parts of CallableTool that DiscoveredMCPTool uses.
@@ -1342,8 +1355,7 @@ describe('DiscoveredMCPTool', () => {
         uri: 'ui://demo/other',
         mimeType: 'text/html;profile=mcp-app',
         text: '<main>Wrong URI</main>',
-        reason:
-          'resource must return text/html;profile=mcp-app for ui://demo/dashboard',
+        reason: 'resource ui://demo/dashboard was not returned by the server',
       },
       {
         uri: 'ui://demo/dashboard',
@@ -1430,9 +1442,13 @@ describe('DiscoveredMCPTool', () => {
           })),
           readResource: vi.fn(async (_params, options) => {
             if (!deadline) {
-              throw Object.assign(new Error('Request timed out'), {
-                code: -32001,
-              });
+              // The shape `@modelcontextprotocol/client` 2.x throws for its
+              // own request timeouts — a string code, never JSON-RPC -32001.
+              throw new SdkError(
+                SdkErrorCode.RequestTimeout,
+                'Request timed out',
+                { timeout: mcpTimeout },
+              );
             }
             return new Promise<never>((_resolve, reject) => {
               options?.signal?.addEventListener('abort', () => {
@@ -1459,11 +1475,41 @@ describe('DiscoveredMCPTool', () => {
             result,
             `resource read timed out (limit: ${expectedTimeout} ms)`,
           );
+          expect(mockDebugWarn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `(cause: ${deadline ? 'The operation timed out' : 'Request timed out'})`,
+            ),
+          );
         } finally {
           timeoutSpy.mockRestore();
         }
       },
     );
+
+    it('attributes a server-sent -32001 to the server, not the host limit', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => {
+          // A server-sent `-32001` arrives as a ProtocolError carrying the
+          // numeric code; the v2 client never emits -32001 for its own
+          // timeouts, so this must not be labelled with the host's limit.
+          throw Object.assign(new Error('MCP error -32001: Unknown session'), {
+            code: -32001,
+          });
+        }),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expectAppLoadWarning(result, 'MCP error -32001: Unknown session');
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        `Warning: MCP App 'ui://demo/dashboard' from '${serverName}' could not be displayed: MCP error -32001: Unknown session`,
+      );
+    });
 
     it('reports an unreadable app resource without changing the tool result', async () => {
       const mcpClient: McpDirectClient = {

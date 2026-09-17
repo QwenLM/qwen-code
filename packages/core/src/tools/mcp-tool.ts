@@ -107,6 +107,21 @@ function isMcpRequestTimeout(error: unknown): boolean {
   );
 }
 
+// The v2 SDK (`@modelcontextprotocol/client`) reports its own request
+// timeouts as `SdkError` with a string code, never as JSON-RPC `-32001` —
+// that code now only ever arrives from the server, so attributing it to the
+// host's own limit misstates the failure. Structural check (like
+// `isMcpRequestTimeout`) to keep the SDK import contained in mcp-client.ts.
+const MCP_SDK_REQUEST_TIMEOUT_CODE = 'REQUEST_TIMEOUT';
+
+function isMcpSdkRequestTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === 'SdkError' &&
+    (error as { code?: unknown }).code === MCP_SDK_REQUEST_TIMEOUT_CODE
+  );
+}
+
 function isMcpDeadSessionHttpError(error: unknown): boolean {
   return (
     typeof error === 'object' &&
@@ -750,7 +765,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const content = resource.contents.find(
         (entry) => entry.uri === this.appResourceUri,
       );
-      if (!content || content.mimeType !== MCP_APP_RESOURCE_MIME_TYPE) {
+      if (!content) {
+        throw new Error(
+          `resource ${this.appResourceUri} was not returned by the server`,
+        );
+      }
+      if (content.mimeType !== MCP_APP_RESOURCE_MIME_TYPE) {
         throw new Error(
           `resource must return ${MCP_APP_RESOURCE_MIME_TYPE} for ${this.appResourceUri}`,
         );
@@ -785,14 +805,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       };
     } catch (error) {
       if (signal.aborted) return undefined;
+      const cause = getErrorMessage(error);
       const reason =
         timeoutSignal.aborted ||
         (error instanceof Error && error.name === 'TimeoutError') ||
-        isExecutionTimeoutFailure(error, this.serverName, signal)
+        isMcpSdkRequestTimeout(error)
           ? `resource read timed out (limit: ${timeoutMs} ms)`
-          : getErrorMessage(error);
+          : cause;
       const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
-      debugLogger.warn(warning);
+      // On the timeout branch `reason` replaces the underlying message, so
+      // keep it on the log line; on the passthrough branch it is the same
+      // string and appending it again would just duplicate it.
+      debugLogger.warn(
+        reason === cause ? warning : `${warning} (cause: ${cause})`,
+      );
       return {
         type: 'mcp_app',
         serverName: this.serverName,
