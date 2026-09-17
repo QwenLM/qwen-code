@@ -95,6 +95,7 @@ function splitCommandForRules(command: string): string[] {
       ch === '#' &&
       !inSingle &&
       !inDouble &&
+      // Bash only treats ASCII space and tab as word boundaries here.
       (i === 0 || command[i - 1] === ' ' || command[i - 1] === '\t')
     ) {
       return [command];

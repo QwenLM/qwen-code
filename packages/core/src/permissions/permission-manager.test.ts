@@ -2373,6 +2373,8 @@ describe('PermissionManager', () => {
       ['bash', 'echo $(date) # comment ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi # comment\nrm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi ; rm -rf /tmp/x # comment ; echo ignored', 'deny'],
+      ['bash', 'echo a#b ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a\v# comment ; rm -rf /tmp/x', 'deny'],
     ] as const)(
       'handles comments conservatively for %s',
       async (shell, command, expected) => {
