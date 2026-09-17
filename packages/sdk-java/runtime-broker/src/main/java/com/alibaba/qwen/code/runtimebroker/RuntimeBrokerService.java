@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -11,9 +11,14 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Runtime placement, Session binding, and execution-ledger authority. */
-public final class RuntimeBrokerService {
+public final class RuntimeBrokerService implements AutoCloseable {
     private static final Set<String> CONTROL_OPERATIONS = Set.of(
             "bind-history", "checkpoint", "history", "manifest",
             "begin-turn", "prepare", "confirmation", "confirm",
@@ -24,7 +29,11 @@ public final class RuntimeBrokerService {
     private final HarnessSessionResolver sessionResolver;
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
-    private final ConcurrentMap<BindingKey, CompletableFuture<RuntimeLease>>
+    private final Duration idleTimeout;
+    private final Duration healthFreshness;
+    private final ScheduledExecutorService scheduler;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final ConcurrentMap<RuntimeProvisionRequest, RuntimeBinding>
             bindings = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, SessionBinding> sessions =
             new ConcurrentHashMap<>();
@@ -35,23 +44,38 @@ public final class RuntimeBrokerService {
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport) {
+        this(sessionResolver, provisioner, transport, Duration.ofMinutes(5),
+                Duration.ofSeconds(30), daemonScheduler());
+    }
+
+    RuntimeBrokerService(HarnessSessionResolver sessionResolver,
+            RuntimeProvisioner provisioner, RuntimeTransport transport,
+            Duration idleTimeout, Duration healthFreshness,
+            ScheduledExecutorService scheduler) {
         this.sessionResolver = require(sessionResolver, "sessionResolver");
         this.provisioner = require(provisioner, "provisioner");
         this.transport = require(transport, "transport");
+        this.idleTimeout = requirePositive(idleTimeout, "idleTimeout");
+        this.healthFreshness = requirePositive(healthFreshness,
+                "healthFreshness");
+        this.scheduler = require(scheduler, "scheduler");
     }
 
     /** Begins Runtime provisioning without blocking model inference. */
     public CompletionStage<Void> warm(String harnessSessionId) {
+        ensureOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId,
                 "harnessSessionId");
-        return resolveScope(harnessId).thenCompose(scope -> binding(scope,
-                harnessId))
+        return resolveScope(harnessId).thenCompose(scope -> binding(
+                request(scope, harnessId))).thenCompose(binding ->
+                        binding.ready)
                 .thenApply(ignored -> null);
     }
 
     /** Acquires one logical Runtime Session, waiting for the warm binding. */
     public CompletionStage<Void> acquire(String harnessSessionId,
             String runtimeSessionId, String turnKind) {
+        ensureOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId,
                 "harnessSessionId");
         String runtimeId = BrokerValues.requireId(runtimeSessionId,
@@ -65,12 +89,8 @@ public final class RuntimeBrokerService {
                         }
                         RuntimeSession runtimeSession = new RuntimeSession(
                                 harnessId, runtimeId, turnKind, scope);
-                        CompletableFuture<RuntimeLease> ready = binding(scope,
-                                harnessId)
-                                .thenCompose(lease -> transport.acquire(lease,
-                                        runtimeSession).thenApply(none -> lease))
-                                .toCompletableFuture();
-                        return new SessionBinding(runtimeSession, ready);
+                        return new SessionBinding(runtimeSession,
+                                request(scope, harnessId));
                     });
             return session.ready.thenApply(ignored -> null);
         });
@@ -95,6 +115,7 @@ public final class RuntimeBrokerService {
             String harnessSessionId, String runtimeSessionId, String turnId,
             String toolCallId, String requestDigest,
             Map<String, Object> reference) {
+        ensureOpen();
         SessionBinding session = requireSession(harnessSessionId,
                 runtimeSessionId);
         String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
@@ -150,23 +171,7 @@ public final class RuntimeBrokerService {
                         "Runtime Session still owns an active execution.");
             }
         }
-        return session.ready.thenCompose(lease -> transport.release(lease,
-                session.session)).thenApply(released -> {
-                    if (Boolean.TRUE.equals(released)) {
-                        sessions.remove(runtimeSessionId, session);
-                        executionsById.entrySet().removeIf(entry -> {
-                            ExecutionRecord execution = entry.getValue();
-                            if (!execution.belongsTo(runtimeSessionId)) {
-                                return false;
-                            }
-                            executionsByKey.remove(execution.idempotencyKey,
-                                    execution);
-                            return true;
-                        });
-                        return true;
-                    }
-                    return false;
-                });
+        return session.release(runtimeSessionId);
     }
 
     private CompletionStage<RuntimeScope> resolveScope(
@@ -190,77 +195,47 @@ public final class RuntimeBrokerService {
         });
     }
 
-    private CompletableFuture<RuntimeLease> binding(RuntimeScope scope,
-            String harnessSessionId) {
-        BindingKey key = new BindingKey(scope, harnessSessionId);
-        CompletableFuture<RuntimeLease> binding = bindings.computeIfAbsent(
-                key, ignored -> {
-                    CompletableFuture<RuntimeLease> provisioned =
-                            new CompletableFuture<>();
-                    CompletionStage<RuntimeLease> started;
-                    try {
-                        started = provisioner.provision(scope);
-                    } catch (RuntimeException exception) {
-                        provisioned.completeExceptionally(exception);
-                        return provisioned;
-                    }
-                    if (started == null) {
-                        provisioned.completeExceptionally(unavailable(
-                                "runtime_broker_provisioning_failed",
-                                "Runtime provisioning returned no operation."));
-                        return provisioned;
-                    }
-                    started.whenComplete((lease, error) -> {
-                        if (error != null) {
-                            provisioned.completeExceptionally(unwrap(error));
-                            bindings.remove(key, provisioned);
-                        } else if (lease == null) {
-                            provisioned.completeExceptionally(unavailable(
-                                    "runtime_broker_provisioning_failed",
-                                    "Runtime provisioning returned no lease."));
-                            bindings.remove(key, provisioned);
-                        } else {
-                            provisioned.complete(lease);
-                        }
-                    });
-                    return provisioned;
-                });
-        binding.whenComplete((lease, error) -> {
-            if (error != null) {
-                bindings.remove(key, binding);
-            }
-        });
-        return binding;
+    private CompletionStage<RuntimeBinding> binding(
+            RuntimeProvisionRequest request) {
+        if (closed.get()) {
+            return failed(closed());
+        }
+        RuntimeBinding binding = bindings.computeIfAbsent(request,
+                RuntimeBinding::new);
+        binding.start();
+        Throwable failure = binding.provisioningFailure();
+        if (failure != null) {
+            return failed(failure);
+        }
+        CompletionStage<Void> unavailable = binding.whenUnavailable();
+        if (unavailable == null) {
+            return CompletableFuture.completedFuture(binding);
+        }
+        return unavailable.thenCompose(ignored -> binding(request));
     }
 
-    private static final class BindingKey {
-        private final RuntimeScope scope;
-        private final String harnessSessionId;
-
-        BindingKey(RuntimeScope scope, String harnessSessionId) {
-            this.scope = scope;
-            this.harnessSessionId = "session".equals(
-                    scope.getIsolationClass()) ? harnessSessionId : null;
-        }
-
-        @Override
-        public boolean equals(Object candidate) {
-            if (this == candidate) {
-                return true;
+    private CompletionStage<RuntimeAssignment> assign(
+            RuntimeProvisionRequest request) {
+        return binding(request).thenCompose(binding -> {
+            if (!binding.reserveSession()) {
+                return assign(request);
             }
-            if (!(candidate instanceof BindingKey)) {
-                return false;
-            }
-            BindingKey other = (BindingKey) candidate;
-            return scope.equals(other.scope)
-                    && Objects.equals(harnessSessionId,
-                            other.harnessSessionId);
-        }
+            return binding.ready.thenCompose(lease ->
+                    binding.ensureHealthy(lease)).thenApply(lease ->
+                            new RuntimeAssignment(binding, lease))
+                    .whenComplete((assignment, error) -> {
+                        if (error != null) {
+                            binding.releaseSession();
+                        }
+                    });
+        });
+    }
 
-        @Override
-        public int hashCode() {
-            return Objects.hash(scope, harnessSessionId);
-        }
+    private static RuntimeProvisionRequest request(RuntimeScope scope,
+            String harnessSessionId) {
+        return new RuntimeProvisionRequest(scope,
+                "session".equals(scope.getIsolationClass())
+                        ? harnessSessionId : null);
     }
 
     private SessionBinding requireSession(String harnessSessionId,
@@ -290,6 +265,17 @@ public final class RuntimeBrokerService {
                     "Tool execution was not found.");
         }
         return execution;
+    }
+
+    private void removeExecutions(String runtimeSessionId) {
+        executionsById.entrySet().removeIf(entry -> {
+            ExecutionRecord execution = entry.getValue();
+            if (!execution.belongsTo(runtimeSessionId)) {
+                return false;
+            }
+            executionsByKey.remove(execution.idempotencyKey, execution);
+            return true;
+        });
     }
 
     private static RuntimeBrokerException invalid(String code,
@@ -334,14 +320,309 @@ public final class RuntimeBrokerService {
         return failed;
     }
 
-    private static final class SessionBinding {
+    private static Duration requirePositive(Duration value, String name) {
+        if (value == null || value.isZero() || value.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return value;
+    }
+
+    private static ScheduledExecutorService daemonScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable,
+                    "qwen-runtime-broker-idle");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    private void ensureOpen() {
+        if (closed.get()) {
+            throw closed();
+        }
+    }
+
+    private static RuntimeBrokerException closed() {
+        return new RuntimeBrokerException(503, "runtime_broker_closed",
+                "Runtime Broker is closed.", false);
+    }
+
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        scheduler.shutdownNow();
+        provisioner.close();
+        bindings.clear();
+    }
+
+    private enum BindingState {
+        PROVISIONING,
+        READY,
+        DRAINING,
+        FAILED,
+        RELEASED
+    }
+
+    private final class RuntimeBinding {
+        private final RuntimeProvisionRequest request;
+        private final CompletableFuture<RuntimeLease> ready =
+                new CompletableFuture<>();
+        private final AtomicBoolean started = new AtomicBoolean();
+        private BindingState state = BindingState.PROVISIONING;
+        private int activeSessions;
+        private long lastHealthNanos;
+        private ScheduledFuture<?> idleTask;
+        private CompletableFuture<Void> drainFuture;
+        private CompletableFuture<Boolean> healthCheck;
+        private Throwable provisioningFailure;
+
+        RuntimeBinding(RuntimeProvisionRequest request) {
+            this.request = request;
+        }
+
+        void start() {
+            if (!started.compareAndSet(false, true)) {
+                return;
+            }
+            CompletionStage<RuntimeLease> provisioned;
+            try {
+                provisioned = provisioner.provision(request);
+            } catch (RuntimeException exception) {
+                failProvisioning(exception);
+                return;
+            }
+            if (provisioned == null) {
+                failProvisioning(unavailable(
+                        "runtime_broker_provisioning_failed",
+                        "Runtime provisioning returned no operation."));
+                return;
+            }
+            provisioned.whenComplete((lease, error) -> {
+                if (error != null) {
+                    failProvisioning(unwrap(error));
+                    return;
+                }
+                if (lease == null) {
+                    failProvisioning(unavailable(
+                            "runtime_broker_provisioning_failed",
+                            "Runtime provisioning returned no lease."));
+                    return;
+                }
+                synchronized (this) {
+                    if (state != BindingState.PROVISIONING) {
+                        return;
+                    }
+                    state = BindingState.READY;
+                    lastHealthNanos = System.nanoTime();
+                    if (activeSessions == 0) {
+                        scheduleIdle();
+                    }
+                }
+                ready.complete(lease);
+            });
+        }
+
+        synchronized CompletionStage<Void> whenUnavailable() {
+            if (state == BindingState.PROVISIONING
+                    || state == BindingState.READY) {
+                return null;
+            }
+            return drainFuture == null
+                    ? CompletableFuture.completedFuture(null) : drainFuture;
+        }
+
+        synchronized Throwable provisioningFailure() {
+            return provisioningFailure;
+        }
+
+        synchronized boolean reserveSession() {
+            if (state != BindingState.PROVISIONING
+                    && state != BindingState.READY) {
+                return false;
+            }
+            activeSessions++;
+            cancelIdle();
+            return true;
+        }
+
+        synchronized void releaseSession() {
+            if (activeSessions == 0) {
+                return;
+            }
+            activeSessions--;
+            if (activeSessions == 0 && state == BindingState.READY) {
+                scheduleIdle();
+            }
+        }
+
+        CompletionStage<RuntimeLease> ensureHealthy(RuntimeLease lease) {
+            CompletableFuture<Boolean> check;
+            synchronized (this) {
+                if (state != BindingState.READY
+                        && state != BindingState.PROVISIONING) {
+                    return failed(unavailable(
+                            "runtime_broker_health_failed",
+                            "Managed Runtime is unavailable."));
+                }
+                if (lastHealthNanos != 0
+                        && System.nanoTime() - lastHealthNanos
+                                < healthFreshness.toNanos()) {
+                    return CompletableFuture.completedFuture(lease);
+                }
+                if (healthCheck != null) {
+                    return checkedLease(lease, healthCheck);
+                }
+                healthCheck = new CompletableFuture<>();
+                check = healthCheck;
+            }
+            CompletionStage<Boolean> health;
+            try {
+                health = provisioner.health(lease);
+            } catch (RuntimeException exception) {
+                check.completeExceptionally(exception);
+                return checkedLease(lease, check);
+            }
+            if (health == null) {
+                check.complete(false);
+                return checkedLease(lease, check);
+            }
+            health.whenComplete((healthy, error) -> {
+                if (error == null) {
+                    check.complete(healthy);
+                } else {
+                    check.completeExceptionally(unwrap(error));
+                }
+            });
+            return checkedLease(lease, check);
+        }
+
+        private CompletionStage<RuntimeLease> checkedLease(RuntimeLease lease,
+                CompletableFuture<Boolean> check) {
+            return check.handle((healthy, error) -> {
+                boolean accepted;
+                synchronized (this) {
+                    if (healthCheck == check) {
+                        healthCheck = null;
+                    }
+                    accepted = error == null && Boolean.TRUE.equals(healthy)
+                            && state == BindingState.READY;
+                    if (accepted) {
+                        lastHealthNanos = System.nanoTime();
+                    }
+                }
+                if (accepted) {
+                    return lease;
+                }
+                throw new CompletionException(healthFailure(error == null
+                        ? null : unwrap(error)));
+            });
+        }
+
+        private RuntimeBrokerException healthFailure(Throwable cause) {
+            RuntimeBrokerException failure = unavailable(
+                    "runtime_broker_health_failed",
+                    "Managed Runtime health check failed.");
+            if (cause != null) {
+                failure.initCause(cause);
+            }
+            beginDrain(true);
+            return failure;
+        }
+
+        private void failProvisioning(Throwable error) {
+            synchronized (this) {
+                state = BindingState.FAILED;
+                provisioningFailure = error;
+                drainFuture = CompletableFuture.completedFuture(null);
+            }
+            bindings.remove(request, this);
+            ready.completeExceptionally(error);
+        }
+
+        private synchronized void scheduleIdle() {
+            cancelIdle();
+            try {
+                idleTask = scheduler.schedule(() -> beginDrain(false),
+                        idleTimeout.toNanos(), TimeUnit.NANOSECONDS);
+            } catch (RuntimeException ignored) {
+                if (!closed.get()) {
+                    throw ignored;
+                }
+            }
+        }
+
+        private synchronized void cancelIdle() {
+            if (idleTask != null) {
+                idleTask.cancel(false);
+                idleTask = null;
+            }
+        }
+
+        private void beginDrain(boolean failedState) {
+            CompletableFuture<Void> draining;
+            synchronized (this) {
+                if (state == BindingState.DRAINING
+                        || state == BindingState.FAILED
+                        || state == BindingState.RELEASED
+                        || (!failedState && (state != BindingState.READY
+                                || activeSessions != 0))) {
+                    return;
+                }
+                state = failedState ? BindingState.FAILED
+                        : BindingState.DRAINING;
+                cancelIdle();
+                drainFuture = new CompletableFuture<>();
+                draining = drainFuture;
+            }
+            ready.thenCompose(lease -> provisioner.drain(request, lease)
+                    .thenCompose(ignored -> provisioner.release(request,
+                            lease))).whenComplete((ignored, error) -> {
+                                bindings.remove(request, this);
+                                synchronized (this) {
+                                    state = error == null
+                                            ? BindingState.RELEASED
+                                            : BindingState.FAILED;
+                                }
+                                if (error == null) {
+                                    draining.complete(null);
+                                } else {
+                                    draining.completeExceptionally(
+                                            unwrap(error));
+                                }
+                            });
+        }
+    }
+
+    private static final class RuntimeAssignment {
+        private final RuntimeBinding binding;
+        private final RuntimeLease lease;
+
+        RuntimeAssignment(RuntimeBinding binding, RuntimeLease lease) {
+            this.binding = binding;
+            this.lease = lease;
+        }
+    }
+
+    private final class SessionBinding {
         private final RuntimeSession session;
+        private final CompletableFuture<RuntimeAssignment> assignment;
         private final CompletableFuture<RuntimeLease> ready;
+        private CompletableFuture<Boolean> release;
 
         SessionBinding(RuntimeSession session,
-                CompletableFuture<RuntimeLease> ready) {
+                RuntimeProvisionRequest request) {
             this.session = session;
-            this.ready = ready;
+            this.assignment = assign(request).toCompletableFuture();
+            this.ready = assignment.thenCompose(value -> transport.acquire(
+                    value.lease, session).thenApply(ignored -> value.lease))
+                    .whenComplete((lease, error) -> {
+                        if (error != null) {
+                            assignment.thenAccept(value ->
+                                    value.binding.releaseSession());
+                        }
+                    }).toCompletableFuture();
         }
 
         void assertIdentity(String harnessSessionId, RuntimeScope scope,
@@ -359,6 +640,25 @@ public final class RuntimeBrokerService {
                 throw conflict("runtime_broker_session_conflict",
                         "Runtime Session belongs to another Harness Session.");
             }
+        }
+
+        synchronized CompletionStage<Boolean> release(
+                String runtimeSessionId) {
+            if (release != null) {
+                return release;
+            }
+            release = assignment.thenCompose(value -> ready.thenCompose(
+                    lease -> transport.release(lease, session)).thenApply(
+                            released -> {
+                                if (Boolean.TRUE.equals(released)) {
+                                    sessions.remove(runtimeSessionId, this);
+                                    removeExecutions(runtimeSessionId);
+                                    value.binding.releaseSession();
+                                    return true;
+                                }
+                                return false;
+                            })).toCompletableFuture();
+            return release;
         }
     }
 

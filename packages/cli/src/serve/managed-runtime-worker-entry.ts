@@ -77,6 +77,7 @@ async function start(
     {
       ownedManagedRuntime: boot,
       preheatBridge: false,
+      ...(startup.kind === 'file' ? { trustedWorkspace: true } : {}),
       daemonLogBaseDir: path.join(boot.outputRoot, 'debug'),
     },
   );

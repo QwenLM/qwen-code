@@ -10,7 +10,9 @@ The module provides:
 - asynchronous Runtime warmup and compatible Runtime reuse;
 - Runtime Session acquisition and release;
 - an in-memory execution ledger with at-most-once dispatch per idempotency key;
-- a static provisioner for the first product-service integration and E2E;
+- a static provisioner for externally managed Runtime endpoints;
+- a local-process provisioner with file boot, active health, idle reclaim,
+  epoch fencing, and owned process-tree shutdown;
 - the private `/internal/runtime-broker/v1` HTTP contract used by
   `qwen serve --profile hosted-harness`;
 - an HTTP transport for the existing Managed Runtime v1/v2 worker protocol.

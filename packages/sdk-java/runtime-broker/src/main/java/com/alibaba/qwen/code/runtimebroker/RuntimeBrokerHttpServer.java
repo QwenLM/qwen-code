@@ -58,6 +58,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public void close() {
         server.stop(0);
         executor.shutdownNow();
+        service.close();
     }
 
     private void handle(HttpExchange exchange) {

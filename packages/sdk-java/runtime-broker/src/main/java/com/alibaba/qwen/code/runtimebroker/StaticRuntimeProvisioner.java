@@ -15,10 +15,12 @@ public final class StaticRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
-    public CompletionStage<RuntimeLease> provision(RuntimeScope scope) {
-        if (scope == null) {
-            throw new IllegalArgumentException("scope is required");
+    public CompletionStage<RuntimeLease> provision(
+            RuntimeProvisionRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("request is required");
         }
+        RuntimeScope scope = request.getScope();
         if ("session".equals(scope.getIsolationClass())) {
             throw new IllegalArgumentException(
                     "Static Runtime cannot provide Session isolation");

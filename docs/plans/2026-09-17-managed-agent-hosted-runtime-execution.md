@@ -6,7 +6,7 @@
 
 设计依据：[Java Runtime Broker MVP](../design/2026-09-17-managed-agent-java-runtime-broker-mvp.zh-CN.md)
 
-当前完成范围：P1、P2、P4 和 P5a；Hosted Harness、Java Broker 以及冷启动、幂等、取消、多 Session 隔离、独立 worker 文件握手均已有真实进程证据。
+当前完成范围：P1、P2、P4、P5a 和 P5b；Hosted Harness、Java Broker 以及冷启动、幂等、取消、多 Session 隔离、独立 worker 文件握手和 Java 自有本地 Runtime 生命周期均已有实现与测试证据。
 
 ## 1. 结论
 
@@ -314,10 +314,12 @@ P4 已自动化并接入 Java CI：
 4. `fix(managed): retry ambiguous broker execution`：P4b 响应丢失幂等恢复。
 5. `test(managed): prove cold runtime cancellation`：P4b Runtime ready 前取消。
 6. `test(managed): prove active cancellation and isolation`：完成 P4b 物理进程树取消和多 Session 隔离。
-7. `feat(java): own local runtime lifecycle`：P5，包含 standalone boot contract。
-8. 产品服务 PR：P6 持久化与恢复。
-9. API PR：P7 公共 Agent API Adapter。
-10. 收敛 PR：P8 灰度默认与旧实验面删除。
+7. `feat(cli): add standalone managed runtime boot protocol`：P5a 文件握手。
+8. `feat(java): own local runtime lifecycle`：P5b Java 进程生命周期。
+9. `test(managed): verify java-owned runtime lifecycle`：P5c 故障与真实进程验收。
+10. 产品服务 PR：P6 持久化与恢复。
+11. API PR：P7 公共 Agent API Adapter。
+12. 收敛 PR：P8 灰度默认与旧实验面删除。
 
 每个 PR 都必须可以独立回滚，不能同时修改公共 API、Runtime 生命周期和持久化 schema。
 
@@ -353,12 +355,12 @@ P4 已自动化并接入 Java CI：
 
 ## 12. 紧接着执行的工作
 
-P1、P2 和 P4 已经闭环。下一条产品关键路径是 P3，同时在 qwen-code 内进入 P5：
+P1、P2、P4、P5a 和 P5b 已经闭环。下一条产品关键路径是 P3，同时在 qwen-code 内完成 P5c：
 
 1. 在真实 Java 产品服务定位 Prompt admission 事务、Session owner 表和 SSE event store 接缝。
 2. 实现 `ManagedAgentCoordinator`：事务提交后并行调用 `runtimeBroker.warm()` 与 `harnessClient.submitPrompt()`，禁止串行等待 Runtime。
 3. 把 Harness event 投影为带单调 `eventSequence` 的公共事件，并实现 `Last-Event-ID` 重连。
-4. 在 qwen-code 实现 P5 `LocalProcessRuntimeProvisioner`，由 Java 持有 worker 进程树、ready record、lease、health、drain 和 release。
+4. 将真实 E2E 改为由 Java `LocalProcessRuntimeProvisioner` 直接启动 Runtime，并闭环 timeout、invalid ready、ready 后 crash 和 shutdown。
 5. P3/P5 通过后再进入持久化恢复；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
 
 P3 的最小上线判断只有三个：首个模型事件不等待 Runtime、同 Turn 的工具只执行一次、Java/Harness/Runtime 任一失败都不回落 Legacy。持久化 schema、Kubernetes 调度和完整 Agent API 兼容不能阻塞这三个判断的第一次产品验证。

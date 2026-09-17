@@ -1,6 +1,6 @@
 # Managed Agent Java 自有 Runtime 生命周期执行方案
 
-状态：执行中（P5a 已完成）
+状态：执行中（P5a、P5b 已完成，下一步 P5c）
 
 更新日期：2026-09-18
 
@@ -238,7 +238,7 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 
 提交：`feat(cli): add standalone managed runtime boot protocol`
 
-### P5b：Java LocalProcessRuntimeProvisioner
+### P5b：Java LocalProcessRuntimeProvisioner（已完成）
 
 改动：
 
@@ -249,6 +249,8 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 - `RuntimeBrokerService` 改用显式 RuntimeBinding
 
 验收：并发 provision 单启动；workspace 复用；session 隔离；epoch 递增；ready 后 health；无 Tool warm 可在 idle deadline 后回收。
+
+2026-09-18 证据：Java Broker 已使用显式 `RuntimeBinding` 管理并发复用、Session 引用、单飞 health 和 idle drain；Local Process Provisioner 已实现容量限制、文件握手、主动 health、epoch fencing、进程树终止和 generation 清理。`mvn clean test checkstyle:check` 共 21 个测试通过；CLI worker boot 单测 5 个通过，CLI typecheck 通过。
 
 提交：`feat(java): own local runtime lifecycle`
 
@@ -311,6 +313,14 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 - 不让 Harness 直接启动、发现或回退到本地 Runtime。
 - 不宣称 Windows 支持。
 
-## 11. 开工顺序
+## 11. 执行与发布顺序
 
 严格按 P5a -> P5b -> P5c 执行。P5a 合入前不写 Java ProcessBuilder；P5b 的单测和假 worker 全绿前不改真实 E2E；五类故障 E2E 未闭环前，不进入 Kubernetes 或 P6 持久化。
+
+当前只执行 P5c，顺序固定为：
+
+1. Java E2E fixture 改为直接构造 `LocalProcessRuntimeProvisioner`，删除 Runtime endpoint 测试注入。
+2. 正常链路证明模型首事件不等待 Runtime ready，并记录启动、health 和物理进程计数。
+3. 依次加入 startup timeout、invalid ready、ready 后 crash、Broker shutdown；每类故障先证明进程和目录收敛，再检查错误码。
+4. 最后运行 Java Broker 全量测试、CLI build/typecheck、Managed Agent 四条真实 E2E，并做两轮 clean diff 审计。
+5. P5c 全绿后才允许产品 Java 服务接入构造参数；灰度期保留 Static Provisioner 回退，但单次 execution 禁止跨 generation 自动重放。
