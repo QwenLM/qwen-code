@@ -14,7 +14,10 @@ import {
 } from './runtime/agent-events.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
 import { MAX_FAILURE_LINES } from './workflow-failure-lines.js';
-import { RESUME_ARGS_TOO_LARGE_NOTE } from './workflow-resume-call.js';
+import {
+  NO_JOURNAL_NO_RESUME_NOTE,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from './workflow-resume-call.js';
 import {
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
@@ -1120,6 +1123,42 @@ describe('WorkflowRunRegistry', () => {
     expect(r.register(reg(runId)).status).toBe('running');
   });
 
+  // A second start under a live id would run two copies of its agents against
+  // one journal, so each refusal says what to do about the run that holds it.
+  it('says what to do about a run id that is still live', () => {
+    const r = new WorkflowRunRegistry();
+    const fresh = () => new AbortController();
+
+    const running = r.register(reg('wf_live_running'));
+    expect(() => r.reserveStart(running.runId, fresh)).toThrow(
+      'Workflow run wf_live_running is still running. Starting it again now would run two copies of its agents against the same journal: cancel it from /workflows first, or wait for it to settle.',
+    );
+
+    const pausedRefusal =
+      'Workflow run wf_live_paused is paused, not finished. Starting it again now would run two copies of its agents against the same journal: resume it from /workflows, or cancel it there and wait for it to exit.';
+    const paused = r.register(reg('wf_live_paused'));
+    r.onDispatchStateChange(paused.runId, 'pausing');
+    expect(r.get(paused.runId)?.status).toBe('pausing');
+    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(pausedRefusal);
+    r.onDispatchStateChange(paused.runId, 'paused');
+    expect(r.get(paused.runId)?.status).toBe('paused');
+    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(pausedRefusal);
+
+    const exiting = r.register(reg('wf_live_exiting'));
+    r.attachHandle({
+      runId: exiting.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle);
+    r.fail(exiting.runId, 'boom', 2_000);
+    expect(() => r.reserveStart(exiting.runId, fresh)).toThrow(
+      'Workflow run wf_live_exiting is not running but its run has not exited yet. Starting it again now would run two copies of its agents against the same journal: wait for it to exit.',
+    );
+
+    const settled = r.register(reg('wf_settled'));
+    r.fail(settled.runId, 'boom', 2_000);
+    expect(() => r.reserveStart(settled.runId, fresh)).not.toThrow();
+  });
+
   it('reserves a run id while a workflow is starting', () => {
     const r = new WorkflowRunRegistry();
     const runId = 'wf_starting';
@@ -1131,7 +1170,7 @@ describe('WorkflowRunRegistry', () => {
     expect(r.isStarting(runId)).toBe(true);
     expect(r.hasRunningEntries()).toBe(true);
     expect(() => r.reserveStart(runId, () => competing)).toThrow(
-      /already active/,
+      /already starting/,
     );
     expect(() => r.register(reg(runId))).toThrow(/already active/);
 
@@ -1168,7 +1207,7 @@ describe('WorkflowRunRegistry', () => {
     expect(r.isStarting('wf_starting')).toBe(true);
     expect(() =>
       r.reserveStart('wf_starting', () => new AbortController()),
-    ).toThrow(/already active/);
+    ).toThrow(/already starting/);
     r.releaseStart('wf_starting', controller);
     expect(r.hasRunningEntries()).toBe(false);
   });
@@ -2321,6 +2360,7 @@ describe('WorkflowRunRegistry', () => {
         isBackgrounded: true,
         workflowName: 'audit',
         scriptPath: '/home/u/.qwen/workflows/audit.js',
+        journalPath: '/runs/journal.jsonl',
       }),
     );
     r.fail(shadowed.runId, 'boom', 3_000);
@@ -2337,6 +2377,7 @@ describe('WorkflowRunRegistry', () => {
         workflowName: 'audit',
         resumeName: 'audit',
         scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runs/journal.jsonl',
       }),
     );
     r.complete(completed.runId, [], 4_000);
@@ -2356,6 +2397,7 @@ describe('WorkflowRunRegistry', () => {
         workflowName: 'audit',
         resumeName: 'audit',
         scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runs/wf_unlocked/journal.jsonl',
       }),
     );
     r.fail(entry.runId, 'boom', 2_000);
@@ -2385,6 +2427,36 @@ describe('WorkflowRunRegistry', () => {
 
   // Args that cannot be pasted back are NAMED, never truncated: half a JSON
   // literal in a resume call is a call that fails to parse.
+  // A resume replays the run's journal. A run that wrote none is told so, in
+  // place of a call the runner would refuse.
+  it('offers no resume call for a run that wrote no journal', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(
+      reg('wf_nojournal', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_nojournal.js',
+      }),
+    );
+    r.fail('wf_nojournal', 'boom', 2_000);
+    const failedText = completion.mock.calls[0][1] as string;
+    expect(failedText).toContain(NO_JOURNAL_NO_RESUME_NOTE);
+    expect(failedText).not.toContain('resumeFromRunId:');
+    expect(failedText).not.toContain('runs live');
+
+    r.register(
+      reg('wf_nojournal_done', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_nojournal_done.js',
+      }),
+    );
+    r.complete('wf_nojournal_done', [], 3_000);
+    const doneText = completion.mock.calls[1][1] as string;
+    expect(doneText).not.toContain('resumeFromRunId:');
+    expect(doneText).not.toContain('Re-run');
+  });
+
   it('names oversized args instead of truncating the resume call', () => {
     const r = new WorkflowRunRegistry();
     const completion = vi.fn();
@@ -2393,6 +2465,7 @@ describe('WorkflowRunRegistry', () => {
       reg('wf_bigargs', {
         isBackgrounded: true,
         scriptPath: '/runtime/workflows/generated/inline/wf_bigargs.js',
+        journalPath: '/runs/wf_bigargs/journal.jsonl',
         args: { blob: 'x'.repeat(400) },
       }),
     );
@@ -2412,6 +2485,7 @@ describe('WorkflowRunRegistry', () => {
       reg('wf_bigargs_done', {
         isBackgrounded: true,
         scriptPath: '/runtime/workflows/generated/inline/wf_bigargs_done.js',
+        journalPath: '/runs/wf_bigargs_done/journal.jsonl',
         args: { blob: 'x'.repeat(400) },
       }),
     );

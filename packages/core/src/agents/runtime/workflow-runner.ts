@@ -28,7 +28,10 @@ import {
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
-import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
+import {
+  readWorkflowSnapshot,
+  writeWorkflowSnapshot,
+} from '../workflow-snapshot.js';
 import {
   readWorkflowSourceRef,
   type WorkflowSourceRef,
@@ -348,9 +351,25 @@ export class WorkflowRunner {
         );
       }
 
-      resumeReplay = options.resumeFromRunId
-        ? await journal?.load()
-        : undefined;
+      if (options.resumeFromRunId) {
+        // A resume replays a journal. With none to replay it would dispatch
+        // every agent again under the old run id while reading as a
+        // continuation, so it is refused before anything is spent or written.
+        // Without storage there is no journal to have lost, and a resume
+        // there has always been a live run under the old id.
+        const loaded = await journal?.load();
+        if (loaded?.kind === 'missing') {
+          throw new Error(
+            `No journal found for workflow run ${options.resumeFromRunId}, so there is nothing to resume. To run the workflow from the start, call Workflow again without resumeFromRunId.`,
+          );
+        }
+        if (loaded?.kind === 'unreadable') {
+          throw new Error(
+            `Could not read the journal for workflow run ${options.resumeFromRunId}: ${loaded.reason}`,
+          );
+        }
+        resumeReplay = loaded?.replay;
+      }
       sourceRef = readWorkflowSourceRef(options.sourceRef);
       if (resumeReplay?.sourceError) throw new Error(resumeReplay.sourceError);
       if (options.resumeFromRunId) {
@@ -365,7 +384,14 @@ export class WorkflowRunner {
             'Workflow sourceRef must match the original journal. Start a new run to use a different source.',
           );
         }
-        if (previousEntry?.sourceRef && !original) {
+        // The registry does not outlive the process, so after a restart the
+        // run's snapshot is what still says it carried a reference. Without
+        // it this guard could not fire, and the resumed run would settle
+        // without the reference and overwrite the snapshot that held it.
+        const recordedSourceRef = previousEntry
+          ? previousEntry.sourceRef
+          : (await readWorkflowSnapshot(config, runId))?.sourceRef;
+        if (recordedSourceRef && !original) {
           throw new Error(
             'Workflow source metadata is missing from its journal.',
           );
@@ -385,6 +411,14 @@ export class WorkflowRunner {
       callerWasAbortedBeforeStart = options.signal.aborted;
       if (journal && !(await journal.ensureExists())) {
         journalPath = undefined;
+      }
+      // Queued before anything else so the journal of a run that launched is
+      // never empty: a later resume can then tell a run interrupted before its
+      // first result from one whose journal is gone. Not awaited, like every
+      // other journal write on the start path: appends are serialized, so it
+      // still lands first, and a slow disk must not hold the launch.
+      if (journal && journalPath && !options.resumeFromRunId) {
+        void journal.markLaunched();
       }
       if (sourceRef) {
         if (!journal || !journalPath) {

@@ -54,6 +54,7 @@ import { parseExtensionWorkflowName } from './runtime/workflow-saved.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
+  NO_JOURNAL_NO_RESUME_NOTE,
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from './workflow-resume-call.js';
 import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
@@ -735,17 +736,35 @@ export class WorkflowRunRegistry {
     runId: string,
     createController: () => AbortController,
   ): AbortController {
-    const existing = this.entries.get(runId);
-    if (
-      (existing && isActiveWorkflowStatus(existing.status)) ||
-      this.handles.has(runId) ||
-      this.starting.has(runId)
-    ) {
-      throw new Error(`Workflow run ${runId} is already active.`);
-    }
+    const refusal = this.describeLiveRun(runId);
+    if (refusal) throw new Error(refusal);
     const controller = createController();
     this.starting.set(runId, controller);
     return controller;
+  }
+
+  /**
+   * Why a run id cannot be started again yet, or `undefined` when it can. A
+   * second start under a live id would run two copies of its agents against
+   * one journal, so each case says what to do instead of only that it is
+   * taken.
+   */
+  private describeLiveRun(runId: string): string | undefined {
+    const twoCopies =
+      'Starting it again now would run two copies of its agents against the same journal';
+    if (this.starting.has(runId)) {
+      return `Workflow run ${runId} is already starting. Wait for that start to settle before resuming it.`;
+    }
+    const existing = this.entries.get(runId);
+    if (existing && isActiveWorkflowStatus(existing.status)) {
+      return existing.status === 'paused' || existing.status === 'pausing'
+        ? `Workflow run ${runId} is paused, not finished. ${twoCopies}: resume it from /workflows, or cancel it there and wait for it to exit.`
+        : `Workflow run ${runId} is still running. ${twoCopies}: cancel it from /workflows first, or wait for it to settle.`;
+    }
+    if (this.handles.has(runId)) {
+      return `Workflow run ${runId} is not running but its run has not exited yet. ${twoCopies}: wait for it to exit.`;
+    }
+    return undefined;
   }
 
   releaseStart(runId: string, controller: AbortController): void {
@@ -1942,7 +1961,11 @@ function buildUsageLine(entry: WorkflowTask): string {
 function buildRecoveryLines(entry: WorkflowTask, nameOnly: boolean): string[] {
   const lines: string[] = [];
   const resume = buildResumeCall({ ...entry, nameOnly });
-  if (resume) {
+  // A resume replays the run's journal, so a run that wrote none is not
+  // offered one: the call would be refused.
+  if (resume && !entry.journalPath) {
+    lines.push(NO_JOURNAL_NO_RESUME_NOTE);
+  } else if (resume) {
     // Only an extension workflow's name carries `<extension>:`. Its file is
     // third-party and an extension update replaces it, so the copy has to
     // land somewhere the user owns.
@@ -1954,10 +1977,9 @@ function buildRecoveryLines(entry: WorkflowTask, nameOnly: boolean): string[] {
       : entry.workflowName
         ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
         : 'Edit the generated script copy first if the script needs to change.';
-    const journalAdvice = entry.journalPath
-      ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
-      : 'No journal was written for this run, so every agent() call runs live.';
-    lines.push(`Resume: ${resume} — ${pathAdvice} ${journalAdvice}`);
+    lines.push(
+      `Resume: ${resume} — ${pathAdvice} The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.`,
+    );
     if (hasUninlinableResumeArgs(entry)) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
@@ -1989,7 +2011,10 @@ function buildDiagnosticsLines(
       `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
     );
   }
-  const resume = buildResumeCall({ ...entry, nameOnly });
+  // Offered only beside a journal: without one the call would be refused.
+  const resume = entry.journalPath
+    ? buildResumeCall({ ...entry, nameOnly })
+    : null;
   if (resume) {
     lines.push(
       entry.workflowName
