@@ -197,7 +197,10 @@ beforeAll(() => {
   );
 });
 
-describe('smoke-packaged teardown', () => {
+// The smoke spawns the app path it is handed, and a shebang script is not
+// spawnable on Windows, so this fixture topology only exists on POSIX. The
+// Windows lane exercises the same teardown against the real packaged build.
+describe.skipIf(process.platform === 'win32')('smoke-packaged teardown', () => {
   it('passes, removes its workspace, and leaves no runtime behind', () => {
     const pidFile = path.join(fixtureRoot, 'drain.pid');
     const result = runSmoke(fakeApp, { SMOKE_FIXTURE_PID_FILE: pidFile });
@@ -257,13 +260,16 @@ describe('smoke-packaged teardown', () => {
   });
 });
 
-describe('smoke-packaged startup failures', () => {
-  it('reports a non-executable binary as a failed start, not a crash', () => {
-    const noExec = writeFixture('fake-noexec.js', '#!/usr/bin/env node\n', {
-      executable: false,
+describe.skipIf(process.platform === 'win32')(
+  'smoke-packaged startup failures',
+  () => {
+    it('reports a non-executable binary as a failed start, not a crash', () => {
+      const noExec = writeFixture('fake-noexec.js', '#!/usr/bin/env node\n', {
+        executable: false,
+      });
+      const result = runSmoke(noExec);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('failed to start');
     });
-    const result = runSmoke(noExec);
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('failed to start');
-  });
-});
+  },
+);
