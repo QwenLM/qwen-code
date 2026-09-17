@@ -78,13 +78,21 @@ const child = spawn(executable, [], {
 });
 let processOutput = '';
 let completed = false;
+let childExited = false;
 let exitFailure;
 captureProcessOutput(child.stdout, 'stdout');
 captureProcessOutput(child.stderr, 'stderr');
 child.on('exit', (code, signal) => {
+  childExited = true;
   processOutput += `[exit] code=${code ?? 'null'} signal=${signal ?? 'null'}\n`;
   exitFailure = new Error(
-    `Packaged desktop runtime exited before readiness (code ${code ?? 'null'}, signal ${signal ?? 'null'})`,
+    `Packaged desktop runtime exited before readiness (code ${code ?? 'null'}, signal ${signal ?? 'null'})\nSmoke workspace: ${workspace}`,
+  );
+});
+child.on('error', (error) => {
+  childExited = true;
+  exitFailure = new Error(
+    `Packaged desktop runtime failed to start: ${error.message}`,
   );
 });
 child.unref();
@@ -94,8 +102,7 @@ try {
   completed = true;
   console.log(`Packaged desktop runtime ready: ${executable}`);
 } finally {
-  terminate(child.pid);
-  if (completed) fs.rmSync(workspace, { recursive: true, force: true });
+  await teardown(child, completed);
 }
 
 function captureProcessOutput(stream, name) {
@@ -196,7 +203,38 @@ function smokeError(message, contents) {
   );
 }
 
-function terminate(pid) {
+// The launched app spawns a daemon that keeps writing under the workspace
+// while it drains on SIGTERM, so deleting the tree the moment the checks pass
+// races it (ENOTEMPTY on macOS, EBUSY on Windows) and fails an otherwise
+// passing smoke. Wait out a bounded drain, force-kill whatever is left so the
+// stdio pipes close and this script can exit, then delete with retries.
+async function teardown(child, removeWorkspace) {
+  terminate(child.pid);
+  const drainDeadline = Date.now() + 5_000;
+  while (!childExited && Date.now() < drainDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!childExited) terminate(child.pid, 'SIGKILL');
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  if (!removeWorkspace) return;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= 5) {
+        console.warn(
+          `smoke: teardown left the workspace behind (${error.code}): ${workspace}`,
+        );
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
+
+function terminate(pid, signal = 'SIGTERM') {
   if (!pid) return;
   try {
     if (process.platform === 'win32') {
@@ -204,7 +242,7 @@ function terminate(pid) {
         stdio: 'ignore',
       });
     } else {
-      process.kill(-pid, 'SIGTERM');
+      process.kill(-pid, signal);
     }
   } catch {
     // The process may already have exited after the smoke succeeded or failed.
