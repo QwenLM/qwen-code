@@ -4309,6 +4309,7 @@ export function createSessionControlPlane(
     initialRuntimeEpoch,
     runtimeEpochSource,
     delegateReadTextFileToClient,
+    clientMcpRuntimeRegistrations: opts.clientMcpRuntimeRegistrations,
     isExternalToolGuardRequired: () => !!opts.externalToolGuard,
     isShuttingDown: () => shuttingDown,
     constructHarnessChannel: constructChannelInfo,

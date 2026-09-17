@@ -16,6 +16,7 @@ import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import {
   getDaemonBaseUrl,
+  getExtensionPairingCredential,
   getDaemonToken,
   hasReloadSurvivableDaemonToken,
   removeDaemonTokenFromUrl,
@@ -209,7 +210,13 @@ function replaceStandaloneSessionUrl(
   window.history.replaceState(null, '', url);
 }
 
-export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+export function StandaloneApp({
+  daemonToken,
+  extensionPairingCredential,
+}: {
+  daemonToken?: string;
+  extensionPairingCredential?: string;
+}) {
   // The entry's own opinion — an explicit URL param or a stored in-app
   // choice. Passed down as the `theme`/`language` host props; `undefined`
   // lets App resolve the daemon's effective settings instead (#11955).
@@ -371,6 +378,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               sessionId={sessionId}
               workspaceId={workspaceId}
               sessionContext={sessionContext}
+              extensionPairingCredential={extensionPairingCredential}
               chromeTheme={documentTheme}
               chromeLanguage={documentLanguage}
               webShellProps={{
@@ -439,6 +447,10 @@ async function main() {
   } else {
     removeDaemonTokenFromUrl();
   }
+  // Read after the handshake above: the extension sends the pairing
+  // credential in the same postMessage as the token, and the boot path is
+  // the only place that waits for it.
+  const extensionPairingCredential = getExtensionPairingCredential();
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -462,7 +474,12 @@ async function main() {
         invalidTarget={INVALID_DAEMON_TARGET}
         unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
-        {(token) => <StandaloneApp daemonToken={token} />}
+        {(token) => (
+          <StandaloneApp
+            daemonToken={token}
+            extensionPairingCredential={extensionPairingCredential}
+          />
+        )}
       </StandaloneAuth>
     </React.StrictMode>,
   );

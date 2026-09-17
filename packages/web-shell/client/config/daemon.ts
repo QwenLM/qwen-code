@@ -61,6 +61,14 @@ export function isPageOriginDaemon(baseUrl: string | undefined): boolean {
 }
 
 const cachedDaemonTokens = new Map<string, string>();
+
+/**
+ * Set by the pairing handshake (`waitForDaemonTokenMessage`) when the page is
+ * embedded by the Chrome extension. Unlike the tokens above this is not
+ * origin-keyed: a page is paired with one extension, and the credential is
+ * only ever read back by `main.tsx` during the same boot.
+ */
+let cachedExtensionPairingCredential: string | undefined;
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
 const DAEMON_TOKEN_STORAGE_KEY = 'qwen-daemon-token';
@@ -177,6 +185,10 @@ export function getDaemonToken(baseUrl?: string): string | undefined {
   return stored;
 }
 
+export function getExtensionPairingCredential(): string | undefined {
+  return cachedExtensionPairingCredential;
+}
+
 export function waitForDaemonTokenMessage(
   timeoutMs = DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS,
 ): Promise<string | undefined> {
@@ -203,9 +215,18 @@ export function waitForDaemonTokenMessage(
       ) {
         return;
       }
-      const data = event.data as { type?: unknown; token?: unknown };
+      const data = event.data as {
+        type?: unknown;
+        token?: unknown;
+        extensionPairingCredential?: unknown;
+      };
       if (data?.type !== DAEMON_AUTH_MESSAGE_TYPE) return;
       const token = typeof data.token === 'string' ? data.token : '';
+      const credential =
+        typeof data.extensionPairingCredential === 'string'
+          ? data.extensionPairingCredential.trim()
+          : '';
+      cachedExtensionPairingCredential = credential || undefined;
       finish(token.trim() || undefined);
     };
     const timer = setTimeout(() => finish(undefined), timeoutMs);

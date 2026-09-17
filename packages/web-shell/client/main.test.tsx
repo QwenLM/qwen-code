@@ -50,6 +50,7 @@ vi.mock('./config/daemon', () => ({
   confirmDaemonTarget: vi.fn(),
   isKnownDaemonTarget: () => false,
   getDaemonToken: () => 'token',
+  getExtensionPairingCredential: () => undefined,
   hasReloadSurvivableDaemonToken: () => testState.tokenSurvivesReload,
   navigateToDaemon: vi.fn(),
   persistDaemonToken: vi.fn(),

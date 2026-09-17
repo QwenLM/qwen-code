@@ -14,6 +14,7 @@ import type {
 } from './channel.js';
 import type { HarnessChannel, ChannelLifecycle } from './channel-lifecycle.js';
 import type {
+  BridgeOptions,
   BridgeRuntimeEpochSource,
   BridgeTelemetry,
 } from './bridgeOptions.js';
@@ -21,6 +22,7 @@ import type { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
 import { CHANNEL_LIVENESS_VERSION } from './bridgeTypes.js';
@@ -38,6 +40,7 @@ import {
 } from './channel-liveness.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import { withTimeout } from './with-timeout.js';
+import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 export interface ChannelStartupOptions {
@@ -50,6 +53,11 @@ export interface ChannelStartupOptions {
   initialRuntimeEpoch: number;
   runtimeEpochSource: BridgeRuntimeEpochSource;
   delegateReadTextFileToClient: boolean;
+  /**
+   * Client-hosted MCP servers to restore on every fresh child, re-added
+   * through the runtime-add ext-method the `qwen serve` route also uses.
+   */
+  clientMcpRuntimeRegistrations?: BridgeOptions['clientMcpRuntimeRegistrations'];
   isExternalToolGuardRequired(): boolean;
   isShuttingDown(): boolean;
   constructHarnessChannel(channel: AcpChannel, id: string): HarnessChannel;
@@ -109,6 +117,7 @@ export function createChannelStartup({
   initialRuntimeEpoch,
   runtimeEpochSource,
   delegateReadTextFileToClient,
+  clientMcpRuntimeRegistrations,
   isExternalToolGuardRequired,
   isShuttingDown,
   constructHarnessChannel,
@@ -312,6 +321,27 @@ export function createChannelStartup({
           return response;
         },
       );
+      // Restore the client-hosted MCP servers this daemon is holding for the
+      // paired client: a fresh child knows none of the runtimes its
+      // predecessor had, so re-add them through the same ext-method the
+      // runtime-add route uses. Runs inside the try so a refusal tears the
+      // child down rather than leaving a connected client silently without
+      // its tool server.
+      for (const registration of clientMcpRuntimeRegistrations?.() ?? []) {
+        const restored = await withTimeout(
+          connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+            registration,
+          ),
+          MCP_RESTART_SERVER_DEADLINE_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+        );
+        if (isRecord(restored) && restored['skipped'] === true) {
+          throw new Error(
+            `Failed to restore client MCP server '${registration.name}'`,
+          );
+        }
+      }
     } catch (err) {
       // Mark the half-initialized channel as dying/unavailable, then
       // kill it. Coalesced callers (`inFlightChannelSpawn` branch in

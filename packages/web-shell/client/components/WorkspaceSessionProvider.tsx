@@ -56,6 +56,7 @@ interface WorkspaceSessionProviderProps {
   sessionContext?: DaemonProductSessionContext;
   lockWorkspaceCwd?: string;
   clientId?: string;
+  extensionPairingCredential?: string;
   restartSseOnPrompt?: boolean;
   historyPageSize?: number;
   chromeTheme?: WebShellTheme;
@@ -156,6 +157,7 @@ function WorkspaceSessionProviderWorkspace({
   sessionContext,
   lockWorkspaceCwd,
   clientId,
+  extensionPairingCredential,
   restartSseOnPrompt,
   historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
   chromeTheme,
@@ -382,6 +384,9 @@ function WorkspaceSessionProviderWorkspace({
           : undefined
       }
       clientId={clientId}
+      createSessionRequest={
+        extensionPairingCredential ? { extensionPairingCredential } : undefined
+      }
       historyPageSize={historyPageSize}
       subagentTranscriptMode="summary"
       prefetchGitBranch={false}
