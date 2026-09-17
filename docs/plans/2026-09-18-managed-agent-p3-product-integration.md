@@ -1,14 +1,18 @@
 # Managed Agent P3 Java Prompt 服务接入执行方案
 
-状态：P3a、P3b 已实现并验证，P3c 待产品 Java 仓接入
+状态：P3a、P3b 已实现并验证；产品 Java P3c-0 已完成，P3c-1 等待 SDK 发布到内部 Maven 仓库
 
 日期：2026-09-18
 
-实施进度：Hosted Harness 私有协议 v1、进程代际 fencing、能力协商、Java Hosted Harness Client 和 Prompt payload digest 校验已经落地；下一步在产品 Java 仓实现 Coordinator、Repository、Outbox 和公共事件投影。
+实施进度：Hosted Harness 私有协议 v1、进程代际 fencing、能力协商、Java Hosted Harness Client 和 Prompt payload digest 校验已经落地；产品 Java 仓已完成 runtime kind、默认关闭配置、Hosted binding fencing 字段和 Managed Event Store 基线。`com.alibaba:qwencode-sdk:0.1.0-alpha` 尚不能从内部 Maven 仓库解析，因此真实 Gateway 继续保持未装配、生产开关关闭。
 
 上游方案：[Managed Agent Hosted Runtime 可执行技术方案](./2026-09-17-managed-agent-hosted-runtime-execution.md)
 
 后续方案：[Managed Agent 公共 Agent API 适配层执行方案](./2026-09-18-managed-agent-public-api-adapter.md)
+
+产品 Java 的实际代码落点、schema、阶段验收和当前进度以 DataWorks 仓
+`app/lsp-server/docs/design/managed-agent-hosted-harness-execution-plan.md` 为准；本文继续作为 qwen-code
+私有协议与跨仓边界说明，不再维护一套与产品仓不同的 Outbox/schema 假设。
 
 ## 1. 本阶段结论
 
@@ -24,7 +28,7 @@ Java Prompt 服务
   - admission、幂等、事件投影、SSE
   - 异步触发 Runtime warm
                 |
-                | loopback HTTP + SSE，私有协议 v1
+                | 内网 HTTP + SSE，私有协议 v1
                 v
 常驻 Hosted Harness（qwen serve，TypeScript）
   - 多 Session 模型循环
@@ -66,17 +70,18 @@ qwen-code 当前已经具备：
 
 ### 2.2 必须补齐的缺口
 
-| 缺口                                                    | 当前风险                                          | P3 处理方式                                                 |
-| ------------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------- |
-| Hosted Harness 没有独立的私有协议握手                   | Java 可能连接到普通 daemon 或不兼容版本           | 增加 Hosted Harness contract v1 capability 和请求头         |
-| Java 不校验 Harness 进程代际                            | 活动 Session 可能被路由到重启后的新进程或错误实例 | capability 返回 `bootId`，每个 Session 请求携带并校验       |
-| Java SDK 不能传 caller `promptId`                       | admission 响应丢失后无法用同一键安全重试          | 给 `PromptRequest` 增加 caller-supplied UUID，并校验响应 ID |
-| Java SDK 没有 load/status/transcript 抽象               | create outcome unknown 和 Java 重启后不能重新附着 | 增加 Hosted Harness 专用 transport API                      |
-| 现有 `startPrompt` 把 submit 和观察绑在一个进程内对象中 | 不适合作为产品 Repository 和恢复边界              | 产品 `HarnessClient` 拆成 submit、stream、snapshot、cancel  |
-| 产品 Java 还没有 Coordinator                            | warm、submit、事件、取消缺少单一所有者            | 增加 `ManagedAgentCoordinator`                              |
-| Harness 事件不是公共事件                                | 对外序号、权限和重连会泄漏实现细节                | Java 投影为公共事件并分配自己的 sequence                    |
+| 缺口                                                    | 当前风险                                          | P3 处理方式                                                  |
+| ------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------ |
+| Hosted Harness 没有独立的私有协议握手                   | Java 可能连接到普通 daemon 或不兼容版本           | 增加 Hosted Harness contract v1 capability 和请求头          |
+| Java 不校验 Harness 进程代际                            | 活动 Session 可能被路由到重启后的新进程或错误实例 | capability 返回 `bootId`，每个 Session 请求携带并校验        |
+| Java SDK 不能传 caller `promptId`                       | admission 响应丢失后无法用同一键安全重试          | 给 `PromptRequest` 增加 caller-supplied UUID，并校验响应 ID  |
+| Java SDK 没有 load/status/transcript 抽象               | create outcome unknown 和 Java 重启后不能重新附着 | 增加 Hosted Harness 专用 transport API                       |
+| 现有 `startPrompt` 把 submit 和观察绑在一个进程内对象中 | 不适合作为产品 Repository 和恢复边界              | 产品 `HarnessClient` 拆成 submit、stream、snapshot、cancel   |
+| 产品 Java 还没有 Coordinator                            | warm、submit、事件、取消缺少单一所有者            | 增加 `ManagedAgentCoordinator`                               |
+| Java SDK 尚未发布到内部 Maven 仓库                      | 产品 CI 无法解析真实 Hosted Harness transport     | 发布 `com.alibaba:qwencode-sdk:0.1.0-alpha` 后才装配 Gateway |
+| Harness 事件不是公共事件                                | 对外序号、权限和重连会泄漏实现细节                | Java 投影为公共事件并分配自己的 sequence                     |
 
-P3 不补 Runtime Broker 数据库恢复；那是 P6。P3 可以复用产品已有的 Session、Turn、SSE 和 Outbox 存储，但不得继续使用仅 JVM 内存保存的公共 Session 权威状态。
+P3c-3 只补齐本方案所需的 Runtime binding、lease、epoch 和 executionCallId 幂等；更完整的跨版本迁移、规模化调度和长周期恢复仍属于 P6。产品 Java 复用现有 `chat_session`、`chat_history`、`agent_cli_runtime_session`，并新增 `agent_managed_event`，不假设产品已有 durable Outbox。
 
 ## 3. 冻结的所有权边界
 
@@ -343,13 +348,12 @@ interface ManagedAgentCoordinator {
 它只组合以下依赖：
 
 ```text
-AgentSessionRepository
-AgentTurnRepository
-SessionBackendBindingRepository
-PublicEventStore
-ManagedOutbox
-HarnessClient
-RuntimeBrokerService
+ChatSessionRepository / ChatHistoryRepository
+AgentCliRuntimeSessionService
+ManagedEventRepository
+HostedHarnessGateway
+RuntimeBrokerGateway
+SessionOperationLock
 TenantWorkspaceAuthorizer
 ```
 
@@ -359,84 +363,59 @@ Controller 只接收公共 ID。Coordinator 在鉴权后解析 Harness ID，任�
 
 ### 7.2 最小持久字段
 
-产品已有表可以扩字段，不要求为 P3 重建整套 schema。至少保存：
+产品落地复用现有表，不重建一套平行聚合：
 
 ```text
-AgentSession
-  publicSessionId
-  tenantId
-  workspaceId
-  executionEngine = MANAGED
-  agentRevision
-  capabilityDigest
-  status
+chat_session
+  公共 Session、tenant/workspace、executionEngine=MANAGED
 
-SessionBackendBinding
-  publicSessionId
-  harnessEndpointId
-  harnessBootId
-  harnessClientId
-  harnessProtocolVersion
-  harnessSessionId
-  state
-  lastHeartbeatAt
+chat_history
+  request_code = 公共 Turn ID
+  question.finalQuestion = 可精确恢复的原始请求
+  expands.managedPromptId
+  expands.managedPayloadDigest
+  expands.managedDeadlineMs
+  expands.status
 
-AgentTurn
-  publicTurnId
-  publicSessionId
-  clientIdempotencyKey
-  promptId
-  promptPayloadDigest
-  status
-  terminalReason
+agent_cli_runtime_session
+  cli_code = QWEN_HOSTED_HARNESS
+  runtime_opaque_id = harnessEndpointId
+  cli_session_id = harnessSessionId
+  bridge_endpoint = Hosted Harness base URL
+  harness_boot_id / harness_client_id / harness_protocol_version / harness_capability_digest
 
-PublicEvent
-  publicSessionId
-  eventSequence
-  sourceRef
-  publicTurnId
-  type
-  payload
-
-ManagedOutbox
-  outboxId
-  aggregateId
-  kind
-  idempotencyKey
-  payload
-  status
-  nextAttemptAt
+agent_managed_event
+  tenant_id / session_code / request_code
+  public_sequence
+  source_boot_id / source_event_epoch / source_event_id
+  event_type / event_payload / is_terminal
 ```
 
 唯一约束：
 
 ```text
-(tenantId, clientSessionIdempotencyKey)
-(publicSessionId, clientTurnIdempotencyKey)
-(harnessSessionId, promptId)
-(publicSessionId, eventSequence)
-(sourceRef, publicEventType)
-(outbox.kind, outbox.idempotencyKey)
+(tenant_id, session_id, cli_code, is_current)
+(tenant_id, session_code, public_sequence)
+(tenant_id, session_code, source_boot_id, source_event_epoch, source_event_id)
 ```
 
-Runtime binding、lease、endpoint 和 token 仍由 Runtime Broker 管理，不复制到产品表。
+Hosted Harness binding 保存在 `agent_cli_runtime_session`；Tool Runtime lease、epoch、endpoint token 和
+executionCallId 幂等由 Runtime Broker 管理。bearer token 不写入任何业务表。
 
 ## 8. 第一条 Prompt 的精确时序
 
 ### 8.1 Session 尚未绑定 Harness
 
 ```text
-T0  Java 完成鉴权，生成 publicSessionId / harnessSessionId / publicTurnId / promptId
-T1  单个事务写入 Session、Binding(CREATING)、Turn(ADMITTED)、input Item、两个 Outbox
-T2  事务提交，HTTP 立即返回 Session/Turn ID，SSE 可以建立
-T3  after-commit dispatcher 并行启动：
-      A. ensure Harness Session -> submit Prompt
-      B. RuntimeBroker.warm(harnessSessionId)
-T4  Harness 调用模型，Java 接收并投影首个 delta
+T0  Java 完成鉴权，生成/读取 sessionCode、harnessSessionId、requestCode、promptId
+T1  chat_history 先写 RUNNING，并保存原始请求、promptId、payloadDigest、deadline
+T2  Java create/load Hosted Harness Session，持久化带 boot fencing 的 current binding
+T3  Java 提交同一 promptId，同时异步触发 ToolRuntimeWarmService.warmAsync()
+T4  Harness 调用模型，Java 持久化公共事件后输出首个 delta
 T5  如果没有 Tool Call，Turn 可在 Runtime 未 ready 时完成
 T6  如果出现 Tool Call，Harness 通过 Broker 等待原 binding
-T7  Runtime ready 后只执行一次，Tool Result 回到同一 Harness Turn
-T8  Java 投影 terminal，Turn 完成
+T7  Runtime ready 后以 executionCallId 最多执行一次，Tool Result 回到同一 Harness Turn
+T8  ManagedTurnFinalizer 同事务写 terminal event 和 chat_history 终态
 ```
 
 Harness create 和 submit 在同一分支内顺序执行；Runtime warm 与这条分支并行。不得先等待 warm 再 create/submit。
@@ -446,20 +425,25 @@ Harness create 和 submit 在同一分支内顺序执行；Runtime warm 与这�
 后续 Turn 不再 create/load Session：
 
 ```text
-transaction(admit Turn + outbox)
-  -> parallel after commit
+persist RUNNING Turn + promptId/digest
+  -> parallel
        Harness submit(promptId)
        Broker warm(harnessSessionId)  // 幂等，通常立即复用
 ```
 
-### 8.3 Outbox 派发策略
+### 8.3 无 Outbox 的崩溃恢复策略
 
-网络调用不能放在数据库事务中。事务提交后使用两层派发：
+网络调用不放在数据库事务中。产品首版不新增机械 Outbox，必须用 `ManagedTurnReconciler` 关闭
+“RUNNING 已落库、submit 尚未完成”的进程崩溃窗口：
 
-1. in-process after-commit 立即调度，保证低延迟；
-2. durable outbox dispatcher 兜底，保证进程在提交后崩溃仍能恢复。
+1. 扫描超过保护窗口仍为 RUNNING 的 Managed Turn；
+2. 按 Session 获取分布式锁；
+3. 从 `chat_history` 精确恢复原 prompt、promptId、payloadDigest 和 deadline；
+4. 先查 Harness status/transcript：已完成则补投影，仍运行则恢复 SSE；
+5. 只有未发现 admission 且 digest 完全一致时，才用同一 promptId 重试 submit。
 
-两层使用相同 idempotency key。立即调度成功后更新 outbox；与后台 dispatcher 竞争时依赖唯一键和 Harness/Broker 幂等，而不是 JVM 锁。
+无法精确重建、binding generation 不一致或对账矛盾时 fail closed 为
+`managed_prompt_outcome_unknown`；不得生成新 promptId，不得回落 Legacy。
 
 ## 9. 事件投影与 SSE
 
@@ -603,9 +587,10 @@ Harness 的 primary workspace 是部署级 control workspace，只放共享 agen
 改动范围在真实 Java 产品仓，不放进 qwen-code Runtime Broker 包：
 
 - `ManagedAgentCoordinator`；
-- Session/Turn/Binding/Event/Outbox Repository 接缝；
+- 复用 `chat_session` / `chat_history` / `agent_cli_runtime_session`，新增 `agent_managed_event`；
 - `HarnessClient` 产品接口和 qwen transport adapter；
 - per-Session event projector；
+- `ManagedTurnFinalizer` 和 `ManagedTurnReconciler`；
 - existing DataAgent Controller 接入；
 - feature flag 和 admission policy。
 
@@ -642,11 +627,13 @@ Java Prompt fixture
 
 1. `feat(serve): version hosted harness private contract`
 2. `feat(java): add hosted harness transport`
-3. 产品 Java：`feat(agent): coordinate managed harness turns`
-4. 联合 E2E：`test(managed): verify product hosted runtime flow`
-5. 产品灰度和观测
-6. P3 稳定后进入 P6 Runtime Broker 持久化与 Java 重启恢复
-7. P6 完成后再进入 P7 OpenAI Managed Agents Adapter
+3. 产品 Java P3c-0：配置、Hosted binding fencing、Managed Event Store
+4. 发布 `com.alibaba:qwencode-sdk:0.1.0-alpha` 到内部 Maven 仓库
+5. 产品 Java P3c-1～P3c-3：Gateway、Coordinator、Connector、Runtime Broker
+6. 联合 E2E：`test(managed): verify product hosted runtime flow`
+7. 产品灰度和观测
+8. P3 稳定后进入 P6 规模化恢复与调度
+9. P6 完成后再进入 P7 OpenAI Managed Agents Adapter
 
 每个提交必须可独立回滚。私有协议、产品 Coordinator、数据库迁移和公网 API 不能合并成一个大 PR。
 
@@ -710,17 +697,20 @@ AND product feature flag enabled
 
 - Prompt admission 的事务入口和现有 Session 表；
 - 现有 SSE event store 是否支持单 Session 单调 sequence；
-- after-commit executor 和 durable outbox 的现成实现；
+- RUNNING Managed Turn 扫描任务与分布式锁复用入口；
 - tenant/workspace 鉴权入口；
 - Harness endpoint 的部署和服务 token 注入方式；
 - 首批允许的 tenant、workspace、模型和 Tool 白名单；
 - capability digest 的生成来源；
 - preview event 保留期、最大 payload 和慢消费者策略。
 
-如果产品仓暂时没有 durable outbox，首个联调可以用 in-process after-commit dispatcher，但只能作为开发验证，不能进入生产灰度。
+产品首版明确不新增 durable Outbox；生产灰度前必须完成 `ManagedTurnReconciler` 的 Java 崩溃恢复测试，
+不能只依赖 JVM 内的 after-commit/in-process 调度。
 
 ## 17. 下一步
 
-当前 qwen-code 侧 P3a、P3b 已完成。下一步在真实产品 Java 仓执行 P3c：先接入 `ManagedAgentCoordinator`、权威 Session/Turn/Binding/Event/Outbox，再将现有 DataAgent Controller 路由到 Coordinator；不要提前实现 OpenAI Controller。
+当前 qwen-code 侧 P3a、P3b 已完成，产品 Java P3c-0 也已完成并通过 Java 21 测试。下一步先把
+`com.alibaba:qwencode-sdk:0.1.0-alpha` 发布到内部 Maven 仓库，再实现真实 `HostedHarnessGateway` 和
+Session binding；不要复制第二套私有协议客户端，也不要提前实现 OpenAI Controller。
 
 P3a + P3b 当前已达到该判断：Java 能用一个版本化、带 Harness generation fencing、caller prompt ID 可重试的私有客户端完整操作现有 `/session` 链路。
