@@ -27,8 +27,9 @@ import {
   goalPauseReasonForFailure,
   goalPauseReasonForInconsistentTranscript,
   goalPauseReasonForUnreadableTranscript,
+  goalPauseReasonForVerifierBudget,
   goalPauseReasonForVerifierFailure,
-  isGoalVerifierFailurePause,
+  goalVerifierFailureNote,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
   goalTurnBudgetReason,
@@ -384,25 +385,20 @@ describe('verifier failure pause reasons', () => {
     ).toBe(true);
   });
 
-  it('recognises every verifier failure pause, and nothing else', () => {
-    for (const reason of [
-      goalPauseReasonForVerifierFailure('timed out'),
-      goalPauseReasonForUnreadableTranscript('rewound'),
-      goalPauseReasonForInconsistentTranscript('duplicate uuid'),
-    ]) {
-      expect(
-        isGoalVerifierFailurePause({ status: 'paused', lastReason: reason }),
-      ).toBe(true);
-      expect(
-        isGoalVerifierFailurePause({ status: 'active', lastReason: reason }),
-      ).toBe(false);
-    }
+  it('keeps a usage-limited note short and free of doubled periods', () => {
     expect(
-      isGoalVerifierFailurePause({
-        status: 'paused',
-        lastReason: goalPauseReasonForFailure('the turn failed'),
-      }),
-    ).toBe(false);
-    expect(isGoalVerifierFailurePause(null)).toBe(false);
+      goalVerifierFailureNote('Goal verifier timed out after 120000ms.'),
+    ).toBe(
+      'Its hand-off proposal could not be verified: Goal verifier timed out after 120000ms.',
+    );
+    expect([...goalVerifierFailureNote('x'.repeat(1_000))].length).toBeLessThan(
+      220,
+    );
+    expect(goalVerifierFailureNote('  ')).toBe(
+      'Its hand-off proposal could not be verified.',
+    );
+    expect(
+      goalPauseReasonForVerifierBudget('the budget of 0 bytes holds no record'),
+    ).toContain('larger context window');
   });
 });

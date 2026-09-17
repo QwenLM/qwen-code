@@ -748,20 +748,35 @@ export function goalPauseReasonForInconsistentTranscript(
 }
 
 /**
- * Whether a paused Goal stopped because its proposal could not be judged,
- * as opposed to the user or the no-progress bound stopping it. Read off
- * the persisted reason so a restart cannot lose it: a resume after this
- * pause keeps the repeated-blocker audit the proposal had already earned,
- * because nothing intervened between the audited turns and the retry.
+ * The pause reason for a verifier request that has no room for a single
+ * transcript record: the side query model's context window, less the
+ * objective and the policy, leaves nothing. Retrying cannot help; a larger
+ * model or a shorter objective can.
  */
-export function isGoalVerifierFailurePause(
-  goal: Pick<GoalRecord, 'status' | 'lastReason'> | null | undefined,
-): boolean {
-  return (
-    goal?.status === 'paused' &&
-    (goal.lastReason?.startsWith(GOAL_VERIFIER_FAILURE_PAUSE_PREFIX) ?? false)
+export function goalPauseReasonForVerifierBudget(message: string): string {
+  return composeGoalPauseReason(
+    message,
+    'Configure a side query model with a larger context window, or shorten the objective, then resume the Goal.',
   );
 }
+
+/**
+ * The sentence a usage-limited stop appends when the hand-off turn's own
+ * proposal could not be verified: the stop reason stays the budget's, this
+ * says what became of the proposal. Short, so the budget reason keeps its
+ * own instruction within the cap.
+ */
+export function goalVerifierFailureNote(message: string): string {
+  const points = [...message.trim().replace(/[.\u3002]+$/u, '')];
+  const shown =
+    points.length <= GOAL_VERIFIER_FAILURE_NOTE_MAX_CHARACTERS
+      ? points.join('')
+      : `${points.slice(0, GOAL_VERIFIER_FAILURE_NOTE_MAX_CHARACTERS - 1).join('')}\u2026`;
+  return shown
+    ? `Its hand-off proposal could not be verified: ${shown}.`
+    : 'Its hand-off proposal could not be verified.';
+}
+const GOAL_VERIFIER_FAILURE_NOTE_MAX_CHARACTERS = 160;
 
 /**
  * The local rejection for a repeated blocker whose audited turns the

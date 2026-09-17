@@ -66,7 +66,6 @@ import {
 import { collectSessionTurnState } from './session-turn-state.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
-import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -2468,110 +2467,6 @@ describe('SessionTranscriptReader', () => {
     ]);
   });
 
-  it('projects a pending Goal checkpoint window without a full-loader fallback', async () => {
-    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
-    const cursor: ChatRecord = {
-      ...record('cursor', null, ''),
-      type: 'system',
-      subtype: 'goal_runtime',
-      message: undefined,
-    };
-    const evidence = Array.from({ length: 80 }, (_, index) => ({
-      ...record(
-        `a-evidence-${index}`,
-        index === 0 ? 'cursor' : `a-evidence-${index - 1}`,
-        `evidence ${index}`,
-      ),
-      provenance: 'assistant_output' as const,
-      goalContext: permit,
-    }));
-    const fragmentedEvidence: ChatRecord = {
-      ...evidence[0]!,
-      message: { role: 'model', parts: [{ text: 'fragment tail' }] },
-    };
-    const compression: ChatRecord = {
-      ...record('compression', evidence.at(-1)!.uuid, ''),
-      type: 'system',
-      subtype: 'chat_compression',
-      message: undefined,
-      systemPayload: {
-        compressedHistory: [
-          { role: 'user', parts: [{ text: 'summary' }] },
-          { role: 'model', parts: [{ text: 'summary result' }] },
-        ],
-      } as ChatRecord['systemPayload'],
-    };
-    const goalPayload: GoalStateRecordPayloadV2 = {
-      v: 2,
-      cause: 'turn_finished',
-      snapshot: {
-        v: 2,
-        activity: 'idle',
-        goal: {
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'verify the result',
-          status: 'active',
-          evidenceCursor: { recordId: 'cursor' },
-          turnCount: 1,
-          activeTimeMs: 0,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      },
-      checkpointPending: {
-        permit,
-        recordUuid: evidence.at(-1)!.uuid,
-      },
-    };
-    const goalState: ChatRecord = {
-      ...record('goal-state', 'compression', ''),
-      type: 'system',
-      subtype: 'goal_state',
-      message: undefined,
-      systemPayload: goalPayload,
-    };
-    const filePath = await writeRecords([
-      cursor,
-      evidence[0]!,
-      fragmentedEvidence,
-      ...evidence.slice(1),
-      compression,
-      goalState,
-    ]);
-    let buildCount = 0;
-    setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
-      if (builtPath === filePath) buildCount++;
-    });
-
-    const service = new SessionService(workspaceDir, {
-      runtimeBaseDir: runtimeDir,
-    });
-    const [loaded, projection] = await Promise.all([
-      service.loadSession(sessionId),
-      service.readRestoreProjection(sessionId, {
-        replay: { kind: 'none' },
-      }),
-    ]);
-    const expected = buildGoalEvidenceCheckpointWindow({
-      records: loaded!.conversation.messages,
-      goal: goalPayload.snapshot.goal!,
-      permit,
-    });
-
-    expect(projection?.runtime.goalCheckpointWindow).toEqual(expected);
-    expect(projection?.runtime.goalCheckpointWindow).toMatchObject({
-      shouldCheckpoint: true,
-      truncated: false,
-    });
-    expect(projection?.runtime.goalCheckpointWindow?.evidence).toHaveLength(80);
-    expect(projection?.runtime.goalCheckpointWindow?.evidence[0]?.content).toBe(
-      'evidence 0\nfragment tail',
-    );
-    expect(buildCount).toBe(1);
-  });
-
   it('defers unavailable pending Goal evidence to runtime recovery', async () => {
     const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
     const evidence = {
@@ -2612,7 +2507,6 @@ describe('SessionTranscriptReader', () => {
       workspaceDir,
     ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
 
-    expect(projection?.runtime.goalCheckpointWindow).toBeUndefined();
     expect(projection?.runtime.goalRecords).toHaveLength(1);
     expect(projection?.runtime.goalRecords[0]?.uuid).toBe('goal-state');
   });

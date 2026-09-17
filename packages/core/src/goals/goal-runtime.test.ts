@@ -29,7 +29,10 @@ import {
   type GoalJournal,
   type GoalTurnHost,
 } from './goal-runtime.js';
-import { GoalConflictError } from './goal-reducer.js';
+import {
+  GoalConflictError,
+  parseGoalStateRecordPayloadV2,
+} from './goal-reducer.js';
 import type { GoalVerifier } from './goal-verifier.js';
 
 const FORMER_GOAL_CONTINUATION_LIMIT = 50;
@@ -1614,6 +1617,235 @@ describe('goal runtime', () => {
     expect(
       journal.appended.find((payload) => payload.cause === 'resume'),
     ).toMatchObject({ blockedAudit: { count: 3 } });
+  });
+
+  it('drops a restored checkpoint when the pause moves the cursor, so the record still parses', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.restore([
+      goalStateRecord(
+        {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'g-old',
+            revision: 1,
+            objective: 'deliver result',
+            status: 'active',
+            evidenceCursor: { recordId: 'checkpoint-record' },
+            turnCount: 3,
+            activeTimeMs: 10,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 2,
+            evidenceCheckpoint: {
+              checkpointId: 'checkpoint-record',
+              createdAt: 2,
+              claims: [
+                {
+                  id: 'checkpoint-record:1',
+                  proofKind: 'external_fact',
+                  claim: 'The suite passed once',
+                  sourceRefs: ['old-1'],
+                },
+              ],
+            },
+          },
+        },
+        'checkpoint',
+      ),
+    ]);
+    const permit = host.started[0]!;
+    // A rewind past the checkpoint: its record is gone from the chain.
+    records = verifierEvidenceRecords(permit, 'elsewhere');
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    const pause = journal.appended.at(-1)!;
+    expect(pause.cause).toBe('pause');
+    // The record's invariant ties the cursor to the checkpoint; a moved
+    // cursor beside the old checkpoint would fail to parse, and every later
+    // record with it, so the checkpoint goes with the old cursor.
+    expect(pause.snapshot.goal).not.toHaveProperty('evidenceCheckpoint');
+    expect(parseGoalStateRecordPayloadV2(pause)).toBeDefined();
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      evidenceCursor: { recordId: journal.records.at(-1)!.uuid },
+    });
+  });
+
+  it('pauses with a budget reason when no transcript record fits the request', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+      // Smaller than the request envelope itself.
+      verifierRequestByteLimit: () => 100,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    records = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    // A certain rejection is not worth a call; the pause says what would
+    // change the outcome.
+    expect(verifier).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      lastReason: expect.stringContaining('larger context window'),
+    });
+    expect(journal.appended.at(-1)?.cause).toBe('pause');
+  });
+
+  it('stops as usage_limited when the hand-off proposal cannot be verified, so resume re-arms the budget', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    let verifierCalls = 0;
+    const verifier: GoalVerifier = vi.fn(async () => {
+      verifierCalls += 1;
+      if (verifierCalls === 1) {
+        // The rejection's own usage is what spends the budget.
+        return {
+          decision: 'reject' as const,
+          reason: 'not yet',
+          usage: { totalTokenCount: 250 },
+        };
+      }
+      throw new Error('Goal verifier timed out after 120000ms');
+    });
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+      ledger: { takeGoalTurnTokens: () => 800 },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    const first = host.started[0]!;
+    records = verifierEvidenceRecords(first, cursorId);
+    runtime.recordTerminalProposal(first, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+    await runtime.finishTurn(first);
+    // The rejection spent the budget; the next turn is the hand-off.
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+    const handOff = host.started[1]!;
+    runtime.markTurnDelivered(`goal-runtime:${handOff.turnId}`);
+    records = [
+      ...records,
+      {
+        ...verifierEvidenceRecords(handOff, cursorId)[1]!,
+        uuid: 'hand-off-output',
+        parentUuid: 'assistant-evidence',
+      },
+    ];
+    runtime.recordTerminalProposal(handOff, {
+      status: 'complete',
+      reason: 'Delivered in the hand-off',
+    });
+
+    await runtime.finishTurn(handOff);
+
+    // A pause would resume straight into the budget gate and stop again
+    // before the model could propose; the stop that re-arms is the budget's.
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'token_budget',
+      lastReason: expect.stringContaining(
+        'Its hand-off proposal could not be verified: Goal verifier timed out after 120000ms.',
+      ),
+    });
+    expect(host.started).toHaveLength(2);
+
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: first.goalId,
+      expectedRevision: first.revision,
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+    expect(runtime.getSnapshot().goal!.tokenBudget).toBeGreaterThan(
+      runtime.getSnapshot().goal!.tokensUsed,
+    );
+    expect(host.started).toHaveLength(3);
+  });
+
+  it('rejects a repeated blocker locally when an audited turn is in the window only in part', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'unreachable',
+    }));
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+      // Room for the three proposals and not for the probe before them.
+      verifierRequestByteLimit: 2_900,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deploy' });
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [verifierEvidenceRecords(host.started[0]!, cursorId)[0]!];
+    const append = (permit: GoalTurnPermit, uuid: string, text: string) => {
+      records = [
+        ...records,
+        {
+          ...verifierEvidenceRecords(permit, cursorId)[1]!,
+          uuid,
+          parentUuid: records.at(-1)!.uuid,
+          message: { role: 'model', parts: [{ text }] },
+        },
+      ];
+    };
+    for (const index of [0, 1, 2]) {
+      const permit = host.started[index]!;
+      if (index === 0) append(permit, 'probe-0', 'x'.repeat(5_000));
+      append(permit, `proposal-${index}`, 'blocked');
+      runtime.recordTerminalProposal(permit, {
+        status: 'blocked',
+        reason: 'The registry rejects every push',
+      });
+      await runtime.finishTurn(permit);
+    }
+
+    // The oldest audited turn reaches the window through its last record
+    // only, the model's own proposal; that is not the turn's evidence.
+    expect(verifier).not.toHaveBeenCalled();
+    expect(journal.appended.at(-1)?.cause).toBe('verifier_reject');
+    expect(runtime.getSnapshot().goal?.lastReason).toContain(
+      'turns the verifier cannot see',
+    );
   });
 
   it('rejects a repeated blocker locally when the window cannot reach its audited turns', async () => {

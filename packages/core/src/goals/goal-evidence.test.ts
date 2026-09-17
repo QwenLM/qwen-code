@@ -1331,6 +1331,34 @@ describe('buildGoalVerifierWindow', () => {
     expect(window.evidence.map((entry) => entry.uuid)).toEqual(['newest']);
     expect(window.turnIds).toEqual(['turn-3']);
     expect(window.omitted).toBe(2);
+    // The turn the cut landed in is named: it is in the window only in part.
+    expect(window.partialTurnId).toBe('turn-1');
+  });
+
+  it('names no partial turn when everything fits', () => {
+    const window = buildGoalVerifierWindow(
+      { records: chain(), goal: goal(), permit: permit() },
+      { budgetBytes: 100_000 },
+    );
+    expect(window).not.toHaveProperty('partialTurnId');
+  });
+
+  it('cuts the newest record again when escaping pushes it past the budget', () => {
+    // Every character doubles on the wire; cut by raw bytes alone, the
+    // record would be charged twice what the budget holds.
+    const records = [
+      record('cursor', 'system'),
+      assistant('quoted', 'turn-3', '"'.repeat(3_000)),
+    ];
+    const window = buildGoalVerifierWindow(
+      { records, goal: goal(), permit: permit() },
+      { budgetBytes: 2_000 },
+    );
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual(['quoted']);
+    expect(window.omitted).toBe(0);
+    expect(
+      Buffer.byteLength(JSON.stringify(window.evidence), 'utf8'),
+    ).toBeLessThanOrEqual(2_000);
   });
 
   it('keeps the serialized arrays within the budget it was given', () => {
@@ -1420,6 +1448,63 @@ describe('buildGoalVerifierWindow', () => {
     );
   });
 
+  it('keeps the ids that tie a result to its call', () => {
+    const call: GoalEvidenceRecord = {
+      ...record('call', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+      }),
+      message: {
+        parts: [
+          {
+            functionCall: {
+              id: 'c-1',
+              name: 'shell',
+              args: { cmd: 'npm test' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'c-2',
+              name: 'shell',
+              args: { cmd: 'echo ok' },
+            },
+          },
+        ],
+      },
+    };
+    const result: GoalEvidenceRecord = {
+      ...record('result', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+      }),
+      message: {
+        parts: [
+          {
+            functionResponse: {
+              id: 'c-2',
+              name: 'shell',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+    };
+    const window = buildGoalVerifierWindow(
+      {
+        records: [record('cursor', 'system'), call, result],
+        goal: goal(),
+        permit: permit(),
+      },
+      { budgetBytes: 10_000 },
+    );
+    expect(window.evidence[0]!.content).toBe(
+      '{"name":"shell","id":"c-2","response":{"output":"ok"}}',
+    );
+    expect(window.evidence[1]!.content).toContain('"id":"c-1"');
+    expect(window.evidence[1]!.content).toContain('"id":"c-2"');
+  });
+
   it('counts the claims of a checkpoint from before the window as omitted', () => {
     const legacy = {
       ...goal(),
@@ -1441,8 +1526,9 @@ describe('buildGoalVerifierWindow', () => {
       { budgetBytes: 100_000 },
     );
     expect(window.evidence).toHaveLength(4);
-    // One claim, plus the record before the cursor.
-    expect(window.omitted).toBe(2);
+    // The claim stands for the records before the cursor, which are not
+    // counted again.
+    expect(window.omitted).toBe(1);
   });
 
   it('cuts long content in the middle so the command and the result survive', () => {

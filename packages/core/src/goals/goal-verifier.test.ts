@@ -145,7 +145,7 @@ describe('createGoalVerifier', () => {
     expect(request).toMatchObject({
       model: 'fast-model',
       promptId: 'side-query:goal-verifier',
-      maxAttempts: 2,
+      maxAttempts: 1,
       config: {
         temperature: 0,
         responseMimeType: 'application/json',
@@ -243,6 +243,40 @@ describe('createGoalVerifier', () => {
       GoalVerifierInputTooLargeError,
     );
     expect(generateText).not.toHaveBeenCalled();
+  });
+
+  it('retries a transient provider failure once, each attempt under its own timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const { config, generateText } = configFor('unused');
+      generateText
+        .mockRejectedValueOnce(
+          Object.assign(new Error('overloaded'), { status: 503 }),
+        )
+        .mockResolvedValueOnce({
+          text: '{"decision":"accept","reason":"grounded"}',
+          usage: undefined,
+        });
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+      const verification = createGoalVerifier(config, { timeoutMs: 5_000 })(
+        input(),
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(verification).resolves.toEqual({
+        decision: 'accept',
+        reason: 'grounded',
+      });
+      expect(generateText).toHaveBeenCalledTimes(2);
+      // Two attempts, two ceilings of the full length.
+      expect(
+        setTimeoutSpy.mock.calls.filter(([, ms]) => ms === 5_000),
+      ).toHaveLength(2);
+      setTimeoutSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('propagates provider failure and clears its timeout', async () => {
@@ -352,12 +386,19 @@ describe('goalVerifierRequestByteLimit', () => {
     expect(goalVerifierRequestByteLimit(configWith('local-model'))).toBe(
       200_000,
     );
-    // The configured window describes the main model, not a fast model.
+    // The side query may fall back to the main generator, so the request
+    // must fit the main model's window as well as the fast model's.
     expect(
       goalVerifierRequestByteLimit(
         configWith('local-model', 'gpt-4o-mini', 32_768),
       ),
-    ).toBe(131_072);
+    ).toBe(32_768);
+  });
+
+  it('assumes the smallest listed window for a fast model the table does not know', () => {
+    expect(
+      goalVerifierRequestByteLimit(configWith('gemini-2.5-pro', 'local-fast')),
+    ).toBe(32_768);
   });
 
   it('follows the side query model, which is the fast model when set', () => {

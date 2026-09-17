@@ -22,8 +22,9 @@ import {
   goalActiveTimeBudgetReason,
   goalPauseReasonForInconsistentTranscript,
   goalPauseReasonForUnreadableTranscript,
+  goalPauseReasonForVerifierBudget,
   goalPauseReasonForVerifierFailure,
-  isGoalVerifierFailurePause,
+  goalVerifierFailureNote,
   goalTokenBudgetReason,
   goalTurnBudgetReason,
   isGoalActiveTimeBudgetSpent,
@@ -505,20 +506,14 @@ export function createGoalRuntime(
   };
 
   /**
-   * The paused snapshot a proposal whose verification could not run settles
-   * on. Nothing was judged and nothing was spent on the answer, so the Goal
-   * waits for the user exactly as the no-progress bound does; the proposal
-   * itself is not kept, because a resumed turn re-proposes from the
-   * transcript it can see.
-   */
-  /**
-   * What a failed verification says about the transcript: nothing (the
-   * verifier or the provider failed), that the cursor no longer anchors it
-   * and a new one would, or that no cursor can make it readable.
+   * What a failed verification says: the verifier or the provider failed
+   * ('verifier'); the request budget has no room for a single record
+   * ('budget'); the cursor no longer anchors the transcript and a new one
+   * would ('reanchor'); or no cursor can make it readable ('inconsistent').
    */
   type VerifierFailure = {
     detail: string;
-    transcript: 'readable' | 'reanchor' | 'inconsistent';
+    cause: 'verifier' | 'budget' | 'reanchor' | 'inconsistent';
   };
   const REANCHORABLE_CODES = new Set<EvidenceSourceUnavailableCode>([
     'cursor_unset',
@@ -529,36 +524,54 @@ export function createGoalRuntime(
   ]);
   const describeVerifierFailure = (error: unknown): VerifierFailure => ({
     detail: error instanceof Error ? error.message : String(error),
-    transcript:
+    cause:
       error instanceof EvidenceSourceUnavailableError
         ? REANCHORABLE_CODES.has(error.code)
           ? 'reanchor'
           : 'inconsistent'
-        : 'readable',
+        : 'verifier',
   });
 
+  /**
+   * The paused snapshot a proposal whose verification could not run settles
+   * on. Nothing was judged and nothing was spent on the answer, so the Goal
+   * waits for the user exactly as the no-progress bound does; the proposal
+   * itself is not kept, because a resumed turn re-proposes from the
+   * transcript it can see.
+   */
   const verifierFailurePausedSnapshot = (
     goal: NonNullable<GoalSnapshotV2['goal']>,
     failure: VerifierFailure,
     recordUuid: string,
   ): GoalSnapshotV2 => {
-    switch (failure.transcript) {
-      case 'readable':
+    switch (failure.cause) {
+      case 'verifier':
         return settledSnapshot(
           goal,
           'paused',
           goalPauseReasonForVerifierFailure(failure.detail),
         );
-      case 'reanchor':
+      case 'budget':
+        return settledSnapshot(
+          goal,
+          'paused',
+          goalPauseReasonForVerifierBudget(failure.detail),
+        );
+      case 'reanchor': {
         // The transcript could not be anchored at the cursor, and the same
         // cursor would fail the same way on every later proposal. Move it
         // to the pause record itself: everything the resumed Goal does lands
-        // after it, and the reason tells the user what was left behind.
+        // after it, and the reason tells the user what was left behind. A
+        // checkpoint an earlier version left goes with the old cursor: the
+        // record ties the two together, and its claims summarised evidence
+        // the new cursor leaves behind anyway.
+        const { evidenceCheckpoint: _folded, ...rest } = goal;
         return settledSnapshot(
-          { ...goal, evidenceCursor: { recordId: recordUuid } },
+          { ...rest, evidenceCursor: { recordId: recordUuid } },
           'paused',
           goalPauseReasonForUnreadableTranscript(failure.detail),
         );
+      }
       case 'inconsistent':
         return settledSnapshot(
           goal,
@@ -566,7 +579,7 @@ export function createGoalRuntime(
           goalPauseReasonForInconsistentTranscript(failure.detail),
         );
       default: {
-        const exhaustive: never = failure.transcript;
+        const exhaustive: never = failure.cause;
         return exhaustive;
       }
     }
@@ -970,6 +983,37 @@ export function createGoalRuntime(
       }
 
       if (outcome.kind === 'paused') {
+        const spent = spentBudget(meteredGoal, now);
+        if (spent && meteredGoal.windDownTurnId !== undefined) {
+          // The proposing turn was the wind-down hand-off: the budget is
+          // spent whatever the verifier did, and only a usage_limited stop
+          // re-arms it on resume. A pause would resume straight into the
+          // budget gate and stop again before the model could propose.
+          const reason = `${spent.reason} ${goalVerifierFailureNote(outcome.detail)}`;
+          let limitedSnapshot: GoalSnapshotV2;
+          try {
+            limitedSnapshot = await journalUsageLimitedSettle(
+              meteredGoal,
+              reason,
+              spent.kind,
+            );
+          } catch {
+            // As for every other settle: show the stop, let the user's next
+            // action surface the persistence loss.
+            limitedSnapshot = usageLimitedSnapshot(
+              meteredGoal,
+              reason,
+              spent.kind,
+            );
+          }
+          if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
+          verificationAttempt = undefined;
+          pendingProposal = undefined;
+          nextVerifierFeedback = undefined;
+          queuedTurnKey = undefined;
+          commitUsageLimitedSettle(limitedSnapshot);
+          return;
+        }
         const recordUuid = randomUUID();
         const pausedSnapshot = verifierFailurePausedSnapshot(
           meteredGoal,
@@ -979,7 +1023,7 @@ export function createGoalRuntime(
         // A moved cursor leaves the audited turns behind it, where no
         // window reaches; an audit that survived would let the policy's
         // word stand in for evidence the verifier cannot see.
-        if (outcome.transcript === 'reanchor') blockedAudit = undefined;
+        if (outcome.cause === 'reanchor') blockedAudit = undefined;
         try {
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,
@@ -1067,23 +1111,35 @@ export function createGoalRuntime(
         turnIds: [],
         omitted: 0,
       });
+      const budgetBytes =
+        verifierRequestByteLimit() - measureGoalVerifierEnvelopeBytes(envelope);
       const window = buildGoalVerifierWindow(
         { records, goal: attempt.goal, permit: attempt.permit },
-        {
-          budgetBytes:
-            verifierRequestByteLimit() -
-            measureGoalVerifierEnvelopeBytes(envelope),
-        },
+        { budgetBytes },
       );
-      // The blocked policy tells the verifier a repeated blocker was
-      // recorded on three consecutive turns. That is only evidence if the
-      // verifier can see those turns; otherwise the policy's word would be
-      // doing the proving, so the runtime rejects before asking.
-      if (
+      if (window.evidence.length === 0 && window.omitted > 0) {
+        // Not one record fits: the side query model's window, less the
+        // objective and the policy, is too small for this Goal. Asking the
+        // verifier would buy a certain rejection every turn until the
+        // budget stopped the Goal; pausing says what would change that.
+        outcome = {
+          kind: 'paused',
+          cause: 'budget',
+          detail: `the verifier's request budget of ${Math.max(0, budgetBytes)} bytes after the request envelope holds no transcript record`,
+        };
+      } else if (
         isRepeatedBlockerProposal(attempt.proposal) &&
         blockedAudit !== undefined &&
-        !blockedAudit.turnIds.every((turnId) => window.turnIds.includes(turnId))
+        !blockedAudit.turnIds.every(
+          (turnId) =>
+            window.turnIds.includes(turnId) && turnId !== window.partialTurnId,
+        )
       ) {
+        // The blocked policy tells the verifier a repeated blocker was
+        // recorded on three consecutive turns. That is only evidence if the
+        // verifier can see those turns whole; a turn the window reaches
+        // only in part may hold nothing but the model's own proposal, so
+        // the policy's word would be doing the proving.
         outcome = {
           kind: 'decision',
           result: {
@@ -1653,14 +1709,13 @@ export function createGoalRuntime(
               }
             : {}),
         };
-        // A resume after a pause the verifier's failure caused keeps the
-        // repeated-blocker audit the proposal had earned, and the record
-        // carries it so a restart between this resume and the next finished
-        // turn does not lose it.
+        // Only a pause the verifier's failure caused leaves an audit behind
+        // (a user pause clears it, a no-progress pause never has one), and
+        // that pause changed nothing about the audited turns. So a resume
+        // that finds one keeps it, and the record carries it so a restart
+        // between this resume and the next finished turn does not lose it.
         const keepsBlockedAudit =
-          request.action === 'resume' &&
-          blockedAudit !== undefined &&
-          isGoalVerifierFailurePause(snapshot.goal);
+          request.action === 'resume' && blockedAudit !== undefined;
         try {
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,

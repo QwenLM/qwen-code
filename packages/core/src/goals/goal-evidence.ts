@@ -720,6 +720,8 @@ const VERIFIER_RECORD_CONTENT_BYTE_LIMIT = 8_000;
  */
 const VERIFIER_RECORD_BUDGET_SHARE = 4;
 const VERIFIER_RECORD_CONTENT_BYTE_FLOOR = 1_000;
+/** Below this, a second cut of the newest record is not worth sending. */
+const VERIFIER_RECORD_CONTENT_BYTE_RETRY_FLOOR = 200;
 /** The head keeps five eighths of a cut record; the tail the rest. */
 const VERIFIER_RECORD_HEAD_SHARE = 5 / 8;
 export const VERIFIER_MIDDLE_TRUNCATION_MARKER =
@@ -746,6 +748,12 @@ export interface GoalVerifierWindow {
    * None of it is sent; the verifier must know it exists out of reach.
    */
   omitted: number;
+  /**
+   * The turn the first record that did not fit belongs to, when a record
+   * was left out: that turn is in the window only in part, and a rule that
+   * needs a whole turn (the repeated-blocker audit) must treat it as absent.
+   */
+  partialTurnId?: string;
 }
 
 export interface BuildGoalVerifierWindowOptions {
@@ -786,27 +794,62 @@ export function buildGoalVerifierWindow(
   const evidence: GoalVerifierEvidenceRecord[] = [];
   const turnIds = new Set<string>();
   let bytes = 0;
-  let omitted = input.goal.evidenceCheckpoint?.claims.length ?? 0;
+  // A checkpoint an earlier version left summarises the records before the
+  // cursor; count its claims, or those records, never both.
+  const checkpointClaims = input.goal.evidenceCheckpoint?.claims.length ?? 0;
+  let omitted = checkpointClaims;
   let full = false;
+  let partialTurnId: string | undefined;
+  const entrySize = (entry: GoalVerifierEvidenceRecord): number =>
+    Buffer.byteLength(JSON.stringify(entry), 'utf8') +
+    1 +
+    (turnIds.has(entry.turnId)
+      ? 0
+      : Buffer.byteLength(JSON.stringify(entry.turnId), 'utf8') + 1);
   for (let index = input.records.length - 1; index >= 0; index -= 1) {
     const record = input.records[index]!;
     // Once the window is full, or before the cursor, a record is only
     // counted: eligibility is cheap, rendering a multi-megabyte tool result
     // for a count is not.
     if (full || index <= cursorIndex) {
-      if (isVerifierEvidence(record, input)) omitted += 1;
+      if (
+        (full || checkpointClaims === 0) &&
+        isVerifierEvidence(record, input)
+      ) {
+        omitted += 1;
+      }
       continue;
     }
-    const entry = verifierEvidence(record, input, recordLimit);
+    let entry = verifierEvidence(record, input, recordLimit);
     if (!entry) continue;
-    const entryBytes =
-      Buffer.byteLength(JSON.stringify(entry), 'utf8') +
-      1 +
-      (turnIds.has(entry.turnId)
-        ? 0
-        : Buffer.byteLength(JSON.stringify(entry.turnId), 'utf8') + 1);
+    let entryBytes = entrySize(entry);
+    if (bytes + entryBytes > budget && evidence.length === 0) {
+      // The newest record is cut by its raw bytes but charged by its
+      // serialized ones, and escaping can double a quote-heavy result. Cut
+      // it once more by the measured ratio so the window holds at least
+      // the record that decides the proposal.
+      const serializedContent = Buffer.byteLength(
+        JSON.stringify(entry.content),
+        'utf8',
+      );
+      const overhead = entryBytes - serializedContent;
+      const rawContent = Buffer.byteLength(entry.content, 'utf8');
+      const room = budget - overhead;
+      if (room > 0 && rawContent > 0) {
+        const retryLimit =
+          Math.floor((room * rawContent) / serializedContent) - 16;
+        if (retryLimit >= VERIFIER_RECORD_CONTENT_BYTE_RETRY_FLOOR) {
+          const recut = verifierEvidence(record, input, retryLimit);
+          if (recut) {
+            entry = recut;
+            entryBytes = entrySize(entry);
+          }
+        }
+      }
+    }
     if (bytes + entryBytes > budget) {
       full = true;
+      partialTurnId = entry.turnId;
       omitted += 1;
       continue;
     }
@@ -818,6 +861,7 @@ export function buildGoalVerifierWindow(
     evidence,
     turnIds: lineageTurnIds.filter((turnId) => turnIds.has(turnId)),
     omitted,
+    ...(partialTurnId === undefined ? {} : { partialTurnId }),
   };
 }
 
@@ -914,12 +958,16 @@ function verifierContent(
 }
 
 function renderToolCall(functionCall: {
+  id?: string;
   name?: string;
   args?: unknown;
 }): string {
   try {
+    // The id is what ties a result to its call when a turn made several
+    // calls of the same tool.
     return JSON.stringify({
       call: functionCall.name ?? '',
+      ...(functionCall.id === undefined ? {} : { id: functionCall.id }),
       ...(functionCall.args === undefined ? {} : { args: functionCall.args }),
     });
   } catch {
@@ -1461,6 +1509,7 @@ function evidencePreview(
 }
 
 function renderToolResponse(functionResponse: {
+  id?: string;
   name?: string;
   response?: unknown;
 }): string {
@@ -1470,6 +1519,7 @@ function renderToolResponse(functionResponse: {
       ...(functionResponse.name === undefined
         ? {}
         : { name: functionResponse.name }),
+      ...(functionResponse.id === undefined ? {} : { id: functionResponse.id }),
       response: functionResponse.response,
     });
   } catch {

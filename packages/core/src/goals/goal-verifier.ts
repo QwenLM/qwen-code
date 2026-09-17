@@ -7,7 +7,8 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { retryWithBackoff } from '../utils/retry.js';
+import { knownTokenLimit, tokenLimit } from '../core/tokenLimits.js';
 import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
 
@@ -26,6 +27,15 @@ export const GOAL_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
  * 32K local model as well as a 1M one.
  */
 const GOAL_VERIFIER_BYTES_PER_CONTEXT_TOKEN = 1;
+/**
+ * The window assumed for a fast model whose name the table does not know.
+ * Such a model is usually a local or OpenAI-compatible deployment, and
+ * nothing tells the runtime its real window; the smallest one the table
+ * lists is the assumption that cannot send a request the model refuses.
+ */
+const GOAL_VERIFIER_UNKNOWN_MODEL_CONTEXT_TOKENS = 32_768;
+/** Backoff before the one retry of a transient provider failure. */
+const GOAL_VERIFIER_RETRY_DELAY_MS = 2_000;
 const MAX_VERIFIER_REASON_LENGTH = 2_000;
 
 const GOAL_VERIFIER_SCHEMA = {
@@ -115,12 +125,20 @@ export function goalVerifierRequestByteLimit(
   // that figure beats the name table when it is the model the query uses.
   const configuredWindow =
     config.getContentGeneratorConfig?.()?.contextWindowSize;
+  const mainWindow =
+    typeof configuredWindow === 'number' && configuredWindow > 0
+      ? configuredWindow
+      : tokenLimit(config.getModel());
+  // The side query may fall back to the main generator when a distinct one
+  // cannot be built for the fast model, so the request must fit both.
   const contextTokens =
-    fastModel !== undefined
-      ? tokenLimit(fastModel)
-      : typeof configuredWindow === 'number' && configuredWindow > 0
-        ? configuredWindow
-        : tokenLimit(config.getModel());
+    fastModel === undefined
+      ? mainWindow
+      : Math.min(
+          mainWindow,
+          knownTokenLimit(fastModel) ??
+            GOAL_VERIFIER_UNKNOWN_MODEL_CONTEXT_TOKENS,
+        );
   return Math.min(
     GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
     Math.floor(contextTokens * GOAL_VERIFIER_BYTES_PER_CONTEXT_TOKEN),
@@ -252,42 +270,52 @@ export function createGoalVerifier(
 
   return async (input, attemptSignal) => {
     const contents = verifierContents(input);
-    const timeoutController = new AbortController();
-    const timer = setTimeout(() => {
-      timeoutController.abort(
-        new Error(`Goal verifier timed out after ${timeoutMs}ms`),
-      );
-    }, timeoutMs);
-    const abortSignal = attemptSignal
-      ? AbortSignal.any([attemptSignal, timeoutController.signal])
-      : timeoutController.signal;
-
-    try {
-      const result = await runSideQuery(config, {
-        contents,
-        abortSignal,
-        purpose: 'goal-verifier',
-        // One retry with backoff for a transient provider failure (a 429
-        // or a 5xx): an unattended Goal should not pause on the first one.
-        maxAttempts: 2,
-        skipOutputLanguagePreference: true,
-        systemInstruction: GOAL_VERIFIER_SYSTEM_PROMPT,
-        config: {
-          temperature: 0,
-          responseMimeType: 'application/json',
-          responseJsonSchema: GOAL_VERIFIER_SCHEMA,
-          thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
-        },
-        validate: validateGoalVerifierText,
-      });
-      return {
-        ...parseGoalVerifierText(result.text),
-        ...(result.usage?.totalTokenCount !== undefined
-          ? { usage: { totalTokenCount: result.usage.totalTokenCount } }
-          : {}),
-      };
-    } finally {
-      clearTimeout(timer);
-    }
+    // Each attempt runs under its own ceiling: a first attempt that spends
+    // most of it before a 5xx arrives must not leave the retry a few seconds.
+    const attempt = async (): Promise<GoalVerificationResult> => {
+      const timeoutController = new AbortController();
+      const timer = setTimeout(() => {
+        timeoutController.abort(
+          new Error(`Goal verifier timed out after ${timeoutMs}ms`),
+        );
+      }, timeoutMs);
+      const abortSignal = attemptSignal
+        ? AbortSignal.any([attemptSignal, timeoutController.signal])
+        : timeoutController.signal;
+      try {
+        const result = await runSideQuery(config, {
+          contents,
+          abortSignal,
+          purpose: 'goal-verifier',
+          maxAttempts: 1,
+          skipOutputLanguagePreference: true,
+          systemInstruction: GOAL_VERIFIER_SYSTEM_PROMPT,
+          config: {
+            temperature: 0,
+            responseMimeType: 'application/json',
+            responseJsonSchema: GOAL_VERIFIER_SCHEMA,
+            thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
+          },
+          validate: validateGoalVerifierText,
+        });
+        return {
+          ...parseGoalVerifierText(result.text),
+          ...(result.usage?.totalTokenCount !== undefined
+            ? { usage: { totalTokenCount: result.usage.totalTokenCount } }
+            : {}),
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    // One retry with backoff for a transient provider failure (a 429 or a
+    // 5xx): an unattended Goal should not pause on the first one. A timeout
+    // or a caller's abort is not transient and is not retried.
+    return retryWithBackoff(attempt, {
+      maxAttempts: 2,
+      initialDelayMs: GOAL_VERIFIER_RETRY_DELAY_MS,
+      maxDelayMs: GOAL_VERIFIER_RETRY_DELAY_MS,
+      ...(attemptSignal ? { signal: attemptSignal } : {}),
+    });
   };
 }
