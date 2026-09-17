@@ -3131,6 +3131,18 @@ const SETTINGS_SCHEMA = {
           { value: 'unrestricted', label: 'Unrestricted (no guideline)' },
         ],
       },
+      workflowNameOnly: {
+        type: 'boolean',
+        label: 'Named Workflows Only',
+        category: 'Tools',
+        // The Workflow tool builds its description and parameter schema from
+        // this once, while the tool registry is built.
+        requiresRestart: true,
+        default: false,
+        description:
+          'Restrict the model to running named workflows: saved workflows and the workflows extensions ship, called by name. The model cannot run an inline script or a script path, and a running script cannot nest one by path, so every run the model starts can be matched by a Workflow(name:...) permission rule. It does not replace an approval policy: the model can still save a new workflow file and run it by name, which an approval rule scoped to specific names or script digests will ask about. Runs a host starts over ACP (run-saved, run-script, retry, rerun) are not restricted. QWEN_CODE_WORKFLOW_NAME_ONLY=1 turns it on too. A workspace may set this to true only.',
+        showInDialog: true,
+      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',

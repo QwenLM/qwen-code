@@ -1260,6 +1260,12 @@ export interface ConfigParameters {
    * (`tools.workflowSizeGuideline`). Unset or unrecognised means the default.
    */
   workflowSizeGuideline?: string;
+  /**
+   * Restrict the model's Workflow calls to named workflows
+   * (`tools.workflowNameOnly`). `QWEN_CODE_WORKFLOW_NAME_ONLY=1` turns it on
+   * too.
+   */
+  workflowNameOnly?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -1466,6 +1472,12 @@ export interface ConfigParameters {
    */
   stopHookBlockingCap?: number;
   /**
+   * System-level hooks configuration (from the System and SystemDefaults
+   * settings files). Administrator configuration, so these hooks are loaded
+   * regardless of folder trust status.
+   */
+  systemHooks?: Record<string, unknown>;
+  /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
    */
@@ -1477,6 +1489,11 @@ export interface ConfigParameters {
    */
   projectHooks?: Record<string, unknown>;
 
+  /**
+   * Legacy merged hooks, read only when none of `systemHooks`, `userHooks`
+   * and `projectHooks` is supplied (a Config built straight from merged
+   * settings). It carries no scope, so it never counts as system hooks.
+   */
   hooks?: Record<string, unknown>;
   /** Glob patterns to exclude from .qwen/rules/ loading. */
   contextRuleExcludes?: string[];
@@ -2922,6 +2939,7 @@ export class Config {
   private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
+  private readonly workflowNameOnly: boolean;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -3021,6 +3039,8 @@ export class Config {
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
+  /** System-level hooks (always loaded regardless of trust) */
+  private systemHooks?: Record<string, unknown>;
   /** User-level hooks (always loaded regardless of trust) */
   private userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -3029,6 +3049,7 @@ export class Config {
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
@@ -3306,6 +3327,13 @@ export class Config {
     )
       ? params.workflowSizeGuideline
       : undefined;
+    // Decided once: the Workflow tool builds its description and schema from
+    // it at startup, and a lock that changed under them would leave the model
+    // holding a contract the tool no longer honours.
+    this.workflowNameOnly =
+      params.workflowNameOnly === true ||
+      process.env['QWEN_CODE_WORKFLOW_NAME_ONLY'] === '1';
+    this.workflowRunRegistry.setNameOnly(this.workflowNameOnly);
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -3602,10 +3630,12 @@ export class Config {
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
     );
-    // Store user and project hooks separately for proper source attribution
+    // Store system, user and project hooks separately for proper source
+    // attribution
+    this.systemHooks = params.systemHooks;
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
-    // Legacy: fall back to merged hooks if new fields are not provided
+    // Legacy: merged hooks, read only if no per-scope hooks are provided
     this.hooks = params.hooks;
     this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
@@ -4139,6 +4169,9 @@ export class Config {
         },
       );
 
+      // Announce only now that the HOOK_EXECUTION_REQUEST subscription is in
+      // place: an observer that receives a bus must be able to run hooks on it.
+      this.announceMessageBus(this.messageBus);
       this.debugLogger.debug('MessageBus initialized with hook subscription');
     } else {
       this.debugLogger.debug('Hook system disabled, skipping initialization');
@@ -9285,6 +9318,17 @@ export class Config {
   }
 
   /**
+   * Whether the model may run only named workflows: its Workflow calls with an
+   * inline `script` or a `scriptPath` are refused, and a script cannot nest
+   * `workflow({scriptPath})`. Runs the host starts itself (ACP `run-saved`,
+   * `run-script`, retry, rerun) are not the model's and are not restricted.
+   * Fixed for the life of the session.
+   */
+  isWorkflowNameOnly(): boolean {
+    return this.workflowNameOnly;
+  }
+
+  /**
    * Apply a guideline the user changed mid-session. Runs started afterwards use
    * it; the tool description keeps its startup value, so the caller also tells
    * the model.
@@ -9604,10 +9648,61 @@ export class Config {
 
   /**
    * Set the message bus instance.
-   * This is called by the CLI layer to inject the MessageBus.
+   * This is called by the CLI layer to inject the MessageBus. The caller must
+   * install the bus's HOOK_EXECUTION_REQUEST subscription BEFORE calling this,
+   * because observers registered with {@link onMessageBusChange} are notified
+   * here and may use the bus right away.
    */
   setMessageBus(messageBus: MessageBus): void {
+    if (this.messageBus === messageBus) {
+      return;
+    }
     this.messageBus = messageBus;
+    this.announceMessageBus(messageBus);
+  }
+
+  /**
+   * Observes the hook MessageBus. The listener is called immediately when a
+   * bus already exists, and again whenever a different bus replaces it.
+   *
+   * A bus is only ever announced AFTER its HOOK_EXECUTION_REQUEST subscription
+   * is installed, so "I have a bus" always implies "this bus can run hooks".
+   * Returns a disposer; a throwing listener is logged and ignored, because a
+   * progress observer must never break hook initialization.
+   */
+  onMessageBusChange(listener: (bus: MessageBus) => void): () => void {
+    this.messageBusListeners.add(listener);
+    if (this.messageBus) {
+      this.notifyMessageBusListener(listener, this.messageBus);
+    }
+    return () => {
+      this.messageBusListeners.delete(listener);
+    };
+  }
+
+  private notifyMessageBusListener(
+    listener: (bus: MessageBus) => void,
+    bus: MessageBus,
+  ): void {
+    try {
+      // An async function is assignable to this listener type, and it runs
+      // from inside initialize(), so a rejection must be handled here too.
+      const result: unknown = listener(bus);
+      if (result instanceof Promise) {
+        result.catch((error: unknown) => {
+          this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+        });
+      }
+    } catch (error) {
+      this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+    }
+  }
+
+  private announceMessageBus(bus: MessageBus): void {
+    // Copy first: a listener may dispose itself (or another) while notified.
+    for (const listener of [...this.messageBusListeners]) {
+      this.notifyMessageBusListener(listener, bus);
+    }
   }
 
   /**
@@ -9623,8 +9718,9 @@ export class Config {
     if (!this.isTrustedFolder()) {
       return undefined;
     }
-    // Prefer new projectHooks field, fall back to hooks for backward compatibility
-    const hooks = this.projectHooks ?? this.hooks;
+    // The legacy merged `hooks` stands in only when no scope was supplied.
+    const hooks =
+      this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
@@ -9637,24 +9733,56 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Prefer new userHooks field, fall back to hooks for backward compatibility
-    const hooks = this.userHooks ?? this.hooks;
+    // The legacy merged `hooks` stands in only when no scope was supplied.
+    const hooks =
+      this.userHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
+  /**
+   * Get system-level hooks configuration.
+   * Returns hooks from the System and SystemDefaults settings files, always
+   * available regardless of folder trust. There is deliberately no fallback to
+   * the legacy merged `hooks`: it carries no scope, and reading it here would
+   * promote user or project hooks to administrator hooks.
+   */
+  getSystemHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode() || this.isSafeMode()) {
+      return undefined;
+    }
+    return this.systemHooks as
+      | { [K in HookEventName]?: HookDefinition[] }
+      | undefined;
+  }
+
+  /**
+   * True when the caller supplied per-scope hooks, so the legacy merged
+   * `hooks` must not be read as a second copy of them: the registry's
+   * duplicate key includes the source, so each copy would register again.
+   */
+  private hasScopedHooks(): boolean {
+    return (
+      this.systemHooks !== undefined ||
+      this.userHooks !== undefined ||
+      this.projectHooks !== undefined
+    );
   }
 
   /**
    * Replaces the settings-derived hook maps captured at construction. The CLI
    * calls this after re-reading the settings files so that
-   * `HookSystem.reload()` sees edits made since startup. All three fields are
+   * `HookSystem.reload()` sees edits made since startup. All four fields are
    * replaced together, as at construction, so a stale legacy `hooks` snapshot
    * can never resurface through the fallback in the getters. The bare, safe
    * mode and folder trust gates in the getters still apply.
    */
   setHooksFromSettings(hooks: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
     hooks?: Record<string, unknown>;
   }): void {
+    this.systemHooks = hooks.systemHooks;
     this.userHooks = hooks.userHooks;
     this.projectHooks = hooks.projectHooks;
     this.hooks = hooks.hooks;

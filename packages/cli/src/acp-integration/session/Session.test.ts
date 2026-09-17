@@ -10906,6 +10906,67 @@ describe('Session', () => {
       ]);
     });
 
+    it.each(['read both', ''])(
+      'records original resource links independently of model expansion (%j)',
+      async (text) => {
+        const links = [
+          {
+            type: 'resource_link' as const,
+            uri: 'transit://resource-a',
+            name: 'notes.md',
+            mimeType: 'text/markdown',
+            size: 0,
+            title: 'First notes',
+            description: 'Original reference',
+            annotations: { audience: ['user' as const], priority: 0.5 },
+            _meta: { preview: { version: 1 } },
+          },
+          {
+            type: 'resource_link' as const,
+            uri: 'https://example.com/notes.md',
+            name: 'notes.md',
+          },
+        ];
+        const expectedLinks = structuredClone(links);
+        const trustedContext: core.InvocationContextV1 = {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'resource-prompt',
+        };
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              ...(text ? [{ type: 'text' as const, text }] : []),
+              ...links,
+            ],
+          },
+          trustedContext,
+          undefined,
+          'model-only instruction',
+        );
+        links[0]._meta!.preview.version = 2;
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          text,
+          undefined,
+          {
+            displayText: text,
+            hookContext: '',
+            resourceLinks: expectedLinks,
+          },
+          trustedContext.promptId,
+        );
+        expect(textParts(firstSentMessage())).toEqual([
+          'model-only instruction',
+        ]);
+      },
+    );
+
     it('records daemon attachment references for transcript replay', async () => {
       const imageReference = {
         type: 'image' as const,
