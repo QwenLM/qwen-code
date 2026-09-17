@@ -30,7 +30,7 @@ async function mount(
   theme?: WebShellTheme,
   invalidTarget?: boolean,
   initialAddress?: string,
-  onChangeTarget?: (daemonOrigin: string, token?: string) => void,
+  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void,
 ) {
   await act(async () =>
     root.render(
@@ -888,4 +888,33 @@ it('remembers only the selected daemon in the current tab across reload checks',
   confirmDaemonTarget('https://other.example');
   expect(isKnownDaemonTarget('https://remote.example')).toBe(false);
   sessionStorage.clear();
+});
+
+// A switch whose credential cannot ride along is refused, and the gate has to
+// say so: the screen would otherwise sit unchanged and read as a no-op.
+it('reports a refused target switch', async () => {
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn(() => false);
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    onChangeTarget,
+  );
+  act(() => {
+    const input = addressInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'https://other.example:4170');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'https://other.example:4170',
+    undefined,
+  );
+  expect(container.textContent).toContain('could not be carried');
 });

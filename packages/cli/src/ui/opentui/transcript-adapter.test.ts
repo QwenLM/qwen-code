@@ -7,7 +7,8 @@
 /**
  * Resume replay rules for subtyped user records: U-32 steering
  * (mid_turn_user_message) replays as a real user row, side-band records
- * (goal_runtime, cron) stay out of the transcript.
+ * (goal_runtime, cron) stay out of the transcript, and a replayed functionCall
+ * carries its arguments for ink's inline args row.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -105,5 +106,42 @@ describe('transcriptToEvents subtyped user records', () => {
       ].join('\n'),
     );
     expect(events).toEqual([{ type: 'done' }]);
+  });
+});
+
+describe('transcriptToEvents resumed tool calls', () => {
+  const call = (id: string, name: string, args: unknown) =>
+    JSON.stringify({
+      type: 'assistant',
+      message: { role: 'model', parts: [{ functionCall: { id, name, args } }] },
+    });
+  const result = (id: string) =>
+    JSON.stringify({ type: 'tool_result', toolCallResult: { callId: id } });
+
+  it("replays the arguments for ink's inline args row", () => {
+    const events = transcriptToEvents(
+      [
+        call('c1', 'edit', { file_path: 'a.ts' }),
+        result('c1'),
+        call('c2', 'list_directory', {}),
+        result('c2'),
+      ].join('\n'),
+    );
+    // ink's resume placeholder records `args` for the same row, so a resumed
+    // session shows what the live one did — and a call without arguments
+    // carries no row at all.
+    expect(events).toEqual([
+      { type: 'tool-start', id: 'c1', tool: 'edit', title: 'edit' },
+      { type: 'tool-args', id: 'c1', args: '{"file_path":"a.ts"}' },
+      { type: 'tool-end', id: 'c1', success: true, summary: 'ok' },
+      {
+        type: 'tool-start',
+        id: 'c2',
+        tool: 'list_directory',
+        title: 'list_directory',
+      },
+      { type: 'tool-end', id: 'c2', success: true, summary: 'ok' },
+      { type: 'done' },
+    ]);
   });
 });

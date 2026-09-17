@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import {
   isImageGenerationCapable,
-  resolveProviderProtocol,
+  tryResolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
 import type { ProviderModelConfig } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
@@ -19,9 +19,18 @@ function modelKey(
   scope: SettingScope,
   provider: string,
   model: ProviderModelConfig,
+  authType: string,
 ) {
   return createHash('sha256')
-    .update(JSON.stringify([scope, provider, model.id, model.baseUrl ?? '']))
+    .update(
+      JSON.stringify([
+        scope,
+        provider,
+        model.id,
+        model.baseUrl ?? '',
+        authType,
+      ]),
+    )
     .digest('hex');
 }
 
@@ -36,30 +45,33 @@ function modelEntries(loaded: LoadedSettings) {
     return Object.entries(providers).flatMap(([provider, models]) => {
       if (seenProviders.has(provider)) return [];
       seenProviders.add(provider);
-      const authType = resolveProviderProtocol(
-        provider,
-        loaded.merged.providerProtocol,
-      );
-      if (!authType || authType === 'qwen-oauth' || !Array.isArray(models))
-        return [];
-      return models.flatMap((model: ProviderModelConfig, index) =>
-        model &&
-        typeof model === 'object' &&
-        typeof model.id === 'string' &&
-        model.id &&
-        (model.baseUrl === undefined || typeof model.baseUrl === 'string')
-          ? [
-              {
-                scope,
-                provider,
-                authType,
-                model,
-                index,
-                key: modelKey(scope, provider, model),
-              },
-            ]
-          : [],
-      );
+      if (!Array.isArray(models)) return [];
+      return models.flatMap((model: ProviderModelConfig, index) => {
+        if (
+          !model ||
+          typeof model !== 'object' ||
+          typeof model.id !== 'string' ||
+          !model.id ||
+          (model.baseUrl !== undefined && typeof model.baseUrl !== 'string')
+        )
+          return [];
+        const authType = tryResolveModelProtocol(
+          provider,
+          model,
+          loaded.merged.providerProtocol,
+        );
+        if (!authType || authType === 'qwen-oauth') return [];
+        return [
+          {
+            scope,
+            provider,
+            authType,
+            model,
+            index,
+            key: modelKey(scope, provider, model, authType),
+          },
+        ];
+      });
     });
   });
 }
