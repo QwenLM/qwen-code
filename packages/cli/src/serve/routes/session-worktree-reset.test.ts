@@ -1506,7 +1506,7 @@ describe('POST /session/:id/load worktree classifications', () => {
     );
   });
 
-  it('keeps a legacy sidecar restore lock-free while a reset holds the worktree', async () => {
+  it('keeps legacy marker rejection lock-free while a reset holds the worktree', async () => {
     const fixture = makeFixture();
     const ownerId = randomUUID();
     const legacyId = randomUUID();
@@ -1548,9 +1548,10 @@ describe('POST /session/:id/load worktree classifications', () => {
       .post(`/session/${legacyId}/load`)
       .send({});
 
-    expect(legacyResponse.status).toBe(200);
-    expect(legacyResponse.body.worktree).toEqual(
-      expect.objectContaining({ path: fixture.realTarget }),
+    expect(legacyResponse.status).toBe(500);
+    expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalledWith(
+      legacyId,
+      expect.anything(),
     );
 
     releaseSpawn();

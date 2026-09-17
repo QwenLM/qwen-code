@@ -6209,7 +6209,7 @@ class QwenAgent implements Agent {
         .getWorktreeSessionPath(config.getSessionId());
       const restored = await restoreWorktreeContext(
         sessionPath,
-        undefined,
+        (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
         config.getSessionId(),
       );
       if (restored.contextMessage) {

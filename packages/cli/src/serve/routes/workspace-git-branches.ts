@@ -501,11 +501,11 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
     mutate: (opts?: { strict?: boolean }) => RequestHandler;
   },
 ): void {
-  app.get('/workspaces/:workspace/git/branches', (req, res) => {
+  app.get('/workspaces/:workspace/git/branches', async (req, res) => {
     const route = 'GET /workspaces/:workspace/git/branches';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    const cwd = resolveSessionManagedGitCwdForRoute(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
       runtime,
@@ -525,7 +525,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/checkout',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
       const route = 'POST /workspaces/:workspace/git/checkout';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
@@ -536,7 +536,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveSessionManagedGitCwdForRoute(
+      const cwd = await resolveSessionManagedGitCwdForRoute(
         req,
         res,
         runtime,
@@ -557,7 +557,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/branch',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
       const route = 'POST /workspaces/:workspace/git/branch';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
@@ -568,7 +568,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveSessionManagedGitCwdForRoute(
+      const cwd = await resolveSessionManagedGitCwdForRoute(
         req,
         res,
         runtime,
@@ -589,7 +589,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/push',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
       const route = 'POST /workspaces/:workspace/git/push';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
@@ -600,7 +600,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveSessionManagedGitCwdForRoute(
+      const cwd = await resolveSessionManagedGitCwdForRoute(
         req,
         res,
         runtime,
@@ -621,7 +621,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/pull',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
       const route = 'POST /workspaces/:workspace/git/pull';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
@@ -632,7 +632,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveSessionManagedGitCwdForRoute(
+      const cwd = await resolveSessionManagedGitCwdForRoute(
         req,
         res,
         runtime,
@@ -653,7 +653,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   app.post(
     '/workspaces/:workspace/git/commit',
     deps.mutate({ strict: true }),
-    (req, res) => {
+    async (req, res) => {
       const route = 'POST /workspaces/:workspace/git/commit';
       const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
@@ -664,7 +664,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         deps.sendBridgeError(res, err, { route });
         return;
       }
-      const cwd = resolveSessionManagedGitCwdForRoute(
+      const cwd = await resolveSessionManagedGitCwdForRoute(
         req,
         res,
         runtime,

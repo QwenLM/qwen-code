@@ -4237,6 +4237,22 @@ export function registerSessionRoutes(
               validationError = error;
               realTarget = undefined;
             }
+            if (realTarget) {
+              try {
+                const marker =
+                  await readWorktreeSessionMarkerStrict(realTarget);
+                if (
+                  marker.state !== 'missing' &&
+                  (marker.state !== 'valid' ||
+                    marker.sessionId !== restoredStorageSessionId)
+                ) {
+                  throw new Error('Worktree marker ownership is invalid');
+                }
+              } catch (error) {
+                await cleanupRestoredSession();
+                throw error;
+              }
+            }
             if (!realTarget) {
               daemonLog?.warn('worktree sidecar path failed containment', {
                 sessionId,

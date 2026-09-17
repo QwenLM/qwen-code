@@ -203,11 +203,11 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     sendBridgeError: SendBridgeError;
   },
 ): void {
-  app.get('/workspaces/:workspace/git/diff', (req, res) => {
+  app.get('/workspaces/:workspace/git/diff', async (req, res) => {
     const route = 'GET /workspaces/:workspace/git/diff';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    const cwd = resolveSessionManagedGitCwdForRoute(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
       runtime,
@@ -219,11 +219,11 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
       runtime.generationGuard?.assertOpen(),
     );
   });
-  app.get('/workspaces/:workspace/git/diff/file', (req, res) => {
+  app.get('/workspaces/:workspace/git/diff/file', async (req, res) => {
     const route = 'GET /workspaces/:workspace/git/diff/file';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    const cwd = resolveSessionManagedGitCwdForRoute(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
       runtime,

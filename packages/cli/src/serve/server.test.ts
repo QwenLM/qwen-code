@@ -17303,7 +17303,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('skips worktree restore when its marker has another owner', async () => {
+    it('refuses legacy worktree restore when its marker has another owner', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -17329,7 +17329,7 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(500);
         expect(res.body.worktree).toBeUndefined();
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);
         expect(bridge.setSessionWorktreeCalls).toHaveLength(0);

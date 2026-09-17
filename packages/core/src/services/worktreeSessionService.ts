@@ -7,6 +7,7 @@
 import nodeFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
@@ -303,8 +304,9 @@ export async function createWorktreeSession(
   session: WorktreeSession,
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const stagedPath = `${filePath}.${randomBytes(6).toString('hex')}.tmp`;
   const handle = await fs.open(
-    filePath,
+    stagedPath,
     fsConstants.O_WRONLY |
       fsConstants.O_CREAT |
       fsConstants.O_EXCL |
@@ -312,15 +314,18 @@ export async function createWorktreeSession(
     0o600,
   );
   let openedStat: Awaited<ReturnType<typeof handle.stat>> | undefined;
-  let written = false;
   try {
     openedStat = await handle.stat();
-    if (!openedStat.isFile() || openedStat.nlink !== 1) {
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1 ||
+      openedStat.ino === 0
+    ) {
       throw new Error('Worktree session sidecar must be a regular file');
     }
     await handle.writeFile(`${JSON.stringify(session, null, 2)}\n`, 'utf8');
     await handle.sync();
-    const pathStat = await fs.lstat(filePath);
+    const pathStat = await fs.lstat(stagedPath);
     if (
       !pathStat.isFile() ||
       pathStat.nlink !== 1 ||
@@ -329,25 +334,23 @@ export async function createWorktreeSession(
     ) {
       throw new Error('Worktree session sidecar path changed');
     }
-    written = true;
-  } finally {
     await handle.close();
-    if (!written && openedStat) {
-      await fs
-        .lstat(filePath)
-        .then(async (pathStat) => {
-          if (
-            pathStat.isFile() &&
-            pathStat.nlink === 1 &&
-            pathStat.dev === openedStat!.dev &&
-            pathStat.ino === openedStat!.ino
-          ) {
-            await fs.unlink(filePath);
-          }
-        })
-        .catch(() => {});
+    await fs.link(stagedPath, filePath);
+  } catch (error) {
+    await handle.close().catch(() => {});
+    if (openedStat) {
+      try {
+        const current = await fs.lstat(stagedPath);
+        if (current.dev === openedStat.dev && current.ino === openedStat.ino) {
+          await fs.unlink(stagedPath);
+        }
+      } catch {
+        // Leave any path whose identity cannot be verified untouched.
+      }
     }
+    throw error;
   }
+  await fs.unlink(stagedPath);
   await fsyncParentDirectory(filePath);
 }
 
@@ -742,14 +745,9 @@ export async function restoreWorktreeContext(
       onWarn?.(
         new Error(
           `Worktree marker is missing for session ${expectedSessionId}; ` +
-            'clearing its stale sidecar.',
+            'refusing restore and preserving sidecar.',
         ),
       );
-      try {
-        await clearWorktreeSession(sidecarPath);
-      } catch (error) {
-        onWarn?.(error);
-      }
       return { contextMessage: null, session: null };
     }
     if (marker.state !== 'valid' || marker.sessionId !== expectedSessionId) {

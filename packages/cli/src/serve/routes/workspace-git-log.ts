@@ -182,11 +182,11 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     sendBridgeError: SendBridgeError;
   },
 ): void {
-  app.get('/workspaces/:workspace/git/log', (req, res) => {
+  app.get('/workspaces/:workspace/git/log', async (req, res) => {
     const route = 'GET /workspaces/:workspace/git/log';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    const cwd = resolveSessionManagedGitCwdForRoute(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
       runtime,
@@ -196,11 +196,11 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     if (cwd === undefined) return;
     void handleLogList(req, res, cwd, deps.sendBridgeError, route);
   });
-  app.get('/workspaces/:workspace/git/log/commit', (req, res) => {
+  app.get('/workspaces/:workspace/git/log/commit', async (req, res) => {
     const route = 'GET /workspaces/:workspace/git/log/commit';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    const cwd = resolveSessionManagedGitCwdForRoute(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
       runtime,

@@ -21,7 +21,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
-import { gitEnv } from '../utils/git-branches.js';
+import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
@@ -2080,7 +2080,7 @@ export class GitWorktreeService {
         {
           cwd: this.sourceRepoPath,
           timeout: timeoutMs,
-          env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+          env: gitRemoteEnv(),
         },
       );
       return { success: true };

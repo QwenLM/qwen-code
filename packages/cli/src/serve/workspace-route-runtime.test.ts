@@ -184,7 +184,7 @@ describe('resolveSessionManagedGitCwd', () => {
     fs.rmSync(runtimeBase, { recursive: true, force: true });
   });
 
-  it('authorizes only the live session that owns the managed worktree', () => {
+  it('authorizes only the live session that owns the managed worktree', async () => {
     const worktree = path.join(repo, '.qwen', 'worktrees', 'branch-a');
     fs.mkdirSync(path.dirname(worktree), { recursive: true });
     execFileSync(
@@ -235,7 +235,7 @@ describe('resolveSessionManagedGitCwd', () => {
     const owned = {
       query: { cwd: worktree, sessionId },
     } as unknown as Request;
-    expect(resolveSessionManagedGitCwd(owned, runtime)).toBe(
+    expect(await resolveSessionManagedGitCwd(owned, runtime)).toBe(
       fs.realpathSync(worktree),
     );
 
@@ -244,7 +244,7 @@ describe('resolveSessionManagedGitCwd', () => {
     const nestedOwned = {
       query: { cwd: nested, sessionId },
     } as unknown as Request;
-    expect(resolveSessionManagedGitCwd(nestedOwned, runtime)).toBe(
+    expect(await resolveSessionManagedGitCwd(nestedOwned, runtime)).toBe(
       fs.realpathSync(nested),
     );
 
@@ -255,11 +255,11 @@ describe('resolveSessionManagedGitCwd', () => {
     process.env['GIT_DIR'] = path.join(decoy, '.git');
     process.env['GIT_WORK_TREE'] = decoy;
     try {
-      expect(resolveSessionManagedGitCwd(owned, runtime)).toBe(
+      expect(await resolveSessionManagedGitCwd(owned, runtime)).toBe(
         fs.realpathSync(worktree),
       );
       expect(
-        resolveSessionManagedGitCwd(
+        await resolveSessionManagedGitCwd(
           { query: { cwd: worktree } } as unknown as Request,
           runtime,
         ),
@@ -276,7 +276,7 @@ describe('resolveSessionManagedGitCwd', () => {
     }
 
     fs.writeFileSync(path.join(worktree, '.qwen-session'), 'x'.repeat(257));
-    expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
     fs.writeFileSync(path.join(worktree, '.qwen-session'), sessionId);
 
     const validSidecar = fs.readFileSync(sidecarPath, 'utf8');
@@ -284,7 +284,7 @@ describe('resolveSessionManagedGitCwd', () => {
     const response = makeResponse();
     const sendBridgeError = vi.fn();
     expect(
-      resolveSessionManagedGitCwdForRoute(
+      await resolveSessionManagedGitCwdForRoute(
         owned,
         response,
         runtime,
@@ -301,17 +301,17 @@ describe('resolveSessionManagedGitCwd', () => {
     fs.writeFileSync(sidecarPath, validSidecar);
 
     const unbound = { query: { cwd: worktree } } as unknown as Request;
-    expect(resolveSessionManagedGitCwd(unbound, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(unbound, runtime)).toBeNull();
 
     fs.writeFileSync(path.join(worktree, '.qwen-session'), 'another-session');
-    expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
 
     if (process.platform !== 'win32') {
       const target = path.join(worktree, 'marker-target');
       fs.writeFileSync(target, sessionId);
       fs.rmSync(path.join(worktree, '.qwen-session'));
       fs.symlinkSync(target, path.join(worktree, '.qwen-session'));
-      expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+      expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
     }
 
     fs.rmSync(path.join(worktree, '.qwen-session'));
@@ -334,10 +334,10 @@ describe('resolveSessionManagedGitCwd', () => {
       path.join(worktree, '.git'),
       fs.readFileSync(path.join(otherWorktree, '.git'), 'utf8'),
     );
-    expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
   });
 
-  it('accepts an existing sidecar whose original cwd is a repo subdirectory', () => {
+  it('accepts an existing sidecar whose original cwd is a repo subdirectory', async () => {
     const workspace = path.join(repo, 'packages', 'app');
     fs.mkdirSync(workspace, { recursive: true });
     const worktree = path.join(repo, '.qwen', 'worktrees', 'branch-b');
@@ -390,12 +390,12 @@ describe('resolveSessionManagedGitCwd', () => {
     const request = {
       query: { cwd: worktree, sessionId },
     } as unknown as Request;
-    expect(resolveSessionManagedGitCwd(request, runtime)).toBe(
+    expect(await resolveSessionManagedGitCwd(request, runtime)).toBe(
       fs.realpathSync(worktree),
     );
   });
 
-  it('rejects a standalone repository under the managed worktree root', () => {
+  it('rejects a standalone repository under the managed worktree root', async () => {
     const worktree = path.join(repo, '.qwen', 'worktrees', 'standalone');
     fs.mkdirSync(worktree, { recursive: true });
     execFileSync('git', ['init', '-q'], { cwd: worktree });
@@ -439,10 +439,10 @@ describe('resolveSessionManagedGitCwd', () => {
     const request = {
       query: { cwd: worktree, sessionId },
     } as unknown as Request;
-    expect(resolveSessionManagedGitCwd(request, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(request, runtime)).toBeNull();
   });
 
-  it('fails closed when the workspace git probe fails', () => {
+  it('fails closed when the workspace git probe fails', async () => {
     const subdirectory = path.join(repo, 'packages', 'app');
     fs.mkdirSync(subdirectory, { recursive: true });
     const runtime = {
@@ -452,14 +452,72 @@ describe('resolveSessionManagedGitCwd', () => {
     process.env['PATH'] = '';
     try {
       expect(
-        resolveSessionManagedGitCwd(fakeReq(subdirectory), runtime),
+        await resolveSessionManagedGitCwd(fakeReq(subdirectory), runtime),
       ).toBeNull();
     } finally {
       process.env['PATH'] = originalPath;
     }
   });
 
-  it('allows a contained cwd when the workspace is deterministically non-git', () => {
+  it('rejects a runtime that drains during cwd resolution', async () => {
+    const error = new Error('runtime draining');
+    const response = makeResponse();
+    const sendBridgeError = vi.fn();
+    const runtime = {
+      workspaceCwd: repo,
+      generationGuard: {
+        assertOpen: () => {
+          throw error;
+        },
+      },
+    } as unknown as WorkspaceRuntime;
+
+    expect(
+      await resolveSessionManagedGitCwdForRoute(
+        fakeReq(repo),
+        response,
+        runtime,
+        'GET /workspaces/:workspace/git',
+        sendBridgeError,
+      ),
+    ).toBeUndefined();
+    expect(sendBridgeError).toHaveBeenCalledWith(response, error, {
+      route: 'GET /workspaces/:workspace/git',
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the event loop responsive during slow git probes',
+    async () => {
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      const bin = path.join(runtimeBase, 'bin');
+      fs.mkdirSync(bin);
+      fs.writeFileSync(
+        path.join(bin, 'git'),
+        `#!/bin/sh\nsleep 0.05\nexec "${realGit}" "$@"\n`,
+        { mode: 0o755 },
+      );
+      const oldPath = process.env['PATH'];
+      let ticks = 0;
+      const timer = setInterval(() => ticks++, 5);
+      try {
+        process.env['PATH'] = `${bin}:${oldPath ?? ''}`;
+        expect(
+          await resolveSessionManagedGitCwd(fakeReq(repo), {
+            workspaceCwd: repo,
+          } as unknown as WorkspaceRuntime),
+        ).toBe(fs.realpathSync(repo));
+      } finally {
+        clearInterval(timer);
+        process.env['PATH'] = oldPath;
+      }
+      expect(ticks).toBeGreaterThan(3);
+    },
+  );
+
+  it('allows a contained cwd when the workspace is deterministically non-git', async () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'non-git-'));
     const subdirectory = path.join(workspace, 'packages', 'app');
     const nestedRepo = path.join(workspace, 'inner');
@@ -482,12 +540,12 @@ describe('resolveSessionManagedGitCwd', () => {
     );
     try {
       expect(
-        resolveSessionManagedGitCwd(fakeReq(subdirectory), {
+        await resolveSessionManagedGitCwd(fakeReq(subdirectory), {
           workspaceCwd: workspace,
         } as unknown as WorkspaceRuntime),
       ).toBe(fs.realpathSync(subdirectory));
       expect(
-        resolveSessionManagedGitCwd(fakeReq(worktree), {
+        await resolveSessionManagedGitCwd(fakeReq(worktree), {
           workspaceCwd: workspace,
         } as unknown as WorkspaceRuntime),
       ).toBeNull();
@@ -496,14 +554,41 @@ describe('resolveSessionManagedGitCwd', () => {
     }
   });
 
+  it('rejects a nested repository worktree inside a git workspace', async () => {
+    const workspace = path.join(repo, 'packages', 'app');
+    const nestedRepo = path.join(workspace, 'inner');
+    const worktree = path.join(nestedRepo, '.qwen', 'worktrees', 'task');
+    fs.mkdirSync(nestedRepo, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: nestedRepo });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: nestedRepo,
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: nestedRepo });
+    fs.writeFileSync(path.join(nestedRepo, 'base.txt'), 'base\n');
+    execFileSync('git', ['add', '.'], { cwd: nestedRepo });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: nestedRepo });
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-q', '-b', 'worktree-task', worktree, 'HEAD'],
+      { cwd: nestedRepo },
+    );
+
+    expect(
+      await resolveSessionManagedGitCwd(fakeReq(worktree), {
+        workspaceCwd: workspace,
+      } as unknown as WorkspaceRuntime),
+    ).toBeNull();
+  });
+
   it.each(['...', '..cache'])(
     'accepts a contained cwd under a %s directory',
-    (segment) => {
+    async (segment) => {
       const nested = path.join(repo, segment, 'sub');
       fs.mkdirSync(nested, { recursive: true });
 
       expect(
-        resolveSessionManagedGitCwd(fakeReq(nested), {
+        await resolveSessionManagedGitCwd(fakeReq(nested), {
           workspaceCwd: repo,
         } as unknown as WorkspaceRuntime),
       ).toBe(fs.realpathSync(nested));

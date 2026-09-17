@@ -186,7 +186,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       const base = typeof body['base'] === 'string' ? body['base'] : undefined;
       const head = typeof body['head'] === 'string' ? body['head'] : undefined;
 
-      const cwd = resolveSessionManagedGitCwdForRoute(
+      const cwd = await resolveSessionManagedGitCwdForRoute(
         req,
         res,
         runtime,

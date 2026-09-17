@@ -1383,7 +1383,7 @@ export async function runNonInteractive(
             .getWorktreeSessionPath(sessionId);
           const restored = await restoreWorktreeContext(
             sessionPath,
-            undefined,
+            (error) => debugLogger.warn('worktree restore warning:', error),
             sessionId,
           );
           if (restored.contextMessage) {

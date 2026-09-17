@@ -68,52 +68,23 @@ export interface GitBranchesResult {
   detached: boolean;
 }
 
-// Repository-shifting and command-executing variables that a daemon process
-// may inherit from its launch environment. Clearing them prevents a trusted
-// workspace request from operating on a different repository or spawning an
-// inherited editor/pager despite the resolved `cwd`.
 const GIT_ENV_VARS_TO_CLEAR = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_COMMON_DIR',
-  'GIT_INDEX_FILE',
-  'GIT_CONFIG_GLOBAL',
-  'GIT_CONFIG_SYSTEM',
-  'GIT_CONFIG_NOSYSTEM',
-  // Repository selectors that an inherited daemon environment could use to
-  // redirect a trusted-workspace git/gh invocation to a different repository
-  // or object database despite the resolved cwd.
   'GH_REPO',
-  'GIT_CONFIG_COUNT',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_ASKPASS',
   'SSH_ASKPASS',
-  'GIT_SSH',
-  'GIT_SSH_COMMAND',
-  'GIT_EXEC_PATH',
-  'GIT_TEMPLATE_DIR',
-  'GIT_EXTERNAL_DIFF',
-  'GIT_PROXY_COMMAND',
+  'XDG_CONFIG_HOME',
   'PREFIX',
-  'GIT_CONFIG',
   'EDITOR',
-  'GIT_EDITOR',
-  'GIT_SEQUENCE_EDITOR',
+  'VISUAL',
   'PAGER',
-  'GIT_PAGER',
 ];
 
-// Command-scope config injection uses numbered GIT_CONFIG_KEY_<n> /
-// GIT_CONFIG_VALUE_<n> pairs (an inherited `url.<base>.insteadOf` can retarget
-// a clone/push). The index count is unbounded, so strip them by prefix.
-const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
 const NORMALIZED_GIT_ENV_VARS_TO_CLEAR = new Set(
   GIT_ENV_VARS_TO_CLEAR.map((key) => key.toLowerCase()),
 );
-const NORMALIZED_GIT_ENV_PREFIXES_TO_CLEAR = GIT_ENV_PREFIXES_TO_CLEAR.map(
-  (prefix) => prefix.toLowerCase(),
+const REMOTE_GIT_TRANSPORT_KEYS = new Set(
+  ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS'].map((key) =>
+    key.toLowerCase(),
+  ),
 );
 
 export function gitEnv(
@@ -124,15 +95,24 @@ export function gitEnv(
     const normalizedKey = key.toLowerCase();
     if (
       NORMALIZED_GIT_ENV_VARS_TO_CLEAR.has(normalizedKey) ||
-      NORMALIZED_GIT_ENV_PREFIXES_TO_CLEAR.some((prefix) =>
-        normalizedKey.startsWith(prefix),
-      )
+      normalizedKey.startsWith('git_')
     ) {
       delete env[key];
     }
   }
   env['LC_ALL'] = 'C';
   env['LANG'] = 'C';
+  return env;
+}
+
+export function gitRemoteEnv(
+  base?: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const source = base ?? process.env;
+  const env = gitEnv(source);
+  for (const [key, value] of Object.entries(source)) {
+    if (REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase())) env[key] = value;
+  }
   return env;
 }
 
@@ -145,7 +125,9 @@ function runGit(
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
-    env: gitEnv(env),
+    env: ['push', 'pull', 'fetch'].includes(args[0] ?? '')
+      ? gitRemoteEnv(env)
+      : gitEnv(env),
   }).then(({ stdout }) => stdout);
 }
 

@@ -242,10 +242,16 @@ describe('gitEnv (R12 env isolation)', () => {
       GIT_PROXY_COMMAND: '/tmp/git-proxy',
       PREFIX: '/tmp/prefix',
       GIT_CONFIG: '/tmp/git-config',
+      XDG_CONFIG_HOME: '/tmp/evil-xdg',
+      GIT_TRACE2: '/tmp/trace',
+      GIT_DEFAULT_HASH: 'sha256',
+      GIT_SSL_NO_VERIFY: '1',
+      GIT_REDIRECT_STDOUT: '/tmp/stdout',
       git_askpass: '/tmp/lowercase-askpass',
       git_config_key_1: 'core.sshCommand',
       git_config_value_1: '/tmp/ssh-command',
       EDITOR: 'vi',
+      VISUAL: 'vim',
       GIT_EDITOR: 'vim',
       GIT_SEQUENCE_EDITOR: 'nano',
       PAGER: 'less',
@@ -275,10 +281,16 @@ describe('gitEnv (R12 env isolation)', () => {
       'GIT_PROXY_COMMAND',
       'PREFIX',
       'GIT_CONFIG',
+      'XDG_CONFIG_HOME',
+      'GIT_TRACE2',
+      'GIT_DEFAULT_HASH',
+      'GIT_SSL_NO_VERIFY',
+      'GIT_REDIRECT_STDOUT',
       'git_askpass',
       'git_config_key_1',
       'git_config_value_1',
       'EDITOR',
+      'VISUAL',
       'GIT_EDITOR',
       'GIT_SEQUENCE_EDITOR',
       'PAGER',
@@ -300,6 +312,23 @@ describe('gitEnv (R12 env isolation)', () => {
       if (saved === undefined) delete process.env['GIT_DIR'];
       else process.env['GIT_DIR'] = saved;
     }
+  });
+
+  it('does not load inherited XDG git configuration', () => {
+    const dir = makeRepo();
+    const xdg = path.join(dir, 'evil-xdg');
+    fs.mkdirSync(path.join(xdg, 'git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(xdg, 'git', 'config'),
+      '[probe]\n  marker = came-from-xdg\n',
+    );
+    const env = gitEnv({ ...hermeticEnv(), XDG_CONFIG_HOME: xdg });
+    expect(() =>
+      execFileSync('git', ['config', '--get', 'probe.marker'], {
+        cwd: dir,
+        env,
+      }),
+    ).toThrow();
   });
 });
 
@@ -769,6 +798,24 @@ describe('gitCreateBranch rollback (R12)', () => {
 });
 
 describe('gitPush', () => {
+  it.skipIf(process.platform === 'win32')(
+    'preserves the caller SSH command for remote pushes',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'remote', 'add', 'origin', 'ssh://example.invalid/repo');
+      await expect(
+        gitPush(
+          dir,
+          { setUpstream: true },
+          {
+            ...hermeticEnv(),
+            GIT_SSH_COMMAND: "sh -c 'echo qwen-transport-probe >&2; exit 1'",
+          },
+        ),
+      ).rejects.toThrow(/qwen-transport-probe/);
+    },
+  );
+
   it('throws a clear error when setUpstream is used in detached HEAD', async () => {
     const dir = makeRepo();
     git(dir, 'tag', 'v1.0');

@@ -80,7 +80,7 @@ export function registerWorkspaceQualifiedGitRoutes(
       deps.sendBridgeError(res, err, { route });
       return;
     }
-    const gitCwd = resolveSessionManagedGitCwdForRoute(
+    const gitCwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
       runtime,
