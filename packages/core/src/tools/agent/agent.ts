@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
@@ -100,6 +101,7 @@ import {
 } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
+import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -324,25 +326,6 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
     'named teammate in an active team. Cannot be combined with ' +
     'plan_mode_required.',
 };
-
-/**
- * Maps ApprovalMode to PermissionMode for hook events.
- */
-function approvalModeToPermissionMode(mode: ApprovalMode): PermissionMode {
-  switch (mode) {
-    case ApprovalMode.YOLO:
-      return PermissionMode.Yolo;
-    case ApprovalMode.AUTO_EDIT:
-      return PermissionMode.AutoEdit;
-    case ApprovalMode.AUTO:
-      return PermissionMode.Auto;
-    case ApprovalMode.PLAN:
-      return PermissionMode.Plan;
-    case ApprovalMode.DEFAULT:
-    default:
-      return PermissionMode.Default;
-  }
-}
 
 /**
  * Resolves the effective permission mode for a sub-agent.
@@ -4050,6 +4033,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Wrap in qwen-code.subagent span (#3731 Phase 3). Foreground
       // invocations are child spans of the AGENT tool's `qwen-code.tool`
       // span, inheriting its traceId so the trace tree stays unified.
+      const goalPermit = getCurrentAgentId()
+        ? undefined
+        : goalTurnContext.getStore();
       const runFramed = () =>
         this.runWithSubagentSpan(
           this.buildSubagentSpanSpec(hookOpts, subagentConfig, 'foreground'),
@@ -4300,6 +4286,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           returnDisplay: this.currentDisplay!,
         };
       } finally {
+        // Background and nested launches have no direct Goal-turn accounting anchor.
+        if (goalPermit && subagentConfig.executor === undefined) {
+          this.config
+            .getChatRecordingService()
+            ?.billGoalTurnTokens(
+              goalPermit.turnId,
+              subagent.getExecutionSummary().totalTokens,
+            );
+        }
         // Mirror the background path: ensure the isolation worktree is
         // reaped on every termination shape (success, failure, cancel,
         // and any uncaught throw inside runFramed). The helper itself

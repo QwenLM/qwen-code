@@ -30,6 +30,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateRecordPayloadV2,
   reduceGoalControl,
+  reduceGoalSpend,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
 
@@ -866,6 +867,96 @@ describe('goal reducer', () => {
       cursor: { recordId: 'r-200' },
     });
     expect(edited?.checkpointStalls).toBeUndefined();
+  });
+
+  it('restores a persisted checkpoint failure and rejects a malformed one', () => {
+    const stalled = snapshot(
+      goalRecord({
+        checkpointStalls: 1,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    );
+    expect(parseGoalSnapshotV2(stalled)).toEqual(stalled);
+    // A check that failed while the window had room reports its failure
+    // without spending a stall, so the diagnostic stands on its own.
+    const unstalled = snapshot(
+      goalRecord({ lastCheckpointFailure: 'Error: provider failed' }),
+    );
+    expect(parseGoalSnapshotV2(unstalled)).toEqual(unstalled);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ lastCheckpointFailure: '' }))),
+    ).toBeUndefined();
+    expect(
+      parseGoalSnapshotV2(
+        snapshot({
+          ...goalRecord(),
+          lastCheckpointFailure: 42,
+        } as unknown as GoalRecord),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('clears the checkpoint failure wherever it clears the stall streak', () => {
+    const failure = 'Error: provider failed';
+    const resume = {
+      action: 'resume' as const,
+      expectedGoalId: 'g-1',
+      expectedRevision: 1,
+    };
+    const edited = reduceGoalControl(
+      goalRecord({ checkpointStalls: 2, lastCheckpointFailure: failure }),
+      {
+        request: {
+          action: 'edit',
+          objective: 'deliver the rest',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'g-next',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+    expect(edited?.lastCheckpointFailure).toBeUndefined();
+
+    const restarted = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        checkpointStalls: 3,
+        lastCheckpointFailure: failure,
+      }),
+      {
+        request: resume,
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+    expect(restarted).toMatchObject({ status: 'active' });
+    expect(restarted?.checkpointStalls).toBeUndefined();
+    expect(restarted?.lastCheckpointFailure).toBeUndefined();
+
+    // A paused Goal resumes into the window it left: like the streak, the
+    // diagnostic is still the truth about that window.
+    const unpaused = reduceGoalControl(
+      goalRecord({
+        status: 'paused',
+        checkpointStalls: 2,
+        lastCheckpointFailure: failure,
+      }),
+      {
+        request: resume,
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+    expect(unpaused).toMatchObject({
+      status: 'active',
+      checkpointStalls: 2,
+      lastCheckpointFailure: failure,
+    });
   });
 
   it('rejects a snapshot carrying negative spend', () => {
@@ -1987,5 +2078,34 @@ describe('turn and active-time budgets', () => {
       activeTimeMs: 1_800_100,
       activeTimeBudgetMs: 2_400_100,
     });
+  });
+});
+
+describe('reduceGoalSpend', () => {
+  it.each(['active', 'paused'] as const)(
+    'adds model spend without losing elapsed time for a %s Goal',
+    (status) => {
+      const goal = goalRecord({
+        status,
+        tokensUsed: 10,
+        turnCount: 2,
+        activeTimeMs: 500,
+      });
+      expect(reduceGoalSpend(goal, 30, 1_000)).toEqual({
+        ...goal,
+        tokensUsed: 40,
+        activeTimeMs: status === 'active' ? 1_400 : 500,
+        updatedAt: 1_000,
+      });
+      expect(goal).toMatchObject({
+        tokensUsed: 10,
+        activeTimeMs: 500,
+        updatedAt: 100,
+      });
+    },
+  );
+  it.each([0, -1, NaN, Infinity])('ignores unusable spend %s', (tokens) => {
+    const goal = goalRecord();
+    expect(reduceGoalSpend(goal, tokens, 99)).toBe(goal);
   });
 });

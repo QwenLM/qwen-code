@@ -15,6 +15,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
   ToolConfirmationPayload,
+  ToolExecutionOrigin,
   ToolInvocation,
   ToolInvocationGuard,
   ToolExecutionStatus,
@@ -38,6 +39,7 @@ import {
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fsSync from 'node:fs';
+import { writeFile as fsWriteFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
@@ -66,6 +68,7 @@ import {
   MOCK_TOOL_GET_DEFAULT_PERMISSION,
   MOCK_TOOL_GET_CONFIRMATION_DETAILS,
 } from '../test-utils/mock-tool.js';
+import type { MediaPolicyToolDescriptor } from '../tools/tools.js';
 import { LlmChat } from './llm-chat.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
@@ -99,6 +102,19 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+
+/** MockTool that self-identifies as an omni media-policy tool, so a
+ * `fixed_policy` execution origin passes the scheduler's origin/descriptor
+ * pairing gate and reaches the code under test. */
+class MockMediaPolicyTool extends MockTool {
+  override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+    return {
+      kind: 'media_policy',
+      inputMediaTypes: ['image'],
+      outputs: [],
+    };
+  }
+}
 
 type ToolSpanRecord = {
   name: string;
@@ -2866,13 +2882,14 @@ describe('CoreToolScheduler', () => {
 
   function outputOfFirstCall(
     onAllToolCallsComplete: ReturnType<typeof vi.fn>,
+    key: 'output' | 'error' = 'output',
   ): string {
     const completionCalls = onAllToolCallsComplete.mock
       .calls as unknown as Array<[ToolCall[]]>;
     const call = completionCalls[0]?.[0]?.[0];
     return call && 'response' in call
       ? ((call.response.responseParts[0]?.functionResponse?.response?.[
-          'output'
+          key
         ] as string) ?? '')
       : '';
   }
@@ -3726,6 +3743,243 @@ describe('CoreToolScheduler', () => {
       'Tool output was too large and has been truncated',
     );
     expect(output).toBe(content);
+  });
+
+  describe('producer-applied output budgets', () => {
+    // These exercise the window between the generic spill gate
+    // (DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD 25k + GATE_HEADROOM 3k ≈ 28k) and
+    // a HIGHER per-tool budget — Shell's default is 30k. A producer that
+    // already sized its body against its own budget reports
+    // `outputBudgetApplied`, and the gate must stand down so one output is not
+    // bounded twice under two different policies.
+    const BODY = 'a'.repeat(29_000);
+
+    async function runBudgetedTool(result: Partial<ToolResult>) {
+      const execute = vi.fn().mockResolvedValue({
+        returnDisplay: 'x',
+        ...result,
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [
+          'budgetedTool',
+          new MockTool({
+            name: 'budgetedTool',
+            execute,
+            maxOutputChars: 30_000,
+          }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'c',
+            name: 'budgetedTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'p',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      return onAllToolCallsComplete;
+    }
+
+    function persistedFilesOfFirstCall(
+      onAllToolCallsComplete: ReturnType<typeof vi.fn>,
+    ): string[] | undefined {
+      const completionCalls = onAllToolCallsComplete.mock
+        .calls as unknown as Array<[ToolCall[]]>;
+      const call = completionCalls[0]?.[0]?.[0];
+      return call && 'response' in call
+        ? call.response.persistedOutputFiles
+        : undefined;
+    }
+
+    it('skips the spill gate for a body the producer already sized', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        outputBudgetApplied: true,
+      });
+
+      expect(outputOfFirstCall(onAllToolCallsComplete)).toBe(BODY);
+    });
+
+    // The control for the case above: without the marker the SAME body is still
+    // spilled, so that assertion cannot pass just because 29k slipped under
+    // some other limit.
+    it('still applies the spill gate when the producer reports nothing', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+      });
+
+      const output = outputOfFirstCall(onAllToolCallsComplete);
+      expect(output).not.toBe(BODY);
+      expect(output.length).toBeLessThan(BODY.length);
+      // Positive anchor: a degenerate '' from a blinded reader must not
+      // satisfy this control.
+      expect(output).toContain(
+        'Tool output was too large and has been truncated',
+      );
+    });
+
+    it('skips the error gate while error.message is still the sized body', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        error: { message: BODY },
+        outputBudgetApplied: true,
+      });
+
+      expect(outputOfFirstCall(onAllToolCallsComplete, 'error')).toBe(BODY);
+    });
+
+    // Spawn/setup failures build `error.message` separately, so the marker on
+    // `llmContent` says nothing about that string and the gate has to hold.
+    it('keeps the error gate for a separately built error message', async () => {
+      const separateMessage = `spawn failed\n${BODY}`;
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        error: { message: separateMessage },
+        outputBudgetApplied: true,
+      });
+
+      const error = outputOfFirstCall(onAllToolCallsComplete, 'error');
+      expect(error).not.toBe(separateMessage);
+      expect(error.length).toBeLessThan(separateMessage.length);
+      // Positive anchor: a degenerate '' from a blinded reader must not
+      // satisfy this control.
+      expect(error).toContain(
+        'Tool output was too large and has been truncated',
+      );
+    });
+
+    // The timeout branch stands the generic gate down for a marked body, so
+    // a marked detail that fits the producer's budget must arrive whole —
+    // this is the window the marker exists to keep open.
+    it('delivers a marked timeout detail whole', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        outputBudgetApplied: true,
+        error: {
+          message: 'Command timed out before it could complete.',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      });
+
+      // The timeout detail travels as the response's error field; the
+      // operational error.message stays the short summary by design.
+      expect(outputOfFirstCall(onAllToolCallsComplete, 'error')).toBe(BODY);
+      // Nothing was cut and no file written: the persistence tri-state stays
+      // `undefined`, so finalization remains free to persist the body.
+      expect(persistedFilesOfFirstCall(onAllToolCallsComplete)).toBeUndefined();
+    });
+
+    // Control for the case above: an unmarked timeout detail of the same size
+    // is still spilled by the generic gate.
+    it('spills an unmarked timeout detail', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        error: {
+          message: 'Command timed out before it could complete.',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      });
+
+      const error = outputOfFirstCall(onAllToolCallsComplete, 'error');
+      expect(error).not.toBe(BODY);
+      expect(error.length).toBeLessThan(BODY.length);
+      expect(error).toContain(
+        'Tool output was too large and has been truncated',
+      );
+    });
+
+    // The timeout branch has no combined pass behind it, so a marked detail
+    // that EXCEEDS the producer's declared budget is re-bounded at that
+    // budget — the marker is a sizing claim, not an unlimited exemption.
+    it('re-bounds a marked timeout detail at the producer budget', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: 'a'.repeat(200_000),
+        outputBudgetApplied: true,
+        error: {
+          message: 'Command timed out before it could complete.',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      });
+
+      const error = outputOfFirstCall(onAllToolCallsComplete, 'error');
+      expect(error).toContain(
+        'Tool output was too large and has been truncated',
+      );
+      // The pass keeps head+tail inside the 30k producer budget; the envelope
+      // around the preview needs room, so pin an upper bound above 30k.
+      expect(error.length).toBeLessThanOrEqual(31_000);
+
+      // The spill file the bound produced must survive into the recorded
+      // call, not be dropped by the timeout branch's plumbing.
+      expect(persistedFilesOfFirstCall(onAllToolCallsComplete)).toHaveLength(1);
+    });
+
+    // The truncated-but-no-spill-file arm: a failed spill write returns a
+    // bounded preview with no file, and the tri-state must report `[]` (a
+    // decision was made) so finalization does not persist the bounded body a
+    // second time.
+    it('re-bounds a marked timeout detail without a file when the spill write fails', async () => {
+      vi.mocked(fsWriteFile).mockRejectedValueOnce(new Error('disk full'));
+
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: 'a'.repeat(200_000),
+        outputBudgetApplied: true,
+        error: {
+          message: 'Command timed out before it could complete.',
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      });
+
+      const error = outputOfFirstCall(onAllToolCallsComplete, 'error');
+      expect(error.length).toBeLessThan(200_000);
+      expect(error).toContain('Could not save full output to file');
+      expect(persistedFilesOfFirstCall(onAllToolCallsComplete)).toEqual([]);
+    });
+
+    // The error gate stands down only while error.message IS the marked body.
+    // Without the marker the identity alone must not exempt it — producers
+    // like tool-registry build identical message/body pairs with no sizing.
+    it('keeps the error gate for an identical error.message without the marker', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: BODY,
+        error: { message: BODY },
+      });
+
+      const error = outputOfFirstCall(onAllToolCallsComplete, 'error');
+      expect(error).not.toBe(BODY);
+      expect(error.length).toBeLessThan(BODY.length);
+      expect(error).toContain(
+        'Tool output was too large and has been truncated',
+      );
+    });
+
+    // The per-tool pass is the single authority for a marked body on the
+    // success path: a marked body that exceeds the producer's declared budget
+    // is still bounded there, so the marker cannot skip both bounds.
+    it('re-bounds a marked success body at the producer budget', async () => {
+      const onAllToolCallsComplete = await runBudgetedTool({
+        llmContent: 'a'.repeat(200_000),
+        outputBudgetApplied: true,
+      });
+
+      const output = outputOfFirstCall(onAllToolCallsComplete);
+      expect(output).toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(output.length).toBeLessThanOrEqual(31_000);
+    });
   });
 
   it('schedules a memory pressure check after tool execution', async () => {
@@ -5791,6 +6045,80 @@ describe('CoreToolScheduler', () => {
       ],
     );
     expect(runSideQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('skips the image funnel entirely for a fixed_policy invocation', async () => {
+    // Same vision-bridge setup that DOES bridge for a model-originated call
+    // (see the test above) — the only difference is the execution origin.
+    // A fixed-policy call's result never feeds the model (the orchestrator
+    // consumes policyArtifacts directly), and running the funnel would
+    // re-enter media processing from inside a policy run.
+    runSideQueryMock.mockResolvedValue({ text: 'Screen says READY' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'degraded image written' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+            displayName: 'degraded.png',
+          },
+        },
+      ],
+      returnDisplay: 'degraded image written',
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'omni_downsample_image',
+            new MockMediaPolicyTool({
+              name: 'omni_downsample_image',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-policy-image',
+          name: 'omni_downsample_image',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-policy-image',
+          executionOrigin: {
+            kind: 'fixed_policy',
+            policyId: 'img-downsample',
+            stage: 'preprocessing',
+          },
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    // No vision bridge side query, no bridged text, no notice/override.
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.response?.['output']).toContain(
+      'degraded image written',
+    );
+    expect(functionResponse?.response?.['output']).not.toContain(
+      'Screen says READY',
+    );
+    expect(completed.response.visionBridgeNotice).toBeUndefined();
+    expect(completed.response.modelOverride).toBeUndefined();
   });
 
   it('bridges images returned with a tool error', async () => {
@@ -12497,6 +12825,13 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expect(completedCalls[0].status).toBe('error');
+    // A hook block is not an approval problem, so it must not carry the
+    // marker that makes the headless CLI suggest -y.
+    const blockedCall = completedCalls[0];
+    if (blockedCall.status !== 'error') {
+      throw new Error('expected the hook-blocked call to settle as an error');
+    }
+    expect(blockedCall.response.approvalRequired).toBeUndefined();
     // This test exercises the actual PreToolUse hook deny path inside
     // _executeToolCallBody — which is the only site that should still emit
     // 'pre_hook_blocked' (#4321 review C-Critical).
@@ -12786,6 +13121,37 @@ describe('CoreToolScheduler telemetry spans', () => {
     const completedCall = completedCalls[0] as CompletedToolCall;
     expect(completedCall.status).toBe('cancelled');
     expect(completedCall.response.executionStatus).toBe('success');
+  });
+
+  it('reports PostToolUse duration_ms from a clock that system time changes cannot move', async () => {
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output: { decision: 'allow' },
+      })),
+    };
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      await runSingleTool({
+        messageBus,
+        disableHooks: false,
+        execute: async () => {
+          // The system clock steps back while the tool runs.
+          dateNow.mockReturnValue(0);
+          return { llmContent: 'done', returnDisplay: 'done' };
+        },
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    const postToolUse = messageBus.request.mock.calls.find(
+      ([request]) => request.eventName === 'PostToolUse',
+    )?.[0] as { input: { duration_ms?: unknown } } | undefined;
+    expect(postToolUse?.input.duration_ms).toEqual(expect.any(Number));
+    expect(postToolUse?.input.duration_ms).toBeGreaterThanOrEqual(0);
   });
 
   it.each([ToolErrorType.EXECUTION_FAILED, ToolErrorType.EXECUTION_TIMEOUT])(
@@ -13860,6 +14226,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     args?: Record<string, unknown>;
     abortController?: AbortController;
     tools?: AnyDeclarativeTool[];
+    executionOrigin?: ToolExecutionOrigin;
   }): Promise<{
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -13877,6 +14244,9 @@ describe('CoreToolScheduler telemetry spans', () => {
           args: options.args ?? { input: 'x' },
           isClientInitiated: false,
           prompt_id: 'prompt-ask',
+          ...(options.executionOrigin
+            ? { executionOrigin: options.executionOrigin }
+            : {}),
         },
       ],
       abortController.signal,
@@ -14256,6 +14626,77 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completed[0].status).toBe('error');
     expect(execute).not.toHaveBeenCalled();
     expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('denies a PreToolUse ask (no bounce) for a fixed_policy invocation', async () => {
+    // Interactive session where a model-originated call WOULD bounce — the
+    // exclusion must come from the execution origin alone: the orchestrator
+    // awaits the call headlessly behind the scheduler, so an
+    // awaiting_approval entry would sit unanswerable.
+    const execute = vi.fn();
+    const messageBus = askMessageBus();
+    const { onAllToolCallsComplete, onToolCallsUpdate } = await scheduleWithAsk(
+      {
+        messageBus,
+        // Media-policy tool: a fixed_policy origin on a non-policy tool
+        // would be rejected by the origin/descriptor gate before the hook
+        // even fires, which is not the path under test here.
+        tools: [new MockMediaPolicyTool({ name: 'mockTool', execute })],
+        executionOrigin: {
+          kind: 'fixed_policy',
+          policyId: 'img-downsample',
+          stage: 'preprocessing',
+        },
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('error');
+    expect(execute).not.toHaveBeenCalled();
+    // Never bounced: no awaiting_approval transition, no blocked span.
+    const statuses = onToolCallsUpdate.mock.calls.flatMap((call) =>
+      (call[0] as ToolCall[]).map((tc) => tc.status),
+    );
+    expect(statuses).not.toContain('awaiting_approval');
+    expect(getBlockedSpans()).toHaveLength(0);
+  });
+
+  it('still denies a hard PreToolUse deny for a fixed_policy invocation (fail-closed)', async () => {
+    // The fixed_policy exemption is scoped to the ask-bounce ONLY: a hook
+    // that hard-denies must block a policy-originated run exactly like any
+    // other — policies must not become a hook-bypass channel.
+    const execute = vi.fn();
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: { decision: 'deny', reason: 'blocked by policy hook' },
+      }),
+    };
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      messageBus,
+      tools: [new MockMediaPolicyTool({ name: 'mockTool', execute })],
+      executionOrigin: {
+        kind: 'fixed_policy',
+        policyId: 'img-downsample',
+        stage: 'preprocessing',
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as ToolCall[];
+    expect(completed[0].status).toBe('error');
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('cancels a pending ask (no hang) when the signal aborts', async () => {
@@ -15845,9 +16286,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
     } as unknown as Config;
+    const onAllToolCallsComplete = vi.fn();
     const scheduler = new CoreToolScheduler({
       config: mockConfig,
-      onAllToolCallsComplete: vi.fn(),
+      onAllToolCallsComplete,
       onToolCallsUpdate: vi.fn(),
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
@@ -15872,6 +16314,14 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(
       'non_interactive_denied',
     );
+    // The only denial a headless front end may answer with an approval-mode
+    // hint: it is marked so the CLI can tell it from a hook block or deny rule.
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    const completed = onAllToolCallsComplete.mock.calls[0][0];
+    expect(completed[0].status).toBe('error');
+    expect(completed[0].response.approvalRequired).toBe(true);
   });
 
   it('PermissionRequest hook deny path emits failure_kind=permission_hook_denied (#4321)', async () => {

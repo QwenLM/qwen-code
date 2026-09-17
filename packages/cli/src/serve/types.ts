@@ -21,6 +21,7 @@ import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudge
 import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import type {
   AuthType,
+  ModelWireApi,
   InputModalities,
   MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
@@ -261,9 +262,8 @@ export interface ServeOptions {
    * plus every `qwen --acp` child it spawns. When unset, derived as half of
    * the cgroup-constrained or host memory.
    *
-   * Observed and reported only. No child is sized from it and no spawn is
-   * refused on its basis: `childHeapMode: 'observe'` models a partition of it
-   * and publishes the model, but there is no mode that applies one. Sizing
+   * `childHeapMode: 'admit'` limits child starts using the modeled slot count;
+   * `observe` only reports the partition. Neither applies its heap ceiling. Sizing
    * children arrives with the peak old-space measurement that can tell an
    * operator beforehand whether their workload fits the partition.
    */
@@ -286,7 +286,8 @@ export interface ServeOptions {
    * Whether the daemon models a per-child heap partition of the budget.
    *
    * `observe` (default) computes the partition and counts the spawns it would
-   * have refused; nothing is applied. There is no `enforce` yet — applying it
+   * have refused; nothing is applied. `admit` enforces only the child count,
+   * retaining the legacy heap arguments. There is no `enforce` yet — applying it
    * needs a way to tell an operator in advance whether their workload fits
    * the ceiling, and `refusals` cannot answer that: it counts admission
    * pressure, while children still run on the far larger host-derived
@@ -547,7 +548,9 @@ export interface ServeAuthProviderDescriptor {
     flowTitle?: string;
     baseUrlStepTitle?: string;
   };
-  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+  steps: Array<
+    'protocol' | 'wireApi' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
+  >;
 }
 
 export interface ServeAuthProviderCatalog {
@@ -565,10 +568,14 @@ export interface ServeAuthProviderCatalog {
 export interface ServeAuthProviderInstallRequest {
   providerId: string;
   protocol?: AuthType;
+  wireApi?: ModelWireApi;
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];
   advancedConfig?: {
+    /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
+    replaceExisting?: boolean;
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;
     contextWindowSize?: number;

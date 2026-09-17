@@ -22,10 +22,8 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import {
-  clampReasoningEffort,
-  parseModelReasoningCapabilities,
-} from '../../reasoning-effort.js';
+import { getEffectiveReasoning } from '../../reasoning-overrides.js';
+import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 import { IMAGE_REATTACHMENT_START } from '../../../services/image-payload-references.js';
@@ -292,12 +290,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
-    const defaultHeaders = {
+    const defaultHeaders: Record<string, string | undefined> = {
       'User-Agent': userAgent,
       'X-DashScope-CacheControl': 'enable',
       'X-DashScope-UserAgent': userAgent,
       'X-DashScope-AuthType': authType,
     };
+    // Omni experiment: oss:// media URLs from the temporary-upload channel
+    // are only resolved server-side when this header is present. Static
+    // injection (vs per-request threading) is deliberate — the header is
+    // harmless on requests without oss:// parts.
+    if (this.cliConfig.isOmniEnabled?.()) {
+      defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
+    }
 
     return customHeaders
       ? { ...defaultHeaders, ...customHeaders }
@@ -339,18 +344,23 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    *
    * This method applies DashScope-specific configurations including:
    * - Cache control for the system message, last tool message (when tools are configured),
-   *   and the latest history message
+   *   and the latest history message — or, when a reattach region trails the
+   *   conversation, the last stable block before it
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
    *
    * @param request - The original chat completion request parameters
    * @param userPromptId - Unique identifier for the user prompt for session tracking
+   * @param reattachBlockCount - Number of trailing blocks in the last message that
+   *   belong to the regenerated reattach region; the conversation cache breakpoint
+   *   is placed before them. Defaults to 0 (last block of the last message).
    * @returns Configured request with DashScope-specific parameters applied
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
+    reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
     let tools = request.tools;
@@ -377,6 +387,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         this.addDashScopeCacheControl(
           request,
           request.stream ? 'all' : 'system_only',
+          reattachBlockCount,
         );
       messages = updatedMessages;
       tools = updatedTools;
@@ -439,7 +450,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...requestParams,
         messages,
         ...(tools ? { tools } : {}),
-        ...(this.buildMetadata(userPromptId) || {}),
+        ...this.buildRequestMetadata(request.model, userPromptId),
         ...dashscopeExtras,
       };
       // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -468,7 +479,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...requestParams, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
-      ...(this.buildMetadata(userPromptId) || {}),
+      ...this.buildRequestMetadata(request.model, userPromptId),
       ...dashscopeExtras,
     };
     // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -535,19 +546,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   private getConfiguredReasoning(model: string | undefined) {
-    const { authType, baseUrl } = this.contentGeneratorConfig;
-    const wireModel = model ?? this.contentGeneratorConfig.model;
-    const reasoning = authType
-      ? this.cliConfig.getResolvedModelConfig?.(authType, wireModel, baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
-    return parseModelReasoningCapabilities(reasoning);
+    return this.getReasoningCapabilities(model);
   }
 
   private isTieredEffortModel(model: string | undefined): boolean {
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return configured.profile === 'dashscope-effort';
     return isTieredEffortWireModel(
       model ?? this.contentGeneratorConfig.model,
-      this.getConfiguredReasoning(model),
+      configured,
     );
   }
 
@@ -567,7 +574,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private buildQwenEffortConfig(
     model: string | undefined,
   ): Record<string, unknown> {
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return {};
+    const reasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      configured,
+    );
     if (!reasoning || reasoning.effort === undefined) {
       return {};
     }
@@ -707,6 +719,54 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
   private conflictingKnobDropWarned = false;
 
+  /**
+   * DashScope is an aggregating gateway: a non-qwen model (e.g. `ZHIPU/GLM-...`)
+   * reached through the same endpoint has its request forwarded to that vendor's
+   * own backend, `metadata` object included. Those backends type `metadata` as a
+   * string, so the object fails to deserialize and the request is rejected with a
+   * flat 400, making the model unusable through Qwen Code. `metadata` is a
+   * platform-private tracing field (sessionId / promptId / channel) that only
+   * means anything to DashScope's own inference path, so gate it on the wire model
+   * the same way `buildQwenEffortConfig` gates the qwen-only thinking knobs, for
+   * the same stated reason: qwen-specific fields must not leak to a non-qwen model
+   * sharing the endpoint.
+   *
+   * This is orthogonal to which *origins* count as DashScope-compatible, so the
+   * `*.alicloudapi.com` recognition added in #9103 is untouched: a qwen model
+   * behind such a gateway still ships metadata.
+   */
+  private buildRequestMetadata(
+    model: string | undefined,
+    userPromptId: string,
+  ): Record<string, unknown> {
+    if (!this.shouldSendRequestMetadata(model)) {
+      return {};
+    }
+    return this.buildMetadata(userPromptId) || {};
+  }
+
+  /**
+   * Auto by default: qwen-family wire models only, per the gateway reasoning on
+   * {@link buildRequestMetadata}. The client cannot tell a forwarded request from
+   * one DashScope serves itself, so an explicit `enableRequestMetadata` wins in
+   * both directions: `true` restores the field for a non-qwen model served
+   * first-party whose tracing still matters, `false` suppresses it everywhere.
+   * Read only from the provider's own config, never the session's. A
+   * side-model generator is built with its own per-model config but shares
+   * the session `Config`, and a cross-provider agent config deliberately
+   * clears this field, so any session fallback would let the main model's
+   * value decide a different model's request. On the main route the provider
+   * config is the same object the qwen-oauth hot switch mutates in place, so
+   * nothing is latched here.
+   */
+  private shouldSendRequestMetadata(model: string | undefined): boolean {
+    const configured = this.contentGeneratorConfig.enableRequestMetadata;
+    if (typeof configured === 'boolean') {
+      return configured;
+    }
+    return isQwenFamilyWireModel(this.resolveWireModel(model));
+  }
+
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
     const channel = this.cliConfig.getChannel?.();
 
@@ -729,6 +789,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private addDashScopeCacheControl(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     cacheControl: 'system_only' | 'all',
+    reattachBlockCount = 0,
   ): {
     messages: OpenAI.Chat.ChatCompletionMessageParam[];
     tools?: ChatCompletionToolWithCache[];
@@ -736,17 +797,26 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const messages = request.messages;
 
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
-    const conversationBreakpoint =
-      this.findConversationCacheBreakpoint(messages);
+    const lastIndex = messages.length - 1;
+
+    // With a volatile reattach region trailing the conversation, the breakpoint
+    // must sit on the last STABLE block — before the reattached images — or the
+    // cached prefix shifts every turn (issue #11627). Otherwise keep the
+    // historical "last block of the last message" anchor.
+    const stableBlock =
+      reattachBlockCount > 0 && lastIndex >= 0
+        ? this.lastStableBlock(messages, reattachBlockCount)
+        : this.findConversationCacheBreakpoint(messages);
 
     const updatedMessages =
       messages.length === 0
         ? messages
         : messages.map((message, index) => {
+            const isConversationAnchor =
+              stableBlock?.messageIndex === index && cacheControl === 'all';
             const shouldAddCacheControl = Boolean(
               (index === systemIndex && systemIndex !== -1) ||
-                (index === conversationBreakpoint?.messageIndex &&
-                  cacheControl === 'all'),
+                isConversationAnchor,
             );
 
             if (
@@ -760,7 +830,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
             return {
               ...message,
-              content: this.addCacheControlToContent(message.content),
+              content: this.addCacheControlToContent(
+                message.content,
+                isConversationAnchor && stableBlock
+                  ? stableBlock.excludeTail
+                  : 0,
+              ),
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
 
@@ -775,9 +850,16 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     };
   }
 
+  /**
+   * Fallback anchor for callers that do not report the reattach region
+   * size: find the marker the converter copied onto the reattach
+   * introduction block and anchor on the message before it. The whole
+   * introduction message is skipped because a per-block marker can still
+   * cache the message that carries it.
+   */
   private findConversationCacheBreakpoint(
     messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  ): { messageIndex: number } | undefined {
+  ): { messageIndex: number; excludeTail: number } | undefined {
     for (const [messageIndex, message] of messages.entries()) {
       if (!Array.isArray(message.content)) continue;
       const reattachmentIndex = message.content.findIndex(
@@ -797,12 +879,46 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
           typeof content === 'string' ||
           (Array.isArray(content) && content.length > 0)
         ) {
-          return { messageIndex: previousIndex };
+          return { messageIndex: previousIndex, excludeTail: 0 };
         }
       }
       return undefined;
     }
-    return { messageIndex: messages.length - 1 };
+    return { messageIndex: messages.length - 1, excludeTail: 0 };
+  }
+
+  /**
+   * Locate the last block that is not part of the trailing reattach region,
+   * walking back through messages as needed. Returns the owning message index
+   * plus how many trailing blocks of that message to skip when stamping the
+   * conversation `cache_control` breakpoint.
+   */
+  private lastStableBlock(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+    reattachBlockCount: number,
+  ): { messageIndex: number; excludeTail: number } | undefined {
+    let remaining = reattachBlockCount;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const content = (messages[index] as { content?: unknown }).content;
+      // An empty string (an empty tool result, or a reasoning-only assistant
+      // turn) carries no stable block; score it zero so the walk continues to
+      // a message with real content instead of anchoring on a fabricated
+      // zero-length text block.
+      const blockCount =
+        typeof content === 'string'
+          ? content.length > 0
+            ? 1
+            : 0
+          : Array.isArray(content)
+            ? content.length
+            : 0;
+      if (blockCount === 0) continue;
+      if (blockCount > remaining) {
+        return { messageIndex: index, excludeTail: remaining };
+      }
+      remaining -= blockCount;
+    }
+    return undefined;
   }
 
   private addCacheControlToTools(
@@ -827,12 +943,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    */
   private addCacheControlToContent(
     content: NonNullable<OpenAI.Chat.ChatCompletionMessageParam['content']>,
+    excludeTail = 0,
   ): ChatCompletionContentPartWithCache[] {
     // Convert content to array format if it's a string
     const contentArray = this.normalizeContentToArray(content);
 
-    // Mark the end of the selected message.
-    return this.addCacheControlToContentArray(contentArray);
+    // Add cache control to the last text item or create one if needed
+    return this.addCacheControlToContentArray(contentArray, excludeTail);
   }
 
   /**
@@ -853,19 +970,35 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Add cache control to the content array
+   * Add cache control to the content array, skipping `excludeTail` trailing
+   * blocks (the reattach region) so the breakpoint lands on the last stable
+   * block instead of a regenerated trailing image.
    */
   private addCacheControlToContentArray(
     contentArray: ChatCompletionContentPartWithCache[],
+    excludeTail = 0,
   ): ChatCompletionContentPartWithCache[] {
     if (contentArray.length === 0) {
       return contentArray;
     }
 
-    // Place the marker on the last block, which may be text or media.
-    const contentIndex = contentArray.length - 1;
-    const lastItem = contentArray[contentIndex];
-    contentArray[contentIndex] = {
+    let targetIndex = contentArray.length - 1 - excludeTail;
+    if (targetIndex < 0) {
+      return contentArray;
+    }
+
+    // When a reattach region is being skipped, keep walking the anchor back
+    // past non-text blocks (e.g. a current-turn inline image the next turn
+    // textualizes) so the breakpoint lands on stable text instead of an image.
+    if (excludeTail > 0) {
+      while (targetIndex > 0 && contentArray[targetIndex].type !== 'text') {
+        targetIndex -= 1;
+      }
+    }
+
+    // Add cache_control to the last stable content item.
+    const lastItem = contentArray[targetIndex];
+    contentArray[targetIndex] = {
       ...lastItem,
       cache_control: { type: 'ephemeral' },
     } as ChatCompletionContentPartTextWithCache;

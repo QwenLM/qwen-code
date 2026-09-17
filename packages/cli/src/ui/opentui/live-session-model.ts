@@ -16,6 +16,7 @@ import type { HistoryItem } from '../model/streaming-model.js';
 import type { GoalSnapshotLike, OpenTuiStreamEvent } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
+import { goalCheckpointHealthLine } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { ArenaAgentCardData, CompressionProps } from '../types.js';
 import { ICON } from '../constants.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -29,6 +30,10 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
   confirm?: ToolConfirmState;
+  /** The scheduler reports the call as 'scheduled' — approved, but not
+   * started because the batch still holds another approval. ink reads the
+   * same status and draws its pending glyph instead of the executing one. */
+  queued?: boolean;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -318,15 +323,21 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
+        const structured = ev.type === 'tool-result' ? ev : undefined;
         // Both events carry the whole display, so the card replaces rather than
-        // accumulates — appending would paint the streamed snapshot twice.
+        // accumulates — appending would paint the streamed snapshot twice. The
+        // structured payloads replace for the same reason, and clearing them
+        // matters: ToolCardBody prefers them over the text unconditionally, so
+        // a shell run that streams ANSI and then trips binary detection would
+        // otherwise freeze on the stale grid and never show the plain-text
+        // notice that replaced it.
         const next: LiveToolItem = {
           ...t,
           output: ev.type === 'tool-output' ? ev.output : ev.display,
+          diff: structured?.diff,
+          todos: structured?.todos,
+          ansi: structured?.ansi,
         };
-        if (ev.type === 'tool-result' && ev.diff) next.diff = ev.diff;
-        if (ev.type === 'tool-result' && ev.todos) next.todos = ev.todos;
-        if (ev.type === 'tool-result' && ev.ansi) next.ansi = ev.ansi;
         if (ev.type === 'tool-result' && ev.visionBridgeNotice) {
           next.visionBridgeNotice = ev.visionBridgeNotice;
         }
@@ -376,6 +387,14 @@ export function foldLiveEvent(
         if (t.confirm === 'pending') {
           items[i] = { ...t, confirm: ev.outcome };
         }
+      }
+      return items;
+    }
+    case 'tool-queued': {
+      const i = findToolIndex(items, ev.id);
+      if (i >= 0) {
+        const t = items[i] as LiveToolItem;
+        items[i] = { ...t, queued: ev.queued };
       }
       return items;
     }
@@ -656,6 +675,8 @@ export type GoalCardView =
       subtitle: string | null;
       objective: string;
       reason?: string;
+      /** Checkpoint health, when goalCheckpointHealthVisible shows it. */
+      checkpoint?: string;
     };
 
 /** Computes the GoalStateCard view (icon/title/subtitle/objective/reason)
@@ -712,11 +733,21 @@ export function describeGoalCard(
   if (!lifecycle) return { state: 'hidden' };
   const stats: string[] = [];
   const turnCount = goal.turnCount ?? 0;
-  if (turnCount > 0)
-    stats.push(`${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`);
+  if (turnCount > 0) {
+    const turns = goal.turnBudget ?? turnCount;
+    stats.push(
+      `${turnCount}${goal.turnBudget === undefined ? '' : `/${goal.turnBudget}`} ${turns === 1 ? 'turn' : 'turns'}`,
+    );
+  }
   const activeTimeMs = goal.activeTimeMs ?? 0;
-  if (activeTimeMs > 0)
-    stats.push(formatDuration(activeTimeMs, { hideTrailingZeros: true }));
+  if (activeTimeMs > 0) {
+    const used = formatDuration(activeTimeMs, { hideTrailingZeros: true });
+    stats.push(
+      goal.activeTimeBudgetMs === undefined
+        ? used
+        : `${used}/${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })}`,
+    );
+  }
   const tokensUsed = goal.tokensUsed ?? 0;
   if (tokensUsed > 0) {
     const used = formatTokenCount(tokensUsed);
@@ -730,6 +761,11 @@ export function describeGoalCard(
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()
       : undefined;
+  // Checkpoint health, worded by core like the ink card's; transcript-view
+  // sanitizes the line when it renders it, so no cleaner is passed here.
+  const checkpointLine = goalCheckpointHealthLine(goal);
+  const checkpoint =
+    checkpointLine === undefined ? undefined : `Checkpoint: ${checkpointLine}`;
   return {
     state: 'card',
     icon: lifecycle.icon,
@@ -738,6 +774,7 @@ export function describeGoalCard(
     subtitle: stats.length > 0 ? stats.join(' · ') : null,
     objective: goal.objective ?? '',
     reason,
+    ...(checkpoint ? { checkpoint } : {}),
   };
 }
 

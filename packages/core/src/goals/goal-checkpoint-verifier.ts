@@ -106,8 +106,9 @@ export interface CreateGoalCheckpointVerifierOptions {
  * and one the emitted schema cannot prevent -- JSON Schema has no aggregate
  * byte bound, and the per-claim and per-item bounds it does carry are
  * stripped before the request goes out. It stays an
- * `InvalidGoalCheckpointError`, so a retry that overruns again reaches the
- * runtime as the unusable result it is.
+ * `InvalidGoalCheckpointError`, but `describeCheckpointFailure` reads it as a
+ * capacity failure: a retry that overruns again stops a stalled Goal with the
+ * narrow-the-objective advice, not the unusable-output one.
  */
 export class GoalCheckpointClaimBudgetError extends InvalidGoalCheckpointError {
   constructor(readonly byteLength: number) {
@@ -216,7 +217,7 @@ function proofKindErrorMessage(
 export class GoalCheckpointVerifierInputTooLargeError extends Error {
   constructor(readonly byteLength: number) {
     super(
-      `Goal checkpoint verifier request exceeds the ${GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT}-byte limit`,
+      `Goal checkpoint verifier request of ${byteLength} bytes exceeds the ${GOAL_CHECKPOINT_VERIFIER_REQUEST_BYTE_LIMIT}-byte limit`,
     );
     this.name = 'GoalCheckpointVerifierInputTooLargeError';
   }
@@ -641,6 +642,7 @@ export function createGoalCheckpointVerifier(
       const sources = checkpointSources(input);
       let retry: CorrectiveRetry | undefined;
       let retryCause: unknown;
+      let totalTokens = 0;
       for (;;) {
         const contents = retryContents(input, retry?.note, retryCause);
         const result = await runSideQuery(config, {
@@ -667,8 +669,15 @@ export function createGoalCheckpointVerifier(
           // failures into plain Errors, erasing the InvalidGoalCheckpointError
           // class and message the verifier's own tests assert on.
         });
+        const tokens = result.usage?.totalTokenCount ?? 0;
+        if (Number.isFinite(tokens) && tokens > 0) totalTokens += tokens;
         try {
-          return parseGoalCheckpointVerifierText(result.text, sources);
+          return {
+            ...parseGoalCheckpointVerifierText(result.text, sources),
+            ...(totalTokens > 0
+              ? { usage: { totalTokenCount: totalTokens } }
+              : {}),
+          };
         } catch (error) {
           const corrective =
             retry === undefined ? correctiveRetryFor(error) : undefined;
@@ -678,6 +687,17 @@ export function createGoalCheckpointVerifier(
           retryCause = error;
         }
       }
+    } catch (error) {
+      // Failed checks cannot return usage, including any completed corrective attempt.
+      // A provider SDK rejects its own aborted request with its own error
+      // ("Request was aborted.") and drops the reason the signal carried, so
+      // a check that ran past this ceiling would never say it timed out. The
+      // caller's abort is left alone: the runtime treats that as an
+      // interrupt, not a failed check.
+      if (timeoutController.signal.aborted && !attemptSignal?.aborted) {
+        throw timeoutController.signal.reason;
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }

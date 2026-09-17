@@ -926,6 +926,7 @@ export function createDaemonWorkspaceService(
         skillName,
         enabled,
         changed: persisted.changed,
+        ...(persisted.block ? { block: persisted.block } : {}),
         activation,
         sessionsRefreshed,
         sessionsFailed,

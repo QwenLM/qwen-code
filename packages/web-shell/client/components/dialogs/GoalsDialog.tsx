@@ -5,8 +5,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { GOAL_CHECKPOINT_STALL_LIMIT } from '@qwen-code/sdk/daemon';
+import { sanitizeControlChars } from '../messages/toolFormatting';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
-import { canResumeGoal } from '../../utils/goalGate';
+import {
+  canResumeGoal,
+  goalCheckpointHealthVisible,
+} from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
@@ -370,6 +375,29 @@ export function GoalsDialog({
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
           const tokenLabel = getGoalTokenLabel(goal, t);
+          const activeTimeMs = getGoalActiveTimeMs(item.snapshot, now);
+          // Checkpoint health, before the stall breaker has to stop the Goal,
+          // under the terminal cards' visibility rule (goalGate pins its copy
+          // to core's). The gate reads the raw value, as core does; sanitizing
+          // escapes control characters rather than removing them, so it is
+          // applied only to the text shown.
+          const checkpointStalls = goal.checkpointStalls ?? 0;
+          const checkpointFailure = sanitizeControlChars(
+            goal.lastCheckpointFailure ?? '',
+          ).trim();
+          const checkpointLine = goalCheckpointHealthVisible(goal)
+            ? [
+                checkpointStalls > 0
+                  ? t('goal.checkpointStalled', {
+                      count: checkpointStalls,
+                      limit: GOAL_CHECKPOINT_STALL_LIMIT,
+                    })
+                  : t('goal.checkpointFailed'),
+                checkpointFailure,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+            : undefined;
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -439,6 +467,19 @@ export function GoalsDialog({
                 </div>
               )}
 
+              {checkpointLine && (
+                <div
+                  className={styles.cardReason}
+                  data-testid="goal-checkpoint"
+                  title={checkpointLine}
+                >
+                  <span className={styles.reasonLabel}>
+                    {t('goal.checkpoint')}:
+                  </span>{' '}
+                  {checkpointLine}
+                </div>
+              )}
+
               <div className={styles.cardFooter}>
                 <span className={styles.statusPill}>
                   {t(`goal.status.${goal.status}`)}
@@ -446,11 +487,16 @@ export function GoalsDialog({
                 <span className={styles.meta} data-testid="goal-activity">
                   {t(`goal.activity.${item.snapshot.activity}`)}
                 </span>
-                <span className={styles.meta}>
+                <span className={styles.meta} data-testid="goal-turns">
                   {goal.turnCount > 0
-                    ? t(goal.turnCount === 1 ? 'goal.turn' : 'goal.turns', {
-                        count: goal.turnCount,
-                      })
+                    ? goal.turnBudget === undefined
+                      ? t(goal.turnCount === 1 ? 'goal.turn' : 'goal.turns', {
+                          count: goal.turnCount,
+                        })
+                      : t('goal.turnsOfBudget', {
+                          count: goal.turnCount,
+                          budget: goal.turnBudget,
+                        })
                     : t('goals.notYetEvaluated')}
                 </span>
                 {tokenLabel ? (
@@ -458,9 +504,16 @@ export function GoalsDialog({
                     {tokenLabel}
                   </span>
                 ) : null}
-                <span className={styles.meta} data-testid="goal-elapsed">
-                  {formatRuntime(getGoalActiveTimeMs(item.snapshot, now))}
-                </span>
+                {activeTimeMs > 0 && (
+                  <span className={styles.meta} data-testid="goal-elapsed">
+                    {goal.activeTimeBudgetMs === undefined
+                      ? formatRuntime(activeTimeMs)
+                      : t('goal.activeOfBudget', {
+                          used: formatRuntime(activeTimeMs),
+                          budget: formatRuntime(goal.activeTimeBudgetMs),
+                        })}
+                  </span>
+                )}
                 <button
                   type="button"
                   className={styles.sessionLink}

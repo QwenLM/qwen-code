@@ -22,7 +22,7 @@ import {
 
 import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { isGitRepository } from '../utils/gitUtils.js';
+import { isGitRepository, NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
@@ -447,6 +447,10 @@ class GrepToolInvocation extends BaseToolInvocation<
         // `fatal: no pattern given` -- and that failure is swallowed by the
         // fallback below, which has the same flaw with a quieter symptom.
         const gitArgs = [
+          // `git grep` refreshes the index, which is what runs a
+          // repository-planted `core.fsmonitor` helper; only the `--untracked`
+          // below keeps this particular argv from doing so.
+          ...NO_EXEC_CONFIG,
           'grep',
           '--untracked',
           '-n',

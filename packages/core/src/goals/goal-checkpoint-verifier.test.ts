@@ -164,6 +164,22 @@ function finishConfig(generateText: ReturnType<typeof vi.fn>) {
 }
 
 describe('createGoalCheckpointVerifier', () => {
+  it('counts corrective retry usage as well as the accepted checkpoint', async () => {
+    const { config, generateText } = configFor('');
+    generateText
+      .mockResolvedValueOnce({
+        text: claimsOfBytes(GOAL_CHECKPOINT_CLAIM_MAX_BYTES + 500),
+        usage: { totalTokenCount: 30 },
+      })
+      .mockResolvedValueOnce({
+        text: claimsOfBytes(120),
+        usage: { totalTokenCount: 70 },
+      });
+    await expect(
+      createGoalCheckpointVerifier(config)(input()),
+    ).resolves.toMatchObject({ usage: { totalTokenCount: 100 } });
+  });
+
   it('uses a bounded tool-free side query and returns structured claims', async () => {
     const reply = JSON.stringify({
       claims: [
@@ -1066,6 +1082,34 @@ describe('createGoalCheckpointVerifier', () => {
     // attempt signal as a user interrupt and drops the check entirely
     // instead of counting it as a stall, so the timeout must not reach it.
     expect(caller.signal.aborted).toBe(false);
+  });
+
+  it('reports the timeout when the provider answers the abort with its own error', async () => {
+    // A real provider SDK rejects an aborted request with its own error and
+    // drops the reason the signal carried, so the Goal record used to say
+    // "Request was aborted." without saying the check had timed out.
+    const generateText = vi.fn().mockImplementation(
+      (request: { abortSignal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          request.abortSignal?.addEventListener('abort', () => {
+            reject(new Error('Request was aborted.'));
+          });
+        }),
+    );
+    const { config } = finishConfig(generateText);
+
+    await expect(
+      createGoalCheckpointVerifier(config, { timeoutMs: 1 })(input()),
+    ).rejects.toThrow('Goal checkpoint verifier timed out after 1ms');
+
+    // The caller's own abort is an interrupt, not a timeout: it keeps the
+    // error the provider raised.
+    const caller = new AbortController();
+    const interrupted = createGoalCheckpointVerifier(config, {
+      timeoutMs: 60_000,
+    })(input(), caller.signal);
+    caller.abort(new Error('user interrupt'));
+    await expect(interrupted).rejects.toThrow('Request was aborted.');
   });
 
   it.each([

@@ -1,3 +1,4 @@
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
@@ -101,20 +102,46 @@ describe('SystemMessage — prompt_cancelled marker', () => {
 
 describe('SystemMessage — goal status', () => {
   it.each([
-    ['en', 'Goal usage limited', 'Last check: token budget reached'],
-    ['zh-CN', '目标用量受限', '上次检查: token budget reached'],
+    [
+      'usage_limited',
+      'en',
+      'Goal usage limited',
+      'token budget reached',
+      'Last check: token budget reached',
+    ],
+    [
+      'usage_limited',
+      'zh-CN',
+      '目标用量受限',
+      'token budget reached',
+      '上次检查: token budget reached',
+    ],
+    [
+      'blocked',
+      'en',
+      'Goal blocked',
+      'approval required',
+      'Last check: approval required',
+    ],
+    [
+      'blocked',
+      'zh-CN',
+      '目标已阻塞',
+      'approval required',
+      '上次检查: approval required',
+    ],
   ] as const)(
-    'renders a usage-limited goal distinctly in %s',
-    (language, title, reason) => {
+    'renders a %s goal distinctly in %s',
+    (kind, language, title, lastReason, reason) => {
       const container = render(
         <SystemMessage
           content=""
           variant="info"
           source="goal"
           data={{
-            kind: 'usage_limited',
+            kind,
             condition: 'finish the evaluation',
-            lastReason: 'token budget reached',
+            lastReason,
           }}
         />,
         language,
@@ -759,4 +786,89 @@ describe('SystemMessage — inline images', () => {
       attachmentId: 'notes.txt',
     });
   });
+});
+
+describe('background continuation', () => {
+  it('shows task provenance with an accessible source action', () => {
+    const locate = vi.fn(() => true);
+    const details = vi.fn();
+    const turn = {
+      turnId: 'turn-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+      label: 'Explore',
+      toolUseId: 'tool-1',
+    };
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Explore"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{ ...turn, backgroundTask: { status: 'completed' } }}
+          onLocateBackgroundSource={locate}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain('Background agent·Explore');
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe('Background task completed');
+    expect(container.querySelector('[title="Explore"]')?.className).toContain(
+      'truncate',
+    );
+    expect(container.querySelector('button')?.textContent).toBe('Source');
+    expect(container.querySelector('button svg')).not.toBeNull();
+    expect(container.querySelector('button')?.className).toContain(
+      'text-muted-foreground',
+    );
+    expect(container.querySelector('button')?.className).toContain(
+      'font-normal',
+    );
+    act(() => container.querySelector('button')!.click());
+    expect(locate).toHaveBeenCalledWith('', 'tool-1');
+    act(() => container.querySelectorAll('button')[1]!.click());
+    expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
+  });
+  it.each([
+    ['failed', 'Background task failed'],
+    ['cancelled', 'Background task cancelled'],
+    [undefined, 'Background result'],
+  ])('does not describe %s results as successful', (status, label) => {
+    const container = render(
+      <SystemMessage
+        content="Explore"
+        variant="info"
+        source="background_notification_turn_started"
+        data={{ backgroundTask: { status } }}
+      />,
+    );
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe(label);
+    expect(container.querySelector('[data-tone="success"]')).toBeNull();
+  });
+  it.each(['completed', 'failed', 'cancelled'])(
+    'shows pending processing without overriding the %s outcome',
+    (status) => {
+      const container = render(
+        <SystemMessage
+          content="Explore completed"
+          variant="info"
+          source="background_task_completed"
+          data={{
+            kind: 'agent',
+            status,
+            description: 'Explore',
+            awaitingProcessing: true,
+          }}
+        />,
+      );
+      expect(container.textContent).toContain('Awaiting processing');
+      expect(
+        container.querySelector('[role="img"]')?.getAttribute('title'),
+      ).toBe(`Background task ${status}`);
+    },
+  );
 });

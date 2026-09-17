@@ -30,6 +30,20 @@ import {
 
 const MAX_BLOCKED_AUDIT_COUNT = 3;
 
+export function reduceGoalSpend(
+  goal: GoalRecord,
+  tokens: number,
+  now: number,
+): GoalRecord {
+  if (!Number.isFinite(tokens) || tokens <= 0) return goal;
+  return {
+    ...goal,
+    tokensUsed: goal.tokensUsed + tokens,
+    activeTimeMs: elapsedActiveTime(goal, now),
+    updatedAt: now,
+  };
+}
+
 export interface GoalControlTransition {
   request: GoalControlRequest;
   now: number;
@@ -151,6 +165,7 @@ export function reduceGoalControl(
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
       checkpointStalls: undefined,
+      lastCheckpointFailure: undefined,
       noProgressTurns: undefined,
       ...rearmedBudgets(current, transition.now, transition),
       lastReason: undefined,
@@ -228,6 +243,7 @@ export function reduceGoalControl(
       // a different one, so carrying it over would spend the new window's
       // allowance on the old window's failures.
       checkpointStalls: undefined,
+      lastCheckpointFailure: undefined,
       noProgressTurns: undefined,
       ...rearmedBudgets(current, transition.now, transition),
       lastReason: undefined,
@@ -694,6 +710,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'updatedAt',
       'evidenceCheckpoint',
       'checkpointStalls',
+      'lastCheckpointFailure',
       'noProgressTurns',
       'lastReason',
       'limitKind',
@@ -724,6 +741,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
     (value['checkpointStalls'] !== undefined &&
       !isNonNegativeInteger(value['checkpointStalls'])) ||
+    (value['lastCheckpointFailure'] !== undefined &&
+      (typeof value['lastCheckpointFailure'] !== 'string' ||
+        !value['lastCheckpointFailure'])) ||
     (value['noProgressTurns'] !== undefined &&
       !isNonNegativeInteger(value['noProgressTurns'])) ||
     (value['lastReason'] !== undefined &&
@@ -775,6 +795,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     ...(value['checkpointStalls']
       ? { checkpointStalls: value['checkpointStalls'] }
       : {}),
+    ...(value['lastCheckpointFailure'] === undefined
+      ? {}
+      : { lastCheckpointFailure: value['lastCheckpointFailure'] }),
     ...(value['noProgressTurns']
       ? { noProgressTurns: value['noProgressTurns'] }
       : {}),

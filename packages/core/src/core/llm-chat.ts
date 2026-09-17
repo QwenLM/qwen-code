@@ -49,9 +49,15 @@ import {
 import {
   classifyRetryError,
   isFallbackEligible,
+  isRetryableUpstreamError,
+  type RetryErrorClassificationContext,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator, InputModalities } from './contentGenerator.js';
+import type {
+  ContentGenerator,
+  InputModalities,
+  PromptCacheSharingParameters,
+} from './contentGenerator.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -65,6 +71,7 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
+import { completedToolCallBoundary } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -130,7 +137,11 @@ import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
 } from './prompts.js';
-import { isRetryableStreamTransportError } from './stream-transport-retry.js';
+import {
+  isFlushedToolCallPark,
+  isRetryableStatuslessUpstreamError,
+  isRetryableStreamTransportError,
+} from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -150,6 +161,23 @@ const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 // Gemini can emit this filler after tool results; filtering and validation
 // must stay in sync.
 const GEMINI_EMPTY_CONTENT_PLACEHOLDER = '(empty content)';
+
+/**
+ * Finish reasons that positively mean the model's answer is closed: a
+ * completed or definitively blocked response leaves nothing a continuation
+ * could resume. Deliberately a deny-list, never an allow-list — values that
+ * carry no completeness information (converter fall-throughs such as
+ * FINISH_REASON_UNSPECIFIED, or enum members a future @google/genai version
+ * adds) must fail open to continuable.
+ */
+const CLOSED_FINISH_REASONS: ReadonlySet<string> = new Set([
+  FinishReason.STOP,
+  FinishReason.SAFETY,
+  FinishReason.RECITATION,
+  FinishReason.BLOCKLIST,
+  FinishReason.PROHIBITED_CONTENT,
+  FinishReason.SPII,
+]);
 
 function hasCandidateOutput(response: GenerateContentResponse): boolean {
   return Boolean(
@@ -651,18 +679,20 @@ const INVALID_STREAM_RETRY_CONFIG = {
   initialDelayMs: 2000,
 };
 
-const TRANSPORT_STREAM_RETRY_CONFIG = {
+const STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
   /**
-   * Budget for *continuation* recovery after a socket-level cut that already
-   * delivered output (issue #7832). This is a different mechanism from the
-   * `maxRetries` replay above and therefore has its own budget: a replay
-   * re-sends the request from scratch and is only legal before any chunk
-   * reached callers, while a continuation keeps the delivered output and asks
-   * the model to resume from it. A single long generation can be cut more than
-   * once by the same gateway idle timeout, so this is sized like
-   * {@link MAX_OUTPUT_RECOVERY_ATTEMPTS} rather than like the replay budget.
+   * Budget for *continuation* recovery after a mid-stream cut that already
+   * delivered output (issue #7832) — a socket-level failure, or a status-less
+   * upstream failure the provider traced with its own request id. This is a
+   * different mechanism from the `maxRetries` replay above and therefore has
+   * its own budget: a replay re-sends the request from scratch and is only
+   * legal before any chunk reached callers, while a continuation keeps the
+   * delivered output and asks the model to resume from it. A single long
+   * generation can be cut more than once by the same gateway idle timeout, so
+   * this is sized like {@link MAX_OUTPUT_RECOVERY_ATTEMPTS} rather than like
+   * the replay budget.
    */
   maxContinuationRetries: 3,
 };
@@ -2226,6 +2256,16 @@ export class LlmChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  /**
+   * The first closed finish reason the in-flight `processStreamResponse`
+   * observed, if any. On a tool-result continuation the finish reason is
+   * deferred off the yielded chunks and re-emitted only on success, so on
+   * a failed attempt the send loop's `lastFinishReason` never sees the
+   * close; this side channel is what the continuation veto consults
+   * instead. Reset per attempt alongside `lastFinishReason`.
+   */
+  private lastObservedClosedFinishReason: string | undefined;
+
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
   /**
@@ -2239,6 +2279,25 @@ export class LlmChat {
    */
   private userContentPushCount = 0;
   private manualPlanExitNoticesEnabled = false;
+  private completedToolCallIds: string[] = [];
+
+  setCompletedToolCallIds(toolCallIds: readonly string[] | undefined): void {
+    this.completedToolCallIds = [...new Set(toolCallIds)].filter(
+      (id) => completedToolCallBoundary(this.history, [id]) > 0,
+    );
+  }
+
+  getCompletedToolCallIds(): readonly string[] {
+    return [...this.completedToolCallIds];
+  }
+
+  getHistoryForRecovery(): Content[] {
+    const boundary = completedToolCallBoundary(
+      this.history,
+      this.completedToolCallIds,
+    );
+    return this.history.slice(boundary).map(copyContentContainer);
+  }
 
   /**
    * True for forked/speculative chats built by `createForkedChat` on the
@@ -2661,9 +2720,10 @@ export class LlmChat {
         this.chatRecordingService?.recordChatCompression({
           info,
           compressedHistory: newHistory,
+          completedToolCallIds: this.completedToolCallIds,
         });
       }
-      this.setHistory(newHistory);
+      this.setHistory(newHistory, this.completedToolCallIds);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       // Compression rewrote the shared history every retained entry sizes,
@@ -2794,6 +2854,7 @@ export class LlmChat {
     this.chatRecordingService?.recordChatCompression({
       info,
       compressedHistory: newHistory,
+      completedToolCallIds: this.completedToolCallIds,
     });
     logChatCompression(
       this.config,
@@ -2802,7 +2863,7 @@ export class LlmChat {
         tokens_after: info.newTokenCount,
       }),
     );
-    this.setHistory(newHistory);
+    this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.tokenCountsRouteKey = this.currentRouteKey();
@@ -3053,6 +3114,7 @@ export class LlmChat {
       const historyBeforeHardRescue = shouldForceFromHard
         ? this.getHistoryShallow()
         : undefined;
+      const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       const lastPromptTokenCountWasEstimatedBeforeHardRescue =
         this.lastPromptTokenCountIsEstimated;
@@ -3151,7 +3213,10 @@ export class LlmChat {
           // prompt is still too large to send, restore the pre-compression
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
-          this.setHistory(historyBeforeHardRescue);
+          this.setHistory(
+            historyBeforeHardRescue,
+            completedToolCallIdsBeforeHardRescue,
+          );
           // setHistory conservatively cleared loaded-skill tracking; the
           // restored bodies re-arm it on their next invoke.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
@@ -3198,6 +3263,7 @@ export class LlmChat {
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
           compressedHistory: this.getHistoryShallow(),
+          completedToolCallIds: this.completedToolCallIds,
         });
       }
 
@@ -3391,7 +3457,7 @@ export class LlmChat {
             acceptQuietToolResultCompletionOnNextAttempt = true;
           }
         };
-        let transportStreamRetryCount = 0;
+        let streamReplayRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
         // send has already handed to callers across all continuation attempts,
@@ -3415,6 +3481,7 @@ export class LlmChat {
         // model's answer starting mid-sentence.
         let transportContinuationPrefix: Part[] = [];
         let reactiveCompressionAttempted = false;
+        let omniMediaDegradeAttempts = 0;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
 
@@ -3533,6 +3600,7 @@ export class LlmChat {
         let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
           transportAttemptParts = [];
+          let streamEstablished = false;
           let streamYieldedChunk = false;
           let streamYieldedContentChunk = false;
           // A cut that already delivered a `functionCall` cannot be continued
@@ -3549,7 +3617,7 @@ export class LlmChat {
             } else if (
               rateLimitRetryCount > 0 ||
               totalInvalidStreamRetryCount() > 0 ||
-              transportStreamRetryCount > 0 ||
+              streamReplayRetryCount > 0 ||
               transportContinuationCount > 0
             ) {
               // A fresh-restart retry reaching this point means a branch that
@@ -3578,11 +3646,38 @@ export class LlmChat {
                 : undefined,
               acceptQuietToolResultCompletion,
             );
+            streamEstablished = true;
 
             // The processor now owns cancellation persistence for this prefix.
             pendingTransportPrefix = [];
             lastFinishReason = undefined;
+            self.lastObservedClosedFinishReason = undefined;
             for await (const chunk of stream) {
+              // A parked tool-call finish the pipeline released on its error
+              // path, reaching an attempt this loop counts nothing delivered
+              // for and with no continuation in flight. The release was decided
+              // from the pipeline's own view of what it yielded, which includes
+              // chunks the protocol-tag suppression in processStreamResponse
+              // withheld — a leading-JSON first chunk, for one. Counting it
+              // here would flip the delivered flags and shut the replay gate
+              // that is in fact still open, killing on one attempt a turn the
+              // replay arm could recover; forwarding it would dispatch a tool
+              // call over output the caller never saw. Drop it and let replay
+              // re-send. The two content terms mirror the replay gate's, so
+              // this fires only where replay is still the live option on
+              // content grounds; the error-path partial turn this attempt
+              // persisted is popped by that arm. Where replay does not end up
+              // firing — its budget spent, or a failure class it does not own
+              // — the turn fails as it would have anyway, and all the drop
+              // costs is that a tool call belonging to an attempt the caller
+              // never saw is not dispatched for it.
+              if (
+                isFlushedToolCallPark(chunk) &&
+                !streamYieldedContentChunk &&
+                transportContinuationText.trim().length === 0
+              ) {
+                continue;
+              }
               if (hasCandidateOutput(chunk)) {
                 streamYieldedChunk = true;
                 streamYieldedAnyChunk = true;
@@ -3731,8 +3826,50 @@ export class LlmChat {
               });
             }
 
-            // Replay only curated socket-level failures before any
-            // content (non-thought output) has reached callers.
+            // Computed above the recovery gates because a status-less upstream
+            // failure that is really an oversized-payload rejection has to
+            // reach the one-shot compaction below instead of being re-sent:
+            // re-sending cannot shrink a request, and the continuation arm
+            // would re-send it strictly larger. A reverse proxy in front of the
+            // endpoint can reject the serialized request with a bare HTTP 413
+            // (no token wording) even below the token-based compaction
+            // threshold; it recovers through the same one-shot path (#10380).
+            const contextOverflow = getContextLengthExceededInfo(error);
+            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+
+            // HTTP establishment failures already exhausted retryWithBackoff;
+            // only server errors raised while reading the stream join replay.
+            const isServerStreamError =
+              streamEstablished &&
+              !isRateLimit &&
+              (classification.kind === 'http' ||
+                classification.kind === 'sse-provider') &&
+              classification.diagnosis === 'retryable' &&
+              classification.statusCode !== undefined &&
+              classification.statusCode >= 500 &&
+              classification.statusCode < 600;
+            // The classes a cut may be resumed from: a curated socket-level
+            // failure, and a status-less upstream failure the provider traced
+            // with its own request id. The latter is what a gateway error
+            // frame pushed into an already-200 stream produces, and it can
+            // only be decided here: retryWithBackoff resolved when the stream
+            // was established, before a single frame was parsed. The overflow
+            // exclusion narrows only that class, so a socket cut keeps the
+            // verdict it had before this branch existed.
+            const isContinuableStreamCut =
+              isRetryableStreamTransportError(classification) ||
+              (isRetryableStatuslessUpstreamError(classification) &&
+                !contextOverflow.isExceeded &&
+                !requestPayloadOverflow.isTooLarge);
+            // Replay admits one class more than continuation does: a server
+            // error raised while reading an established stream (#11634) is
+            // worth re-sending from scratch, but is not a cut this branch may
+            // ask the model to resume from.
+            const isReplayableStreamError =
+              isContinuableStreamCut || isServerStreamError;
+
+            // Replay transient server errors and curated socket-level failures
+            // before any content (non-thought output) has reached callers.
             // Thinking-only output does not block the replay: such an
             // attempt persists nothing (error-path persistence
             // requires a delivered functionCall, which this gate
@@ -3742,7 +3879,7 @@ export class LlmChat {
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
             if (
-              isRetryableStreamTransportError(classification) &&
+              isReplayableStreamError &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3753,24 +3890,33 @@ export class LlmChat {
               // consulted here because this branch is checked before the
               // continuation one below.
               transportContinuationText.trim().length === 0 &&
-              transportStreamRetryCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
+              streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
-              transportStreamRetryCount++;
+              streamReplayRetryCount++;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportStreamRetryCount;
-              debugLogger.warn('Transport stream retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
-                attempt: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                retryDelayMs: delayMs,
-                yieldedNonContentChunks: streamYieldedChunk,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-              });
+                STREAM_RETRY_CONFIG.initialDelayMs * streamReplayRetryCount;
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry scheduled'
+                  : 'Transport stream retry scheduled',
+                {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
+                  attempt: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  retryDelayMs: delayMs,
+                  yieldedNonContentChunks: streamYieldedChunk,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  classificationReason: classification.reason,
+                  providerCode: classification.providerCode,
+                  requestId: classification.requestId,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                  }),
+                },
+              );
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
               // continuation had staged must go. The gate above now admits
@@ -3803,12 +3949,37 @@ export class LlmChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
+            // A closed finish reason on an attempt that produced output of its
+            // own means that answer already completed (or was definitively
+            // blocked) — the failure landed while the SDK was absorbing
+            // trailing metadata, so there is nothing to resume and a
+            // continuation would only fabricate a tail into durable history.
+            // MAX_TOKENS stays continuable: it marks a *truncated* answer, the
+            // exact shape this arm exists for.
+            // The yielded finish reason governs when one reached the
+            // caller; when the tool-result deferral stripped it from the
+            // yielded chunks, the close survives only in what
+            // processStreamResponse observed.
+            const attemptFinishReason =
+              lastFinishReason ?? self.lastObservedClosedFinishReason;
+            // Scoped to an attempt that closed *with output of its own*. The
+            // fabricated tail this veto exists to prevent needs something to
+            // fabricate onto: an attempt that contributed no visible part —
+            // a bare finish chunk, which is what a model returns when asked to
+            // resume an answer it considers complete — leaves the turn with
+            // nothing persisted and every other arm shut, so refusing the
+            // continuation there strands prose an earlier attempt delivered.
+            const attemptClosedWithOwnOutput =
+              attemptFinishReason !== undefined &&
+              CLOSED_FINISH_REASONS.has(attemptFinishReason) &&
+              streamYieldedContentChunk;
             const canContinueAfterTransportCut =
-              isRetryableStreamTransportError(classification) &&
+              isContinuableStreamCut &&
+              !attemptClosedWithOwnOutput &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
-                TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries;
+                STREAM_RETRY_CONFIG.maxContinuationRetries;
             if (canContinueAfterTransportCut) {
               self.popPendingPartialAssistantTurn();
               transportContinuationCount++;
@@ -3820,17 +3991,18 @@ export class LlmChat {
               transportContinuationPrefix = transportContinuationParts;
               pendingTransportPrefix = transportContinuationPrefix;
               const delayMs =
-                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-                transportContinuationCount;
+                STREAM_RETRY_CONFIG.initialDelayMs * transportContinuationCount;
               debugLogger.warn('Transport stream continuation scheduled', {
                 retryPath: 'stream',
                 retryDecision: 'continue',
                 attempt: transportContinuationCount,
-                maxRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
+                maxRetries: STREAM_RETRY_CONFIG.maxContinuationRetries,
                 retryDelayMs: delayMs,
                 errorKind: classification.kind,
                 transportCode: classification.transportCode,
+                classificationReason: classification.reason,
+                providerCode: classification.providerCode,
+                requestId: classification.requestId,
                 deliveredChars: transportContinuationText.length,
               });
               // `isContinuation` keeps the UI's text buffer, so the next
@@ -3843,37 +4015,114 @@ export class LlmChat {
               rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamTransportError(classification)) {
+            if (isReplayableStreamError) {
               // Reached only when neither branch above fired: content was
-              // already delivered so replaying would duplicate it, or the
+              // already delivered so replaying would duplicate it, the
               // replay budget is exhausted, or continuation is unavailable
-              // (function-call cut, no text to anchor on, or its own budget
-              // exhausted).
-              debugLogger.warn('Transport stream retry not taken', {
-                retryPath: 'stream',
-                retryDecision: streamYieldedContentChunk
-                  ? 'skipped_after_content'
-                  : 'exhausted',
-                attempts: transportStreamRetryCount,
-                maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-                continuationAttempts: transportContinuationCount,
-                maxContinuationRetries:
-                  TRANSPORT_STREAM_RETRY_CONFIG.maxContinuationRetries,
-                errorKind: classification.kind,
-                transportCode: classification.transportCode,
-              });
+              // (function-call cut, no text to anchor on, its own budget
+              // exhausted, or a closed finish reason — the attempt's answer
+              // already completed, so there was nothing to resume).
+              debugLogger.warn(
+                isServerStreamError
+                  ? 'Server stream retry not taken'
+                  : 'Transport stream retry not taken',
+                {
+                  retryPath: 'stream',
+                  retryDecision: attemptClosedWithOwnOutput
+                    ? 'skipped_terminal_finish_reason'
+                    : streamYieldedContentChunk ||
+                        transportContinuationText.trim().length > 0
+                      ? 'skipped_after_content'
+                      : 'exhausted',
+                  attempts: streamReplayRetryCount,
+                  maxRetries: STREAM_RETRY_CONFIG.maxRetries,
+                  continuationAttempts: transportContinuationCount,
+                  maxContinuationRetries:
+                    STREAM_RETRY_CONFIG.maxContinuationRetries,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                  classificationReason: classification.reason,
+                  providerCode: classification.providerCode,
+                  requestId: classification.requestId,
+                  ...(isServerStreamError && {
+                    statusCode: classification.statusCode,
+                  }),
+                },
+              );
             }
 
-            const contextOverflow = getContextLengthExceededInfo(error);
-            // A reverse proxy in front of the endpoint can reject the
-            // serialized request with a bare HTTP 413 (no token wording)
-            // even below the token-based compaction threshold; recover it
-            // through this same one-shot reactive path (#10380).
-            const requestPayloadOverflow = getRequestPayloadTooLargeInfo(error);
+            // Both detectors were computed above the recovery gates, so that a
+            // status-less upstream failure could be kept out of them.
             if (
               contextOverflow.isExceeded ||
               requestPayloadOverflow.isTooLarge
             ) {
+              // Server-limit fallback for omni media (server-feedback-driven
+              // transport guard): a request carrying oss:// media that the
+              // server rejected as over its input limit is retried with the
+              // media degraded one guard-ladder rung further. Runs BEFORE
+              // reactive compression — history compression cannot shrink
+              // media tokens, which dominate these rejections. Bounded by
+              // the guard's maxTransportPasses and only armed when a
+              // normalized omni processing config exists (omni sessions).
+              const omniDegradeMaxAttempts =
+                self.config.getOmniProcessingConfig?.()?.limits
+                  .maxTransportPasses ?? 0;
+              if (
+                contextOverflow.isExceeded &&
+                !exactRoute &&
+                omniMediaDegradeAttempts < omniDegradeMaxAttempts
+              ) {
+                const degradeAttempt = omniMediaDegradeAttempts++;
+                let degradeOutcome:
+                  | { replacedParts: number; degradedResources: number }
+                  | undefined;
+                try {
+                  // Dynamic import keeps the omni pipeline out of the send
+                  // path for non-omni sessions (mirrors fileUtils).
+                  const { degradeOmniMediaAfterServerReject } = await import(
+                    '../omni/reactive-degrade.js'
+                  );
+                  degradeOutcome = await degradeOmniMediaAfterServerReject(
+                    self.config,
+                    self.history,
+                    degradeAttempt,
+                    {
+                      signal: params.config?.abortSignal,
+                      observedLimitTokens: contextOverflow.limitTokens,
+                    },
+                  );
+                } catch (degradeError) {
+                  if (
+                    params.config?.abortSignal?.aborted ||
+                    isAbortError(degradeError)
+                  ) {
+                    throw degradeError;
+                  }
+                  debugLogger.warn(
+                    'Omni media degradation fallback failed.',
+                    degradeError,
+                  );
+                }
+                if (degradeOutcome && degradeOutcome.replacedParts > 0) {
+                  self.popPendingPartialAssistantTurn();
+                  requestContents = self.getRequestHistoryForRoute(
+                    currentUserContent,
+                    requestModalities,
+                  );
+                  debugLogger.warn(
+                    `Server input limit exceeded; degraded ` +
+                      `${degradeOutcome.degradedResources} omni media ` +
+                      `resource(s) in place (attempt ${degradeAttempt + 1}/` +
+                      `${omniDegradeMaxAttempts}); retrying.`,
+                  );
+                  resetTransportContinuation();
+                  yield { type: StreamEventType.RETRY };
+                  suppressNextRetryEvent = true;
+                  rearmQuietAcceptanceIfBudgetSpent();
+                  continue;
+                }
+              }
               // Whether this pass (or a previous one) spent the one-shot
               // payload-overflow recovery; when it did and the error is
               // still a payload overflow, the wrap below turns it into an
@@ -4886,15 +5135,20 @@ export class LlmChat {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
-    const apiCall = () =>
-      generator.generateContentStream(
-        {
-          model,
-          contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
-        },
-        prompt_id,
-      );
+    const apiCall = () => {
+      // A continuation attempt's replay gate is already shut by the
+      // accumulated prefix, so the pipeline must release a parked tool-call
+      // finish rather than withhold it for a replay that cannot happen.
+      const request: PromptCacheSharingParameters = {
+        model,
+        contents: requestContents,
+        config: { ...this.generationConfig, ...params.config },
+        ...(transportContinuationPrefix !== undefined && {
+          continuationInFlight: true,
+        }),
+      };
+      return generator.generateContentStream(request, prompt_id);
+    };
     const cgConfig = this.config.getContentGeneratorConfig();
     const authType = overrides?.retryAuthType ?? cgConfig?.authType;
     const extraRetryErrorCodes =
@@ -4914,25 +5168,24 @@ export class LlmChat {
         }
 
         const status = getErrorStatus(error);
-        if (status === 400) return false;
+        if (status === 400) {
+          // A provider-body-less 400 wrapping a low-level network failure
+          // ("network error for request ...") classifies as transport and is
+          // transient; genuine client 400s stay kind 'http' and fail fast.
+          return (
+            classifyRetryError(error, { authType, extraRetryErrorCodes })
+              .kind === 'transport'
+          );
+        }
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
-        // Honor provider-specific rate-limit codes (e.g. DashScope) so a custom
-        // predicate does not silently drop them — the default path checks these
-        // via defaultShouldRetry, but a custom shouldRetryOnError bypasses it.
-        if (isRateLimitError(error, extraRetryErrorCodes)) return true;
-
-        // Transient network errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP
-        // status and would otherwise fall through every predicate above.
-        if (
-          classifyRetryError(error, { extraRetryErrorCodes }).kind ===
-          'transport'
-        ) {
-          return true;
-        }
-
-        return false;
+        // Everything an HTTP status cannot decide — provider rate-limit codes
+        // (e.g. DashScope), transport failures (ECONNRESET, ETIMEDOUT, …), and
+        // upstream error bodies the provider traced with its own request id.
+        // Shared with defaultShouldRetry, which a custom predicate like this
+        // one bypasses, so the two paths cannot drift apart.
+        return isRetryableUpstreamError(error, extraRetryErrorCodes);
       },
       authType,
       extraRetryErrorCodes,
@@ -4971,6 +5224,7 @@ export class LlmChat {
       transportContinuationPrefix,
       acceptQuietToolResultCompletion,
       params.config?.abortSignal,
+      { authType, extraRetryErrorCodes },
     );
   }
 
@@ -5189,6 +5443,7 @@ export class LlmChat {
    */
   clearHistory(): void {
     this.history = [];
+    this.completedToolCallIds = [];
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -5340,8 +5595,12 @@ export class LlmChat {
     }
   }
 
-  setHistory(history: Content[]): void {
+  setHistory(
+    history: Content[],
+    completedToolCallIds?: readonly string[],
+  ): void {
     this.history = history;
+    this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
     // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find
@@ -5364,6 +5623,7 @@ export class LlmChat {
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    this.setCompletedToolCallIds(this.completedToolCallIds);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and
@@ -5385,6 +5645,7 @@ export class LlmChat {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    this.setCompletedToolCallIds(this.completedToolCallIds);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
     // exists. Clear it for the same reason setHistory does — and drop
@@ -5400,8 +5661,12 @@ export class LlmChat {
    */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
+    const boundary = completedToolCallBoundary(
+      this.history,
+      this.completedToolCallIds,
+    );
     while (
-      this.history.length > 0 &&
+      this.history.length > boundary &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,
@@ -5508,6 +5773,12 @@ export class LlmChat {
    *   before either durable write, so the JSONL transcript and in-memory
    *   history carry the same merged turn (issue #8094). Undefined on every
    *   non-continuation send.
+   * @param retryClassificationContext - Auth type and configured extra retry
+   *   codes to classify a trailing stream failure with. Must match what the
+   *   send loop classifies with: the acceptance gate below decides by
+   *   classification, and a throttle only the caller's configured codes
+   *   recognise would otherwise be misread as a status-less upstream failure
+   *   and swallowed instead of reaching the rate-limit retry.
    */
   private async *processStreamResponse(
     model: string,
@@ -5517,6 +5788,7 @@ export class LlmChat {
     transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
     abortSignal?: AbortSignal,
+    retryClassificationContext?: RetryErrorClassificationContext,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -5536,6 +5808,10 @@ export class LlmChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    // The first closed finish reason seen, if any — tracked so a stream
+    // that fails *after* the model closed its answer can be accepted as
+    // complete below rather than retried.
+    let closedFinishReason: string | undefined;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
     const takePendingProtocolParts = (): Part[] => {
@@ -5593,6 +5869,16 @@ export class LlmChat {
         hasFinishReason ||=
           chunk?.candidates?.some((candidate) => candidate.finishReason) ??
           false;
+        closedFinishReason ??= chunk?.candidates?.find(
+          (candidate) =>
+            candidate.finishReason !== undefined &&
+            CLOSED_FINISH_REASONS.has(candidate.finishReason),
+        )?.finishReason;
+        // Mirror onto the instance: the tool-result deferral below strips
+        // the reason from the yielded chunk, and a failed attempt never
+        // re-emits it — without this the send loop's continuation veto is
+        // blind to a close on exactly that path.
+        this.lastObservedClosedFinishReason ??= closedFinishReason;
 
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
@@ -5899,6 +6185,108 @@ export class LlmChat {
       .join('')
       .trim();
 
+    // Completeness is a property of the turn, not of the attempt. On a
+    // continuation the visible text already delivered lives in
+    // `transportContinuationPrefix`, and the merge that folds it back in runs
+    // below — and only once `streamError` is null. Measuring this gate with the
+    // attempt's own `contentText` therefore refused exactly the attempt that
+    // closes a continuation without adding prose (a thought part and STOP), and
+    // no other arm owns that failure: replay needs an empty delivered prefix,
+    // continuation is vetoed by this very close, and the rate-limit, overflow
+    // and invalid-stream arms do not match a status-less frame. The prose the
+    // caller watched stream then reached neither history nor the JSONL record.
+    //
+    // The attempt must still have contributed something of its own. One that
+    // delivered nothing at all is left to the continuation arm, which resumes
+    // from the prefix; accepting it here would route it to the empty-response
+    // validation instead, and the fresh restart that follows re-sends the
+    // original prompt and loses the prose the caller already watched stream.
+    // With no prefix the conjuncts reduce to `contentText`, so every
+    // non-continuation shape is decided exactly as before.
+    //
+    // Guarded on `streamError` because only the gate below reads this, and the
+    // merge it mirrors is a dedup pass over the delivered prefix: without the
+    // guard every successful continuation turn would pay it twice, once here
+    // and once in the merge block. The prefix travels as parts, so it is
+    // reduced to text the same way the cancellation merge above reduces it.
+    const completedText =
+      streamError !== null && transportContinuationPrefix
+        ? mergeDeliveredPrefix(
+            getPlainTextFromParts(transportContinuationPrefix),
+            contentText,
+          )
+        : contentText;
+    // `hasAnyContent` is shared with the stream-validation block below, hoisted
+    // rather than duplicated so the two reads cannot drift.
+    // `lacksVisibleToolResultProgress` is attempt-local: it measures what this
+    // attempt delivered, not what the turn accumulated. The acceptance gate
+    // reads it directly — a continuation attempt that closed with only a
+    // thought part after a tool result has no visible progress of its own, so
+    // the gate declines and the continuation arm owns the shape. The validation
+    // block below reads the same binding for the same reason.
+    const hasAnyContent = contentText || thoughtText;
+    const lacksVisibleToolResultProgress =
+      isToolResultContinuation &&
+      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+
+    // A failure that lands after the model already closed its answer —
+    // typically a gateway error frame pushed into an already-200 stream
+    // while the SDK was absorbing trailing usage metadata — must not fail
+    // the turn: the answer is complete, and the trailing error concerns
+    // only a tail the turn no longer needs. Accept the delivered content so
+    // it persists through the success path below; propagating instead
+    // strands a complete answer out of history and the JSONL record, and
+    // the retry arms have nothing to resume (continuing would fabricate a
+    // tail past the finish). Tool-call turns keep the error-path partial
+    // persistence below, which the scheduler's repair flow depends on.
+    if (
+      streamError !== null &&
+      !hasToolCall &&
+      closedFinishReason !== undefined &&
+      completedText &&
+      hasAnyContent &&
+      !lacksVisibleToolResultProgress
+    ) {
+      // Two failure classes can be swallowed here: a curated socket-level cut,
+      // and a status-less upstream frame the provider traced with its own
+      // request id. Both are transport or gateway artefacts that say nothing
+      // about the answer, which is why a closed answer can survive them. The
+      // server-error class the replay gate also admits (#11634) is deliberately
+      // not one of them: that status is the server's own verdict on the
+      // response, and the arm owning it answers with a retry rather than by
+      // accepting the turn. Anything else reached this point precisely because
+      // no recovery arm owns it, so nulling it would certify an outcome the
+      // turn did not have: a user cancel would be converted into a completion,
+      // a throttling StreamContentError would never reach the rate-limit
+      // retry, and the pipeline's own InvalidStreamError would bypass the
+      // invalid-stream retry budget.
+      //
+      // Classified with the send loop's own context. A throttle that only the
+      // configured `retryErrorCodes` recognise carries a request id and no
+      // status, so without that context it reads as a status-less upstream
+      // frame — the one class this gate accepts.
+      const trailingErrorClassification = classifyRetryError(
+        streamError,
+        retryClassificationContext,
+      );
+      if (
+        isRetryableStreamTransportError(trailingErrorClassification) ||
+        isRetryableStatuslessUpstreamError(trailingErrorClassification)
+      ) {
+        debugLogger.warn(
+          'Accepting completed answer despite trailing stream failure.',
+          {
+            finishReason: closedFinishReason,
+            error:
+              streamError instanceof Error
+                ? streamError.message
+                : String(streamError),
+          },
+        );
+        streamError = null;
+      }
+    }
+
     // Deferred until after the throw sites below so a protocol-tag leak
     // or stream-validation failure cannot dispatch a recovered call that
     // the retry path would then execute a second time.
@@ -6039,11 +6427,9 @@ export class LlmChat {
     // tool call, so they retry (#7039) — and once that retry budget is
     // exhausted the quiet completion is accepted rather than failing the
     // run (#9026): some model families legitimately end turns silently
-    // after a tool result.
-    const hasAnyContent = contentText || thoughtText;
-    const lacksVisibleToolResultProgress =
-      isToolResultContinuation &&
-      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    // after a tool result. Both bindings this reads are computed above the
+    // trailing-failure acceptance gate, which shares them (see the comment
+    // there for why sharing them is the point).
     let acceptedQuietToolResultCompletion = false;
     if (
       streamError === null &&

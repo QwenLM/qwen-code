@@ -243,6 +243,7 @@ async function main() {
     import { existsSync } from 'node:fs';
     const prefix = '@qwen-code/qwen-code-core/';
     const named = new Map([
+      ['omni', 'omni/index.ts'], ['omniPolicyCollection', 'omni/policy/model-call-collection.ts'],
       ['transcriptRecords', 'utils/transcript-records.ts'], ['envVarResolver', 'utils/envVarResolver.ts'],
       ['goalWire', 'goals/goal-wire.ts'], ['memoryScopes', 'memory/scopes.ts'],
       ['subSessionConstants', 'tools/sub-session-constants.ts'], ['toolWriteOrigin', 'services/tool-write-origin.ts'],
@@ -250,7 +251,7 @@ async function main() {
       ['conversationsRuntimeMarker', 'utils/conversations-runtime-marker.ts'],
       ['subagentRuntime', 'subagent-runtime.ts'],
       ['storage', 'config/storage.ts'], ['atomicFileWrite', 'utils/atomicFileWrite.ts'],
-      ['debugLogger', 'utils/debugLogger.ts'],
+      ['debugLogger', 'utils/debugLogger.ts'], ['board', 'board.ts'],
     ]);
     export function resolve(specifier, context, nextResolve) {
       if (specifier === '@qwen-code/qwen-code-core') {

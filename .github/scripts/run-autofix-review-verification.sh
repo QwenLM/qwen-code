@@ -734,12 +734,12 @@ sensitive_class_of() {
     package-lock.json | npm-shrinkwrap.json | */package-lock.json | */npm-shrinkwrap.json | patches/*) echo 'supply-chain' ;;
     .gitattributes | */.gitattributes) echo 'measurement-config' ;;
     *) case "${f##*/}" in
-      eslint.config.* | eslint.legacy-filenames.mjs | vitest.config.* | tsconfig.json | tsconfig.*.json)
+      eslint.config.* | eslint.legacy-filenames.mjs | eslint.legacy-core-barrel-imports.mjs | vitest.config.* | tsconfig.json | tsconfig.*.json)
         # Workspace-root configs are machinery; a scaffold template deep in
         # a src tree is test/fixture data (same exemption manifests get).
         if at_workspace_root "${f}"; then
           case "${f##*/}" in
-            eslint.config.* | eslint.legacy-filenames.mjs) echo 'lint-config' ;;
+            eslint.config.* | eslint.legacy-filenames.mjs | eslint.legacy-core-barrel-imports.mjs) echo 'lint-config' ;;
             vitest.config.*) echo 'test-config' ;;
             *) echo 'ts-config' ;;
           esac

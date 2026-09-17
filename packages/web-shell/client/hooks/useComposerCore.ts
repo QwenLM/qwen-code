@@ -29,7 +29,12 @@ import {
   StateEffect,
   StateField,
 } from '@codemirror/state';
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  isolateHistory,
+} from '@codemirror/commands';
 import {
   acceptCompletion,
   autocompletion,
@@ -125,6 +130,10 @@ import {
   sanitizeAttachmentName,
   type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
+import {
+  createPastedTextFile,
+  shouldFoldPastedText,
+} from '../utils/largePaste';
 
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
@@ -1135,6 +1144,7 @@ export interface UseComposerCoreOptions {
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
+  allowEmptySlashMenu?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -1385,6 +1395,7 @@ export interface UseComposerCoreReturn {
   removeImage: (index: number) => void;
   pastedFiles: PromptFile[];
   removeFile: (index: number) => void;
+  expandPastedText: (index: number) => void;
   composerTags: WebShellComposerTag[];
   removeTopTag: (id: string) => void;
   addTags: (
@@ -1440,6 +1451,7 @@ export function useComposerCore(
     placeholderText = 'Type a message...',
     commands,
     skills = [],
+    allowEmptySlashMenu = false,
     slashCommandCategoryOrder,
     autoSubmitSlashCommands = false,
     queuedMessages = [],
@@ -1572,6 +1584,8 @@ export function useComposerCore(
   workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
+  const allowEmptySlashMenuRef = useRef(allowEmptySlashMenu);
+  allowEmptySlashMenuRef.current = allowEmptySlashMenu;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
   const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
@@ -1930,10 +1944,75 @@ export function useComposerCore(
     (files: readonly File[]) => enqueueExtractedTransfer(extractFiles(files)),
     [enqueueExtractedTransfer],
   );
+  /**
+   * Whether a paste landed in the composer's own editor rather than in one of
+   * the other text controls that share the composer surface.
+   */
+  const pastedInEditor = useCallback((target: EventTarget | null): boolean => {
+    if (!(target instanceof Node)) return false;
+    if (mobileTextareaRef.current === target) return true;
+    return viewRef.current?.dom.contains(target) ?? false;
+  }, []);
+  /**
+   * Folds an oversized paste into an attachment card. Returns whether the
+   * caller should stop the browser's own insertion: a short paste stays inline,
+   * and a disabled composer, a shell command, or a host with attachments turned
+   * off has no card to fold into, so each leaves today's behavior alone.
+   */
+  const foldPastedTextIntoCard = useCallback((text: string): boolean => {
+    // The exemptions are checked before the measurement: sizing a paste costs a
+    // full UTF-8 encode, which a multi-megabyte paste in shell mode should not
+    // pay for something that is about to be discarded.
+    if (
+      disabledRef.current ||
+      shellModeRef.current ||
+      !attachmentsEnabledRef.current
+    ) {
+      return false;
+    }
+    const view = viewRef.current;
+    const textarea = mobileTextareaRef.current;
+    if (
+      view?.state.selection.ranges.some((range) => !range.empty) ||
+      (textarea && textarea.selectionStart !== textarea.selectionEnd)
+    ) {
+      return false;
+    }
+    const draft = view?.state.doc.toString() ?? mobileTextRef.current;
+    const caret =
+      view?.state.selection.main.from ?? textarea?.selectionStart ?? 0;
+    if (
+      /^[!/]/.test(draft.trimStart()) ||
+      /^[!/]/.test(
+        (draft.slice(0, caret) + text + draft.slice(caret)).trimStart(),
+      )
+    ) {
+      return false;
+    }
+    if (!shouldFoldPastedText(text)) return false;
+    const taken = new Set(pastedFilesRef.current.map((file) => file.name));
+    const next = [...pastedFilesRef.current, createPastedTextFile(text, taken)];
+    pastedFilesRef.current = next;
+    setPastedFiles(next);
+    return true;
+  }, []);
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
       onPasteCapture: (event) => {
-        if (event.clipboardData.getData('text/plain')) return;
+        const pastedText = event.clipboardData.getData('text/plain');
+        if (pastedText) {
+          // These handlers live on the composer surface, which also contains
+          // controls that take text of their own (the history search box), so
+          // only a paste aimed at the editor may be folded.
+          if (
+            pastedInEditor(event.target) &&
+            foldPastedTextIntoCard(pastedText)
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+          return;
+        }
         if (enqueueImageTransfer(event.clipboardData, 'paste')) {
           event.preventDefault();
           event.stopPropagation();
@@ -1994,7 +2073,13 @@ export function useComposerCore(
         }
       },
     }),
-    [clearImageDragState, enqueueImageTransfer, isTouchComposer],
+    [
+      clearImageDragState,
+      enqueueImageTransfer,
+      foldPastedTextIntoCard,
+      isTouchComposer,
+      pastedInEditor,
+    ],
   );
   useEffect(() => {
     if (!imageDragActive) return;
@@ -2277,6 +2362,7 @@ export function useComposerCore(
       languageRef.current,
       tRef.current,
       slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+      allowEmptySlashMenuRef.current,
     );
     if (!result) return false;
     setSlashMenu({
@@ -2328,6 +2414,7 @@ export function useComposerCore(
         languageRef.current,
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+        allowEmptySlashMenuRef.current,
       );
       if (!relativeResult) {
         setSlashMenu(null);
@@ -2679,10 +2766,17 @@ export function useComposerCore(
         : [];
     const editorText = view ? view.state.doc.toString() : mobileTextRef.current;
     const followup = followupStateRef.current;
+    // A folded paste leaves the draft empty, which is the state the follow-up
+    // completion submits from, so the suggestion would become the message with
+    // the paste along as an attachment. The paste wins while a card waits.
+    const foldedPastePending = pastedFilesRef.current.some(
+      (file) => file.text !== undefined,
+    );
     const followupCompletion =
       textOverride === undefined &&
       !suppressFollowupCompletion &&
       inlineTags.length === 0 &&
+      !foldedPastePending &&
       followup?.isVisible
         ? getFollowupCompletion(editorText, followup.suggestion)
         : null;
@@ -3008,8 +3102,8 @@ export function useComposerCore(
           if (atMenu.accept()) {
             return true;
           }
-          if (slashMenuRef.current) {
-            return acceptSlashCompletion(undefined, true);
+          if (slashMenuRef.current && acceptSlashCompletion(undefined, true)) {
+            return true;
           }
           if (completionStatus(view.state) === 'active') return false;
           const text = view.state.doc.toString();
@@ -3070,7 +3164,7 @@ export function useComposerCore(
           if (closeAtMenuIfOpen()) {
             return true;
           }
-          if (slashMenuRef.current) {
+          if (slashMenuRef.current?.items.length) {
             closeSlashMenu();
             return true;
           }
@@ -3109,7 +3203,12 @@ export function useComposerCore(
           // the sticky history.isNavigating — see its declaration.)
           if (!isBrowsingHistory) {
             if (atMenu.moveSelection('up')) return true;
-            if (moveSlashCompletionSelection('up')) return true;
+            // An open slash menu owns the arrows even with zero items, so
+            // they never reach history recall behind the visible popover.
+            if (slashMenuRef.current) {
+              moveSlashCompletionSelection('up');
+              return true;
+            }
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(false)(view);
             }
@@ -3159,7 +3258,12 @@ export function useComposerCore(
           // user is no longer paging through history.
           if (!isBrowsingHistory) {
             if (atMenu.moveSelection('down')) return true;
-            if (moveSlashCompletionSelection('down')) return true;
+            // Symmetric with ArrowUp: an open slash menu owns the key even
+            // when it has no items to move through.
+            if (slashMenuRef.current) {
+              moveSlashCompletionSelection('down');
+              return true;
+            }
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(true)(view);
             }
@@ -3210,8 +3314,12 @@ export function useComposerCore(
           if (acceptFollowupIntoEditor(view, 'tab')) {
             return true;
           }
-          if (slashMenuRef.current) {
+          const slashMenu = slashMenuRef.current;
+          if (slashMenu) {
             if (acceptSlashCompletion()) return true;
+            // An open-but-empty menu still owns Tab so the key cannot fall
+            // through to the cycle-mode fallback beneath the popover.
+            if (slashMenu.items.length === 0) return true;
             if (!cycleModeOnTabRef.current) return false;
           }
           if (completionStatus(view.state) === 'active') {
@@ -3718,7 +3826,12 @@ export function useComposerCore(
     if (slashMenuRef.current) {
       refreshSlashMenuForView(viewRef.current);
     }
-  }, [slashMenuDataKey, language, refreshSlashMenuForView]);
+  }, [
+    slashMenuDataKey,
+    language,
+    refreshSlashMenuForView,
+    allowEmptySlashMenu,
+  ]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -4498,6 +4611,32 @@ export function useComposerCore(
     setPastedFiles(next);
   }, []);
 
+  /**
+   * Moves a folded paste into the editor: the card disappears and the text
+   * lands at the caret as one undoable edit. There is no way back, so this is
+   * the user's explicit choice rather than a toggle.
+   */
+  const expandPastedText = useCallback(
+    (index: number) => {
+      const file = pastedFilesRef.current[index];
+      if (!file || file.text === undefined) return;
+      const view = viewRef.current;
+      if (view) {
+        view.dispatch({
+          ...view.state.replaceSelection(file.text),
+          annotations: isolateHistory.of('full'),
+          scrollIntoView: true,
+        });
+        view.focus();
+      } else {
+        if (!mobileTextareaRef.current) return;
+        insertText(file.text);
+      }
+      removeFile(index);
+    },
+    [insertText, removeFile],
+  );
+
   // ---- Computed ----
 
   const canSubmit =
@@ -4628,6 +4767,7 @@ export function useComposerCore(
     removeImage,
     pastedFiles,
     removeFile,
+    expandPastedText,
     composerTags,
     removeTopTag,
     addTags,
