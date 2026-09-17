@@ -59,6 +59,11 @@ import {
 } from './tool-call-preparation.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 
+const degradeOmniMediaMock = vi.hoisted(() => vi.fn());
+vi.mock('../omni/reactive-degrade.js', () => ({
+  degradeOmniMediaAfterServerReject: degradeOmniMediaMock,
+}));
+
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
 
@@ -6207,6 +6212,163 @@ describe('LlmChat', async () => {
         (compressedEvent as { info: ChatCompressionInfo }).info
           .originalTokenCountIsEstimated,
       ).toBe(true);
+    });
+
+    describe('Omni overflow recovery on LlmChat', () => {
+      beforeEach(() => {
+        degradeOmniMediaMock.mockReset();
+        Object.assign(mockConfig, {
+          getOmniProcessingConfig: () => ({
+            limits: { maxTransportPasses: 1 },
+          }),
+        });
+      });
+
+      it('rebuilds the request from degraded media before compressing history', async () => {
+        const compress = vi
+          .spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValue({
+            newHistory: null,
+            info: {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          });
+        degradeOmniMediaMock.mockImplementation(
+          async (_config, history: Content[]) => {
+            history.at(-1)!.parts = [
+              {
+                fileData: { mimeType: 'image/png', fileUri: 'oss://degraded' },
+              },
+            ];
+            return { replacedParts: 1, degradedResources: 1 };
+          },
+        );
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(new Error('context_length_exceeded'))
+          .mockResolvedValueOnce(makeStreamResponse('recovered'));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                fileData: { mimeType: 'image/png', fileUri: 'oss://original' },
+              },
+            ],
+          },
+          'omni-recovery',
+        );
+        const events: StreamEvent[] = [];
+        for await (const event of stream) events.push(event);
+        expect(degradeOmniMediaMock).toHaveBeenCalledOnce();
+        expect(compress).toHaveBeenCalledTimes(1);
+        const retry = JSON.stringify(
+          vi.mocked(mockContentGenerator.generateContentStream).mock
+            .calls[1][0],
+        );
+        expect(retry).toContain('oss://degraded');
+        expect(retry).not.toContain('oss://original');
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+      });
+
+      it('bounds degradation and then follows the existing compression failure path', async () => {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+        degradeOmniMediaMock.mockResolvedValue({
+          replacedParts: 1,
+          degradedResources: 1,
+        });
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          new Error('context_length_exceeded'),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'omni-bound',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toThrow('context_length_exceeded');
+        expect(degradeOmniMediaMock).toHaveBeenCalledOnce();
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not degrade media on a byte-only HTTP 413', async () => {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          Object.assign(new Error('Request Entity Too Large'), { status: 413 }),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'omni-413',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toThrow();
+        expect(degradeOmniMediaMock).not.toHaveBeenCalled();
+      });
+
+      it('propagates cancellation during degradation without another model request', async () => {
+        const controller = new AbortController();
+        degradeOmniMediaMock.mockImplementation(async () => {
+          controller.abort();
+          controller.signal.throwIfAborted();
+        });
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(new Error('context_length_exceeded'));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: 'latest',
+            config: { abortSignal: controller.signal },
+          },
+          'omni-cancel',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledOnce();
+      });
     });
 
     it('does not attempt reactive compression more than once per send', async () => {
@@ -14589,6 +14751,63 @@ describe('LlmChat', async () => {
             'test-model',
             { message: 'test' },
             'prompt-transport-continuation-replaced-by-compression',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('discarded half'),
+              ),
+            ),
+          ).toBe(false);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops a pending continuation when Omni media degradation takes over', async () => {
+        vi.useFakeTimers();
+        try {
+          Object.assign(mockConfig, {
+            getOmniProcessingConfig: () => ({
+              limits: { maxTransportPasses: 1 },
+            }),
+          });
+          degradeOmniMediaMock.mockResolvedValue({
+            replacedParts: 1,
+            degradedResources: 1,
+          });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('discarded half ')]))
+            .mockRejectedValueOnce(
+              new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-replaced-by-omni',
           );
           await collectStreamWithFakeTimers(stream, 10_000);
 

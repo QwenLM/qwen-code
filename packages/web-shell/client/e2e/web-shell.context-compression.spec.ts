@@ -110,6 +110,39 @@ for (const theme of ['light', 'dark']) {
       .getByRole('group', { name: 'Context Usage', exact: true })
       .first();
     await expect(historical).toContainText('Snapshot');
+    const snapshotMeter = historical.locator('[data-web-shell-context-meter]');
+    await expect(snapshotMeter).toBeVisible();
+    const readsBeforeCollapse = reads;
+    await historical
+      .getByRole('button', { name: 'Collapse', exact: true })
+      .click();
+    await expect(snapshotMeter).toBeHidden();
+    await expect(historical).toHaveText('Context Usage Snapshot', {
+      useInnerText: true,
+    });
+    const expandSnapshot = historical.getByRole('button', {
+      name: 'Expand',
+      exact: true,
+    });
+    await expect(expandSnapshot).toHaveAttribute('aria-expanded', 'false');
+    await historical.screenshot({
+      path: testInfo.outputPath(`context-snapshot-collapsed-${theme}.png`),
+    });
+    await expandSnapshot.press('Enter');
+    await expect(snapshotMeter).toBeVisible();
+    const collapseSnapshot = historical.getByRole('button', {
+      name: 'Collapse',
+      exact: true,
+    });
+    await expect(collapseSnapshot).toHaveAttribute('aria-expanded', 'true');
+    await historical.screenshot({
+      path: testInfo.outputPath(`context-snapshot-expanded-${theme}.png`),
+    });
+    await collapseSnapshot.press('Space');
+    await expect(snapshotMeter).toBeHidden();
+    await expandSnapshot.click();
+    await expect(snapshotMeter).toBeVisible();
+    expect(reads).toBe(readsBeforeCollapse);
     const editor = page.locator(
       '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
     );

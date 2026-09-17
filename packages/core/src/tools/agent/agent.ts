@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
@@ -4045,6 +4046,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Wrap in qwen-code.subagent span (#3731 Phase 3). Foreground
       // invocations are child spans of the AGENT tool's `qwen-code.tool`
       // span, inheriting its traceId so the trace tree stays unified.
+      const goalPermit = getCurrentAgentId()
+        ? undefined
+        : goalTurnContext.getStore();
       const runFramed = () =>
         this.runWithSubagentSpan(
           this.buildSubagentSpanSpec(hookOpts, subagentConfig, 'foreground'),
@@ -4295,6 +4299,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           returnDisplay: this.currentDisplay!,
         };
       } finally {
+        // Background and nested launches have no direct Goal-turn accounting anchor.
+        if (goalPermit && subagentConfig.executor === undefined) {
+          this.config
+            .getChatRecordingService()
+            ?.billGoalTurnTokens(
+              goalPermit.turnId,
+              subagent.getExecutionSummary().totalTokens,
+            );
+        }
         // Mirror the background path: ensure the isolation worktree is
         // reaped on every termination shape (success, failure, cancel,
         // and any uncaught throw inside runFramed). The helper itself

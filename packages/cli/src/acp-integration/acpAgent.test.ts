@@ -33,6 +33,17 @@ import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getDefaultReasoningConfig } from './model-configuration.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
 
+const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+    >()),
+    prepareFileWatchersForProcessExit: mockPrepareFileWatchersForProcessExit,
+  }),
+);
+
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup, mockRegisterCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
@@ -235,6 +246,17 @@ vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
 
 vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
   ndJsonStream: vi.fn().mockReturnValue({}),
+}));
+
+const { mockCloseAcpOutput } = vi.hoisted(() => ({
+  mockCloseAcpOutput: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+}));
+
+vi.mock('./acp-output.js', () => ({
+  createAcpOutput: vi.fn(() => ({
+    stream: new WritableStream<Uint8Array>(),
+    close: mockCloseAcpOutput,
+  })),
 }));
 
 // Mock stream conversion
@@ -1368,6 +1390,7 @@ describe('runAcpAgent shutdown cleanup', () => {
     } as unknown as Config;
 
     mockRunExitCleanup.mockResolvedValue(undefined);
+    mockCloseAcpOutput.mockReset().mockResolvedValue(undefined);
     mockConnectionState.reset();
     sigTermListeners = [];
     sigIntListeners = [];
@@ -1653,8 +1676,10 @@ describe('runAcpAgent shutdown cleanup', () => {
       expect(sigTermListeners.length).toBeGreaterThan(0);
     });
 
+    expect(mockPrepareFileWatchersForProcessExit).not.toHaveBeenCalled();
     // Simulate SIGTERM from IDE
     sigTermListeners[0]('SIGTERM');
+    expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
 
     // runExitCleanup is async, wait for it
     await vi.waitFor(() => {
@@ -1690,6 +1715,73 @@ describe('runAcpAgent shutdown cleanup', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('waits for output finish after EOF cleanup with signal handlers still installed', async () => {
+    let finishOutput!: () => void;
+    mockCloseAcpOutput.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishOutput = resolve;
+        }),
+    );
+    const { agent, agentPromise } = await startPreloadTestAgent();
+    const disposeSessions = vi.fn().mockResolvedValue(undefined);
+    Object.assign(agent!, {
+      shutdownMcpPool: vi.fn().mockResolvedValue(undefined),
+      disposeSessions,
+    });
+    let completed = false;
+    void agentPromise.then(() => {
+      completed = true;
+    });
+    mockConnectionState.resolve();
+    await vi.waitFor(() => expect(mockCloseAcpOutput).toHaveBeenCalledOnce());
+
+    expect(disposeSessions).toHaveBeenCalledOnce();
+    expect(completed).toBe(false);
+    expect(sigTermListeners).toHaveLength(1);
+    finishOutput();
+    await agentPromise;
+    expect(sigTermListeners).toHaveLength(0);
+  });
+
+  it('retains both EOF cleanup and output failures', async () => {
+    const cleanupError = new Error('session cleanup failed');
+    const outputError = new Error('output failed');
+    mockCloseAcpOutput.mockRejectedValueOnce(outputError);
+    const { agent, agentPromise } = await startPreloadTestAgent();
+    Object.assign(agent!, {
+      shutdownMcpPool: vi.fn().mockResolvedValue(undefined),
+      disposeSessions: vi.fn().mockRejectedValue(cleanupError),
+    });
+    const rejected = agentPromise.catch((error: unknown) => error);
+
+    mockConnectionState.resolve();
+    await expect(rejected).resolves.toMatchObject({
+      errors: [cleanupError, outputError],
+    });
+    expect(mockCloseAcpOutput).toHaveBeenCalledOnce();
+    expect(sigTermListeners).toHaveLength(0);
+  });
+
+  it('does not replace a signal exit with an interrupted output drain failure', async () => {
+    let rejectOutput!: (error: Error) => void;
+    mockCloseAcpOutput.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectOutput = reject;
+        }),
+    );
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(sigTermListeners).toHaveLength(1));
+    mockConnectionState.resolve();
+    await vi.waitFor(() => expect(mockCloseAcpOutput).toHaveBeenCalledOnce());
+
+    sigTermListeners[0]('SIGTERM');
+    rejectOutput(new Error('stdout destroyed by signal shutdown'));
+    await agentPromise;
+    await vi.waitFor(() => expect(processExitSpy).toHaveBeenCalledWith(0));
   });
 
   it('only runs shutdown once even if multiple signals arrive', async () => {
@@ -2784,6 +2876,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks('managed-session');
     const order: string[] = [];
     vi.mocked(innerConfig.closeSessionWriter).mockImplementation(async () => {
+      expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
       order.push('writer');
     });
     vi.mocked(innerConfig.shutdown).mockImplementation(async (options) => {
@@ -2813,6 +2906,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
+    expect(mockPrepareFileWatchersForProcessExit).not.toHaveBeenCalled();
     mockConnectionState.resolve();
     await agentPromise;
 
