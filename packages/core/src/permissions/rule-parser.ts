@@ -935,6 +935,20 @@ function isAsyncOperator(command: string, index: number): boolean {
 }
 
 /**
+ * A trailing CR that is the *whole* redirection target of the segment, as in
+ * the `>\r` of `cat >\r\necho hi`. The operator list mirrors the one the op
+ * extractor uses (`shell-semantics.ts`).
+ *
+ * Such a CR is not a line-ending artefact: bash names the file `\r`, so
+ * dropping it with the CRLF loses the write and leaves the bare operator in the
+ * positional args, where `looksLikePath('>')` turns it into a spurious
+ * `read_file '<cwd>/>'`. A CR after a real word (`echo x >out\r\n`) is not this
+ * shape and is still dropped as a line ending.
+ */
+const CR_IS_WHOLE_REDIRECT_TARGET =
+  /(^|[ \t])(?:<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)\r$/;
+
+/**
  * One segment of a compound command, together with the operator that ended it.
  */
 export interface CompoundCommandSegment {
@@ -1013,10 +1027,13 @@ export function splitCompoundCommandSegments(
         continue;
       }
       // A CRLF pair ends a line, so the `\r` in front of a `\n` terminator is
-      // dropped with it; a lone `\r` is a bash word character and stays.
+      // dropped with it; a lone `\r` is a bash word character and stays. The
+      // exception is a `\r` that *is* the whole redirection target of the line.
       const raw = command.substring(lastSplit, i);
+      const dropsLineEndingCR =
+        op === '\n' && !CR_IS_WHOLE_REDIRECT_TARGET.test(raw);
       const segment = trimBashWordSeparators(
-        op === '\n' ? raw.replace(/\r$/, '') : raw,
+        dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
       );
       if (segment) {
         segments.push({ command: segment, terminator: op });
@@ -1346,6 +1363,34 @@ export function resolvePathPattern(
 }
 
 /**
+ * Placeholder for the characters JavaScript's `.` does not match, substituted
+ * before a string reaches picomatch. See {@link neutralizeLineTerminators}.
+ */
+const LINE_TERMINATOR_PLACEHOLDER = '\u0001';
+
+/**
+ * Substitute the four JS line terminators — `\r`, `\n`, `\u2028` and `\u2029` —
+ * with a length-preserving placeholder before handing a string to picomatch.
+ *
+ * picomatch compiles `**` to a `.`-based body, so without this a path ending in
+ * a line terminator misses every `**` pattern: `/project/out\r` does not match
+ * `/project/**`. Bash keeps a lone CR as an ordinary word character, so a
+ * redirection target can legitimately end in one (`printf 'echo x >out\r' >
+ * s.sh && bash s.sh` creates a file named `out\r`), and the miss silently
+ * turned a `deny` into an `allow` (#11865).
+ *
+ * It is applied to the pattern and to the candidate alike, so the matcher stays
+ * symmetric: `matchesPathPattern` has exactly one non-test caller,
+ * `matchesRule`, which the permission manager consults for deny, ask and allow
+ * rules alike, and a one-sided substitution would turn every allow rule into a
+ * grant for line-terminator-bearing paths. The placeholder is not `/`, so `*`
+ * still cannot cross a directory boundary.
+ */
+function neutralizeLineTerminators(value: string): string {
+  return value.replace(/[\r\n\u2028\u2029]/g, LINE_TERMINATOR_PLACEHOLDER);
+}
+
+/**
  * Match a file path against a gitignore-style path pattern.
  *
  * Uses picomatch for the actual glob matching, following gitignore semantics:
@@ -1375,7 +1420,7 @@ export function matchesPathPattern(
       ? getCanonicalPatternCandidates(resolvedPattern)
       : [resolvedPattern];
   const matchers = patterns.map((pattern) =>
-    picomatch(pattern, {
+    picomatch(neutralizeLineTerminators(pattern), {
       dot: true,
       nocase: false,
     }),
@@ -1386,7 +1431,7 @@ export function matchesPathPattern(
       : [toPosixPath(filePath)];
 
   return paths.some((candidate) =>
-    matchers.some((isMatch) => isMatch(candidate)),
+    matchers.some((isMatch) => isMatch(neutralizeLineTerminators(candidate))),
   );
 }
 

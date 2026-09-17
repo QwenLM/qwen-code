@@ -525,15 +525,51 @@ export function getCommandRoots(command: string): string[] {
     .filter((c): c is string => !!c);
 }
 
+/**
+ * Trim the characters bash's lexer discards at a command edge — space, tab and
+ * newline — plus a CR that is the first half of a CRLF pair. A lone CR is an
+ * ordinary bash word character, as are VT, FF and NBSP, which
+ * `String.prototype.trim` also strips; that deleted a redirection target before
+ * op extraction (#11865).
+ *
+ * Two pointers rather than a `$`-anchored `g` regex: with the `g` flag the
+ * engine retries the end-anchored alternative at every index, and inside an
+ * interior whitespace run the greedy `+` unwinds one character at a time, so
+ * the regex is quadratic there (~1.4 s at a 40 k run, ~3.2 s at 64 k) —
+ * synchronously, on model-controlled input, inside the permission gate.
+ */
+function trimBashEdgeSeparators(command: string): string {
+  let start = 0;
+  let end = command.length;
+  while (start < end) {
+    const ch = command[start]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      start++;
+      continue;
+    }
+    if (ch === '\r' && command[start + 1] === '\n') {
+      start++;
+      continue;
+    }
+    break;
+  }
+  while (end > start) {
+    const ch = command[end - 1]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      end--;
+      continue;
+    }
+    if (ch === '\r' && command[end] === '\n') {
+      end--;
+      continue;
+    }
+    break;
+  }
+  return command.slice(start, end);
+}
+
 export function stripShellWrapper(command: string): string {
-  // Bash's lexer skips space, tab and newline at command edges. A CR is
-  // removed only as part of CRLF; by itself it is an ordinary word character.
-  // String.trim() also removes VT, FF, NBSP and other ordinary bash characters,
-  // which can delete a redirection target before op extraction (#11865).
-  const trimmed = command.replace(
-    /^(?:[ \t\n]|\r(?=\n))+|(?:[ \t\n]|\r(?=\n))+$/g,
-    '',
-  );
+  const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
 
   // Skip leading env assignments (e.g. `FOO=bar bash -c '...'`)
