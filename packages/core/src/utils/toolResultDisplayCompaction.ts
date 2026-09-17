@@ -581,10 +581,20 @@ function compactMcpAppResultDisplay(
   display: McpAppResultDisplay,
   purpose: CompactionPurpose,
 ): McpAppResultDisplay {
+  // A saved transcript is replayed by the Web Shell, which mounts the sandboxed
+  // iframe only when `html` is non-empty and never re-fetches the `ui://`
+  // resource (packages/web-shell/client/components/messages/McpApp.tsx). Wiping
+  // the payload for the recording purpose made every recorded MCP App fall back
+  // to plain text on replay, so the fields are kept verbatim there: `html` is
+  // already bounded by the producer's MCP_APP_RESOURCE_MAX_BYTES check in
+  // tools/mcp-tool.ts, and a truncated document would not render either.
+  // Terminal history only ever renders `fallbackText`, so it keeps dropping
+  // them. See #10369.
+  const retainAppPayload = purpose === 'recording';
   return {
     ...display,
-    html: '',
-    toolResult: {},
+    html: retainAppPayload ? display.html : '',
+    toolResult: retainAppPayload ? display.toolResult : {},
     fallbackText: compactString(
       display.fallbackText,
       purpose,

@@ -557,7 +557,7 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedTeam.teamName).toContain('truncated from');
   });
 
-  it('drops MCP App HTML and tool results from retained displays', () => {
+  it('drops MCP App HTML and tool results from retained history displays', () => {
     const marker = 'PROBE_MCP_APP_HTML_UNIQUE_MARKER';
     const display: McpAppResultDisplay = {
       type: 'mcp_app',
@@ -575,6 +575,50 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.toolResult).toEqual({});
     expect(compacted.fallbackText).toBe('Dashboard ready');
     expect(JSON.stringify(compacted)).not.toContain(marker);
+  });
+
+  // The recording purpose feeds the replayed transcript, and the Web Shell
+  // mounts the MCP App iframe only when `html` is non-empty (it never
+  // re-fetches the `ui://` resource). See #10369.
+  it('keeps MCP App HTML and tool results in recorded displays', () => {
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: '<main>PROBE_MCP_APP_HTML_UNIQUE_MARKER</main>',
+      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.html).toBe(display.html);
+    expect(compacted.toolResult).toEqual(display.toolResult);
+    expect(compacted.toolArguments).toEqual(display.toolArguments);
+    expect(compacted.fallbackText).toBe('Dashboard ready');
+  });
+
+  it('still bounds an oversized MCP App fallbackText when recording', () => {
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: '<main>app</main>',
+      toolResult: {},
+      toolArguments: {},
+      fallbackText: `head-${'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS)}-tail`,
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.html).toBe(display.html);
+    expect(compacted.fallbackText.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(compacted.fallbackText).toContain(
+      'truncated for saved session preview',
+    );
   });
 });
 
