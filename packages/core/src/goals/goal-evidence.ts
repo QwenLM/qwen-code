@@ -51,6 +51,15 @@ const VERIFIER_EVIDENCE_CONTENT_BYTE_LIMIT = 8_000;
 const VERIFIER_EVIDENCE_HEAD_BYTES = 3_000;
 const VERIFIER_EVIDENCE_MIDDLE_TRUNCATION_MARKER =
   '\n\u2026[middle truncated]\n';
+/**
+ * The least room the verifier request must have left for evidence: one
+ * record at the content limit with every byte doubled by JSON escaping,
+ * plus its keys and ids. Under this the window holds a stub or nothing, the
+ * verifier can only reject, and the model can only propose again; what has
+ * to shrink is the objective, so the runtime says that instead.
+ */
+export const VERIFIER_EVIDENCE_WINDOW_MIN_BYTES =
+  VERIFIER_EVIDENCE_CONTENT_BYTE_LIMIT * 2 + 512;
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
 const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
 

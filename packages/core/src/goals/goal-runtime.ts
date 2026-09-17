@@ -9,6 +9,7 @@ import {
   buildGoalEvidenceCheckpointWindow,
   buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
+  VERIFIER_EVIDENCE_WINDOW_MIN_BYTES,
   type GoalEvidenceCheckpointWindow,
   type GoalEvidenceRecord,
   type GoalVerifierEvidenceWindow,
@@ -1185,9 +1186,10 @@ export function createGoalRuntime(
             omitted: Number.MAX_SAFE_INTEGER,
           }),
         );
-      if (budgetBytes <= 0) {
+      if (budgetBytes < VERIFIER_EVIDENCE_WINDOW_MIN_BYTES) {
         // Not a verifier failure a resume could get past: the objective or
-        // the reason fills the request by itself.
+        // the reason leaves no room for even one full record, so every
+        // proposal would be rejected for what the window left out.
         await recordVerificationOutcome(attempt, {
           kind: 'paused',
           reason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,

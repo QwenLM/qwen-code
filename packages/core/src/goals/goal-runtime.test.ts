@@ -1230,19 +1230,67 @@ describe('goal runtime', () => {
     ]);
   });
 
-  it('pauses with a clear reason when the objective leaves the verifier no room for evidence', async () => {
+  it.each([
+    ['fills the request by itself', 260_000],
+    // Room for a stub but not for one full record: the verifier could only
+    // reject for what the window left out, turn after turn.
+    ['leaves less room than one full record needs', 245_000],
+  ])(
+    'pauses with a clear reason when the objective %s',
+    async (_name, length) => {
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      // /goal set accepts any length; a pasted 250 kB specification is the
+      // objective, and no evidence window can fit next to it.
+      await runtime.dispatch({
+        action: 'create',
+        objective: 'x'.repeat(length),
+      });
+      const permit = host.started[0];
+      records = verifierEvidenceRecords(
+        permit,
+        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      );
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+      });
+
+      await runtime.finishTurn(permit);
+
+      expect(verifier).not.toHaveBeenCalled();
+      expect(runtime.getSnapshot()).toMatchObject({
+        activity: 'idle',
+        goal: {
+          status: 'paused',
+          lastReason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+        },
+      });
+      expect(runtime.getSnapshot().goal).not.toHaveProperty('limitKind');
+      expect(journal.appended.at(-1)).toMatchObject({ cause: 'pause' });
+      expect(host.started).toHaveLength(1);
+    },
+  );
+
+  it('still asks the verifier when a long objective leaves room for a full record', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
     const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'ok',
+    }));
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
     runtime.bindHost(host);
-    // /goal set accepts any length; a pasted 250 kB specification is the
-    // objective, and no evidence window can fit next to it.
     await runtime.dispatch({
       action: 'create',
-      objective: 'x'.repeat(260_000),
+      objective: 'x'.repeat(230_000),
     });
     const permit = host.started[0];
     records = verifierEvidenceRecords(
@@ -1256,17 +1304,8 @@ describe('goal runtime', () => {
 
     await runtime.finishTurn(permit);
 
-    expect(verifier).not.toHaveBeenCalled();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'paused',
-        lastReason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
-      },
-    });
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('limitKind');
-    expect(journal.appended.at(-1)).toMatchObject({ cause: 'pause' });
-    expect(host.started).toHaveLength(1);
+    expect(verifier).toHaveBeenCalledOnce();
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'complete' });
   });
 
   it.each([
