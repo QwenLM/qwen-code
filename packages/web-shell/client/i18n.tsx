@@ -1198,6 +1198,7 @@ const EN: Messages = {
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
     `${v?.count ?? 0} file(s) exceeded the attachment size limit.`,
+  'editor.pastedTextShowInEditor': 'Show inline',
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -5030,6 +5031,7 @@ const ZH: Messages = {
   'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
+  'editor.pastedTextShowInEditor': '显示到输入框',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
