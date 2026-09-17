@@ -5097,7 +5097,14 @@ describe('HookEventHandler', () => {
         await hookEventHandler.fireUserPromptSubmitEvent('hi');
         const explicit = progress().find((m) => m['phase'] === 'end');
 
-        expect(explicit).toEqual(implicit);
+        // Two firings are two invocations, so the identity is the one field
+        // that has to differ; everything the outcome decides must not.
+        expect(implicit?.['invocationId']).toMatch(/^hook-\d+$/);
+        expect(explicit?.['invocationId']).not.toBe(implicit?.['invocationId']);
+        expect(explicit).toEqual({
+          ...implicit,
+          invocationId: expect.stringMatching(/^hook-\d+$/),
+        });
       },
     );
   });
