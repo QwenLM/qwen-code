@@ -1654,6 +1654,11 @@ export const useLlmStream = (
                 args: toolArgs,
                 isClientInitiated: true,
                 prompt_id,
+                // Client-direct provenance (omni policy design): slash
+                // commands scheduling a tool are the in-process `client`
+                // channel — subject to the same media-policy modelAccess
+                // gate as model calls, never to fixed-policy semantics.
+                executionOrigin: { kind: 'client' },
               };
               registerToolBatch(toolCallRequest);
               scheduleToolCalls([toolCallRequest], abortSignal);
@@ -3290,6 +3295,8 @@ export const useLlmStream = (
         const message = messages[index];
         if (GOAL_COMMAND_RE.test(message)) {
           await handleSlashCommand(message);
+          // The command has already taken effect; restoring it after cancelled
+          // steering preparation would execute that side effect again.
           continue;
         }
 
@@ -3299,11 +3306,24 @@ export const useLlmStream = (
         if (isAtCommand(message)) {
           const timeout = new AbortController();
           const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
-          const timeoutId = setTimeout(() => {
-            timeout.abort(
-              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-            );
-          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          // URL media refs are exempt from the fixed mid-turn budget: the
+          // omni URL path downloads and uploads media end-to-end inside
+          // resolveAtCommandQuery under its own watchdogs (30s header, 60s
+          // idle), so a 10s cap would structurally kill every mid-turn
+          // @https reference — and inside the resolver the timeout abort is
+          // indistinguishable from a user cancel, so the message would be
+          // dropped quietly rather than failing with a named error.
+          // Filesystem resolution keeps the cap unchanged.
+          const hasUrlMediaRef =
+            /@https?:\/\//i.test(message) &&
+            (config.isOmniEnabled?.() ?? false);
+          const timeoutId = hasUrlMediaRef
+            ? undefined
+            : setTimeout(() => {
+                timeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
           try {
             const atCommandResult = await resolveWithAbort(
               atCommandSignal,
@@ -3758,6 +3778,15 @@ export const useLlmStream = (
 
       const releaseSubmissionActivity =
         retainSubmissionActivity(submissionGeneration);
+      if (
+        submitType === SendMessageType.UserQuery &&
+        !allowConcurrentBtwDuringResponse &&
+        !isDetachedToolContinuation
+      ) {
+        // Media preparation can upload before the model stream starts.
+        // Submission activity owns clearing this state on every exit path.
+        setIsResponding(true);
+      }
       const submission = promptIdContext.run(prompt_id, async () => {
         let queuedGoal = metadata?.goal;
         let preparedQuery: {
@@ -4516,7 +4545,10 @@ export const useLlmStream = (
       };
       const orphanedEntries: Part[][] = [];
       try {
-        const history = llmClient?.getHistoryShallow?.() ?? [];
+        const history =
+          llmClient?.getChat?.()?.getHistoryForRecovery?.() ??
+          llmClient?.getHistoryShallow?.() ??
+          [];
         for (let i = history.length - 1; i >= 0; i--) {
           const entry = history[i];
           if (!entry || entry.role !== 'user') break;

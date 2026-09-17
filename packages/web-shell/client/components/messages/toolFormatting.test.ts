@@ -102,6 +102,37 @@ describe('toolFormatting', () => {
     ).toBe('README.md');
   });
 
+  it.each([
+    'packages/web-shell/client/messageTypes.ts (lines 161-200)',
+    'packages/.../MessageList.dom.test.tsx (lines 277-298)',
+    './src/index.ts',
+    '../src/index.ts',
+    '~/project/src/index.ts',
+    'Writing to src/index.ts',
+    "'TODO' in path 'src/components' (filter: '**/*.ts')",
+    'https://example.com/docs/index.html',
+  ])('preserves separators in title description %s', (description) => {
+    const call = tool({ title: `ReadFile: ${description}` });
+    expect(getToolDescription(call, '/workspace/project')).toBe(description);
+    expect(getToolSummaryDescription(call, '/workspace/project')).toBe(
+      description,
+    );
+  });
+
+  it.each([
+    ["'/workspace/project/src/index.ts'", "'src/index.ts'"],
+    ['"/workspace/project/src/index.ts"', '"src/index.ts"'],
+    ['(/workspace/project/src/index.ts)', '(src/index.ts)'],
+    ['C:/workspace/project/src/index.ts', 'index.ts'],
+  ])('normalizes an embedded absolute path %s', (path, expected) => {
+    expect(
+      getToolDescription(
+        tool({ title: `Writing to ${path}` }),
+        '/workspace/project',
+      ),
+    ).toBe(`Writing to ${expected}`);
+  });
+
   it('falls back to a workspace-relative file path', () => {
     expect(
       getToolDescription(

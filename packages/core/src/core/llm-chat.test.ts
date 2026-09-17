@@ -59,6 +59,11 @@ import {
 } from './tool-call-preparation.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 
+const degradeOmniMediaMock = vi.hoisted(() => vi.fn());
+vi.mock('../omni/reactive-degrade.js', () => ({
+  degradeOmniMediaAfterServerReject: degradeOmniMediaMock,
+}));
+
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
 
@@ -6333,6 +6338,163 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    describe('Omni overflow recovery on LlmChat', () => {
+      beforeEach(() => {
+        degradeOmniMediaMock.mockReset();
+        Object.assign(mockConfig, {
+          getOmniProcessingConfig: () => ({
+            limits: { maxTransportPasses: 1 },
+          }),
+        });
+      });
+
+      it('rebuilds the request from degraded media before compressing history', async () => {
+        const compress = vi
+          .spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValue({
+            newHistory: null,
+            info: {
+              originalTokenCount: 0,
+              newTokenCount: 0,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          });
+        degradeOmniMediaMock.mockImplementation(
+          async (_config, history: Content[]) => {
+            history.at(-1)!.parts = [
+              {
+                fileData: { mimeType: 'image/png', fileUri: 'oss://degraded' },
+              },
+            ];
+            return { replacedParts: 1, degradedResources: 1 };
+          },
+        );
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(new Error('context_length_exceeded'))
+          .mockResolvedValueOnce(makeStreamResponse('recovered'));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                fileData: { mimeType: 'image/png', fileUri: 'oss://original' },
+              },
+            ],
+          },
+          'omni-recovery',
+        );
+        const events: StreamEvent[] = [];
+        for await (const event of stream) events.push(event);
+        expect(degradeOmniMediaMock).toHaveBeenCalledOnce();
+        expect(compress).toHaveBeenCalledTimes(1);
+        const retry = JSON.stringify(
+          vi.mocked(mockContentGenerator.generateContentStream).mock
+            .calls[1][0],
+        );
+        expect(retry).toContain('oss://degraded');
+        expect(retry).not.toContain('oss://original');
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(1);
+      });
+
+      it('bounds degradation and then follows the existing compression failure path', async () => {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+        degradeOmniMediaMock.mockResolvedValue({
+          replacedParts: 1,
+          degradedResources: 1,
+        });
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          new Error('context_length_exceeded'),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'omni-bound',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toThrow('context_length_exceeded');
+        expect(degradeOmniMediaMock).toHaveBeenCalledOnce();
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not degrade media on a byte-only HTTP 413', async () => {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+        vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+          Object.assign(new Error('Request Entity Too Large'), { status: 413 }),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'omni-413',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toThrow();
+        expect(degradeOmniMediaMock).not.toHaveBeenCalled();
+      });
+
+      it('propagates cancellation during degradation without another model request', async () => {
+        const controller = new AbortController();
+        degradeOmniMediaMock.mockImplementation(async () => {
+          controller.abort();
+          controller.signal.throwIfAborted();
+        });
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockRejectedValueOnce(new Error('context_length_exceeded'));
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: 'latest',
+            config: { abortSignal: controller.signal },
+          },
+          'omni-cancel',
+        );
+        await expect(
+          (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })(),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledOnce();
+      });
+    });
+
     it('does not attempt reactive compression more than once per send', async () => {
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
@@ -6781,7 +6943,22 @@ describe('LlmChat', async () => {
     it('rejects before request serialization and restores history when hard-rescue compression is still oversized', async () => {
       const originalHistory: Content[] = [
         { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
-        { role: 'model', parts: [{ text: 'ack' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'ended',
+                name: 'update_goal',
+                response: {},
+              },
+            },
+          ],
+        },
       ];
       const recordChatCompression = vi.fn();
       const chatWithRecording = new LlmChat(
@@ -6794,7 +6971,7 @@ describe('LlmChat', async () => {
         } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
-      chatWithRecording.setHistory(originalHistory);
+      chatWithRecording.setHistory(originalHistory, ['ended']);
       chatWithRecording.setLastPromptTokenCount(176_999);
 
       vi.spyOn(
@@ -6827,6 +7004,8 @@ describe('LlmChat', async () => {
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(176_999);
       expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
+      expect(chatWithRecording.getCompletedToolCallIds()).toEqual(['ended']);
+      expect(chatWithRecording.getHistoryForRecovery()).toEqual([]);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
       );
@@ -8141,6 +8320,156 @@ describe('LlmChat', async () => {
         mockContentGenerator.generateContentStream,
       ).mock.calls[0][0].config as { maxOutputTokens?: number };
       expect(requestConfig.maxOutputTokens).toBe(32_768);
+    });
+  });
+
+  describe('completed tool boundary', () => {
+    const result: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: { id: 'ended', name: 'update_goal', response: {} },
+        },
+      ],
+    };
+
+    it.each(['summary', 'fast'] as const)(
+      'preserves and records completed boundaries through %s compression',
+      async (mode) => {
+        const call: Content = {
+          role: 'model',
+          parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+        };
+        const recordChatCompression = vi.fn();
+        const recordingChat = new LlmChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordChatCompression,
+          } as unknown as ConstructorParameters<typeof LlmChat>[3],
+          uiTelemetryService,
+        );
+        recordingChat.setHistory(
+          [
+            { role: 'user', parts: [{ text: 'work' }] },
+            {
+              ...call,
+              parts: [
+                { text: 'reasoning '.repeat(100), thought: true },
+                ...call.parts!,
+              ],
+            },
+            structuredClone(result),
+          ],
+          ['ended'],
+        );
+        if (mode === 'summary') {
+          vi.spyOn(
+            ChatCompressionService.prototype,
+            'compress',
+          ).mockResolvedValueOnce({
+            newHistory: [call, structuredClone(result)],
+            info: {
+              originalTokenCount: 1000,
+              newTokenCount: 100,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          });
+        }
+
+        const info =
+          mode === 'summary'
+            ? await recordingChat.tryCompress('completed-boundary', true)
+            : recordingChat.compressFast().info;
+
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(recordingChat.getCompletedToolCallIds()).toEqual(['ended']);
+        expect(recordingChat.getHistoryForRecovery()).toEqual([]);
+        expect(recordChatCompression).toHaveBeenCalledWith(
+          expect.objectContaining({
+            completedToolCallIds: ['ended'],
+            compressedHistory: recordingChat.getHistory(),
+          }),
+        );
+      },
+    );
+
+    it('restores the earlier completed boundary when rewind removes a later one', () => {
+      const later: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'later',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      chat.setHistory(
+        [
+          structuredClone(result),
+          { role: 'user', parts: [{ text: 'next goal' }] },
+          later,
+        ],
+        ['ended', 'later'],
+      );
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      chat.truncateHistory(1);
+      expect(chat.getCompletedToolCallIds()).toEqual(['ended']);
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      const input: Content = { role: 'user', parts: [{ text: 'unanswered' }] };
+      chat.addHistory(input);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
+      expect(chat.getHistory()).toEqual([result]);
+    });
+
+    it('keeps completed results out of recovery and retry without altering model history', () => {
+      chat.setHistory([structuredClone(result)]);
+      chat.setCompletedToolCallIds(['ended']);
+      expect(chat.getHistory()).toEqual([result]);
+      expect(chat.getHistory(true)).toEqual([result]);
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      chat.addHistory(input);
+      expect(chat.getHistoryForRecovery()).toEqual([input]);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
+      expect(chat.getHistory()).toEqual([result]);
+    });
+
+    it('preserves the boundary through deliberate history transforms and invalidates removed IDs', () => {
+      chat.setHistory([structuredClone(result)], ['ended']);
+      chat.setHistory(
+        [{ role: 'user', parts: [{ text: 'startup' }] }, ...chat.getHistory()],
+        chat.getCompletedToolCallIds(),
+      );
+      chat.stripThoughtsFromHistory();
+      expect(chat.getHistoryForRecovery()).toEqual([]);
+      chat.truncateHistory(1);
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+      chat.addHistory(structuredClone(result));
+      expect(chat.getHistoryForRecovery()).toHaveLength(2);
+      chat.setCompletedToolCallIds(['ended']);
+      chat.setHistory([structuredClone(result)]);
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+    });
+
+    it('rejects ambiguous imported IDs and clears the boundary on clear', () => {
+      chat.setHistory(
+        [structuredClone(result), structuredClone(result)],
+        ['ended'],
+      );
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+      chat.setHistory([structuredClone(result)], ['ended']);
+      chat.clearHistory();
+      chat.addHistory(structuredClone(result));
+      expect(chat.getCompletedToolCallIds()).toEqual([]);
+      expect(chat.getHistoryForRecovery()).toEqual([result]);
     });
   });
 
@@ -14546,6 +14875,63 @@ describe('LlmChat', async () => {
             'test-model',
             { message: 'test' },
             'prompt-transport-continuation-replaced-by-compression',
+          );
+          await collectStreamWithFakeTimers(stream, 10_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          const thirdRequest = requestContentsOfCall(2);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('discarded half'),
+              ),
+            ),
+          ).toBe(false);
+          expect(
+            thirdRequest.some((entry) =>
+              entry.parts?.some((part) =>
+                part.text?.includes('The connection dropped mid-response'),
+              ),
+            ),
+          ).toBe(false);
+          expect(chat.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'a clean answer' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops a pending continuation when Omni media degradation takes over', async () => {
+        vi.useFakeTimers();
+        try {
+          Object.assign(mockConfig, {
+            getOmniProcessingConfig: () => ({
+              limits: { maxTransportPasses: 1 },
+            }),
+          });
+          degradeOmniMediaMock.mockResolvedValue({
+            replacedParts: 1,
+            degradedResources: 1,
+          });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('discarded half ')]))
+            .mockRejectedValueOnce(
+              new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('a clean answer', 'STOP');
+              })(),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-replaced-by-omni',
           );
           await collectStreamWithFakeTimers(stream, 10_000);
 
