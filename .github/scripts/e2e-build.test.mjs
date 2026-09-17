@@ -578,7 +578,13 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
     const unpacks = Object.values(doc.jobs).flatMap((job) =>
       (job.steps ?? []).filter((s) => s.name === 'Unpack build artifact'),
     );
-    assert.equal(unpacks.length, downloads.length);
+    // A leg unpacks once what it downloads in two attempts (first try plus
+    // the bounded retry pinned below), so count the first attempts, not
+    // every download step.
+    const firstAttempts = downloads.filter(
+      (s) => s.name === 'Download build artifact',
+    );
+    assert.equal(unpacks.length, firstAttempts.length);
     for (const unpack of unpacks) {
       assert.ok(
         unpack.run.endsWith('/' + archive + '"'),
@@ -612,5 +618,151 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
       consumed.has('e2e-build'),
       'no leg downloads the artifact the build job publishes',
     );
+  });
+});
+
+describe('e2e build artifact download retry (consumer legs)', () => {
+  // Run 35250857883's macOS shard 2/2 died in 'Download build artifact'
+  // with the build job green behind it (#12125): the download crosses the
+  // same runner-to-blobstore network as the #11364 upload stall, but unlike
+  // the upload it carried no retry, so one transient failure reddened a
+  // whole leg. Every consumer leg now mirrors the upload side's one bounded
+  // retry. The semantics live entirely in step properties nothing else
+  // asserts on, and a regression — the retry dropped, its gate reworded,
+  // the attempts drifting apart — is silent until the next transient stall
+  // reds a main run again, so pin the contract per leg.
+  const doc = parse(readFileSync(E2E_WORKFLOW, 'utf8'));
+  const consumers = Object.entries(doc.jobs).filter(([, job]) =>
+    (job.steps ?? []).some((s) => s.name === 'Download build artifact'),
+  );
+
+  it('finds the legs that consume the build artifact', () => {
+    // The pins below are per consumer; an empty match set would green them
+    // vacuously, so fail when the filter stops seeing legs. The four known
+    // legs are pinned by name in scripts/tests/e2e-workflow.test.js; a new
+    // leg with a 'Download build artifact' step joins consumers on its own
+    // and must then carry the pair.
+    assert.ok(
+      consumers.length >= 4,
+      'expected the four e2e legs downloading the build artifact',
+    );
+  });
+
+  it('keeps the two-attempt shape per leg, gated on the first outcome', () => {
+    for (const [jobName, job] of consumers) {
+      const steps = job.steps;
+      // Scope to the archive, not the action: an unrelated second artifact
+      // download in a leg must not redden the retry contract, and the two
+      // attempts are bound by step name, never by position.
+      const archiveDownloads = steps.filter(
+        (s) =>
+          String(s.uses || '').startsWith('actions/download-artifact@') &&
+          s.with?.name === 'e2e-build',
+      );
+      assert.equal(
+        archiveDownloads.length,
+        2,
+        `${jobName} must download e2e-build exactly twice: first attempt plus one bounded retry`,
+      );
+      const first = archiveDownloads.find(
+        (s) => s.name === 'Download build artifact',
+      );
+      const retry = archiveDownloads.find(
+        (s) => s.name === 'Download build artifact (retry)',
+      );
+      assert.ok(first, `${jobName} must have a 'Download build artifact' step`);
+      assert.ok(
+        retry,
+        `${jobName} must have a 'Download build artifact (retry)' step`,
+      );
+      // The first attempt's failure must not red the leg before the retry
+      // runs; the retry carries no continue-on-error, so a double failure
+      // still fails the leg and a deterministic failure — the artifact
+      // missing — stays red through both attempts.
+      assert.equal(first.id, 'download-build');
+      assert.equal(first['continue-on-error'], true);
+      assert.equal(retry['continue-on-error'], undefined);
+      // The whole expression, not a substring: a prepended failure()
+      // conjunct is false once the first attempt's continue-on-error absorbs
+      // the stall (its conclusion is success; only its outcome is failure),
+      // so the retry would never run while a substring pin still reads green.
+      assert.equal(
+        retry.if,
+        "${{ steps.download-build.outcome == 'failure' }}",
+      );
+      // Both attempts pull the same artifact into the same path — unpack
+      // reads the first attempt's path, so a retry downloading elsewhere
+      // leaves the leg red on a recovered download. There is no asymmetry
+      // like the upload's overwrite here: a download reserves nothing.
+      assert.deepEqual(
+        retry.with,
+        first.with,
+        `${jobName} retry must download the same payload to the same path`,
+      );
+      assert.equal(
+        retry.uses,
+        first.uses,
+        `${jobName} attempts must run the same action pin`,
+      );
+      assert.ok(
+        steps.indexOf(first) < steps.indexOf(retry),
+        `${jobName} first attempt must run before the retry`,
+      );
+      // Unpack consumes what the download produced, so it must wait for the
+      // retry: wedged between the attempts it would run on the first
+      // attempt's empty path and fail the leg the retry would have saved.
+      const unpack = steps.find((s) => s.name === 'Unpack build artifact');
+      assert.ok(unpack, `${jobName} must have an 'Unpack build artifact' step`);
+      assert.ok(
+        steps.indexOf(retry) < steps.indexOf(unpack),
+        `${jobName} unpack must run after the retry`,
+      );
+    }
+  });
+
+  it('announces an absorbed first-attempt failure per leg', () => {
+    // A recovered download leaves the leg green, so the main-CI failure
+    // tracker — gated on conclusion == "failure" — never records the stall
+    // the retry absorbed, and the recurrence count goes quiet while the
+    // network class keeps striking. Same remedy as the upload side: a
+    // warning annotation keeps it countable without reddening the leg;
+    // placed after the retry, the implicit success() gate scopes it to the
+    // absorbed case — a double failure reddens the leg directly.
+    for (const [jobName, job] of consumers) {
+      const steps = job.steps;
+      const announce = steps.find(
+        (s) => s.name === 'Announce absorbed download failure',
+      );
+      assert.ok(
+        announce,
+        `${jobName} must have an 'Announce absorbed download failure' step`,
+      );
+      assert.equal(
+        announce.if,
+        "${{ steps.download-build.outcome == 'failure' }}",
+        `${jobName} announce must be gated on the first attempt outcome, exactly like the retry`,
+      );
+      assert.ok(
+        !announce.uses,
+        `${jobName} announce must be a plain run step — an action would carry its own failure modes`,
+      );
+      assert.match(
+        announce.run,
+        /::warning::/,
+        `${jobName} announce must emit a warning annotation the check-run annotations API keeps queryable`,
+      );
+      assert.doesNotMatch(
+        announce.run,
+        /::error::|exit\s+[1-9]/,
+        `${jobName} announce must not be able to turn the leg red`,
+      );
+      const retry = steps.find(
+        (s) => s.name === 'Download build artifact (retry)',
+      );
+      assert.ok(
+        steps.indexOf(retry) < steps.indexOf(announce),
+        `${jobName} announce must run after the retry so it fires only for the absorbed failure`,
+      );
+    }
   });
 });
