@@ -35,6 +35,14 @@ describe('settings presentation aliases', () => {
     ).toBe(true);
     expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:omni-media-delivery');
   });
+  it('aliases the named-workflows-only lock row', () => {
+    expect(
+      isSettingExcluded('tools.workflowNameOnly', {
+        excludeItems: ['setting:workflow-name-only'],
+      }),
+    ).toBe(true);
+    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:workflow-name-only');
+  });
   it('matches published builtin ids by direct membership', () => {
     expect(
       isItemExcluded('builtin:model-management', {
