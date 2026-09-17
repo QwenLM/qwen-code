@@ -198,19 +198,25 @@ jobs:
   # sandbox:docker leg sat on a pool runner for exactly 600s and failed
   # without a single step). No commit can cause that, so the per-commit issue
   # it would file hands the autofix agent an unactionable flake — re-run the
-  # failed jobs once instead. A flake is absorbed: the re-run passes and no
-  # issue ever existed. A recurrence on attempt 2 files per commit as a fleet
-  # failure kept off the autofix route, so a persistent outage costs one
-  # human-read issue per merge rather than one agent round per merge. A
-  # non-failure attempt 2 — cancelled, timed out, stale — files nothing:
-  # analyze's failure-only gate skips it, so the re-run step's annotation is
-  # the record of the suppressed filing. The re-run itself is skipped when a
-  # newer main run of the same workflow already exists: the attempt would
-  # re-enter the watched workflow's concurrency group as the newest pending
-  # entry, and GitHub keeps at most one pending run per group (e2e.yml) — it
-  # would cancel that newer run, whose `cancelled` conclusion analyze's
-  # failure-only gate never sees, dropping main's newest tree with no record
-  # at all.
+  # failed jobs once instead. A flake is absorbed only when the re-run is
+  # OBSERVED to pass: the step polls the re-run to completion and any other
+  # outcome — failure, cancellation, or a poll that outlives its loop — fails
+  # the job so file_issue's result-gate files the fleet failure. Keying on the
+  # outcome rather than the request matters because the re-run re-enters the
+  # watched workflow's concurrency group as the newest pending entry, where
+  # the next merge can cancel it before it starts (GitHub keeps at most one
+  # pending run per group and cancel-in-progress stays off on main — see
+  # e2e.yml), and that cancelled attempt never passes analyze's failure-only
+  # gate: suppressing on the request alone dropped main's failure with no
+  # record anywhere. The re-run itself is skipped only when a newer run of
+  # the same workflow is still QUEUED in the same event-scoped group — the
+  # one run it would actually displace. A recurrence on attempt 2 that runs
+  # and fails files per commit through the normal path, so a persistent
+  # outage costs one human-read issue per merge rather than one agent round
+  # per merge. The 90x30s poll bounds the wait at ~45 minutes (E2E
+  # completed-run duration: median 47m, p75 63m — a re-run slower than the
+  # cap files rather than absorbs, fail-closed), and timeout-minutes sits
+  # above the loop so the loop's own error, not the platform's, is the bound.
   rerun_never_started:
     name: 'Re-run jobs that never started'
     needs: 'analyze'
@@ -218,7 +224,7 @@ jobs:
     # Deliberately hosted, NOT the ECS pool, for the same reason as
     # file_issue: recovering a broken pool must not queue behind that pool.
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 5
+    timeout-minutes: 60
     permissions:
       actions: 'write'
     outputs:
@@ -233,31 +239,64 @@ jobs:
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           WORKFLOW_RUN_CREATED_AT: '${{ github.event.workflow_run.created_at }}'
+          WORKFLOW_RUN_EVENT: '${{ github.event.workflow_run.event }}'
         run: |-
-          # Supersession first: when a newer run of the same workflow already
-          # exists on main, this commit no longer decides anything and the
-          # re-run's only effect would be cancelling that newer run out of
-          # the concurrency group's single pending slot. file_issue's gate
-          # reads the superseded output and files the fleet failure instead.
+          # Supersession first, narrowed to the only run this re-run could
+          # harm: one still QUEUED in the same event-scoped concurrency group
+          # (e2e.yml keys the group on workflow + event + ref, and with
+          # cancel-in-progress off a group holds at most one pending run,
+          # which a new arrival cancels). A newer run already in progress
+          # always finishes and a completed one is beyond harming — counting
+          # either suppressed the re-run, and with it the persistence probe
+          # the filing decision leans on, in the large majority of cases.
+          # file_issue's gate reads the superseded output and files the fleet
+          # failure instead.
           superseded="$(
             gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&per_page=10" \
-              | jq --arg id "${WORKFLOW_RUN_ID}" --arg created "${WORKFLOW_RUN_CREATED_AT}" \
-                '[.workflow_runs[] | select((.id | tostring) != $id and .created_at > $created)] | length'
+              | jq --arg id "${WORKFLOW_RUN_ID}" --arg created "${WORKFLOW_RUN_CREATED_AT}" --arg event "${WORKFLOW_RUN_EVENT}" \
+                '[.workflow_runs[] | select((.id | tostring) != $id and .created_at > $created and .status == "queued" and .event == $event)] | length'
           )"
           if [[ "${superseded}" != "0" ]]; then
             echo 'superseded=true' >> "${GITHUB_OUTPUT}"
-            message="Not re-running ${WORKFLOW_RUN_URL}: a newer main run of the same workflow supersedes this commit, so the re-run would only displace it — the fleet failure files its issue instead"
+            message="Not re-running ${WORKFLOW_RUN_URL}: a newer main run of the same workflow is queued in its concurrency group, so the re-run would only displace it — the fleet failure files its issue instead"
             echo "::notice::${message}"
             echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
-          # This job is the one decision in the workflow that suppresses a
-          # filing, so it announces itself: once the re-run absorbs the flake,
-          # this annotation is the only record the suppression ever happened.
-          message="Re-ran the failed jobs of ${WORKFLOW_RUN_URL}: no step of any failed job ran, so no issue was filed"
-          echo "::notice::${message}"
-          echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
+          # Suppress the filing on the re-run's observed OUTCOME, never on the
+          # request: a re-run cancelled before it starts never passes
+          # analyze's failure-only gate, so keying on the request drops main's
+          # failure with no record. Only a confirmed success absorbs the
+          # filing; anything else — failure, cancellation, or a poll that
+          # outlives the loop — fails this job so file_issue files the fleet
+          # failure.
+          conclusion=''
+          for _ in $(seq 1 90); do
+            attempt=0
+            status=''
+            conclusion=''
+            read -r attempt status conclusion < <(
+              gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
+                --jq '[.run_attempt, .status, (.conclusion // "-")] | @tsv'
+            ) || true
+            if [[ "${attempt}" =~ ^[0-9]+$ && "${attempt}" -ge 2 && "${status}" == 'completed' ]]; then
+              break
+            fi
+            sleep 30
+          done
+          if [[ "${conclusion}" == 'success' ]]; then
+            # This job is the one decision in the workflow that suppresses a
+            # filing, so it announces itself: once the re-run absorbs the
+            # flake, this annotation is the only record the suppression ever
+            # happened.
+            message="Re-ran the failed jobs of ${WORKFLOW_RUN_URL}: the re-run passed, so no issue was filed"
+            echo "::notice::${message}"
+            echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          echo "::error::Re-run of ${WORKFLOW_RUN_URL} ended '${conclusion:-unknown}' — filing the fleet failure issue instead of absorbing it"
+          exit 1
 
   # Every GitHub write happens here, as the autofix bot. This job deliberately
   # checks out nothing and runs no repository code: it only consumes the title
@@ -267,10 +306,11 @@ jobs:
     needs:
       - 'analyze'
       - 'rerun_never_started'
-    # Skip filing only when the one bounded re-run actually started. A skipped
-    # rerun job (an ordinary failure with steps, or an attempt-2+ recurrence)
-    # and a failed one (the re-run request itself errored) both fall through
-    # to filing, where the body and route follow never_started — as does a
+    # Skip filing only when the one bounded re-run actually started and was
+    # observed to pass. A skipped rerun job (an ordinary failure with steps,
+    # or an attempt-2+ recurrence) and a failed one (the re-run request
+    # errored, or the observed re-run did not pass) both fall through to
+    # filing, where the body and route follow never_started — as does a
     # re-run skipped because a newer main run supersedes this commit (the
     # superseded output): the fleet failure is filed rather than displacing
     # the newer run.
@@ -298,7 +338,7 @@ jobs:
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
-          AUTOFIX_SKIP_LABEL: 'autofix/skip'
+          AUTOFIX_IN_PROGRESS_LABEL: 'autofix/in-progress'
         run: |-
           apply_autofix_route() {
             # A run whose failed jobs all executed zero repository steps ran
@@ -306,18 +346,25 @@ jobs:
             # make: the issue records the fleet failure for a human instead.
             if [[ "${NEVER_STARTED}" == 'true' ]]; then
               echo "Leaving the issue off the autofix route: no failed job executed a step."
-              # A human must still FIND the fleet issue — an unlabelled,
-              # bot-authored issue is skipped by every routing automation.
-              # autofix/skip keeps the agent's scan (-label:autofix/skip) off
-              # it, and a same-commit issue an ordinary failure already
-              # routed comes back off that route: body and labels are decided
-              # from the same flag.
+              # type/bug is pure taxonomy here: no routing automation picks
+              # up a bot-authored issue (triage skips it by authorship, owner
+              # assignment needs labels this branch does not apply), so the
+              # issue's channel is the repo's watchers — the same one the
+              # sibling CI-failure reporters file to. The removal below is
+              # what takes a same-commit issue an ordinary failure already
+              # routed back OFF the route: both autofix intake gates key on
+              # ready-for-agent + approved (the scan's label filter and the
+              # real-time route's two flags), and in-progress is the agent's
+              # claim marker the same gates reject. autofix/skip is
+              # deliberately NOT used: it is a human/agent opt-out the
+              # ordinary branch never removes, and a class flip would leave
+              # it vetoing a real regression at every intake gate.
               gh issue edit "$1" \
                 --repo "${REPO}" \
-                --add-label "${BUG_LABEL},${AUTOFIX_SKIP_LABEL}"
+                --add-label "${BUG_LABEL}"
               gh issue edit "$1" \
                 --repo "${REPO}" \
-                --remove-label "${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
+                --remove-label "${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL},${AUTOFIX_IN_PROGRESS_LABEL}" \
                 --remove-assignee "${AUTOFIX_BOT}"
               return 0
             fi
@@ -331,8 +378,12 @@ jobs:
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
 
           if [[ -n "${EXISTING_ISSUE}" ]]; then
+            # The title follows the CURRENT run's class and workflow: a class
+            # flip re-renders the body, and keeping the first filer's title
+            # would name one failure over prose describing another.
             gh issue edit "${EXISTING_ISSUE}" \
               --repo "${REPO}" \
+              --title "${ISSUE_TITLE}" \
               --body-file "${body_file}"
             echo "Recorded this run on issue #${EXISTING_ISSUE}."
             apply_autofix_route "${EXISTING_ISSUE}"

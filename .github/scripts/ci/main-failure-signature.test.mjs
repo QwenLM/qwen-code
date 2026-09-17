@@ -789,12 +789,39 @@ test('the fleet body names the never-started jobs, their hosts and the run', () 
   assert.ok(body.includes(`- Commit: ${OCCURRENCE.sha}`));
 });
 
-test('an existing fleet body is re-rendered when this run is ordinary', () => {
+test('a setup-death fleet body names the failed step without contradicting itself', () => {
+  // The meta projection counts repository steps, so a runner that died
+  // during setup reads as never-started, while the TSV projection keeps the
+  // runner-internal step that failed ('Set up job'). The body must not claim
+  // zero executed steps in one line and name the failed step two lines
+  // later: a failed Set up job points at runner setup or the runner image,
+  // and a commit CAN break setup (e2e.yml consumes the repo-local composite
+  // action and computes runs-on from a label expression), so the class
+  // invariant is qualified for this shape.
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [{ name: 'Build for E2E', steps: ['Set up job'] }],
+    [{ name: 'Build for E2E', steps: 0, runner_name: 'ecs-qwen-hk4-9' }],
+  );
+  assert.equal(analysis.neverStarted, true);
+
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(body.includes('failed in step `Set up job`'));
+  assert.ok(!body.includes('no step of any failed job'));
+  assert.ok(!body.includes('No commit can have caused this'));
+  assert.ok(body.includes('runner setup'));
+});
+
+test('an existing fleet body is re-rendered when this run is ordinary, and preserved', () => {
   // The per-commit dedupe key is the sha alone and every watched workflow
   // runs on the same main commit, so an ordinary failure can find the fleet
   // issue a never-started run filed first. The body and the route both
   // follow THIS run's class: echoing the fleet prose while the route labels
-  // the issue would dispatch the agent onto a stand-down notice.
+  // the issue would dispatch the agent onto a stand-down notice. The
+  // displaced fleet report is not destroyed — it names the dead host and any
+  // triage notes a human wrote — it moves into a machine-owned collapsed
+  // block below the fresh pitch.
   const fleetBody = renderIssueBody({
     analysis: analyzeLogs(
       'E2E Tests',
@@ -815,15 +842,20 @@ test('an existing fleet body is re-rendered when this run is ordinary', () => {
     existingBody: fleetBody,
   });
 
+  // The fresh ordinary pitch leads and names its own failed job…
   assert.ok(body.includes('labeled for autofix'));
-  assert.ok(!body.includes('runner-fleet'));
   assert.ok(body.includes('`Test (windows-latest, Node 22.x)`'));
+  // …and the displaced fleet body survives verbatim in the collapsed block.
+  assert.ok(body.includes('<details>'));
+  assert.ok(body.includes(fleetBody.trim()));
 });
 
-test('an existing ordinary body is re-rendered when this run never started', () => {
+test('an existing ordinary body is re-rendered when this run never started, and preserved', () => {
   // The mirror: an ordinary failure filed and routed first, then a
   // never-started run on the same commit finds it. The fleet failure must
-  // replace the autofix pitch or it leaves no trace anywhere.
+  // lead or it leaves no trace on the routed surface — and the displaced
+  // ordinary report, the autofix pitch and the failed job it named, is
+  // preserved verbatim rather than destroyed.
   const ordinaryBody = renderIssueBody({
     analysis: analyzeLogs(
       'Qwen Code CI',
@@ -845,7 +877,115 @@ test('an existing ordinary body is re-rendered when this run never started', () 
   });
 
   assert.ok(body.includes('runner-fleet'));
-  assert.ok(!body.includes('labeled for autofix'));
+  assert.ok(body.includes('<details>'));
+  assert.ok(body.includes(ordinaryBody.trim()));
+});
+
+test('a class flip preserves notes written below the displaced body', () => {
+  // The witness for why preservation is not optional: a maintainer's triage
+  // notes live below the machine block, and a fleet run landing on an
+  // ordinary issue must not delete them (or vice versa).
+  const ordinaryBody = renderIssueBody({
+    analysis: analyzeLogs(
+      'Qwen Code CI',
+      ['npm error code ERESOLVE'],
+      [WINDOWS_JOB],
+    ),
+    occurrence: OCCURRENCE,
+  });
+  const withNotes = `${ordinaryBody}\n## Investigation\n\nPool host was replaced at 03:00Z.\n`;
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [],
+    [],
+    [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+  );
+  const body = renderIssueBody({
+    analysis,
+    occurrence: OCCURRENCE,
+    existingBody: withNotes,
+  });
+
+  assert.ok(body.includes('runner-fleet'));
+  assert.ok(body.includes('Pool host was replaced at 03:00Z.'));
+  assert.ok(body.includes('`Test (windows-latest, Node 22.x)`'));
+});
+
+test('a preserved fleet block does not reclassify the ordinary body carrying it', () => {
+  // The class check reads the OPENING marker lines only: after a
+  // fleet→ordinary flip the body carries the displaced fleet prose (and its
+  // marker) inside the collapsed block, so a whole-body substring check
+  // would re-render on every later ordinary run — wiping the notes the merge
+  // exists to keep.
+  const fleetBody = renderIssueBody({
+    analysis: analyzeLogs(
+      'E2E Tests',
+      [],
+      [],
+      [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+    ),
+    occurrence: OCCURRENCE,
+  });
+  const ordinary = analyzeLogs(
+    'Qwen Code CI',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const flipped = renderIssueBody({
+    analysis: ordinary,
+    occurrence: OCCURRENCE,
+    existingBody: fleetBody,
+  });
+  assert.ok(flipped.includes('<details>'));
+
+  const again = renderIssueBody({
+    analysis: ordinary,
+    occurrence: OCCURRENCE,
+    existingBody: flipped,
+  });
+  assert.equal(again, flipped);
+});
+
+test('an existing fleet body is kept verbatim when this run also never started', () => {
+  // The same-class fleet quadrant: during a standing outage a second
+  // workflow's never-started run on the same commit must not overwrite the
+  // first fleet body — that is where a human's triage notes live, and the
+  // second workflow's name and dead host are not worth them.
+  const fleetBody = renderIssueBody({
+    analysis: analyzeLogs(
+      'E2E Tests',
+      [],
+      [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: [] }],
+      [
+        {
+          name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+          steps: 0,
+          runner_name: 'ecs-qwen-hk4-30',
+        },
+      ],
+    ),
+    occurrence: OCCURRENCE,
+  });
+  const withNotes = `${fleetBody}\n## Investigation\n\nPool host ecs-qwen-hk4-30 was drained.\n`;
+  const second = analyzeLogs(
+    'Qwen Code CI',
+    [],
+    [{ name: 'Build for E2E', steps: [] }],
+    [{ name: 'Build for E2E', steps: 0, runner_name: 'ecs-qwen-hk5-12' }],
+  );
+  assert.equal(second.neverStarted, true);
+
+  const body = renderIssueBody({
+    analysis: second,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: withNotes,
+  });
+
+  assert.equal(body, withNotes);
 });
 
 test('parseFailedJobsMeta carries the runner name when the projection has it', () => {

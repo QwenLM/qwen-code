@@ -370,12 +370,45 @@ describe('main CI failure issue workflow', () => {
     expect(rerunRun).toMatch(
       /if \[\[ "\$\{superseded\}" != "0" \]\]; then[\s\S]*?exit 0\n[\s\S]*?fi\n[\s\S]*?gh api -X POST/,
     );
+    // The predicate counts only a run this re-run could actually DISPLACE:
+    // one still queued in the same event-scoped concurrency group (e2e.yml
+    // keys the group on workflow + event + ref). Counting any newer run
+    // whatever its status or event suppressed the re-run in the large
+    // majority of cases — measured over 1012 real main runs, 98 of 102
+    // suppressions had no pending suppressor at all — so removing either
+    // term must red this pin. `.event` is the runs-API field (as
+    // qwen-autofix.yml reads it); the context name event_name does not exist
+    // in the payload and would silently disable the guard.
+    expect(rerun.steps[0].env.WORKFLOW_RUN_EVENT).toBe(
+      '${{ github.event.workflow_run.event }}',
+    );
+    expect(rerunRun).toContain('--arg event "${WORKFLOW_RUN_EVENT}"');
+    expect(rerunRun).toContain('.status == "queued"');
+    expect(rerunRun).toContain('.event == $event');
     // A skipped-as-superseded re-run must still file the fleet issue (the
     // failure is real; only the re-run would be harmful), so the skip rides
     // an output file_issue's gate admits.
     expect(rerun.outputs.superseded).toBe(
       '${{ steps.rerun.outputs.superseded }}',
     );
+
+    // The suppression is keyed on the re-run's OBSERVED outcome, never on the
+    // request: a re-run cancelled before it starts (the next merge takes the
+    // group's single pending slot) never passes analyze's failure-only gate,
+    // so request-keyed suppression dropped main's failure with no record
+    // (measured: 455 of 458 cancelled E2E main runs raised a watcher that
+    // concluded skipped). The poll must sit AFTER the POST and gate the
+    // suppression on the observed conclusion; deleting the poll and exiting 0
+    // right after the POST reds all three pins. timeout-minutes sits above
+    // the 90x30s (~45min) poll loop so the loop's own error, not the
+    // platform's, is the bound.
+    expect(rerunRun).toMatch(
+      /gh api -X POST[\s\S]*?run_attempt[\s\S]*?conclusion/,
+    );
+    expect(rerunRun).toMatch(
+      /if \[\[ "\$\{conclusion\}" == 'success' \]\]; then/,
+    );
+    expect(Number(rerun['timeout-minutes'])).toBeGreaterThanOrEqual(45);
 
     // file_issue files unless the re-run actually started: a skipped rerun
     // job (ordinary failure with steps) and a failed one (the API call
@@ -414,31 +447,47 @@ describe('main CI failure issue workflow', () => {
     expect(routeRun).toMatch(
       /if \[\[ "\$\{NEVER_STARTED\}" == 'true' \]\]; then[\s\S]*?return 0[\s\S]*?\n\s+fi\n[\s\S]*?gh issue edit "\$1"/,
     );
-    // ...and the fleet issue is not left unreachable: it keeps human-facing
-    // labels (type/bug, plus autofix/skip — which the agent's scan excludes
-    // via -label:autofix/skip, so the state is explicit and queryable),
-    // while a same-commit issue an ordinary failure already routed is taken
-    // back OFF the route. The remove is what makes body and labels agree on
-    // that path; the add alone would leave the agent dispatched onto a
-    // stand-down notice.
-    expect(jobs.file_issue.steps[0].env.AUTOFIX_SKIP_LABEL).toBe(
-      'autofix/skip',
+    // ...and the fleet branch keeps the issue human-findable WITHOUT
+    // borrowing the human-owned opt-out: it adds type/bug alone and strips
+    // ALL route state — both autofix intake gates key on ready-for-agent +
+    // approved (the scan's label filter, the real-time route's two flags),
+    // and in-progress is the agent's claim marker the same gates reject — so
+    // a same-commit issue an ordinary failure already routed, or one the
+    // agent had already claimed, comes fully back off the route.
+    // autofix/skip is deliberately never referenced anywhere in this step:
+    // the ordinary branch below only ever ADDS labels, so a machine-applied
+    // skip would survive a class flip and veto a real regression at every
+    // intake gate with no code path left to clear it.
+    expect(jobs.file_issue.steps[0].env.AUTOFIX_IN_PROGRESS_LABEL).toBe(
+      'autofix/in-progress',
     );
+    expect(jobs.file_issue.steps[0].env.AUTOFIX_SKIP_LABEL).toBeUndefined();
     const guard = routeRun.match(
       /if \[\[ "\$\{NEVER_STARTED\}" == 'true' \]\]; then(?<block>[\s\S]*?)\n\s+fi/,
     )?.groups?.block;
     expect(guard).toBeDefined();
-    expect(guard).toContain('--add-label "${BUG_LABEL},${AUTOFIX_SKIP_LABEL}"');
+    expect(guard).toContain('--add-label "${BUG_LABEL}"');
     expect(guard).toContain(
-      '--remove-label "${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
+      '--remove-label "${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL},${AUTOFIX_IN_PROGRESS_LABEL}"',
     );
     expect(guard).toContain('--remove-assignee "${AUTOFIX_BOT}"');
     expect(guard).not.toContain('--add-label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(routeRun).not.toContain('AUTOFIX_SKIP_LABEL');
   });
 
   it('re-reads an existing issue so recorded recurrences survive the update', () => {
     expect(workflow).toContain('gh issue view "${existing_issue}"');
     expect(workflow).toContain('--existing "${existing_body}"');
+    // The update also re-sets the title: the per-commit dedupe key is the sha
+    // alone and every watched workflow runs on the same main commit, so the
+    // existing issue can belong to the OTHER failure class of this commit —
+    // the body is re-rendered for the current class and the title must
+    // follow it, or the issue keeps the first filer's workflow name over
+    // prose describing another failure.
+    const routeRun = String(jobs.file_issue.steps[0].run);
+    expect(routeRun).toMatch(
+      /gh issue edit "\$\{EXISTING_ISSUE\}"[\s\S]*?--title "\$\{ISSUE_TITLE\}"[\s\S]*?--body-file "\$\{body_file\}"/,
+    );
   });
 
   it('uses a random heredoc delimiter for the multiline body output', () => {

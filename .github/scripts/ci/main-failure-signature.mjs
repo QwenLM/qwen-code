@@ -48,6 +48,11 @@ const VITEST_FAIL_PATTERN = /^FAIL\s+(.+)$/;
 const PYTEST_FAIL_PATTERN = /^FAILED\s+(.+?)(?:\s+-\s.*)?$/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 
+/** Opens the machine-owned collapsed block that carries a displaced per-commit
+ * body verbatim across a failure-class flip (see renderIssueBody). */
+const PRESERVED_BODY_OPEN =
+  '<details>\n<summary>Superseded report for this commit — the failure class changed; kept for the record, no longer current</summary>';
+
 function cleanLine(line) {
   return line
     .replace(ANSI_PATTERN, '')
@@ -298,15 +303,34 @@ function renderPerCommitBody({ analysis, occurrence }) {
   // the fleet failure and the workflow keeps the issue off the agent's
   // route, both keying on the same flag.
   if (analysis.neverStarted) {
+    // A job that died during runner setup still NAMES its failed step — the
+    // workflow's jobs projection keeps the runner-internal 'Set up job' the
+    // meta projection discounts — and a commit can break setup (e2e.yml
+    // consumes the repo-local composite action and computes runs-on from a
+    // label expression), so only the shape where no failed job names a step
+    // may assert that no commit caused it.
+    const namesFailedStep = analysis.failedJobs.some(
+      (job) => job.steps.length > 0,
+    );
     return [
       `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
       `<!-- ${FLEET_BODY_MARKER} -->`,
       '',
-      'A main-branch CI run failed on `main` with no step of any failed job',
-      'executed — the runner accepted each job and died before its first',
-      'step — and no automatic re-run cleared it. No commit can have',
-      'caused this, so the issue is tracked per commit as a runner-fleet',
-      'failure.',
+      ...(namesFailedStep
+        ? [
+            'A main-branch CI run failed on `main` with no repository step of',
+            'any failed job executed — each failed job died during runner',
+            'setup, before its first repository step — and no automatic',
+            're-run cleared it, so the issue is tracked per commit as a',
+            'runner-fleet failure.',
+          ]
+        : [
+            'A main-branch CI run failed on `main` with no step of any failed job',
+            'executed — the runner accepted each job and died before its first',
+            'step — and no automatic re-run cleared it. No commit can have',
+            'caused this, so the issue is tracked per commit as a runner-fleet',
+            'failure.',
+          ]),
       '',
       `- Workflow: ${analysis.workflow}`,
       ...(analysis.failedJobs.length
@@ -316,9 +340,19 @@ function renderPerCommitBody({ analysis, occurrence }) {
       `- Run ID: ${occurrence.runId}`,
       `- Commit: ${occurrence.sha}`,
       '',
-      'This issue is deliberately not routed to the autofix agent: no code',
-      'change can fix a job that never started. It needs a human to look at',
-      'the runner fleet.',
+      ...(namesFailedStep
+        ? [
+            'This issue is deliberately not routed to the autofix agent: no',
+            'repository step ran, so there is no test failure to repair. It',
+            'needs a human to look at the runner setup named above — and',
+            'because setup runs repository configuration, a commit can have',
+            'caused it.',
+          ]
+        : [
+            'This issue is deliberately not routed to the autofix agent: no code',
+            'change can fix a job that never started. It needs a human to look at',
+            'the runner fleet.',
+          ]),
       '',
     ].join('\n');
   }
@@ -359,12 +393,28 @@ function cappedTestLines(tests) {
 }
 
 /**
+ * The class of an existing per-commit body is read from its OPENING marker
+ * lines only: a cross-class re-render preserves the displaced body in a
+ * collapsed block below, and a whole-body substring check would see that
+ * preserved fleet marker and reclassify the carrier — every later ordinary
+ * run would re-render and wipe the notes the merge exists to keep.
+ */
+function existingBodyIsFleet(existingBody) {
+  return existingBody
+    .split('\n')
+    .slice(0, 3)
+    .some((line) => line.includes(FLEET_BODY_MARKER));
+}
+
+/**
  * Build the issue body: the create path when `existingBody` is empty, otherwise
  * a merge that keeps the existing prose (an agent's or a human's notes live
  * there) and only refreshes the machine-owned trailer. One exception: on the
  * per-commit path an existing body of the OTHER failure class is re-rendered,
  * because the issue's labels follow the current run's class and the two must
- * not disagree.
+ * not disagree — and the displaced body is preserved verbatim in a collapsed
+ * block, because it names the other failure's job, step and run and carries
+ * any triage notes a human wrote below the machine block.
  */
 export function renderIssueBody({
   analysis,
@@ -380,12 +430,20 @@ export function renderIssueBody({
     // body would pitch the agent under a stand-down notice, and echoing a
     // stale autofix pitch would hide a fleet failure. Only a same-class body
     // is kept verbatim — that is where an agent's or a human's notes live.
-    if (
-      existingBody.trim() &&
-      existingBody.includes(FLEET_BODY_MARKER) ===
-        Boolean(analysis.neverStarted)
-    ) {
-      return existingBody;
+    if (existingBody.trim()) {
+      if (existingBodyIsFleet(existingBody) === Boolean(analysis.neverStarted))
+        return existingBody;
+      const fresh = renderPerCommitBody({ analysis, occurrence });
+      return [
+        fresh.trimEnd(),
+        '',
+        PRESERVED_BODY_OPEN,
+        '',
+        existingBody.trim(),
+        '',
+        '</details>',
+        '',
+      ].join('\n');
     }
     return renderPerCommitBody({ analysis, occurrence });
   }
