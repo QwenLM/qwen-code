@@ -216,6 +216,8 @@ ACCEPTED -> WAITING_RUNTIME -> DISPATCHED -> STARTED
 
 ### P3：接入真实 Java Prompt 服务（产品接入关键路径）
 
+详细执行方案：[Managed Agent P3 Java Prompt 服务接入执行方案](./2026-09-18-managed-agent-p3-product-integration.md)
+
 Java 产品仓改动：
 
 1. 增加 `ManagedAgentCoordinator`，组合 Session repository、`HarnessClient`、`RuntimeBrokerService` 和 `PublicEventStore`。
@@ -223,7 +225,7 @@ Java 产品仓改动：
 3. Prompt admission 事务提交后同时调用 `runtimeBroker.warm(harnessSessionId)` 与 `harnessClient.submitPrompt(...)`。
 4. `warm()` 失败只记录 Runtime 状态；在模型尚未产生 Tool Call 时不终止模型流。
 5. Harness 事件由 Java 分配单调 `eventSequence`，通过 SSE 输出；支持 `Last-Event-ID`。
-6. Client 断开只关闭订阅，不取消 Turn；显式 cancel 才同时取消 Harness Turn 和 Broker execution。
+6. Client 断开只关闭订阅，不取消 Turn；显式 cancel 发送给 Harness，由 Harness 使用精确的 Runtime Session 和 execution ID 继续取消 Broker execution。
 
 新增接口建议：
 
@@ -359,10 +361,11 @@ P4 已自动化并接入 Java CI：
 
 P1、P2、P4 和 P5 已经闭环。下一条产品关键路径是 P3：
 
-1. 在真实 Java 产品服务定位 Prompt admission 事务、Session owner 表和 SSE event store 接缝。
-2. 实现 `ManagedAgentCoordinator`：事务提交后并行调用 `runtimeBroker.warm()` 与 `harnessClient.submitPrompt()`，禁止串行等待 Runtime。
-3. 把 Harness event 投影为带单调 `eventSequence` 的公共事件，并实现 `Last-Event-ID` 重连。
-4. 在产品接入测试中复用已经完成的 Java 自有 Runtime E2E，不再保留 endpoint 测试注入或 Harness 启动 Runtime 的旁路。
-5. P3 通过后再进入持久化恢复；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
+1. 先在 qwen-code 完成 Hosted Harness 私有协议版本、boot generation fencing 和 Java reference client。
+2. 在真实 Java 产品服务定位 Prompt admission 事务、Session owner 表和 SSE event store 接缝。
+3. 实现 `ManagedAgentCoordinator`：事务提交后并行调用 `runtimeBroker.warm()` 与 `harnessClient.submitPrompt()`，禁止串行等待 Runtime。
+4. 把 Harness event 投影为带单调 `eventSequence` 的公共事件，并实现 `Last-Event-ID` 重连。
+5. 在产品接入测试中复用已经完成的 Java 自有 Runtime E2E，不再保留 endpoint 测试注入或 Harness 启动 Runtime 的旁路。
+6. P3 通过后再进入持久化恢复；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
 
 P3 的最小上线判断只有三个：首个模型事件不等待 Runtime、同 Turn 的工具只执行一次、Java/Harness/Runtime 任一失败都不回落 Legacy。持久化 schema、Kubernetes 调度和完整 Agent API 兼容不能阻塞这三个判断的第一次产品验证。

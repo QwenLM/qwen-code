@@ -8,6 +8,8 @@
 
 相关实现阶段：[Managed Agent Java 自有 Runtime 生命周期执行方案](./2026-09-17-managed-agent-java-owned-runtime-lifecycle.md)
 
+产品接入阶段：[Managed Agent P3 Java Prompt 服务接入执行方案](./2026-09-18-managed-agent-p3-product-integration.md)
+
 ## 1. 结论
 
 公共 Agent API 放在 Java 产品服务，不放进 Hosted Harness，也不放进 Runtime Broker。Java 先建立一套供应商无关的 `Agent / Session / Turn / Item / Artifact / Event` 应用模型，再在其上提供不同 HTTP Adapter：
@@ -301,25 +303,31 @@ Java 通过一个稳定客户端封装现有 Hosted Harness `/session` 能力：
 interface HarnessClient {
     CompletionStage<HarnessSessionRef> createSession(
             CreateHarnessSession command);
-    CompletionStage<Void> loadSession(LoadHarnessSession command);
+    CompletionStage<HarnessSessionRef> loadSession(
+            LoadHarnessSession command);
     CompletionStage<PromptReceipt> submitTurn(SubmitHarnessTurn command);
     HarnessEventStream streamEvents(StreamHarnessEvents query);
     CompletionStage<Void> cancelTurn(CancelHarnessTurn command);
+    CompletionStage<Void> heartbeat(HeartbeatHarnessSession command);
     CompletionStage<HarnessSnapshot> getSnapshot(GetHarnessSnapshot query);
     CompletionStage<Void> closeSession(CloseHarnessSession command);
 }
 ```
 
+产品 Java 必须保存公共 ID 到 Harness ID 的稳定映射。首版不要求把 `publicTurnId` 发送给 Harness；它通过 Java 持久化的 `(harnessSessionId, promptId) -> publicTurnId` 映射完成事件投影，避免公共 API 结构进入 qwen 私有协议。
+
+首版 Hosted Harness 使用部署级固定 capability，Java 在 Session binding 中固定 `agentRevision` 和握手获得的 `capabilityDigest`；它们不要求在每个请求中重复发送。未来支持一个 Harness 上的动态 AgentDefinition 时，通过新私有协议版本扩展，不能改变 v1 的含义。
+
 私有请求至少带：
 
 - `protocolVersion`；
-- `harnessOwnerId`、`harnessGeneration` 和 `harnessSessionId`；
-- 稳定的 `publicTurnId`、`promptId`；
-- `agentRevision` 和 `capabilityDigest`；
+- `harnessBootId` fencing token 和 `harnessSessionId`；
+- create/load 后的请求还必须带当前 attachment 的 `harnessClientId`；
+- 稳定的 `promptId`；
 - 服务身份 token；
 - 可选 deadline。
 
-Harness 事件至少带 `harnessEventEpoch`、`harnessEventSequence`、`publicTurnId`、稳定 Item/call ID、事件类型和 payload。Java 使用 `harnessSessionId + harnessEventEpoch + harnessEventSequence` 作为 `sourceRef` 去重后，再分配公共 `eventSequence`。Harness 不分配公共 Session ID，也不根据请求体决定 tenant/workspace。
+Harness 事件至少带 `harnessEventEpoch`、`harnessEventSequence`、`promptId`、稳定 Item/call ID、事件类型和 payload。Java 使用 `harnessBootId + harnessEventEpoch + harnessEventSequence` 作为 `sourceRef`，再通过 `(harnessSessionId, promptId)` 映射公共 Turn，去重后分配公共 `eventSequence`。Harness 不分配公共 Session/Turn ID，也不根据请求体决定 tenant/workspace。
 
 一个活动 Turn 固定到 `SessionBackendBindingRepository` 中记录的 Harness owner/generation。Harness event epoch 改变时，Java 不得继续使用旧 sequence；必须先读取 snapshot/transcript 完成对账，再从新 epoch 订阅。共享 Session Authority 尚未完成前，不允许在 Turn 中途漂移到任意 Harness 实例。
 
@@ -663,12 +671,13 @@ Trace 至少关联 `publicSessionId`、`publicTurnId`、`publicItemId`、`harnes
 
 当前不要先写 OpenAI Controller。按以下顺序开工：
 
-1. 在真实 Java 产品服务定位 Session 创建、Prompt admission、事务、SSE 和 tenant/workspace 鉴权代码，形成接缝清单。
-2. 完成 A0：只提交内部对象、接口、状态机、Repository schema 和 Adapter mapping tests。
-3. 完成 A1：用现有 Hosted Harness 和 Runtime Broker 跑通 Java Coordinator；证明 TTFT 不等待 Runtime。
-4. 完成 A2：持久化、outbox、event cursor 和重启恢复。
-5. 再实现 A3 的 OpenAI Managed Agents Adapter。
-6. A3 稳定后，根据真实 SDK 接入需求决定是否实施 Responses Adapter；不要同时开两套公网写入口。
+1. 按 P3 执行方案先完成 qwen-code 私有协议 fencing 和 Java Hosted Harness reference client。
+2. 在真实 Java 产品服务定位 Session 创建、Prompt admission、事务、SSE 和 tenant/workspace 鉴权代码，形成接缝清单。
+3. 完成 A0：只提交内部对象、接口、状态机、Repository schema 和 Adapter mapping tests。
+4. 完成 A1：用版本化 Hosted Harness client 和 Runtime Broker 跑通 Java Coordinator；证明 TTFT 不等待 Runtime。
+5. 完成 A2：持久化、outbox、event cursor 和重启恢复。
+6. 再实现 A3 的 OpenAI Managed Agents Adapter。
+7. A3 稳定后，根据真实 SDK 接入需求决定是否实施 Responses Adapter；不要同时开两套公网写入口。
 
 最小产品验证只看四项：
 
