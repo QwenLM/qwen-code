@@ -13,7 +13,7 @@ import {
 } from '../ui/field';
 import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
-import { FolderOpenIcon } from 'lucide-react';
+import { ArrowLeftIcon, CornerLeftUpIcon, FolderOpenIcon } from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -28,9 +28,13 @@ export interface WorkspacePathSuggestions {
 }
 
 interface AddWorkspaceDialogProps {
+  browseDirectories?: boolean;
+  onBack?: () => void;
+  initialPath?: string;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   displayNameEnabled?: boolean;
+  daemonAddress?: string;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
@@ -51,20 +55,26 @@ function isAbsoluteLike(value: string): boolean {
 }
 
 export function AddWorkspaceDialog({
+  browseDirectories = false,
+  onBack,
+  initialPath = '',
   onClose,
   onAdd,
   displayNameEnabled = false,
+  daemonAddress,
   onSuggest,
   onPick,
   persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
-  const [path, setPath] = useState('');
+  const [path, setPath] = useState(initialPath);
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [persist, setPersist] = useState(true);
   const [suggestions, setSuggestions] = useState<WorkspacePathSuggestion[]>([]);
+  const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
   const [hostSep, setHostSep] = useState('/');
@@ -105,10 +115,15 @@ export function AddWorkspaceDialog({
     if (!onSuggest) return undefined;
     if (!isAbsoluteLike(path)) {
       setSuggestions([]);
+      setSuggestionsLoaded(false);
+      setSuggestionsError(false);
       closeList();
       return undefined;
     }
     const seq = ++suggestSeqRef.current;
+    setSuggestions([]);
+    setSuggestionsLoaded(false);
+    setSuggestionsError(false);
     const openOnResult = !suppressNextFetchOpenRef.current;
     suppressNextFetchOpenRef.current = false;
     const timer = setTimeout(() => {
@@ -116,27 +131,31 @@ export function AddWorkspaceDialog({
         (result) => {
           if (seq !== suggestSeqRef.current) return;
           setSuggestions(result.suggestions);
+          setSuggestionsLoaded(true);
+          setSuggestionsError(false);
           setHostSep(result.sep || '/');
           setHighlight(-1);
           const input = inputRef.current;
           if (
-            input !== null &&
-            getShadowAwareActiveElement(input) === input &&
-            (openOnResult || listOpenRef.current)
+            browseDirectories ||
+            (input !== null &&
+              getShadowAwareActiveElement(input) === input &&
+              (openOnResult || listOpenRef.current))
           ) {
             setListOpen(result.suggestions.length > 0);
           }
         },
         () => {
           if (seq !== suggestSeqRef.current) return;
-          // Autocomplete is best-effort; a failed lookup just yields no list.
           setSuggestions([]);
+          setSuggestionsLoaded(true);
+          setSuggestionsError(browseDirectories);
           closeList();
         },
       );
     }, SUGGEST_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [path, onSuggest, closeList]);
+  }, [browseDirectories, path, onSuggest, closeList]);
 
   // Radix listens for Escape on document capture; intercept one step earlier
   // (window capture) so an open suggestion list consumes the Escape instead
@@ -234,12 +253,19 @@ export function AddWorkspaceDialog({
         return;
       }
       if (event.key === 'Enter' && open && highlight >= 0) {
-        // Enter accepts the highlighted directory instead of submitting.
         event.preventDefault();
         acceptSuggestion(suggestions[highlight]);
+        return;
+      }
+      if (
+        event.key === 'Enter' &&
+        browseDirectories &&
+        !event.nativeEvent.isComposing
+      ) {
+        event.preventDefault();
       }
     },
-    [listOpen, suggestions, highlight, acceptSuggestion],
+    [listOpen, suggestions, highlight, acceptSuggestion, browseDirectories],
   );
 
   const handleSubmit = useCallback(
@@ -284,12 +310,13 @@ export function AddWorkspaceDialog({
     ],
   );
 
-  const showList = listOpen && suggestions.length > 0;
+  const showList = (browseDirectories || listOpen) && suggestions.length > 0;
 
   return (
     <DialogShell
       title={t('sidebar.addWorkspaceTitle')}
       size="md"
+      dismissible={!submitting}
       onClose={onClose}
     >
       <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
@@ -313,6 +340,7 @@ export function AddWorkspaceDialog({
                   onKeyDown={handleInputKeyDown}
                   onFocus={cancelBlurDismiss}
                   onBlur={() => {
+                    if (browseDirectories) return;
                     // Delay so a mousedown on a suggestion wins over blur.
                     cancelBlurDismiss();
                     blurTimeoutRef.current = setTimeout(() => {
@@ -344,6 +372,33 @@ export function AddWorkspaceDialog({
                   aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
                   aria-invalid={error ? true : undefined}
                 />
+                {browseDirectories && (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    title={t('workspaceHost.parent')}
+                    aria-label={t('workspaceHost.parent')}
+                    disabled={submitting}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      const trimmed = path.replace(/[\\/]+$/, '');
+                      if (/^[A-Za-z]:$/.test(trimmed)) {
+                        setPath(`${trimmed}\\`);
+                        return;
+                      }
+                      const index = Math.max(
+                        trimmed.lastIndexOf('/'),
+                        trimmed.lastIndexOf('\\'),
+                      );
+                      setPath(
+                        index >= 0 ? trimmed.slice(0, index + 1) : hostSep,
+                      );
+                    }}
+                  >
+                    <CornerLeftUpIcon aria-hidden="true" />
+                  </Button>
+                )}
                 {onPick && (
                   <Button
                     type="button"
@@ -362,7 +417,7 @@ export function AddWorkspaceDialog({
                   id={LISTBOX_ID}
                   role="listbox"
                   aria-label={t('sidebar.addWorkspaceSuggestions')}
-                  className="absolute inset-x-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
+                  className={`${browseDirectories ? 'relative' : 'absolute inset-x-0 top-full z-50'} mt-1 max-h-56 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md`}
                 >
                   {suggestions.map((suggestion, index) => (
                     <li
@@ -383,15 +438,37 @@ export function AddWorkspaceDialog({
                       }}
                       onMouseEnter={() => setHighlight(index)}
                     >
+                      {browseDirectories && (
+                        <FolderOpenIcon
+                          className="mr-2 inline size-4"
+                          aria-hidden="true"
+                        />
+                      )}
                       {suggestion.name}
                       <span className="text-muted-foreground">{hostSep}</span>
                     </li>
                   ))}
                 </ul>
               )}
+              {browseDirectories && suggestionsLoaded && !showList && (
+                <div
+                  role={suggestionsError ? 'alert' : 'status'}
+                  className="mt-1 rounded-md border px-3 py-3 text-sm text-muted-foreground"
+                >
+                  {t(
+                    suggestionsError
+                      ? 'workspaceHost.folderListError'
+                      : 'workspaceHost.noFolders',
+                  )}
+                </div>
+              )}
             </div>
             <FieldDescription id={HINT_ID}>
-              {t('sidebar.addWorkspaceHint')}
+              {daemonAddress
+                ? t('sidebar.addWorkspaceDaemonHint', {
+                    address: daemonAddress,
+                  })
+                : t('sidebar.addWorkspaceHint')}
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
@@ -404,6 +481,11 @@ export function AddWorkspaceDialog({
                 id="add-workspace-display-name"
                 type="text"
                 value={displayName}
+                placeholder={
+                  browseDirectories
+                    ? path.split(/[\\/]/).filter(Boolean).pop()
+                    : undefined
+                }
                 onChange={(event) => setDisplayName(event.target.value)}
                 disabled={submitting}
                 maxLength={256}
@@ -434,20 +516,43 @@ export function AddWorkspaceDialog({
             </Field>
           )}
         </FieldGroup>
-        <div className="flex justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onClose}
-            disabled={submitting}
-          >
-            {t('sidebar.addWorkspaceCancel')}
-          </Button>
-          <Button type="submit" disabled={submitting || !path.trim()}>
-            {submitting
-              ? t('sidebar.addWorkspaceAdding')
-              : t('sidebar.addWorkspaceRegister')}
-          </Button>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          {onBack && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="self-start"
+              onClick={onBack}
+              disabled={submitting}
+            >
+              <ArrowLeftIcon aria-hidden="true" />
+              {t('workspaceHost.back')}
+            </Button>
+          )}
+          <div className="flex w-full gap-2 sm:ml-auto sm:w-auto">
+            <Button
+              type="button"
+              variant="outline"
+              className="flex-1 sm:flex-none"
+              onClick={onClose}
+              disabled={submitting}
+            >
+              {t('sidebar.addWorkspaceCancel')}
+            </Button>
+            <Button
+              type="submit"
+              className="flex-1 sm:flex-none"
+              disabled={submitting || !path.trim()}
+            >
+              {submitting
+                ? t('sidebar.addWorkspaceAdding')
+                : t(
+                    browseDirectories
+                      ? 'workspaceHost.addFolder'
+                      : 'sidebar.addWorkspaceRegister',
+                  )}
+            </Button>
+          </div>
         </div>
       </form>
     </DialogShell>

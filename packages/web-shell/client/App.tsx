@@ -252,6 +252,14 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { AddRemoteWorkspaceDialog } from './components/dialogs/AddRemoteWorkspaceDialog';
+import { StandaloneContext } from './config/standalone';
+import {
+  clearRemoteWorkspaceAddStep,
+  completeRemoteWorkspaceAdd,
+  getRemoteWorkspaceAddStep,
+  leaveRemoteWorkspaceAdd,
+} from './config/remote-workspace-add';
 import { Button } from './components/ui/button';
 import {
   isPluginShadowPanel,
@@ -3382,6 +3390,7 @@ export function App({
     structuralOnly: true,
   });
   const connection = useConnection();
+  const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,
@@ -3606,7 +3615,21 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [initialRemoteWorkspaceAddStep] = useState(() =>
+    standalone ? getRemoteWorkspaceAddStep() : undefined,
+  );
+  const [showAddRemoteWorkspaceDialog, setShowAddRemoteWorkspaceDialog] =
+    useState(initialRemoteWorkspaceAddStep === 'connect');
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
+    initialRemoteWorkspaceAddStep === 'browse',
+  );
+  const remoteWorkspaceAddActiveRef = useRef(
+    initialRemoteWorkspaceAddStep === 'browse',
+  );
+  const remoteWorkspaceAddCompletedRef = useRef(false);
+  useEffect(() => {
+    if (initialRemoteWorkspaceAddStep) clearRemoteWorkspaceAddStep();
+  }, [initialRemoteWorkspaceAddStep]);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -8706,7 +8729,9 @@ export function App({
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
     if (!projectFeaturesAvailable) setShowMemoryDialog(false);
-    setShowAddWorkspaceDialog(false);
+    if (!remoteWorkspaceAddActiveRef.current) {
+      setShowAddWorkspaceDialog(false);
+    }
     setGitDialog(undefined);
     if (
       !projectFeaturesAvailable &&
@@ -10483,6 +10508,7 @@ export function App({
     // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
     showAuthDialog ||
+    showAddRemoteWorkspaceDialog ||
     showAddWorkspaceDialog ||
     scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
@@ -13091,6 +13117,31 @@ export function App({
       workspaceActions,
     ],
   );
+  const handleAddRemoteWorkspace = useCallback(
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      await handleAddWorkspace(cwd, persist, displayName);
+      remoteWorkspaceAddCompletedRef.current = true;
+      completeRemoteWorkspaceAdd();
+    },
+    [handleAddWorkspace],
+  );
+
+  const closeAddWorkspaceDialog = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    if (!remoteWorkspaceAddActiveRef.current) return;
+    remoteWorkspaceAddActiveRef.current = false;
+    if (remoteWorkspaceAddCompletedRef.current) {
+      completeRemoteWorkspaceAdd();
+      return;
+    }
+    leaveRemoteWorkspaceAdd();
+  }, []);
+
+  const changeRemoteWorkspaceHost = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    remoteWorkspaceAddActiveRef.current = false;
+    leaveRemoteWorkspaceAdd(true);
+  }, []);
 
   /**
    * Reconciles either a known committed cwd or an unknown POST outcome. Known
@@ -18225,10 +18276,73 @@ export function App({
               />
             </DialogShell>
           )}
-          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
+          {showAddRemoteWorkspaceDialog && (
+            <AddRemoteWorkspaceDialog
+              onClose={() => setShowAddRemoteWorkspaceDialog(false)}
+            />
+          )}
+          {!lockedWorkspaceCwd &&
+            showAddWorkspaceDialog &&
+            remoteWorkspaceAddActiveRef.current &&
+            !workspaceCapabilitiesReady && (
+              <DialogShell
+                title={t('sidebar.addRemoteWorkspace')}
+                size="md"
+                onClose={closeAddWorkspaceDialog}
+              >
+                <div className="flex flex-col gap-5">
+                  <p role={workspace.status === 'error' ? 'alert' : 'status'}>
+                    {t(
+                      workspace.status === 'error'
+                        ? 'workspaceHost.connectionError'
+                        : 'workspaceHost.loadingFolders',
+                    )}
+                  </p>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={closeAddWorkspaceDialog}
+                    >
+                      {t('sidebar.addWorkspaceCancel')}
+                    </Button>
+                    <Button type="button" onClick={changeRemoteWorkspaceHost}>
+                      {t('workspaceHost.back')}
+                    </Button>
+                  </div>
+                </div>
+              </DialogShell>
+            )}
+          {!lockedWorkspaceCwd &&
+            showAddWorkspaceDialog &&
+            (!remoteWorkspaceAddActiveRef.current ||
+              dynamicWorkspaceRegistrationSupported) && (
             <AddWorkspaceDialog
-              onClose={() => setShowAddWorkspaceDialog(false)}
-              onAdd={handleAddWorkspace}
+              browseDirectories={remoteWorkspaceAddActiveRef.current}
+              onBack={
+                remoteWorkspaceAddActiveRef.current
+                  ? changeRemoteWorkspaceHost
+                  : undefined
+              }
+              initialPath={
+                remoteWorkspaceAddActiveRef.current
+                  ? workspace.capabilities?.workspaceCwd?.replace(
+                      /[^\\/]+[\\/]?$/,
+                      '',
+                    ) || workspace.capabilities?.workspaceCwd || '/'
+                  : undefined
+              }
+              daemonAddress={
+                remoteWorkspaceAddActiveRef.current
+                  ? workspace.baseUrl || window.location.origin
+                  : undefined
+              }
+              onClose={closeAddWorkspaceDialog}
+              onAdd={
+                remoteWorkspaceAddActiveRef.current
+                  ? handleAddRemoteWorkspace
+                  : handleAddWorkspace
+              }
               onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={
                 nativeDirectoryPickerSupported &&
@@ -18248,6 +18362,33 @@ export function App({
               displayNameEnabled={workspaceDisplayNameSupported}
             />
           )}
+          {!lockedWorkspaceCwd &&
+            showAddWorkspaceDialog &&
+            remoteWorkspaceAddActiveRef.current &&
+            workspaceCapabilitiesReady &&
+            !dynamicWorkspaceRegistrationSupported && (
+              <DialogShell
+                title={t('sidebar.addRemoteWorkspace')}
+                size="md"
+                onClose={closeAddWorkspaceDialog}
+              >
+                <div className="flex flex-col gap-5">
+                  <p role="alert">{t('workspaceHost.unsupported')}</p>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={closeAddWorkspaceDialog}
+                    >
+                      {t('sidebar.addWorkspaceCancel')}
+                    </Button>
+                    <Button type="button" onClick={changeRemoteWorkspaceHost}>
+                      {t('workspaceHost.back')}
+                    </Button>
+                  </div>
+                </div>
+              </DialogShell>
+            )}
           {scratchOutcomeUnknown !== 'clear' && (
             <DialogShell
               title={t('sidebar.scratchOutcomeUnknownTitle')}
@@ -18460,6 +18601,11 @@ export function App({
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported
                       ? () => setShowAddWorkspaceDialog(true)
+                      : undefined
+                  }
+                  onOpenAddRemoteWorkspace={
+                    standalone
+                      ? () => setShowAddRemoteWorkspaceDialog(true)
                       : undefined
                   }
                   workspaces={workspaces}

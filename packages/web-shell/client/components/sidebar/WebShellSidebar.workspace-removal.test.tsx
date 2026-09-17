@@ -414,6 +414,7 @@ function renderSidebar(
         };
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
+    onOpenAddRemoteWorkspace?: () => void;
     onOpenWorkspacesOverview?: () => void;
     footer?: Parameters<typeof WebShellSidebar>[0]['footer'];
     onNewSession?: (workspaceCwd?: string) => boolean;
@@ -465,6 +466,7 @@ function renderSidebar(
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
+          onOpenAddRemoteWorkspace={overrides.onOpenAddRemoteWorkspace}
           onOpenWorkspacesOverview={overrides.onOpenWorkspacesOverview}
           footer={overrides.footer}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
@@ -893,6 +895,19 @@ describe('WebShellSidebar workspace removal', () => {
     act(() => click(addButton!));
 
     expect(onOpenAddWorkspace).toHaveBeenCalledOnce();
+  });
+
+  it('exposes the standalone Add remote workspace action', () => {
+    const onOpenAddRemoteWorkspace = vi.fn();
+    renderSidebar({ onOpenAddRemoteWorkspace });
+
+    const addButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Add remote workspace"]',
+    );
+    expect(addButton).not.toBeNull();
+    act(() => click(addButton!));
+
+    expect(onOpenAddRemoteWorkspace).toHaveBeenCalledOnce();
   });
 
   it('scopes pinned and archived sessions to a locked secondary workspace', async () => {

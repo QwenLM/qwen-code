@@ -283,6 +283,7 @@ export function buildDaemonConnectionUrl(
   url.searchParams.delete('context');
   url.searchParams.delete('addWorkspace');
   url.searchParams.delete('workspaceReturn');
+  url.searchParams.delete('addRemoteWorkspace');
   url.searchParams.delete('token');
   // Session-scoped like the rest: a `?split=` deep link names sessions of the
   // daemon being left behind.
@@ -318,10 +319,18 @@ export function isKnownDaemonTarget(origin: string): boolean {
   }
 }
 
-export function navigateToDaemon(raw: string, token?: string): boolean {
+export function navigateToDaemon(
+  raw: string,
+  token?: string,
+  options?: { continueRemoteWorkspaceAdd?: boolean },
+): boolean {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
-  const nextUrl = buildDaemonConnectionUrl(raw, window.location.href);
-  if (!daemonOrigin || !nextUrl) return false;
+  const builtUrl = buildDaemonConnectionUrl(raw, window.location.href);
+  if (!daemonOrigin || !builtUrl) return false;
+  const nextUrl = new URL(builtUrl);
+  if (options?.continueRemoteWorkspaceAdd) {
+    nextUrl.searchParams.set('addRemoteWorkspace', 'browse');
+  }
   // Read before the assign: getDaemonBaseUrl() follows the live URL.
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
@@ -346,6 +355,11 @@ export function navigateToDaemon(raw: string, token?: string): boolean {
     // Unless the credential cannot outlive it: with storage disabled the
     // reloaded page would boot with no token at all, so stay on this one.
     if (token !== undefined && !hasReloadSurvivableDaemonToken()) return false;
+    if (options?.continueRemoteWorkspaceAdd) {
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set('addRemoteWorkspace', 'browse');
+      window.history.replaceState(null, '', currentUrl);
+    }
     window.location.reload();
     return true;
   }
@@ -379,6 +393,6 @@ export function navigateToDaemon(raw: string, token?: string): boolean {
   ) {
     return false;
   }
-  window.location.assign(nextUrl);
+  window.location.assign(nextUrl.toString());
   return true;
 }

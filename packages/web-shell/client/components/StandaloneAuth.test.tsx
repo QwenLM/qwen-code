@@ -23,6 +23,7 @@ afterEach(() => {
   vi.useRealTimers();
   sessionStorage.clear();
   localStorage.clear();
+  window.history.replaceState(null, '', '/');
 });
 async function mount(
   initialToken?: string,
@@ -30,7 +31,11 @@ async function mount(
   theme?: WebShellTheme,
   invalidTarget?: boolean,
   initialAddress?: string,
-  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void,
+  onChangeTarget?: (
+    daemonOrigin: string,
+    token?: string,
+    options?: { continueRemoteWorkspaceAdd?: boolean },
+  ) => boolean | void,
 ) {
   await act(async () =>
     root.render(
@@ -182,6 +187,27 @@ it('lets an invalid target be replaced from the connection form', async () => {
     'remote-token',
   );
   expect(fetch).not.toHaveBeenCalled();
+});
+it('preserves remote-add continuation when correcting the daemon target', async () => {
+  window.history.replaceState(null, '', '/?addRemoteWorkspace=browse');
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn();
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    false,
+    'http://replacement.example:4170',
+    onChangeTarget,
+  );
+
+  expect(container.textContent).toContain('Cancel adding remote workspace');
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://replacement.example:4170',
+    undefined,
+    { continueRemoteWorkspaceAdd: true },
+  );
 });
 it('asks before probing a daemon this browser has not connected to', async () => {
   const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));

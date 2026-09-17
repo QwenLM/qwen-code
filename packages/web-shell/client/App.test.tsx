@@ -54,6 +54,7 @@ import { serializeContextUsageMessage } from './components/messages/ContextUsage
 import { serializeStatsMessage } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
+import { StandaloneContext } from './config/standalone';
 
 type StreamingState = 'idle' | 'responding';
 
@@ -219,8 +220,16 @@ type AddWorkspaceDialogTestProps = {
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   onSuggest?: (prefix: string) => Promise<unknown>;
   onPick?: () => Promise<string | undefined>;
+  browseDirectories?: boolean;
+  onBack?: () => void;
+  initialPath?: string;
+  daemonAddress?: string;
   displayNameEnabled?: boolean;
   persistenceSupported?: boolean;
+};
+
+type AddRemoteWorkspaceDialogTestProps = {
+  onClose: () => void;
 };
 
 function voiceSetting(effective: string): DaemonSettingDescriptor {
@@ -665,6 +674,8 @@ const {
         isPending: boolean;
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
+      latestAddRemoteWorkspaceDialogProps:
+        null as AddRemoteWorkspaceDialogTestProps | null,
       latestSessionOverviewProps: null as {
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
         onOpenSplit?: (sessionIds: string[]) => void;
@@ -1451,6 +1462,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
       onOpenAddWorkspace?: () => void;
+      onOpenAddRemoteWorkspace?: () => void;
       onOpenGitDiff?: (workspaceCwd: string) => void;
       onOpenCommit?: (workspaceCwd: string) => void;
       onThemeChange?: (theme: 'light' | 'dark') => void;
@@ -1478,6 +1490,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             Boolean(props.canOpenSessionsOverview),
           ),
           'data-can-open-split-view': String(Boolean(props.canOpenSplitView)),
+          'data-has-add-remote-workspace': String(
+            Boolean(props.onOpenAddRemoteWorkspace),
+          ),
         },
         React.createElement(
           'button',
@@ -1505,6 +1520,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: props.onOpenAddWorkspace,
           },
           'add workspace',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-add-remote-workspace',
+            type: 'button',
+            onClick: props.onOpenAddRemoteWorkspace,
+          },
+          'add remote workspace',
         ),
         React.createElement(
           'button',
@@ -1746,6 +1770,18 @@ vi.mock('./components/dialogs/AddWorkspaceDialog', async () => {
       testState.latestAddWorkspaceDialogProps = props;
       return React.createElement('div', {
         'data-testid': 'add-workspace-dialog',
+      });
+    },
+  };
+});
+
+vi.mock('./components/dialogs/AddRemoteWorkspaceDialog', async () => {
+  const React = await import('react');
+  return {
+    AddRemoteWorkspaceDialog: (props: AddRemoteWorkspaceDialogTestProps) => {
+      testState.latestAddRemoteWorkspaceDialogProps = props;
+      return React.createElement('div', {
+        'data-testid': 'add-remote-workspace-dialog',
       });
     },
   };
@@ -10301,6 +10337,7 @@ async function renderOpenSource(overrides: Partial<SessionSource> = {}) {
 function renderApp(
   props: React.ComponentProps<typeof App> = {},
   notificationTarget?: EventTarget,
+  standalone = false,
 ): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
@@ -10312,9 +10349,13 @@ function renderApp(
   const doRender = (nextProps: React.ComponentProps<typeof App> = props) => {
     act(() => {
       root.render(
-        <TurnNotificationNavigationContext.Provider value={notificationTarget}>
-          <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
-        </TurnNotificationNavigationContext.Provider>,
+        <StandaloneContext.Provider value={standalone}>
+          <TurnNotificationNavigationContext.Provider
+            value={notificationTarget}
+          >
+            <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
+          </TurnNotificationNavigationContext.Provider>
+        </StandaloneContext.Provider>,
       );
     });
   };
@@ -10740,6 +10781,7 @@ beforeEach(() => {
   testState.backgroundDetails = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
+  testState.latestAddRemoteWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
@@ -17727,6 +17769,83 @@ describe('App session callbacks', () => {
     expect(
       container.querySelectorAll('[data-testid="add-workspace-dialog"]'),
     ).toHaveLength(1);
+  });
+
+  it('opens and resumes the standalone Add remote workspace flow', async () => {
+    const connectorView = renderApp({}, undefined, true);
+    await flush();
+
+    expect(
+      connectorView.container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-has-add-remote-workspace'),
+    ).toBe('true');
+    act(() => {
+      connectorView.container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-add-remote-workspace"]',
+        )
+        ?.click();
+    });
+    expect(
+      connectorView.container.querySelector(
+        '[data-testid="add-remote-workspace-dialog"]',
+      ),
+    ).not.toBeNull();
+    connectorView.unmount();
+
+    mockWorkspace.capabilities =
+      undefined as unknown as typeof mockWorkspace.capabilities;
+    window.history.replaceState(
+      null,
+      '',
+      '/?daemon=https%3A%2F%2Fremote.example&addRemoteWorkspace=browse',
+    );
+
+    const browserView = renderApp({}, undefined, true);
+    await flush();
+
+    expect(
+      browserView.container.querySelector(
+        '[data-dialog-title="Add remote workspace"]',
+      ),
+    ).not.toBeNull();
+
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+        'workspace_display_name',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/remote/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    browserView.rerender();
+    await flush();
+
+    expect(
+      browserView.container.querySelector(
+        '[data-testid="add-workspace-dialog"]',
+      ),
+    ).not.toBeNull();
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      browseDirectories: true,
+      daemonAddress: window.location.origin,
+      persistenceSupported: true,
+      displayNameEnabled: true,
+    });
+    expect(testState.latestAddWorkspaceDialogProps?.onBack).toBeTypeOf(
+      'function',
+    );
+    expect(
+      new URLSearchParams(window.location.search).has('addRemoteWorkspace'),
+    ).toBe(false);
   });
 
   it('closes the Add workspace dialog when navigation enters a standalone chat', async () => {
