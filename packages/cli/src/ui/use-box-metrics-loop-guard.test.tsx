@@ -306,12 +306,14 @@ describe('ink useBoxMetrics loop guard', () => {
     // A tripped instance stops scheduling renders of its own, so it can only
     // measure again on an event from outside the cascade. Any later commit in
     // the ink root reaches it too - this box keeps its measured element mounted,
-    // and `onLayout` runs for every commit of a root it is subscribed to, not
-    // only for commits that re-render this subtree - but a resize is recomputed
-    // by ink's own handler with no React commit at all, so `onResize` is the
-    // path that reaches a tripped instance while nothing else in the tree
-    // renders. The commit-path refill of a tripped instance is a separate line
-    // and is pinned by the case below, not by this one.
+    // and the root layout listener that `getMeasurementGuard` registers fans out
+    // to every instance subscribed to that root, so it runs for every commit of
+    // the root, not only for commits that re-render this subtree - but a resize
+    // is recomputed by ink's own handler with no React commit at all, so
+    // `onResize` is the path that reaches a tripped instance while nothing else
+    // in the tree renders. That handler refills the budget outright, which is a
+    // separate path from the commit-driven refill pinned by the case below, not
+    // by this one.
     // Drop that reset and this case goes red: `updateMetrics` returns before
     // `setMetrics`, so nothing follows the resize and the box renders against a
     // stale width for the rest of the session.
@@ -345,14 +347,16 @@ describe('ink useBoxMetrics loop guard', () => {
   });
 
   it('refills a tripped instance on a later sibling commit, without a resize', async () => {
-    // The case above pins `onResize`; this pins the other refill path, the
-    // `else` branch of `onLayout`, which is the one the comment there calls "any
-    // later commit in the ink root". Nothing pinned it until now: every other
-    // recovery here goes through `stdout.emit('resize')`, and the
-    // external-rerender case never trips - its count oscillates between 0 and 1
-    // across all 39 iterations. Without that refill a box that tripped once
-    // stays frozen until the user happens to resize the terminal, rendering a
-    // stale width for the rest of the session.
+    // The case above pins `onResize`; this pins the other refill path, the one
+    // a commit drives. The budget the cascade tripped is refilled by the
+    // microtask that a run starting from zero schedules, which cannot fire until
+    // the cascading chain has unwound - so a later commit in the root measures
+    // again, and the comment there calls that "any later commit in the ink
+    // root". Nothing pinned it until now: every other recovery here goes through
+    // `stdout.emit('resize')`, and the external-rerender case never trips - its
+    // count oscillates between 0 and 1 across all 39 iterations. Without that
+    // refill a box that tripped once stays frozen until the user happens to
+    // resize the terminal, rendering a stale width for the rest of the session.
     let renders = 0;
     let bumpSibling!: () => void;
     // The sibling owns its state on purpose. With the width in a shared parent
