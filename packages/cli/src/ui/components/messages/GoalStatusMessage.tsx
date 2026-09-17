@@ -6,17 +6,16 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import {
-  goalCheckpointHealthLine,
-  type GoalSnapshotV2,
-  type GoalStateCause,
-} from '@qwen-code/qwen-code-core';
+import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { ICON } from '../../constants.js';
-import { formatDuration } from '../../utils/formatters.js';
-import { formatTokenCount } from '../../statusLinePresets.js';
-import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
+import {
+  describeGoalCard,
+  describeLegacyGoalCard,
+  type GoalCardColor,
+} from '../../utils/goal-card-view.js';
+import type { GoalStatusKind } from '../../types.js';
 
 interface LegacyGoalStatusMessageProps {
   kind: GoalStatusKind;
@@ -42,19 +41,37 @@ type GoalStatusMessageProps =
   | LegacyGoalStatusMessageProps
   | GoalStateMessageProps;
 
-const pluralTurns = (n: number) => (n === 1 ? 'turn' : 'turns');
-
-function assertNeverGoalStatusKind(kind: never): never {
-  throw new Error(`Unexpected goal status kind: ${kind}`);
+/** The theme colour of each palette slot a card view names. */
+function cardColor(color: GoalCardColor): string {
+  switch (color) {
+    case 'secondary':
+      return theme.text.secondary;
+    case 'accent':
+      return theme.text.accent;
+    case 'warning':
+      return theme.status.warning;
+    case 'error':
+      return theme.status.error;
+    case 'success':
+      return theme.status.success;
+    default: {
+      const exhaustive: never = color;
+      throw new Error(`Unexpected goal card colour: ${String(exhaustive)}`);
+    }
+  }
 }
 
 const GoalStateCard: React.FC<GoalStateMessageProps> = ({
   snapshot,
   cause,
 }) => {
-  const goal = snapshot.goal;
-  if (!goal) {
-    if (cause !== 'clear') return null;
+  const view = describeGoalCard(snapshot, cause);
+  if (view.state === 'hidden') {
+    // A Goal is on the record but its status is one this build cannot word.
+    if (snapshot.goal) throw new Error('Unexpected Goal status');
+    return null;
+  }
+  if (view.state === 'cleared') {
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
@@ -64,104 +81,30 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
       </Box>
     );
   }
-
-  const lifecycle = (() => {
-    switch (goal.status) {
-      case 'active':
-        if (snapshot.activity === 'verifying') {
-          return {
-            prefix: ICON.CIRCLE_EMPTY,
-            color: theme.text.secondary,
-            title: 'Goal checking',
-          };
-        }
-        return {
-          prefix: ICON.BULLSEYE,
-          color: theme.text.accent,
-          title:
-            snapshot.activity === 'running' ? 'Goal running' : 'Goal active',
-        };
-      case 'paused':
-        return {
-          prefix: '!',
-          color: theme.status.warning,
-          title: 'Goal paused',
-        };
-      case 'blocked':
-        return {
-          prefix: ICON.CROSS,
-          color: theme.status.error,
-          title: 'Goal blocked',
-        };
-      case 'usage_limited':
-        return {
-          prefix: '!',
-          color: theme.status.warning,
-          title: 'Goal usage limited',
-        };
-      case 'complete':
-        return {
-          prefix: ICON.CHECK,
-          color: theme.status.success,
-          title: 'Goal complete',
-        };
-      default: {
-        const exhaustive: never = goal.status;
-        void exhaustive;
-        throw new Error('Unexpected Goal status');
-      }
-    }
-  })();
-  const stats: string[] = [];
-  if (goal.turnCount > 0) {
-    stats.push(
-      goal.turnBudget === undefined
-        ? `${goal.turnCount} ${pluralTurns(goal.turnCount)}`
-        : `${goal.turnCount}/${goal.turnBudget} ${pluralTurns(goal.turnBudget)}`,
-    );
-  }
-  if (goal.activeTimeMs > 0) {
-    const used = formatDuration(goal.activeTimeMs, { hideTrailingZeros: true });
-    stats.push(
-      goal.activeTimeBudgetMs === undefined
-        ? used
-        : `${used}/${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })}`,
-    );
-  }
-  if (goal.tokensUsed > 0) {
-    const used = formatTokenCount(goal.tokensUsed);
-    stats.push(
-      goal.tokenBudget === undefined
-        ? `${used} tokens`
-        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
-    );
-  }
-  const subtitle = stats.length > 0 ? stats.join(' · ') : null;
+  const color = cardColor(view.color);
   // This renderer writes straight to the terminal, so both lines below are
   // sanitized here: a pause reason can embed a raw provider error, and the
   // checkpoint diagnostic, though cleaned where it is written, can come back
   // from a journal record verbatim.
   const reason =
-    goal.status !== 'active' || snapshot.activity === 'verifying'
-      ? sanitizeTerminalText(goal.lastReason ?? '').trim()
-      : undefined;
-  // Checkpoint health, shown before the stall breaker has to stop the Goal:
-  // a Goal paying a failed checkpoint every turn otherwise looks like one
-  // that is working. A Goal the breaker stopped keeps the line, since its stop
-  // reason names the kind of failure but not the failure itself; which
-  // records show it, and in what words, is decided once in core.
-  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
+    view.reason === undefined
+      ? undefined
+      : sanitizeTerminalText(view.reason).trim();
+  const checkpoint =
+    view.checkpoint === undefined
+      ? undefined
+      : sanitizeTerminalText(view.checkpoint);
 
   return (
     <Box flexDirection="row">
       <Box width={2} flexShrink={0}>
-        <Text color={lifecycle.color}>{lifecycle.prefix}</Text>
+        <Text color={color}>{view.icon}</Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        <Text color={lifecycle.color}>
-          {lifecycle.title}
-          {subtitle ? (
-            <Text color={theme.text.secondary}> · {subtitle}</Text>
+        <Text color={color}>
+          {view.title}
+          {view.subtitle ? (
+            <Text color={theme.text.secondary}> · {view.subtitle}</Text>
           ) : null}
         </Text>
         <Box flexDirection="row">
@@ -169,7 +112,7 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
             <Text color={theme.text.secondary}>Goal:</Text>
           </Box>
           <Box flexGrow={1}>
-            <Text wrap="wrap">{goal.objective}</Text>
+            <Text wrap="wrap">{view.objective}</Text>
           </Box>
         </Box>
         {reason ? (
@@ -179,7 +122,7 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
         ) : null}
         {checkpoint ? (
           <Text color={theme.status.warning} wrap="wrap">
-            Checkpoint: {checkpoint}
+            {checkpoint}
           </Text>
         ) : null}
       </Box>
@@ -190,27 +133,30 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
 const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
   if (props.snapshot) return <GoalStateCard {...props} />;
   const { kind, condition, iterations, durationMs, lastReason } = props;
-  if (kind === 'checking') {
-    const reason = lastReason?.trim();
+  const view = describeLegacyGoalCard({
+    kind,
+    condition,
+    iterations,
+    durationMs,
+    lastReason,
+  });
+  if (view.state === 'hidden') {
+    throw new Error(`Unexpected goal status kind: ${kind}`);
+  }
+  if (view.state === 'checking') {
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
           <Text color={theme.text.secondary}>{ICON.CIRCLE_EMPTY}</Text>
         </Box>
         <Box flexGrow={1} flexDirection="column">
-          <Text color={theme.text.secondary}>
-            Goal check
-            {typeof iterations === 'number' && iterations > 0
-              ? ` · turn ${iterations}`
-              : ''}{' '}
-            · not yet met
-          </Text>
+          <Text color={theme.text.secondary}>{view.title}</Text>
           <Text color={theme.text.secondary} wrap="wrap">
-            Goal: {condition}
+            Goal: {view.condition}
           </Text>
-          {reason ? (
+          {view.judgeReason ? (
             <Text color={theme.text.secondary} wrap="wrap">
-              Judge: {reason}
+              Judge: {view.judgeReason}
             </Text>
           ) : null}
         </Box>
@@ -218,68 +164,17 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
     );
   }
 
-  const { prefix, prefixColor, title } = (() => {
-    switch (kind) {
-      case 'set':
-        return {
-          prefix: ICON.BULLSEYE,
-          prefixColor: theme.text.accent,
-          title: 'Goal set',
-        };
-      case 'achieved':
-        return {
-          prefix: ICON.CHECK,
-          prefixColor: theme.status.success,
-          title: 'Goal achieved',
-        };
-      case 'cleared':
-        return {
-          prefix: ICON.CIRCLE_EMPTY,
-          prefixColor: theme.text.secondary,
-          title: 'Goal cleared',
-        };
-      case 'failed':
-        return {
-          prefix: ICON.CROSS,
-          prefixColor: theme.status.error,
-          title: 'Goal could not be achieved',
-        };
-      case 'aborted':
-        return {
-          prefix: '!',
-          prefixColor: theme.status.warning,
-          title: 'Goal aborted',
-        };
-      case 'paused':
-        return {
-          prefix: '!',
-          prefixColor: theme.status.warning,
-          title: 'Goal paused',
-        };
-      default:
-        return assertNeverGoalStatusKind(kind);
-    }
-  })();
-
-  const stats: string[] = [];
-  if (typeof iterations === 'number' && iterations > 0) {
-    stats.push(`${iterations} ${pluralTurns(iterations)}`);
-  }
-  if (typeof durationMs === 'number') {
-    stats.push(formatDuration(durationMs, { hideTrailingZeros: true }));
-  }
-  const subtitle = stats.length > 0 ? stats.join(' · ') : null;
-
+  const color = cardColor(view.color);
   return (
     <Box flexDirection="row">
       <Box width={2} flexShrink={0}>
-        <Text color={prefixColor}>{prefix}</Text>
+        <Text color={color}>{view.icon}</Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        <Text color={prefixColor}>
-          {title}
-          {subtitle ? (
-            <Text color={theme.text.secondary}> · {subtitle}</Text>
+        <Text color={color}>
+          {view.title}
+          {view.subtitle ? (
+            <Text color={theme.text.secondary}> · {view.subtitle}</Text>
           ) : null}
         </Text>
         <Box flexDirection="row">
@@ -287,12 +182,12 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
             <Text color={theme.text.secondary}>Goal:</Text>
           </Box>
           <Box flexGrow={1}>
-            <Text wrap="wrap">{condition}</Text>
+            <Text wrap="wrap">{view.condition}</Text>
           </Box>
         </Box>
-        {isTerminalGoalStatusKind(kind) && lastReason?.trim() ? (
+        {view.lastCheck ? (
           <Text color={theme.text.secondary} wrap="wrap">
-            Last check: {lastReason.trim()}
+            Last check: {view.lastCheck}
           </Text>
         ) : null}
       </Box>
