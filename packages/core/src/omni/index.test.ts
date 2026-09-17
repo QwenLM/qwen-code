@@ -767,12 +767,19 @@ describe('readMediaViaOmniDelivery result shape', () => {
     }));
     const { readMediaViaOmniDelivery } = await import('./index.js');
 
-    for (const [filePath, parentFragment] of [
+    // Each fixture is resolved into this platform's own spelling before it
+    // reaches the pipeline: fs reports the resolved path, so a POSIX spelling
+    // on Windows is a different input shape — scrubbing one is tracked in
+    // #12082, not asserted here.
+    const cases = [
       ['/Users/张三/视频/clip.mp4', '/Users/张三'],
       ['/Users/a/videos/~draft.mp4', '/Users/a/videos'],
       ["/Users/a/it's (v2)+final@x/clip.mp4", "it's (v2)+final@x"],
       ['C:\\Users\\björn\\clip.mp4', 'C:\\Users'],
-    ] as const) {
+    ] as const;
+    for (const [spelledPath, spelledParent] of cases) {
+      const filePath = path.resolve(spelledPath);
+      const parentFragment = path.resolve(spelledParent);
       const result = await readMediaViaOmniDelivery({
         filePath,
         config: deliveryConfig(),
@@ -787,6 +794,40 @@ describe('readMediaViaOmniDelivery result shape', () => {
       }
     }
   });
+
+  // A path spelled differently from the way the filesystem reports it still
+  // leaks on Windows: the sanitizer replaces the caller's spelling, the error
+  // text carries the resolved one, and the fallback pass stops at the first
+  // space or quote inside a segment, so the parent survives into the delivery
+  // error (#12082). Skipped there until the sanitizer handles it — this is the
+  // case to unskip once that lands, not a coverage drop.
+  it.skipIf(process.platform === 'win32')(
+    'never leaks the parent directory when the spelling differs from the fs report',
+    async () => {
+      vi.doMock('./ffmpeg.js', () => ({
+        isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+        isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+      }));
+      const { readMediaViaOmniDelivery } = await import('./index.js');
+
+      for (const [filePath, parentFragment] of [
+        ["/Users/a/it's (v2)+final@x/clip.mp4", "it's (v2)+final@x"],
+        ['/Users/a/My Videos/clip.mp4', '/Users/a/My Videos'],
+      ] as const) {
+        const result = await readMediaViaOmniDelivery({
+          filePath,
+          config: deliveryConfig(),
+          displayName: 'clip.mp4',
+          relativePathForDisplay: 'clip.mp4',
+          expectedModality: 'video',
+        });
+        expect(result.error).toMatch(/Omni media delivery failed/);
+        for (const field of [result.error, result.llmContent]) {
+          expect(String(field)).not.toContain(parentFragment);
+        }
+      }
+    },
+  );
 });
 
 describe('processMediaForOmniDelivery upload cache integration', () => {
