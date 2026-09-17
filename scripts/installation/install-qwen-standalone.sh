@@ -485,6 +485,74 @@ detect_target() {
     echo "${os}-${arch}"
 }
 
+detect_glibc_version() {
+    local version=""
+
+    if command_exists getconf; then
+        version=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk 'NR == 1 { print $2 }' || true)
+    fi
+
+    if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+([.][0-9]+)?$ ]] && command_exists ldd; then
+        version=$(LC_ALL=C LANG=C ldd --version 2>&1 | awk '
+            NR == 1 {
+                for (i = NF; i > 0; i--) {
+                    if ($i ~ /^[0-9]+\.[0-9]+([.][0-9]+)?$/) {
+                        print $i
+                        exit
+                    }
+                }
+            }
+        ' || true)
+    fi
+
+    if [[ "${version}" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+        echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+        return 0
+    fi
+
+    return 1
+}
+
+glibc_version_at_least() {
+    local version="$1"
+    local required_major="$2"
+    local required_minor="$3"
+    local major="${version%%.*}"
+    local minor="${version#*.}"
+    minor="${minor%%.*}"
+
+    if (( major > required_major )); then
+        return 0
+    fi
+
+    if (( major == required_major && minor >= required_minor )); then
+        return 0
+    fi
+
+    return 1
+}
+
+check_standalone_runtime_compatibility() {
+    local target="$1"
+
+    [[ "${target}" == linux-* ]] || return 0
+
+    local glibc_version
+    if ! glibc_version=$(detect_glibc_version); then
+        # Do not guess for unknown libc implementations. The archive/runtime
+        # compatibility check below still handles those hosts as before.
+        return 0
+    fi
+
+    if glibc_version_at_least "${glibc_version}" 2 28; then
+        return 0
+    fi
+
+    log_error "The standalone Linux archive bundles Node.js 22 and requires glibc 2.28 or newer; this system has glibc ${glibc_version}."
+    log_error "Use --method npm with a Node.js 22+ build compatible with this system, or use a Linux distribution with glibc 2.28+."
+    return 1
+}
+
 archive_extension_for_target() {
     case "$1" in
         darwin-*|linux-*)
@@ -1169,6 +1237,10 @@ install_standalone() {
         if ! target=$(detect_target); then
             log_warning "Standalone archive is not available for this platform."
             return 2
+        fi
+
+        if ! check_standalone_runtime_compatibility "${target}"; then
+            return 1
         fi
 
         local archive_extension

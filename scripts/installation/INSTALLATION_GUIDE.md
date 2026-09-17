@@ -19,7 +19,12 @@ The installers are intentionally lightweight:
 Standalone archives include a private Node.js runtime, so users do not need a
 local Node.js installation on the standalone path. Node.js 22 or newer and npm
 are only required when the installer falls back to npm or when
-`--method npm` is used.
+`--method npm` is used. The official Linux standalone archives bundle the
+Node.js 22 runtime from nodejs.org and therefore require glibc 2.28 or newer.
+The Linux installer checks a detected glibc version before downloading an
+official standalone archive and reports how to use npm with a compatible
+Node.js build when the host is too old. Offline `--archive` installs are not
+blocked by this preflight because custom archives may carry a different runtime.
 
 ## Installation Scripts
 
@@ -333,6 +338,14 @@ brew install qwen-code
 
 In `detect` mode, the installer falls back to npm. In `standalone` mode, install
 fails so that automation can detect the missing artifact.
+
+### Standalone Linux Runtime Requires Newer glibc
+
+Official Linux standalone archives bundle the official Node.js 22 runtime and
+require glibc 2.28 or newer. When the installer detects an older glibc version,
+it stops before downloading the archive. Use `--method npm` only with a Node.js
+22+ build that is compatible with the host, or move to a Linux distribution
+with glibc 2.28 or newer.
 
 ### Node.js Missing or Too Old
 
