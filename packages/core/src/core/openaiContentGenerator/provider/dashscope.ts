@@ -22,10 +22,8 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import {
-  clampReasoningEffort,
-  parseModelReasoningCapabilities,
-} from '../../reasoning-effort.js';
+import { getEffectiveReasoning } from '../../reasoning-overrides.js';
+import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -291,12 +289,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
-    const defaultHeaders = {
+    const defaultHeaders: Record<string, string | undefined> = {
       'User-Agent': userAgent,
       'X-DashScope-CacheControl': 'enable',
       'X-DashScope-UserAgent': userAgent,
       'X-DashScope-AuthType': authType,
     };
+    // Omni experiment: oss:// media URLs from the temporary-upload channel
+    // are only resolved server-side when this header is present. Static
+    // injection (vs per-request threading) is deliberate — the header is
+    // harmless on requests without oss:// parts.
+    if (this.cliConfig.isOmniEnabled?.()) {
+      defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
+    }
 
     return customHeaders
       ? { ...defaultHeaders, ...customHeaders }
@@ -540,19 +545,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   private getConfiguredReasoning(model: string | undefined) {
-    const { authType, baseUrl } = this.contentGeneratorConfig;
-    const wireModel = model ?? this.contentGeneratorConfig.model;
-    const reasoning = authType
-      ? this.cliConfig.getResolvedModelConfig?.(authType, wireModel, baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
-    return parseModelReasoningCapabilities(reasoning);
+    return this.getReasoningCapabilities(model);
   }
 
   private isTieredEffortModel(model: string | undefined): boolean {
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return configured.profile === 'dashscope-effort';
     return isTieredEffortWireModel(
       model ?? this.contentGeneratorConfig.model,
-      this.getConfiguredReasoning(model),
+      configured,
     );
   }
 
@@ -572,7 +573,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private buildQwenEffortConfig(
     model: string | undefined,
   ): Record<string, unknown> {
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return {};
+    const reasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      configured,
+    );
     if (!reasoning || reasoning.effort === undefined) {
       return {};
     }

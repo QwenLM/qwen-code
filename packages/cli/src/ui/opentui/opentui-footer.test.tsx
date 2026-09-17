@@ -92,8 +92,18 @@ vi.mock('../../i18n/index.js', async (importOriginal) => {
 
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  SPINNER_FRAMES,
+  SPINNER_INTERVAL_MS,
+  WAITING_SPINNER_FRAME,
+} from '../constants.js';
 import { WITTY_LOADING_PHRASES } from '../hooks/usePhraseCycler.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
+
+/** The indicator's first text cell is the spinner's own 2-column box. */
+function spinnerCell(container: HTMLElement): string {
+  return (container.querySelector('span')?.textContent ?? '').trim();
+}
 
 function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -120,6 +130,65 @@ describe('OpenTuiLoadingIndicator', () => {
     const { container } = render(<OpenTuiLoadingIndicator streaming />);
     expect(container.textContent).toContain('esc to cancel');
     expect(container.textContent).toContain('(0s');
+  });
+
+  it('advances the spinner frame while the turn is in flight', () => {
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    expect(spinnerCell(container)).toBe(SPINNER_FRAMES[0]);
+    act(() => {
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 3);
+    });
+    expect(spinnerCell(container)).toBe(SPINNER_FRAMES[3]);
+  });
+
+  it("holds ink's static frame once a call is parked on a confirmation", () => {
+    // Parked, not idle: the shell renders this row with the turn still in
+    // flight, so every tick source has to be off on `waiting` alone.
+    const { container } = render(<OpenTuiLoadingIndicator streaming waiting />);
+    // The frame stays put because no tick exists to move it, not because the
+    // next tick happens to draw the same glyph.
+    expect(vi.getTimerCount()).toBe(0);
+    expect(container.textContent).toContain('Waiting for user confirmation...');
+    // ink drops the cancel suffix here: there is no in-flight request to cancel.
+    expect(container.textContent).not.toContain('esc to cancel');
+    act(() => {
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 20);
+    });
+    expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
+  });
+
+  it('resumes the elapsed counter a parked call paused instead of restarting it', () => {
+    const { container, rerender } = render(
+      <OpenTuiLoadingIndicator streaming />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(container.textContent).toContain('(3s');
+    rerender(<OpenTuiLoadingIndicator streaming waiting />);
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    rerender(<OpenTuiLoadingIndicator streaming />);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    // Four, not one: a pause that read as "inactive" would reset the accumulated
+    // elapsed on the way back, and the row would report a turn that has been
+    // running for half a minute as four seconds old.
+    expect(container.textContent).toContain('(4s');
+  });
+
+  it('keeps the waiting row but loses its phrase when loading phrases are off', () => {
+    // ui.accessibility.enableLoadingPhrases: ink's Composer passes no phrase,
+    // and the row stays so the waiting-row sequence is unchanged.
+    const { container } = render(
+      <OpenTuiLoadingIndicator streaming waiting showPhrase={false} />,
+    );
+    expect(container.textContent).not.toContain(
+      'Waiting for user confirmation',
+    );
+    expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
   });
 
   it('ticks the elapsed counter once per second', () => {

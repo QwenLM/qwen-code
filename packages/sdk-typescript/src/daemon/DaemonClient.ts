@@ -87,6 +87,7 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonSessionWorkflowTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
@@ -443,6 +444,8 @@ function transcriptPageSuffix(
   opts: DaemonSessionTranscriptPageOptions,
 ): string {
   const query = new URLSearchParams();
+  if (opts.compactedReplayMode !== undefined)
+    query.set('compactedReplayMode', opts.compactedReplayMode);
   if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
   if (opts.direction !== undefined) query.set('direction', opts.direction);
   if (opts.atRecordId !== undefined) query.set('atRecordId', opts.atRecordId);
@@ -688,6 +691,8 @@ export interface RestoreSessionRequest {
   historyPageSize?: number;
   /** Load-only live-turn replay projection. Omit for the complete journal. */
   liveReplayMode?: 'full' | 'summary';
+  /** Load-only response projection for durable replay; defaults to full. */
+  compactedReplayMode?: 'full' | 'summary';
   /** Restore-time attribution for legacy/unattributed sessions. */
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
@@ -715,6 +720,8 @@ export interface WorktreeResetSessionRequest {
 }
 
 export interface PromptRequest {
+  /** Per-prompt projection for all subscribers and ring replay; defaults to full. */
+  eventDetailMode?: 'full' | 'summary';
   prompt: PromptContentBlock[];
   /** Deliver the successful final answer directly through a channel worker. */
   delivery?: DaemonChannelDelivery;
@@ -3793,6 +3800,12 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Control a workflow run, or start a new one. `taskId` is the run id for the
+   * control actions, the definition name for `run-saved`, and the caller's own
+   * start key for `run-script` — two concurrent starts under one key start one
+   * run. `input` is read by the two start actions only.
+   */
   async sessionWorkflowTaskAction(
     sessionId: string,
     taskId: string,
@@ -3802,8 +3815,10 @@ export class DaemonClient {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved',
+      | 'run-saved'
+      | 'run-script',
     clientId?: string,
+    input?: DaemonWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: DaemonSessionWorkflowTaskStatus['status'];
@@ -3813,7 +3828,22 @@ export class DaemonClient {
       changed: boolean;
       status?: DaemonSessionWorkflowTaskStatus['status'];
       taskId?: string;
-    }>(sessionId, taskId, 'workflow-action', { action }, clientId);
+    }>(
+      sessionId,
+      taskId,
+      'workflow-action',
+      {
+        action,
+        // Sent only when supplied, so a control action's body is what it was
+        // before start input existed.
+        ...(input?.args !== undefined ? { args: input.args } : {}),
+        ...(input?.sourceRef !== undefined
+          ? { sourceRef: input.sourceRef }
+          : {}),
+        ...(input?.script !== undefined ? { script: input.script } : {}),
+      },
+      clientId,
+    );
   }
 
   private async sessionTaskMutation<T>(
@@ -3931,6 +3961,9 @@ export class DaemonClient {
             : {}),
           ...(action === 'load' && req.historyPageSize !== undefined
             ? { historyPageSize: req.historyPageSize }
+            : {}),
+          ...(action === 'load' && req.compactedReplayMode !== undefined
+            ? { compactedReplayMode: req.compactedReplayMode }
             : {}),
           ...(action === 'load' && req.liveReplayMode !== undefined
             ? { liveReplayMode: req.liveReplayMode }
@@ -4295,6 +4328,7 @@ export class DaemonClient {
     message: string,
     opts?: {
       signal?: AbortSignal;
+      eventDetailMode?: 'full' | 'summary';
       clientId?: string;
       messageId?: string;
       content?: PromptContentBlock[];
@@ -4315,6 +4349,9 @@ export class DaemonClient {
         body: JSON.stringify({
           message,
           messageId: opts?.messageId,
+          ...(opts?.eventDetailMode !== undefined
+            ? { eventDetailMode: opts.eventDetailMode }
+            : {}),
           ...(opts?.content && opts.content.length > 0
             ? { content: opts.content }
             : {}),

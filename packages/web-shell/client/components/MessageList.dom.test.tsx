@@ -4458,6 +4458,26 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('1 tool call'));
   });
 
+  it('includes final subagent usage in the processing row', () => {
+    const agent = agentMsg('summary-agent');
+    agent.tools[0]!.rawOutput = {
+      type: 'task_execution',
+      status: 'completed',
+      executionSummary: { inputTokens: 1000, outputTokens: 200 },
+    };
+    const c = mount(
+      [
+        userMsg('u1'),
+        agent,
+        { ...asstMsg('a1'), usage: { inputTokens: 2000, outputTokens: 300 } },
+      ],
+      undefined,
+      { isResponding: true },
+    );
+    expect(c.textContent).toContain('Processing');
+    expect(c.textContent).toContain('↑3.0k ↓500');
+  });
+
   it('does not add tool summary usage when full transcript usage includes it', () => {
     const agent = agentMsg('nested');
     agent.tools[0]!.rawOutput = {

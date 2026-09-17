@@ -11,16 +11,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
-import type {
-  RequestPermissionRequest,
-  AvailableCommand,
-  ModelInfo,
-} from '@agentclientprotocol/sdk';
-import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
-import type {
-  PermissionResponseMessage,
-  AskUserQuestionResponseMessage,
-} from '../../types/webviewMessageTypes.js';
+import type { AvailableCommand, ModelInfo } from '@agentclientprotocol/sdk';
 import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
@@ -34,6 +25,7 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   applyProviderInstallPlanToFile,
   snapshotSettingsForRollback,
+  resolveProviderSettings,
   restoreSettingsSnapshot,
   writeCodingPlanConfig,
   readQwenSettingsForVSCode,
@@ -41,6 +33,8 @@ import {
 } from '../../services/settingsWriter.js';
 import {
   buildInstallPlan,
+  getModelsForProviderProtocol,
+  type ProviderProtocolConfig,
   parseInsightMessage,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
@@ -49,6 +43,7 @@ import {
   QwenDaemonProcess,
   type QwenDaemonListenerHandle,
 } from '../../services/qwenDaemonProcess.js';
+import { isLoopbackHostname } from '../../services/daemonIdeConnection.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -72,15 +67,12 @@ function getDaemonProcess(context: vscode.ExtensionContext): QwenDaemonProcess {
 const DotColor = {
   /** Task completed while tab was not active. */
   Orange: 'orange',
-  /** Agent needs user input (permission / question). Higher priority than orange. */
-  Blue: 'blue',
 } as const;
 type DotColor = (typeof DotColor)[keyof typeof DotColor];
 
 /** Asset file names for tab dot icon states. */
 const DOT_ICON: Record<DotColor | 'default', string> = {
   orange: 'icon-orange.png',
-  blue: 'icon-blue.png',
   default: 'icon.png',
 };
 
@@ -151,17 +143,7 @@ export class WebViewProvider {
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
   private isSyncingToVSCode = false; // Guard to prevent config change loop
-  // Track a pending permission request and its resolver so extension commands
-  // can "simulate" user choice from the command palette (e.g. after accepting
-  // a diff, auto-allow read/execute, or auto-reject on cancel).
-  private pendingPermissionRequest: RequestPermissionRequest | null = null;
-  private pendingPermissionResolve: ((optionId: string) => void) | null = null;
   private readonly webShellPermissionOwners = new Map<vscode.Webview, string>();
-  // Track a pending ask user question request and its resolver
-  private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
-  private pendingAskUserQuestionResolve:
-    | ((result: { optionId: string; answers?: Record<string, string> }) => void)
-    | null = null;
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
   private authState: boolean | null = null;
@@ -192,10 +174,8 @@ export class WebViewProvider {
   private authFlowActive = false;
   /** Timestamp (ms) when the current agent task started (first stream chunk) */
   private agentStartTime: number | null = null;
-  /** Current tab-dot state: null = no dot, 'orange' = task done, 'blue' = needs attention */
+  /** Current tab-dot state: null = no dot, 'orange' = task done. */
   private dotState: DotColor | null = null;
-  /** Guard: attention notification already sent for the current permission/question request */
-  private attentionNotified = false;
   /** Guard: idle notification already sent for the current task (prevents multi-turn duplicates) */
   private idleNotificationSent = false;
 
@@ -211,17 +191,6 @@ export class WebViewProvider {
         if (webview !== this.attachedWebview) {
           this.webShellPermissionOwners.delete(webview);
         }
-      }
-      // Panel dispose callback — unblock any pending ACP Promises
-      if (this.pendingPermissionResolve) {
-        this.pendingPermissionResolve('cancel');
-        this.pendingPermissionResolve = null;
-        this.pendingPermissionRequest = null;
-      }
-      if (this.pendingAskUserQuestionResolve) {
-        this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
-        this.pendingAskUserQuestionResolve = null;
-        this.pendingAskUserQuestionRequest = null;
       }
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
@@ -543,18 +512,6 @@ export class WebViewProvider {
         }
       }
 
-      const pendingToolCallId =
-        this.pendingPermissionRequest?.toolCall?.toolCallId;
-      const updateToolCallId = updateData.toolCallId;
-      const updateStatus = updateData.status;
-      if (
-        typeof updateToolCallId === 'string' &&
-        updateToolCallId === pendingToolCallId &&
-        (updateStatus === 'completed' || updateStatus === 'failed')
-      ) {
-        this.pendingPermissionResolve?.('cancel');
-      }
-
       this.sendMessageToWebView({
         type: 'toolCall',
         data: {
@@ -571,215 +528,6 @@ export class WebViewProvider {
         data: { entries },
       });
     });
-
-    this.agentManager.onPermissionRequest(
-      async (request: RequestPermissionRequest) => {
-        // Notify the user immediately (dot + optional system notification)
-        const toolTitle = (request.toolCall as { title?: string } | undefined)
-          ?.title;
-        this.handleAgentNeedsAttention(toolTitle);
-
-        // Send permission request to WebView
-        this.sendMessageToWebView({
-          type: 'permissionRequest',
-          data: request,
-        });
-
-        // If a previous permission request is still pending, cancel it so its
-        // promise settles instead of leaking (issue: handler overwrite leak).
-        if (this.pendingPermissionResolve) {
-          this.pendingPermissionResolve('cancel');
-        }
-
-        // Wait for user response
-        return new Promise((resolve) => {
-          // Cache the pending request and its resolver so extension commands
-          // (e.g. diff accept/cancel) can resolve it externally.
-          this.pendingPermissionRequest = request;
-          this.pendingPermissionResolve = (optionId: string) => {
-            // Clear pending state BEFORE resolving to prevent re-entrant calls
-            this.pendingPermissionRequest = null;
-            this.pendingPermissionResolve = null;
-            // Resolve the ACP promise
-            resolve(optionId);
-            // Instruct the webview UI to close its drawer
-            this.sendMessageToWebView({
-              type: 'permissionResolved',
-              data: { optionId },
-            });
-            // NOTE: Diff management (closeAll, suppressBriefly) is handled
-            // exclusively in the message handler below to avoid double execution.
-          };
-
-          const handler = (message: PermissionResponseMessage) => {
-            if (message.type !== 'permissionResponse') {
-              return;
-            }
-            if (!this.pendingPermissionResolve) return;
-
-            const optionId = message.data.optionId || '';
-
-            // Resolve the optionId back to ACP so the agent isn't blocked
-            this.pendingPermissionResolve?.(optionId);
-
-            const isCancel =
-              optionId === 'cancel' ||
-              optionId.toLowerCase().includes('reject');
-
-            // For switch_mode (exit_plan_mode), cancel means "reject
-            // the plan and stay in plan mode" — the agent keeps running.
-            const isSwitchMode =
-              (request.toolCall as { kind?: string } | undefined)?.kind ===
-              'switch_mode';
-            const isWorkflowApproval =
-              (
-                request.toolCall as
-                  | { _meta?: { workflowApproval?: unknown } }
-                  | undefined
-              )?._meta?.workflowApproval === true;
-
-            // Always close open qwen-diff editors after any permission decision
-            void vscode.commands.executeCommand('qwen.diff.closeAll');
-
-            if (isCancel) {
-              // Fire and forget — for normal tool calls, cancel generation and
-              // end the stream; for switch_mode, keep the session alive but
-              // still mark the permission tool call as failed in the UI.
-              void (async () => {
-                if (!isSwitchMode && !isWorkflowApproval) {
-                  try {
-                    await this.agentManager.cancelCurrentPrompt();
-                  } catch (err) {
-                    logger.warn(
-                      '[WebViewProvider] cancelCurrentPrompt error:',
-                      err,
-                    );
-                  }
-
-                  this.agentStartTime = null;
-                  this.idleNotificationSent = false;
-                  this.sendMessageToWebView({
-                    type: 'streamEnd',
-                    data: { timestamp: Date.now(), reason: 'user_cancelled' },
-                  });
-                }
-
-                // Synthesize a failed tool_call_update to match CLI UX
-                try {
-                  const toolCallId =
-                    (request.toolCall as { toolCallId?: string } | undefined)
-                      ?.toolCallId || '';
-                  const title =
-                    (request.toolCall as { title?: string } | undefined)
-                      ?.title || '';
-                  let kind = ((
-                    request.toolCall as { kind?: string } | undefined
-                  )?.kind || 'execute') as string;
-                  if (!kind && title) {
-                    const t = title.toLowerCase();
-                    if (t.includes('read') || t.includes('cat')) {
-                      kind = 'read';
-                    } else if (t.includes('write') || t.includes('edit')) {
-                      kind = 'edit';
-                    } else {
-                      kind = 'execute';
-                    }
-                  }
-
-                  this.sendMessageToWebView({
-                    type: 'toolCall',
-                    data: {
-                      type: 'tool_call_update',
-                      toolCallId,
-                      title,
-                      kind,
-                      status: 'failed',
-                      rawInput: (request.toolCall as { rawInput?: unknown })
-                        ?.rawInput,
-                      locations: (
-                        request.toolCall as {
-                          locations?: Array<{
-                            path: string;
-                            line?: number | null;
-                          }>;
-                        }
-                      )?.locations,
-                    },
-                  });
-                } catch (err) {
-                  logger.warn(
-                    '[WebViewProvider] failed to synthesize failed tool_call_update:',
-                    err,
-                  );
-                }
-              })();
-            } else {
-              // Allowed/proceeded — suppress diff re-open briefly
-              void vscode.commands.executeCommand('qwen.diff.suppressBriefly');
-            }
-          };
-          // Store handler in message handler
-          this.messageHandler.setPermissionHandler(handler);
-        });
-      },
-    );
-
-    this.agentManager.onAskUserQuestion(
-      async (request: AskUserQuestionRequest) => {
-        // Notify the user immediately (dot + optional system notification)
-        this.handleAgentNeedsAttention();
-
-        // Send ask user question request to WebView
-        this.sendMessageToWebView({
-          type: 'askUserQuestion',
-          data: request,
-        });
-
-        // Wait for user response
-        return new Promise<{
-          optionId: string;
-          answers?: Record<string, string>;
-        }>((resolve) => {
-          // Cache the pending request and its resolver
-          this.pendingAskUserQuestionRequest = request;
-          this.pendingAskUserQuestionResolve = (result) => {
-            try {
-              resolve(result);
-            } finally {
-              // Always clear pending state
-              this.pendingAskUserQuestionRequest = null;
-              this.pendingAskUserQuestionResolve = null;
-              // Instruct the webview UI to close the dialog
-              this.sendMessageToWebView({
-                type: 'askUserQuestionResolved',
-                data: { optionId: result.optionId },
-              });
-            }
-          };
-          const handler = (message: AskUserQuestionResponseMessage) => {
-            if (message.type !== 'askUserQuestionResponse') {
-              return;
-            }
-
-            const { optionId, answers, cancelled } = message.data;
-
-            // Resolve with the result
-            if (cancelled) {
-              this.pendingAskUserQuestionResolve?.({
-                optionId: 'cancel',
-              });
-            } else {
-              this.pendingAskUserQuestionResolve?.({
-                optionId: optionId || 'proceed_once',
-                answers,
-              });
-            }
-          };
-          // Store handler in message handler
-          this.messageHandler.setAskUserQuestionHandler(handler);
-        });
-      },
-    );
 
     this.agentManager.onDisconnected((code, signal) => {
       logger.log(
@@ -1487,13 +1235,33 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+      const resolvedSnapshot = rollbackSnapshot
+        ? resolveProviderSettings(rollbackSnapshot)
+        : null;
+      const existingProviders = resolvedSnapshot?.['modelProviders'] as
         | ModelProvidersConfig
         | undefined;
+      const protocol = inputs.protocol ?? providerConfig.protocol;
+      const existingModelsForProtocol = getModelsForProviderProtocol(
+        existingProviders,
+        protocol,
+        resolvedSnapshot?.['providerProtocol'] as
+          | ProviderProtocolConfig
+          | undefined,
+      );
+      const saved = resolvedSnapshot as {
+        model?: { name?: string; baseUrl?: string };
+        security?: { auth?: { selectedType?: string } };
+      } | null;
       const plan = buildInstallPlan(
         providerConfig,
         inputs,
-        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+        existingModelsForProtocol,
+        {
+          authType: saved?.security?.auth?.selectedType,
+          id: saved?.model?.name,
+          baseUrl: saved?.model?.baseUrl,
+        },
       );
       await applyProviderInstallPlanToFile(plan);
 
@@ -1946,6 +1714,39 @@ export class WebViewProvider {
   }
 
   /**
+   * Translate the daemon URL into one the webview can actually reach.
+   *
+   * The daemon binds the loopback of the machine hosting this extension
+   * process. In a remote window (SSH, Dev Container, WSL) that machine is not
+   * the one rendering the webview, so the raw address points the shell at the
+   * client's own loopback and every request fails with a connection refusal.
+   * `asExternalUri` asks VS Code to forward the port and returns the address
+   * on the client side. A local window needs no translation, and the result is
+   * never cached: a restarted extension host forwards to a fresh port.
+   *
+   * Only the webview-facing payload goes through this: the extension host is
+   * co-located with the daemon and must keep the loopback URL, which is also
+   * all `validateDaemonBaseUrl()` accepts.
+   */
+  private async resolveWebviewDaemonBaseUrl(baseUrl: string): Promise<string> {
+    if (!vscode.env.remoteName) return baseUrl;
+    const externalUri = await vscode.env.asExternalUri(
+      vscode.Uri.parse(baseUrl),
+    );
+    const externalUrl = externalUri.toString();
+    // This URL shares its payload with the daemon's bearer token. A
+    // browser-based remote resolves to a relay origin rather than a forwarded
+    // loopback one, and the webview CSP would then be the only thing keeping
+    // that token away from a third-party host — so refuse here instead.
+    if (!isLoopbackHostname(new URL(externalUrl).hostname)) {
+      throw new Error(
+        `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", which is not a forwarded loopback address.`,
+      );
+    }
+    return externalUrl;
+  }
+
+  /**
    * Handle common webview message types shared across all host contexts
    * (sidebar, new panel, restored panel). Returns true if the message was
    * fully handled and the caller should skip further processing.
@@ -2091,10 +1892,14 @@ export class WebViewProvider {
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;
+        const webviewBaseUrl = await this.resolveWebviewDaemonBaseUrl(
+          runtime.baseUrl,
+        );
         await webview.postMessage({
           type: 'webShellBootstrap',
           data: {
             ...runtime,
+            baseUrl: webviewBaseUrl,
             clientId: this.daemonClientId,
             workspaceCwd: canonicalWorkspaceCwd,
             // The daemon matches workspaces by canonical path, but every
@@ -2241,14 +2046,10 @@ export class WebViewProvider {
     return false;
   }
 
-  /** Update the tab-dot icon. Blue takes priority over orange. */
+  /** Update the tab-dot icon. */
   private setTabDot(color: DotColor): void {
     const config = vscode.workspace.getConfiguration('qwen-code');
     if (!config.get<boolean>('dotIndicator', true)) {
-      return;
-    }
-    // Blue takes priority; never downgrade from blue to orange.
-    if (this.dotState === DotColor.Blue && color === DotColor.Orange) {
       return;
     }
     this.dotState = color;
@@ -2372,8 +2173,6 @@ export class WebViewProvider {
     // onEndTurn multiple times and resetting would lose the true start time.
     // It is reset when the user sends the next message (see onDidReceiveMessage).
     const startTime = this.agentStartTime;
-    this.attentionNotified = false; // reset for next permission/question cycle
-
     const panel = this.panelManager.getPanel();
     const panelActive = panel?.active ?? false;
 
@@ -2397,32 +2196,6 @@ export class WebViewProvider {
     ) {
       this.idleNotificationSent = true;
       this.notifyUser('Waiting for your input.');
-    }
-  }
-
-  /**
-   * Called when the agent needs user attention (permission request or ask-question).
-   * @param detail - optional context, e.g. the tool name that needs approval.
-   */
-  private handleAgentNeedsAttention(detail?: string): void {
-    const panel = this.panelManager.getPanel();
-    const panelActive = panel?.active ?? false;
-
-    if (!panelActive) {
-      this.setTabDot(DotColor.Blue);
-    }
-
-    const userWatching = this.isUserWatchingPanel();
-
-    // Notify once per request regardless of task duration.
-    if (!userWatching && !this.attentionNotified) {
-      this.attentionNotified = true;
-      if (this.isNotificationsEnabled()) {
-        const message = detail
-          ? `Needs your permission to use ${detail}.`
-          : 'Waiting for your input.';
-        this.notifyUser(message);
-      }
     }
   }
 
@@ -2473,9 +2246,7 @@ export class WebViewProvider {
    * Whether there is a pending permission decision awaiting an option.
    */
   hasPendingPermission(): boolean {
-    return (
-      this.webShellPermissionOwners.size > 0 || !!this.pendingPermissionResolve
-    );
+    return this.webShellPermissionOwners.size > 0;
   }
 
   /**
@@ -2514,104 +2285,32 @@ export class WebViewProvider {
   }
 
   /**
-   * Simulate selecting a permission option while a request drawer is open.
-   * The choice can be a concrete optionId or a shorthand intent.
+   * Forward a permission decision from a managed diff to its owning web shell.
    */
   respondToPendingPermission(
-    choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
+    choice: 'allow' | 'cancel',
     context?: { fromDiffEditor?: boolean; permissionRequestId?: string },
   ): void {
     // Web-shell approvals are bound to the request id stored on the managed
     // diff. The target web shell validates that exact id again before voting,
     // so an original file or a stale/stacked diff cannot resolve another
     // session's approval.
-    if (
-      typeof choice === 'string' &&
-      context?.fromDiffEditor &&
-      context.permissionRequestId
-    ) {
-      const decision =
-        choice === 'accept' || choice === 'allow'
-          ? 'allow'
-          : choice === 'cancel' || choice === 'reject'
-            ? 'reject'
-            : undefined;
-      const webview = decision
-        ? Array.from(this.webShellPermissionOwners).find(
-            ([, requestId]) => requestId === context.permissionRequestId,
-          )?.[0]
-        : undefined;
-      if (webview && decision) {
-        void webview.postMessage({
-          type: 'webShellPermissionDecision',
-          data: { decision, requestId: context.permissionRequestId },
-        });
-      }
+    if (!context?.fromDiffEditor || !context.permissionRequestId) {
       return;
     }
-    if (!this.pendingPermissionResolve || !this.pendingPermissionRequest) {
-      return; // nothing to do
-    }
-
-    const options = this.pendingPermissionRequest.options || [];
-
-    const pickByKind = (substr: string, preferOnce = false) => {
-      const lc = substr.toLowerCase();
-      const filtered = options.filter((o) =>
-        (o.kind || '').toLowerCase().includes(lc),
-      );
-      if (preferOnce) {
-        const once = filtered.find((o) =>
-          (o.optionId || '').toLowerCase().includes('once'),
-        );
-        if (once) {
-          return once.optionId;
-        }
-      }
-      return filtered[0]?.optionId;
-    };
-
-    const pickByOptionId = (substr: string) =>
-      options.find((o) => (o.optionId || '').toLowerCase().includes(substr))
-        ?.optionId;
-
-    let optionId: string | undefined;
-
-    if (typeof choice === 'object') {
-      optionId = choice.optionId;
-    } else {
-      const c = choice.toLowerCase();
-      if (c === 'accept' || c === 'allow') {
-        // Prefer an allow_once/proceed_once style option, then any allow/proceed
-        optionId =
-          pickByKind('allow', true) ||
-          pickByOptionId('proceed_once') ||
-          pickByKind('allow') ||
-          pickByOptionId('proceed') ||
-          options[0]?.optionId; // last resort: first option
-      } else if (c === 'cancel' || c === 'reject') {
-        // Prefer explicit cancel, then a reject option
-        optionId =
-          options.find((o) => o.optionId === 'cancel')?.optionId ||
-          pickByKind('reject') ||
-          pickByOptionId('cancel') ||
-          pickByOptionId('reject') ||
-          'cancel';
-      }
-    }
-
-    if (!optionId) {
+    const webview = Array.from(this.webShellPermissionOwners).find(
+      ([, requestId]) => requestId === context.permissionRequestId,
+    )?.[0];
+    if (!webview) {
       return;
     }
-
-    try {
-      this.pendingPermissionResolve(optionId);
-    } catch (_error) {
-      logger.warn(
-        '[WebViewProvider] respondToPendingPermission failed:',
-        _error,
-      );
-    }
+    void webview.postMessage({
+      type: 'webShellPermissionDecision',
+      data: {
+        decision: choice === 'allow' ? 'allow' : 'reject',
+        requestId: context.permissionRequestId,
+      },
+    });
   }
 
   /**
@@ -2669,25 +2368,6 @@ export class WebViewProvider {
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
             panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
-          }
-          return;
-        }
-        // Handle ask user question response
-        if (message.type === 'askUserQuestionResponse') {
-          const askUserQuestionMsg = message as AskUserQuestionResponseMessage;
-          const answers = askUserQuestionMsg.data.answers || {};
-          const cancelled = askUserQuestionMsg.data.cancelled || false;
-
-          // Resolve the pending ask user question promise
-          if (cancelled) {
-            this.pendingAskUserQuestionResolve?.({
-              optionId: 'cancel',
-            });
-          } else {
-            this.pendingAskUserQuestionResolve?.({
-              optionId: 'proceed_once',
-              answers,
-            });
           }
           return;
         }
@@ -2902,17 +2582,6 @@ export class WebViewProvider {
    * Dispose the WebView provider and clean up resources
    */
   dispose(): void {
-    // Unblock any pending ACP Promises before tearing down
-    if (this.pendingPermissionResolve) {
-      this.pendingPermissionResolve('cancel');
-      this.pendingPermissionResolve = null;
-      this.pendingPermissionRequest = null;
-    }
-    if (this.pendingAskUserQuestionResolve) {
-      this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
-      this.pendingAskUserQuestionResolve = null;
-      this.pendingAskUserQuestionRequest = null;
-    }
     if (WebViewProvider.lastContextMenuProvider === this) {
       WebViewProvider.lastContextMenuProvider = null;
     }

@@ -360,14 +360,16 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
-    it('should keep cross-session messaging off by default', () => {
-      // The default is the entire security posture of the feature: shipping
-      // it flipped on would open every session on the box to peer messages.
+    it('should keep cross-session messaging on by default', () => {
+      // On by default since docs/design/2026-09-14-cross-session-messaging-default-on.md.
+      // This value is not what bounds a peer: the inbound gate is (review-class
+      // parity, an explicit hold or refuse), with the tighten-only workspace
+      // ranking and the per-session inbox token around it.
       const crossSessionMessaging =
         getSettingsSchema().agents.properties.crossSessionMessaging;
 
       expect(crossSessionMessaging.type).toBe('boolean');
-      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.default).toBe(true);
       expect(crossSessionMessaging.requiresRestart).toBe(true);
       expect(crossSessionMessaging.showInDialog).toBe(false);
     });

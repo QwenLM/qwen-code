@@ -254,6 +254,8 @@ export function useMessageQueue(): UseMessageQueueReturn {
     (
       goalControlMode: GoalQueueControlMode = 'normal',
     ): QueuedSubmission | null => {
+      // Goal controls bypass ordinary input so queued text cannot prevent
+      // clearing or replacing the Goal that is holding that input.
       if (goalControlMode !== 'normal') {
         const goalCommandIndex = queueRef.current.findIndex(({ text }) =>
           GOAL_COMMAND_RE.test(text),

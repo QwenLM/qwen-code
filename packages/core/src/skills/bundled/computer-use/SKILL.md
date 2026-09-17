@@ -47,7 +47,7 @@ If `node_repl` is unavailable, run:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.5
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.8
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.9
 ```
 
 Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,
@@ -245,6 +245,21 @@ captured element list even when `.text` reports a diff or no change. Use tokens
 from that list; unchanged tokens remain usable across observations. After a
 capture read failure, use only tokens issued by the latest observation.
 
+Text rows omit default enabled/unselected states and the primary click action.
+`disabled` and `selected` mark non-default states; `actions` lists secondary
+actions. Editable content appears separately from its label as `value`, including
+an empty value after clearing a field. The element list retains all actions.
+Empty layout containers and duplicate labels are omitted; adjacent static text
+may share a row. Window, dialog, list and table context, focused/selected state,
+and actionable elements remain visible. Use element tokens, not row positions.
+Linux observations omit virtual children when an app manages their lifetime
+(`managed_descendants_omitted`). The returned tree is bounded; use a screenshot
+for sheet or canvas content that is not present in the tree.
+Linux also omits hidden native menu branches (`hidden_menu_subtrees_omitted`).
+Open a menu and observe again to read its displayed commands. A collection
+timeout returns the completed portion with an incomplete-capture indication;
+it does not establish that missing controls are absent.
+
 Text is limited to 12,000 characters by default. Filter the elements for controls
 you need, or request `disableDiff: true` with a larger `maxTextChars` (minimum
 512). An omitted row does not prove absence. If you discarded earlier text,
@@ -264,6 +279,10 @@ await computer.click({ pid: target.pid, elementToken });
 await computer.typeText({ ...target, text: 'hello' });
 nodeRepl.write((await computer.observeWindow(target)).text);
 ```
+
+When the controls and next actions are already known, combine the actions and
+saving in the same cell, then observe. A new observation is a decision boundary;
+do not split a known sequence into one call per action.
 
 End the batch when opening a dialog or menu. For a dialog, list windows and
 observe the matching window before typing. For a menu in the same window,
@@ -299,5 +318,7 @@ Do not stringify the whole observation or a raw driver result containing image
 bytes. In outer code mode, also forward each returned image block with `image()`
 as shown in the shared entrypoint, including images from `node_repl_wait`.
 
-When all Computer Use work is complete, call `await computer.close()` and clear
-`globalThis.computer`. Reset the REPL only when no other persistent state is needed.
+Include `await computer.close()` and clearing `globalThis.computer` at the end
+of the cell that emits final verification. Inspect that result before reporting
+success; reconnect if it reveals unfinished work. Avoid a separate cleanup-only
+call. Reset the REPL only when no other persistent state is needed.

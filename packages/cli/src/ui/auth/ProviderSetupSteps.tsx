@@ -16,6 +16,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 import { AuthType, discoverProviderModels } from '@qwen-code/qwen-code-core';
 import type {
+  ModelWireApi,
   ProviderConfig,
   BaseUrlOption,
   ModelSpec,
@@ -784,7 +785,11 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }): React.JSX.Element {
         </Text>
       </Box>
       <Box marginTop={1}>
-        <Text>{flow.state.previewJson}</Text>
+        {flow.state.previewError ? (
+          <Text color={theme.status.error}>{flow.state.previewError}</Text>
+        ) : (
+          <Text>{flow.state.previewJson}</Text>
+        )}
       </Box>
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
@@ -806,13 +811,6 @@ const PROTOCOL_ITEMS = [
     label: t('OpenAI-compatible'),
     description: t('Standard OpenAI API format (most common)'),
     value: AuthType.USE_OPENAI,
-  },
-  {
-    key: AuthType.USE_OPENAI_RESPONSES,
-    title: t('OpenAI Responses'),
-    label: t('OpenAI Responses'),
-    description: t('OpenAI Responses API — streaming reasoning + tool use'),
-    value: AuthType.USE_OPENAI_RESPONSES,
   },
   {
     key: AuthType.USE_ANTHROPIC,
@@ -892,7 +890,10 @@ export function ProviderSetupSteps({
           <Box marginTop={1}>
             <DescriptiveRadioButtonSelect
               items={items}
-              initialIndex={0}
+              initialIndex={Math.max(
+                0,
+                items.findIndex((item) => item.value === flow.state.protocol),
+              )}
               onSelect={flow.selectProtocol}
               itemGap={1}
             />
@@ -901,6 +902,36 @@ export function ProviderSetupSteps({
         </>
       );
     }
+
+    case 'wireApi':
+      return (
+        <>
+          <Box marginTop={1}>
+            <DescriptiveRadioButtonSelect
+              items={[
+                {
+                  key: 'chat-completions',
+                  title: t('Chat Completions'),
+                  description: t('Standard OpenAI API format (most common)'),
+                  value: 'chat-completions' as ModelWireApi,
+                },
+                {
+                  key: 'responses',
+                  title: t('Responses'),
+                  description: t(
+                    'OpenAI Responses API — streaming reasoning + tool use',
+                  ),
+                  value: 'responses' as ModelWireApi,
+                },
+              ]}
+              initialIndex={flow.state.wireApi === 'responses' ? 1 : 0}
+              onSelect={flow.selectWireApi}
+              itemGap={1}
+            />
+          </Box>
+          <NAV_HINT_SELECT />
+        </>
+      );
 
     case 'baseUrl':
       if (Array.isArray(provider.baseUrl)) {
