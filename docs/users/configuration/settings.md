@@ -9,6 +9,10 @@
 > **Note on New Configuration Format**: The format of the `settings.json` file has been updated to a new, more organized structure. The old format will be migrated automatically.
 > Qwen Code offers several ways to configure its behavior, including environment variables, command-line arguments, and settings files. This document outlines the different configuration methods and available settings.
 
+## Tool execution sandbox
+
+`tools.executionSandbox` is an operator-only Linux policy with required `filesystem: "read-only" | "workspace-write"` and `network: "open" | "closed"`, plus optional `backend: "auto" | "bwrap"`. System policy replaces the complete User/SystemDefaults object; Workspace values are ignored. Bare/safe modes retain the policy and changing it requires restart. See [Sandbox](../features/sandbox.md#linux-tool-execution-sandbox) for configuration, scope, unsupported integrations, verification and migration from whole-CLI bwrap.
+
 ## Configuration layers
 
 Configuration is applied in the following order of precedence (lower numbers are overridden by higher numbers):

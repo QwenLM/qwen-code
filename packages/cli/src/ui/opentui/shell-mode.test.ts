@@ -32,6 +32,11 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...mocked, default: mocked };
 });
 
+const runtimeShellMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core/sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: runtimeShellMock,
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -101,6 +106,10 @@ describe('executeUserShell', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     executeMock.mockReset();
+    runtimeShellMock.mockReset();
+    runtimeShellMock.mockImplementation((_runtime, ...args) =>
+      executeMock(...args),
+    );
     addHistoryMock.mockReset();
     currentChat = {};
     osPlatformMock.mockReturnValue('linux');
@@ -147,6 +156,29 @@ describe('executeUserShell', () => {
     events
       .filter((event) => event.type.startsWith('tool-'))
       .map((event) => (event as { id?: string }).id);
+
+  it('passes the selected Config and raw command to the runtime sandbox', async () => {
+    const config = makeConfig(false);
+    config.getShellExecutionSandbox = () =>
+      ({ filesystem: 'read-only', network: 'closed' }) as ReturnType<
+        Config['getShellExecutionSandbox']
+      >;
+    executeMock.mockResolvedValue({ result: Promise.resolve(makeResult()) });
+    const signal = new AbortController().signal;
+    await executeUserShell(config, 'echo sandbox', () => {}, signal, {
+      width: 80,
+      height: 24,
+    });
+    expect(runtimeShellMock).toHaveBeenCalledWith(
+      config,
+      'echo sandbox',
+      '/tmp/project',
+      expect.any(Function),
+      signal,
+      false,
+      expect.objectContaining({ terminalWidth: 80 }),
+    );
+  });
 
   it('streams throttled snapshots and lands the whole output', async () => {
     const { events, done, emitOutput, resolveResult } = setup();

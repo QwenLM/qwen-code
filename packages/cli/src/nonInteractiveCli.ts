@@ -569,13 +569,16 @@ export async function runNonInteractive(
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
-    const cleanupReviewWorktrees = (gitTimeout?: number) =>
+    const cleanupReviewWorktrees = (gitTimeout?: number) => {
+      // Review leases live in the tool-writable workspace in this mode.
+      if (config.getShellExecutionSandbox?.()) return;
       cleanupReviewWorktreeLeases({
         sessionId,
         promptId: prompt_id,
         repositoryRoot: config.getProjectRoot(),
         gitTimeout,
       });
+    };
     const unregisterReviewWorktreeCleanup = registerCleanup(() =>
       cleanupReviewWorktrees(1_000),
     );

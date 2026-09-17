@@ -1,0 +1,41 @@
+# Sandbox execution API
+
+[English](2026-09-16-sandbox-execution-api.md) | [简体中文](2026-09-16-sandbox-execution-api.zh-CN.md)
+
+## Status and problem
+
+Implementation stage of the [tool execution sandbox](2026-09-16-tool-execution-sandbox.md), following the verified bwrap prototype. The prototype routes argv through a host shell and sends file writes through a separate process API. Neither is the intended core contract. This stage adds internal APIs and installed workers; existing CLI tools and configuration remain on their current paths.
+
+The subsequent [runtime shell integration](2026-09-16-runtime-shell-sandbox.md) connects these APIs to a restricted trusted-host headless runtime and adds terminal-error mapping. The results below describe the API-stage v4 snapshot, not the later implementation's current bytes.
+
+The later [runtime file-tool stage](2026-09-16-runtime-file-sandbox.md) replaces the limited JSON worker with a binary body, stat-version checks and the shared atomic writer to preserve file semantics. The 1 MiB protocol and file limitations below belong to the API-stage snapshot.
+
+## Design
+
+`ShellExecutionService.executeLaunch` accepts an absolute executable, argv, absolute cwd, an exact environment and optional bounded caller-owned stdin bytes. It snapshots the launch before asynchronous initialization. It uses the existing pipe/PTY output, cancellation and background lifecycle without shell parsing or implicit environment additions. Stdin requests are pipe-only and end with EOF. PTY launches must supply a nonempty `TERM`; POSIX PTY launches must also supply `PWD` equal to cwd. The adapter preserves these explicit values instead of allowing node-pty to add or override them. PTY fallback is allowed only before a process exists and retains the same launch. No sandbox/backend failure replays a command.
+
+The Linux bwrap adapter accepts trusted workspace, installation and runtime-state directories plus a read-only/workspace-write filesystem policy and open/closed network policy. It canonicalizes and rejects overlap of writable roots with protected state, installation and system paths. Each execution receives a private scratch directory and a control directory under runtime state. The sandbox uses a read-only root, private PID namespace, fresh `/proc`, minimal `/dev`, explicit environment and optional network namespace. This is an internal first adapter, not full user path-policy admission or backend auto-selection.
+
+A fixed installed Node relay is started directly, with a minimal bootstrap environment independent of the payload environment. The adapter strips Qwen internal secrets from the payload environment and assigns `TMPDIR`, `TMP` and `TEMP` to private scratch and `PWD` to canonical cwd. The relay inherits pipe or PTY stdio and spawns bwrap with a separate FD 3 for `--json-status-fd`. The sandbox child closes that FD. The relay creates a regular status file using exclusive creation, no symlink following and mode `0600`; the file descriptor is not inherited by bwrap. The entire control directory is kernel read-only to the payload and disjoint from writable roots. A Unix socket is unsuitable because a read-only mount does not prevent connecting to it. The relay checks the expected parent PID before spawning and every 100 ms; on parent loss it exits and bwrap `--die-with-parent` terminates the namespace. This is bounded polling, not an immediate native parent-death signal on the relay.
+
+The bounded status stream is parsed separately from stdout/stderr. A final bwrap `exit-code` confirms successful payload exec and its exit status. Initial `child-pid` is not a setup-ready event. Missing, malformed or truncated final evidence is `unconfirmed`, including supervisor errors after payload execution. Cancellation/signal termination is `interrupted`; a promoted process is `running` until its separate settlement promise completes. These states never authorize automatic retry. Scratch/control directories survive promotion and are removed at terminal settlement. Cleanup errors are logged without losing the execution result. If a transport error leaves termination unconfirmed, retain directories for later inspection instead of deleting live resources. Host crashes may leave temporary directories; crash recovery and garbage collection are follow-up work.
+
+An installed file worker accepts at most 1 MiB of UTF-8 JSON via stdin. It validates a write request, checks expected content, creates a same-directory temporary file, checks freshness again and renames inside the sandbox. The client uses the same bwrap adapter and checks both trusted execution status and the worker reply. The kernel confines symlink traversal and writes. This limited worker does not provide compare-and-swap atomicity against concurrent writers, preserve existing file modes or implement binary edits; production file-tool migration requires resolving those semantics.
+
+## Files and scope
+
+Changes cover the core shell service and its tests, `packages/core/src/sandbox/`, separate relay/file-worker build entries, package asset inclusion, and the Linux prototype verifier. Existing `execute` callers retain their command-string contract. No Landlock helper, new settings, permission flow, frontend tool migration, macOS/Windows sandbox backend, Bun standalone support or read confidentiality is included. Trusted same-user host processes and an attacker modifying workspace ancestors from outside the sandbox are outside this first adapter's threat model. Existing hard-link aliases retain the limitation documented by the unified design; this adapter does not promise inode-wide immutability.
+
+## Verification and acceptance
+
+Focused unit tests must prove literal argv, exact environment, immutable launch snapshots, stdin EOF/early-close handling, pipe-only stdin and no replay after PTY spawn. Real Linux tests must exercise pipes and actual PTY, namespaces, write denial, network modes, cancellation, background settlement, parent death and worker input. Status tests distinguish payload nonzero exit from unconfirmed setup failure and interruption after execution; forged stdout, FD writes and control-file writes must not forge receipts. Packaged assets must be present. Build, typecheck and bundle must pass; the installed global CLI and local CLI version smoke checks establish that this is an internal API stage, not a new user-visible switch.
+
+## Verification results (2026-09-16)
+
+The final v4 implementation passed 178 focused unit tests, 31 real-Linux harness checks and 6 independent adversarial checks. Linux evidence uses Lima `qwen-sbx`, ARM64, Linux `7.0.0-31-generic`, Node `v22.22.1`, bwrap `0.11.1` and real `@lydell/node-pty@1.2.0-beta.10`. Independent checks confirm explicit PTY environment values, Qwen-secret removal, scratch retention through promotion, final cleanup and conservative handling of a receipt lost after execution. An earlier independent probe exposed implicit `PWD` injection; the final contract and negative tests resolve that discrepancy.
+
+The repository build, latest core rebuild, typecheck, bundle, targeted lint and formatting passed. The local bundled CLI reports `0.23.4`. The npm package dry-run includes both workers, with bytes matching the Linux-verified artifacts. Independent code review reported no remaining blocking finding in this stage. The v4 manifest contains 275 input hashes matching source at completion of that stage; the shell bundle SHA-256 is `410260db7ce72eeaa3c5ffcb050ddd91901b2f131abda798f8a3c2aa4b1aa4cc`. Test installation, fixtures and attributable processes were cleaned up. The detailed baseline, failed intermediate probe and final logs are recorded in `.qwen/e2e-tests/sandbox-execution-api.md`. These are internal execution integration checks, not full model E2E or production feature enablement. Linux x64, other kernels, full file semantics and Landlock remain follow-up work.
+
+## Open questions
+
+Realtime trustworthy exec readiness would require another trusted inner exec helper; bwrap 0.11.1 only supplies final exec evidence. Full path-policy admission, crash cleanup, file-mode/binary/concurrency semantics and tool migration remain separate milestones. Landlock must later satisfy the same execution contract without weakening policy.

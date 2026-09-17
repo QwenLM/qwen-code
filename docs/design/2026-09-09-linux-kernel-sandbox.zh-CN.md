@@ -2,6 +2,8 @@
 
 [English](2026-09-09-linux-kernel-sandbox.md) | [简体中文](2026-09-09-linux-kernel-sandbox.zh-CN.md)
 
+> 设计更新（2026-09-16）：[统一工具执行沙箱设计](2026-09-16-tool-execution-sandbox.zh-CN.md)是当前实施方向，用工具执行替换整 CLI bwrap，不保留 bwrap 兼容模式，并在同一边界接入 Landlock。下文整 CLI 决策及[已撤回的整 CLI Landlock 提案](2026-09-16-landlock-backend.zh-CN.md)保留为历史背景。生产代码尚未迁移；替代设计规定配置迁移和测试更新。
+
 内部设计文档，目标是让 qwen-code 在没有容器运行时的 Linux 主机上获得内核级隔离
 ——弥补今天的空白：Linux 上的 `--sandbox` 实际含义是"docker/podman，或者什么都
 没有"，而 `QWEN_SANDBOX=false` 是整个集成测试矩阵的默认值，因此绝大多数 Linux

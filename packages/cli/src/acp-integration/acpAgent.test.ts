@@ -1427,6 +1427,17 @@ describe('runAcpAgent shutdown cleanup', () => {
     processOffSpy.mockRestore();
   });
 
+  it('rejects a tool sandbox before ACP initialization or transport setup', async () => {
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ network: 'closed' });
+    await expect(
+      runAcpAgent(mockConfig, mockSettings, mockArgv),
+    ).rejects.toThrow('does not support ACP sessions');
+    expect(mockConfig.initialize).not.toHaveBeenCalled();
+    expect(ndJsonStream).not.toHaveBeenCalled();
+  });
+
   it('starts telemetry only after a matching successful initialize response is sent', async () => {
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
     await vi.waitFor(() => expect(ndJsonStream).toHaveBeenCalledOnce());

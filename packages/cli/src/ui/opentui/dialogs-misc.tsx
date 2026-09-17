@@ -581,13 +581,16 @@ export function OpenTuiRewindDialog({ onClose }: P) {
   );
 }
 
-export function OpenTuiDiffDialog({ onClose }: P) {
+export function OpenTuiDiffDialog({ config, onClose }: P) {
   useEsc(onClose);
+  const sandboxed = Boolean(config?.getShellExecutionSandbox?.());
   const [lines, setLines] = useState<string[]>([]);
   useEffect(() => {
+    if (sandboxed) return;
     let alive = true;
     import('node:child_process')
       .then(({ execFile }) => {
+        if (!alive) return;
         execFile(
           'git',
           [
@@ -610,7 +613,17 @@ export function OpenTuiDiffDialog({ onClose }: P) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [sandboxed]);
+  if (sandboxed) {
+    return (
+      <Shell title="Diff" onClose={onClose}>
+        <text fg={C.dim}>
+          Diff preview unavailable in tool sandbox. Run git diff through the
+          Shell tool.
+        </text>
+      </Shell>
+    );
+  }
   return (
     <Shell title="Diff" onClose={onClose}>
       <scrollbox height={14} marginTop={1} stickyScroll={false}>
