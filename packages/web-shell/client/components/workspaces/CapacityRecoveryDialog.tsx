@@ -7,6 +7,7 @@ import type {
   DaemonRuntimeStopResult,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { useInteractionBlocker } from '../../interactionBlockContext';
 import { DialogShell } from '../dialogs/DialogShell';
 import { Button } from '../ui/button';
 import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
@@ -26,6 +27,8 @@ export function CapacityRecoveryDialog({
   onClose(): void;
 }) {
   const { t } = useI18n();
+  const registerInteractionBlocker = useInteractionBlocker();
+  useEffect(() => registerInteractionBlocker(), [registerInteractionBlocker]);
   const [options, setOptions] = useState<DaemonRuntimeStopOptions>();
   const [selected, setSelected] = useState('');
   const [busy, setBusy] = useState(false);
@@ -130,13 +133,16 @@ export function CapacityRecoveryDialog({
       setError(cause instanceof Error ? cause.message : String(cause));
       if (
         cause instanceof DaemonHttpError &&
-        isRecord(cause.body) &&
-        [
-          'workspace_runtime_stop_stale',
-          'workspace_runtime_stop_blocked',
-          'invalid_runtime_stop_confirmation',
-          'workspace_runtime_stop_not_supported',
-        ].includes(String(cause.body.code))
+        ([401, 403, 404].includes(cause.status) ||
+          (isRecord(cause.body) &&
+            [
+              'workspace_runtime_stop_stale',
+              'workspace_runtime_stop_blocked',
+              'invalid_runtime_stop_confirmation',
+              'workspace_runtime_stop_not_supported',
+              'workspace_runtime_unavailable',
+              'workspace_mismatch',
+            ].includes(String(cause.body.code))))
       ) {
         setUnknownOutcome(false);
       }

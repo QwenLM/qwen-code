@@ -1111,7 +1111,9 @@ export type ComposerSubmitCommit = () => void;
 
 export interface ComposerSubmitMetadata {
   retainDraftDuringSessionCreation?: (
-    operation: () => Promise<unknown>,
+    operation: (
+      onSessionAllocated: (sessionId: string) => void,
+    ) => Promise<unknown>,
   ) => Promise<unknown>;
   isCurrentDraft?: (options?: { allowSessionAssignment?: boolean }) => boolean;
   inputAnnotations?: DaemonInputAnnotation[];
@@ -2783,7 +2785,10 @@ export function useComposerCore(
       viewRef.current === view &&
       (composerIdentityRef.current.sessionId === submissionIdentity.sessionId ||
         (options?.allowSessionAssignment === true &&
-          submissionIdentity.sessionId === undefined)) &&
+          submissionIdentity.sessionId === undefined &&
+          draftAssignment.assignedSessionId !== undefined &&
+          composerIdentityRef.current.sessionId ===
+            draftAssignment.assignedSessionId)) &&
       composerIdentityRef.current.promptHistoryStorageKey ===
         submissionIdentity.promptHistoryStorageKey &&
       (view
@@ -2800,12 +2805,19 @@ export function useComposerCore(
       assignedSessionId: undefined as string | undefined,
     };
     const retainDraftDuringSessionCreation = async (
-      operation: () => Promise<unknown>,
+      operation: (
+        onSessionAllocated: (sessionId: string) => void,
+      ) => Promise<unknown>,
     ) => {
-      if (submissionIdentity.sessionId !== undefined) return operation();
+      const onSessionAllocated = (sessionId: string) => {
+        if (draftSessionAssignmentRef.current === draftAssignment)
+          draftAssignment.assignedSessionId = sessionId;
+      };
+      if (submissionIdentity.sessionId !== undefined)
+        return operation(onSessionAllocated);
       draftSessionAssignmentRef.current = draftAssignment;
       try {
-        await operation();
+        await operation(onSessionAllocated);
       } finally {
         if (draftSessionAssignmentRef.current === draftAssignment)
           draftSessionAssignmentRef.current = undefined;
@@ -3636,10 +3648,10 @@ export function useComposerCore(
       assignment &&
       previousDraftIdentity.sessionId === undefined &&
       sessionId !== undefined &&
+      sessionId === assignment.assignedSessionId &&
       !workspaceChanged &&
       previousDraftIdentity.storageKey === assignment.storageKey
     ) {
-      assignment.assignedSessionId = sessionId;
       draftIdentityRef.current = {
         sessionId,
         workspaceCwd: storageScopeKey,

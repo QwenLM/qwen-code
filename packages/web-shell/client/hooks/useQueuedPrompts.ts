@@ -567,6 +567,7 @@ export function useQueuedPrompts({
     tail: Promise<void>;
   } | null>(null);
   const heldPromptsByOwnerRef = useRef<Map<string, QueuedPrompt[]>>(new Map());
+  const stoppedHeldOwnersRef = useRef(new Set<string>());
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
@@ -1704,12 +1705,36 @@ export function useQueuedPrompts({
       previousOwner.sessionId,
     );
     if (runtimeStopped) {
-      if (previousOwnerKey)
-        heldPromptsByOwnerRef.current.delete(previousOwnerKey);
-      // Nothing queued before an explicit runtime stop may auto-run on resume.
-      queuedPromptsRef.current = [];
-      pendingMidTurnAdmissionsRef.current.clear();
-      clearedUnconfirmedPromptIdsRef.current.clear();
+      for (const key of heldPromptsByOwnerRef.current.keys()) {
+        if (
+          workspaceCwd !== undefined &&
+          key.startsWith(`${workspaceCwd}\u0000`)
+        )
+          stoppedHeldOwnersRef.current.add(key);
+      }
+      if (
+        previousOwner.workspaceCwd === workspaceCwd &&
+        previousOwner.sessionId === sessionId
+      ) {
+        restoreQueuedPromptsToEditorRef.current(
+          queuedPromptsRef.current.filter(
+            (prompt) =>
+              isLocallyHeldPrompt(prompt) ||
+              unreleasedPromptIdsRef.current.has(prompt.id) ||
+              (prompt.midTurnState === 'submitting' &&
+                prompt.midTurnMessageId === undefined) ||
+              prompt.midTurnFailedAction === 'edit',
+          ),
+        );
+        if (previousOwnerKey) {
+          heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+          stoppedHeldOwnersRef.current.delete(previousOwnerKey);
+        }
+        // Nothing queued before an explicit runtime stop may auto-run on resume.
+        queuedPromptsRef.current = [];
+        pendingMidTurnAdmissionsRef.current.clear();
+        clearedUnconfirmedPromptIdsRef.current.clear();
+      }
     }
     if (previousOwnerKey) {
       const heldPrompts = queuedPromptsRef.current
@@ -1737,6 +1762,8 @@ export function useQueuedPrompts({
         );
       if (heldPrompts.length > 0) {
         heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
+        if (runtimeStopped && previousOwner.workspaceCwd === workspaceCwd)
+          stoppedHeldOwnersRef.current.add(previousOwnerKey);
       } else {
         heldPromptsByOwnerRef.current.delete(previousOwnerKey);
       }
@@ -1782,6 +1809,8 @@ export function useQueuedPrompts({
       for (const [key, prompts] of [...heldPromptsByOwnerRef.current]) {
         if (key === nextOwnerKey || !key.endsWith(suffix)) continue;
         heldPromptsByOwnerRef.current.delete(key);
+        if (stoppedHeldOwnersRef.current.delete(key))
+          stoppedHeldOwnersRef.current.add(nextOwnerKey);
         relocated.push(...prompts);
       }
       if (relocated.length > 0) {
@@ -1792,6 +1821,11 @@ export function useQueuedPrompts({
         ].sort((a, b) => a.id - b.id);
         heldPromptsByOwnerRef.current.set(nextOwnerKey, heldPrompts);
       }
+    }
+    if (nextOwnerKey && stoppedHeldOwnersRef.current.delete(nextOwnerKey)) {
+      restoreQueuedPromptsToEditorRef.current(heldPrompts);
+      heldPromptsByOwnerRef.current.delete(nextOwnerKey);
+      heldPrompts = [];
     }
     // Daemon-owned rows are re-rendered from the next queue snapshot; only the
     // locally held Goal queue survives an owner change.

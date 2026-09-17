@@ -72,13 +72,13 @@ UI 消费这些字段用于候选选择、影响展示和确认。同时展示�
 
 ### 进行中与失败结果
 
-每个 bridge 保留一个不透明 stop token，以及最多一个 stop promise 和它的最近结果。Token 随 bridge 创建，在接受 stop 时同步更换；回执记录已消费 token 与 channel 身份/epoch。重复提交最近已接受的 token 时观察同一操作，不重复副作用；更早的 token 返回 stale。部分失败已收敛后，重新预览并确认可以消费当前 token，对同 channel 的剩余 session 重试；仍需复查 session 集合和阻塞项，不能以旧确认关闭替换后的 channel。通过候选接口暴露这个小型内存回执，不建立持久操作队列。重建 bridge/daemon 会产生新 token，使旧确认失效。
+每个 bridge 保留一个不透明 stop token，以及最多一个 stop promise 和它的最近结果。Token 随 bridge 创建，在接受 stop 时同步更换；回执记录已消费 token 与 channel 身份/epoch。重复提交最近已接受的 token 时观察同一操作，不重复副作用；更早的 token 返回 stale。部分失败已收敛后，重新预览并确认可以消费当前 token，对同 channel 的剩余 session 重试；仍需复查 session 集合和阻塞项，不能以旧确认关闭替换后的 channel。通过候选接口暴露这个小型内存回执，不建立持久操作队列。重建 bridge/daemon 会产生新 token，使旧确认失效。回执仅在所属 runtime 仍为当前可信实例时可读；移除、信任变化或 daemon 重建可能使回执不可用。缺失回执仍按结果未知处理，不能据此继续原操作。
 
 | 结果                                          | 契约                                                                                                                                   |
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Capability/runtime 不支持                     | `501 workspace_runtime_stop_not_supported`，无副作用。                                                                                 |
 | 身份/session 集合变化                         | `409 workspace_runtime_stop_stale`，尚未开始关闭。                                                                                     |
-| 存在独立活动或观测未知                        | `409 workspace_runtime_stop_blocked`，携带原因，尚未开始关闭。                                                                         |
+| 存在独立活动或观测未知                        | `409 workspace_runtime_stop_blocked`，尚未开始关闭。初始预览携带原因；后续门禁复查可能只返回 code/error，需要刷新预览。                |
 | 已接受的停止在观测 deadline 后仍执行          | `503 workspace_runtime_stop_in_progress`，携带目标身份及部分事实；刷新只读状态，不重新提交 stop 或重放发起操作。                       |
 | Close 被拒、flush 失败或下次 close 前预算耗尽 | `409 workspace_runtime_stop_incomplete`，包含已关闭/已中断/剩余 ID，以及已知的释放状态。不能声称没有发生操作，也不自动 kill 绕过拒绝。 |
 | Teardown 无法证明释放                         | `503 workspace_runtime_stop_failed`，保留捕获的 child 跟踪并显示清理状态，不手工减 registry。                                          |
@@ -119,7 +119,7 @@ flowchart TD
   H -->|容量仍满| B
 ```
 
-在操作实际失败处捕获小型类型化容量恢复意图，不解析 toast：原 daemon/client、owner snapshot、product context、操作类型、原 session/草稿标识和版本，以及已有受保护的继续操作。覆盖 provider create/load 错误、action notice 和 App error，让同一次失败只打开一个弹窗。Daemon/session/workspace 或草稿变化时使意图失效；刷新候选是只读操作。
+在操作实际失败处捕获小型类型化容量恢复意图，不解析 toast：原 daemon/client、owner snapshot、product context、操作类型、原 session/草稿标识和版本，以及已有受保护的继续操作。App 覆盖受保护的首次提交创建和 Skills ensure；provider 的 load/resume 失败驱动 App 和已有会话 pane 的恢复。空 ChatPane 不通过 sendPrompt 创建 session，嵌入宿主负责新会话创建及其错误处理。同时最多保留一个意图；已有弹窗不能接纳第二个错误时，应正常报告该错误。Daemon/session/workspace 或草稿变化时使意图失效；刷新候选是只读操作。
 
 | 发起操作                                                                | 释放后的继续方式                                                                                                       |
 | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
@@ -128,11 +128,11 @@ flowchart TD
 | 已确认 dispatch 前回滚的 standalone create                              | 遵循原 rollback 身份/可重试契约及其 capacity cause，保留原 pending creation 意图。                                     |
 | 已提交/结果未知的 create、已接受 prompt、含糊的连接中断或其他未支持动作 | 先进入已有 outcome/recovery 流程。未确认没有 dispatch 或存在安全继续路径前，不挂盲重试回调，也不提供“停止并继续”。     |
 
-受保护的首次提交续发在自身分配初始 session 时临时保留发起方草稿。期间编辑器发生修改仍会拒绝续发，只有 prompt 被接受后才清空草稿，不重复执行宿主准备逻辑。
+受保护的首次提交续发只对本次分配回调报告的 session ID 保留发起方草稿。切换到无关会话时，应加载该会话已有草稿而不能覆盖它。单次续发沿用原来的接纳结果和未知结果处理；期间编辑器发生修改仍会拒绝续发，只有 prompt 被接受后才清空草稿，不重复执行宿主准备逻辑。
 
 POST 前取消确认无副作用。服务端接受 stop 后关闭弹窗，仅取消本地等待；应说明所选停止可能继续，不能假装已回滚。此时也取消原意图的自动继续。
 
-其他新版 Web Shell 页收到用户停止 cause 后，保留所选保存会话/聊天记录，进入带“恢复”操作的 stopped 状态；针对该 attachment 停止 SSE 重连、自动 load、自动 ensure 和排队 prompt 重提。旧客户端收到 `client_close` 后保持原终态行为（可能清空选择）。需明确测试重连/响应丢失。离线或独立旧客户端可能错过终态事件，稍后再次请求工作；这次一次性停止不新增持久 suspended-workspace 标记。由准入处理随后名额竞争，不承诺永久休眠。
+其他新版 Web Shell 页收到用户停止 cause 后，保留所选保存会话/聊天记录，进入带“恢复”操作的 stopped 状态；针对该 attachment 停止 SSE 重连、自动 load、自动 ensure 和排队 prompt 重提。未接纳输入保留为草稿；被停止 workspace 中兄弟会话的暂存提示在重新打开时恢复为草稿，不能自动提交。清空所选会话时移除其 stop/recovery 标记。选择器阻止聊天全局快捷键，已停止的编辑器要求显式恢复。旧客户端收到 `client_close` 后保持原终态行为（可能清空选择）。需明确测试重连/响应丢失。离线或独立旧客户端可能错过终态事件，稍后再次请求工作；这次一次性停止不新增持久 suspended-workspace 标记。由准入处理随后名额竞争，不承诺永久休眠。
 
 所选远端 daemon 必须仍是产生容量错误和候选列表的那个。弹窗打开时切换 daemon，应丢弃确认和继续操作；绝不能用新的默认 client 执行旧选择。
 

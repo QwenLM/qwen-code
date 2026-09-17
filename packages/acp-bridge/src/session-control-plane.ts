@@ -14451,7 +14451,6 @@ export function createSessionControlPlane(
     },
 
     async killSession(sessionId, opts) {
-      if (runtimeStop) return false;
       const entry = byId.get(sessionId);
       if (!entry) return false;
       // BQ9tV race guard: skip the reap if any other client already
@@ -14471,6 +14470,7 @@ export function createSessionControlPlane(
         entry.spawnOwnerWantedKill = true;
         return false;
       }
+      if (runtimeStop) return false;
       if (entry.closing) {
         const closingChannel = channelInfoForEntry(entry);
         if (!closingChannel) return false;

@@ -42,6 +42,16 @@ it('rejects a late capacity error from a previous daemon and invalidates its exi
     expect(offerFromA(error, intent)).toBe(true);
   });
   expect(current.intent?.client).toBe(clientA);
+  act(() => {
+    expect(
+      current.offer(error, {
+        isCurrent: () => true,
+        resume: vi.fn(),
+        requesterCwd: '/other',
+      }),
+    ).toBe(false);
+  });
+  expect(current.intent?.resume).toBe(intent.resume);
   act(() => root.render(<Harness client={clientB} />));
   expect(current.intent?.isCurrent()).toBe(false);
   act(() => {

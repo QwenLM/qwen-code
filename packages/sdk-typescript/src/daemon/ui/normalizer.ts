@@ -133,11 +133,27 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'session_closed':
+      if (
+        isRecord(event.data) &&
+        event.data['persistenceUnconfirmed'] === true
+      ) {
+        return [
+          {
+            ...base,
+            type: 'error',
+            recoverable: false,
+            text: 'Workspace runtime stopped; session persistence is unconfirmed.',
+          },
+        ];
+      }
       return [
         {
           ...base,
           type: 'status',
-          text: `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
+          text:
+            getString(event.data, 'cause') === 'workspace_runtime_stop'
+              ? 'Workspace runtime stopped.'
+              : `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
         },
       ];
     case 'session_recording_degraded': {

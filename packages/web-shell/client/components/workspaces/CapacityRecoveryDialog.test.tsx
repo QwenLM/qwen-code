@@ -207,3 +207,42 @@ describe('CapacityRecoveryDialog', () => {
     expect(h.resume).not.toHaveBeenCalled();
   });
 });
+
+it.each([401, 403, 404])(
+  'unlocks after a definitive pre-acceptance HTTP %s rejection',
+  async (status) => {
+    const h = await mount(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new DaemonHttpError(
+            status,
+            { code: 'untrusted_workspace' },
+            'rejected',
+          ),
+        ),
+    );
+    await choose();
+    await click(button('Stop these sessions and continue'));
+    expect(h.resume).not.toHaveBeenCalled();
+    expect(
+      (document.querySelector('[role="radio"]') as HTMLButtonElement).disabled,
+    ).toBe(false);
+    await choose();
+    expect(button('Stop these sessions and continue').disabled).toBe(false);
+  },
+);
+it('keeps an ambiguous server failure locked without a matching receipt', async () => {
+  await mount(
+    vi
+      .fn()
+      .mockRejectedValue(
+        new DaemonHttpError(500, { code: 'internal_error' }, 'failed'),
+      ),
+  );
+  await choose();
+  await click(button('Stop these sessions and continue'));
+  expect(
+    (document.querySelector('[role="radio"]') as HTMLButtonElement).disabled,
+  ).toBe(true);
+});

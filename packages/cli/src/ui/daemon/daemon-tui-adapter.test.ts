@@ -1284,3 +1284,21 @@ describe('DaemonTuiAdapter', () => {
     voteEvents.close();
   });
 });
+
+it('stopped session disconnects TUI with persistence warning', () => {
+  const updates = reduceDaemonEventToTuiUpdates({
+    id: 1,
+    v: 1,
+    type: 'session_closed',
+    data: {
+      sessionId: 'session',
+      reason: 'client_close',
+      cause: 'workspace_runtime_stop',
+      persistenceUnconfirmed: true,
+      exitCode: null,
+      signalCode: 'SIGKILL',
+    },
+  });
+  expect(updates.some((update) => update.type === 'disconnected')).toBe(true);
+  expect(JSON.stringify(updates)).toMatch(/persist|sav|record/i);
+});

@@ -2237,3 +2237,50 @@ it('does not resubmit locally held prompts after an explicit runtime stop and re
   expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
   expect(actions.removePendingPrompt).not.toHaveBeenCalled();
 });
+
+it('runtime stop fences sibling session stash in same workspace', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'responding',
+    actions,
+    true,
+    true,
+    false,
+    true,
+  );
+  act(() => latest.enqueuePrompt('sibling text from before runtime stop'));
+  render('responding', 'session-2', true, false, true);
+  expect(latest.queuedPrompts).toEqual([]);
+  render('idle', 'session-2', true, false, true, '/workspace', true);
+  render('idle', 'session-2', true, false, false, '/workspace', false);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith(
+    'sibling text from before runtime stop',
+  );
+});
+it('runtime stop returns unaccepted mid-turn text to composer', () => {
+  const { actions } = createActions();
+  vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
+    new Promise(() => undefined),
+  );
+  const { editor, render } = mount('responding', actions);
+  act(() => latest.enqueuePrompt('unaccepted before runtime stop'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  render('responding', 'session-1', true, false, false, '/workspace', true);
+  expect(latest.queuedPrompts).toEqual([]);
+  expect(editor.setText).toHaveBeenCalledWith('unaccepted before runtime stop');
+});
+
+it('preserves another workspace held queue when switching into a stopped workspace', async () => {
+  const { actions } = createActions();
+  const { render } = mount('responding', actions, true, true, false, true);
+  act(() => latest.enqueuePrompt('unaffected workspace draft'));
+  render('idle', 'session-2', true, false, false, '/other', true);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {});
+  expect(actions.submitPrompt).toHaveBeenCalledOnce();
+});

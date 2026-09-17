@@ -231,3 +231,26 @@ describe('workspace runtime stop routes', () => {
     expect(h.deps.stopKeepalive).not.toHaveBeenCalled();
   });
 });
+
+it('legacy conditional cron cannot run or block explicit stop', async () => {
+  vi.mocked(readCronTasks).mockResolvedValue([
+    {
+      id: 'legacy',
+      cron: '* * * * *',
+      prompt: 'old',
+      recurring: true,
+      createdAt: 1,
+      lastFiredAt: null,
+      enabled: true,
+      condition: 'files_changed',
+    } as unknown as Awaited<ReturnType<typeof readCronTasks>>[number],
+  ]);
+  const h = setup();
+  const listed = await request(h.app).get('/workspaces/runtime-stop-options');
+  const stopped = await request(h.app)
+    .post('/workspaces/selected/runtime/stop')
+    .send(confirmation);
+  expect(listed.body.workspaces[0].enabledTaskCount).toBe(0);
+  expect(listed.body.workspaces[0].canStop).toBe(true);
+  expect(stopped.status).toBe(200);
+});

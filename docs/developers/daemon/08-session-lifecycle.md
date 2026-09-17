@@ -130,12 +130,12 @@ A successful update fans `session_metadata_updated` to every subscriber.
 
 ### Termination
 
-| Terminal frame   | Trigger                                                                                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_closed` | `DELETE /session/:id` (client_close) or programmatic close.                                                                                                   |
-| `session_died`   | `channel.exited` fires for any reason (crash, child kill). Carries `exitCode?` + `signalCode?` when the OS exit path was used.                                |
-| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed. |
-| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                             |
+| Terminal frame   | Trigger                                                                                                                                                                                                    |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_closed` | `DELETE /session/:id` (client_close), programmatic close, or confirmed workspace runtime stop (`cause: workspace_runtime_stop`). A stop-associated fatal exit also carries `persistenceUnconfirmed: true`. |
+| `session_died`   | `channel.exited` outside a confirmed workspace stop (crash, unowned child kill). Carries `exitCode?` + `signalCode?` when the OS exit path was used.                                                       |
+| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed.                                              |
+| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                                                                          |
 
 Pending permissions are resolved as `{kind:'cancelled', reason:'session_closed'}` via `mediator.forgetSession(sessionId)` at every termination path.
 

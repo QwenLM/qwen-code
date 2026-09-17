@@ -20,6 +20,7 @@ export function useCapacityRecovery(
   actions: Pick<DaemonSessionActions, 'loadSession' | 'resumeSession'>,
 ) {
   const [intent, setIntent] = useState<CapacityRecoveryIntent>();
+  const intentRef = useRef<CapacityRecoveryIntent | undefined>(undefined);
   const owner = useRef({ client });
   if (owner.current.client !== client) owner.current = { client };
   const renderOwner = owner.current;
@@ -37,6 +38,7 @@ export function useCapacityRecovery(
     (error: unknown, continuation: Omit<CapacityRecoveryIntent, 'client'>) => {
       if (
         !client ||
+        intentRef.current !== undefined ||
         owner.current !== renderOwner ||
         !supported ||
         !isRecoverableAcpCapacityError(error) ||
@@ -44,17 +46,15 @@ export function useCapacityRecovery(
       )
         return false;
       const capturedOwner = renderOwner;
-      setIntent(
-        (previous) =>
-          previous ?? {
-            ...continuation,
-            client,
-            isCurrent: () =>
-              mounted.current &&
-              owner.current === capturedOwner &&
-              continuation.isCurrent(),
-          },
-      );
+      intentRef.current = {
+        ...continuation,
+        client,
+        isCurrent: () =>
+          mounted.current &&
+          owner.current === capturedOwner &&
+          continuation.isCurrent(),
+      };
+      setIntent(intentRef.current);
       return true;
     },
     [client, supported, renderOwner],
@@ -77,6 +77,13 @@ export function useCapacityRecovery(
         ](recovery.sessionId, { sessionContext: recovery.sessionContext }),
     });
     if (accepted) offered.current = recovery;
-  }, [connection.capacityRecovery, offer]);
-  return { intent, offer, dismiss: () => setIntent(undefined) };
+  }, [connection.capacityRecovery, offer, intent]);
+  return {
+    intent,
+    offer,
+    dismiss: () => {
+      intentRef.current = undefined;
+      setIntent(undefined);
+    },
+  };
 }

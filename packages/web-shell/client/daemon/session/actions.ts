@@ -327,6 +327,9 @@ export function getConnectionAfterSessionClear(
   const next = { ...current };
   if (!clearedSessionId || current.sessionId === clearedSessionId) {
     delete next.sessionId;
+    delete next.runtimeStopped;
+    delete next.runtimeStopPersistenceUnconfirmed;
+    delete next.capacityRecovery;
     delete next.clientId;
     delete next.displayName;
     delete next.titleSource;

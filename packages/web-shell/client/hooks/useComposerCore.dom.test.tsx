@@ -2528,14 +2528,67 @@ it('retains the guarded retry draft across its initial session allocation and cl
     () => void,
     import('./useComposerCore').ComposerSubmitMetadata,
   ];
-  await call[4].retainDraftDuringSessionCreation!(async () => {
-    mounted.switchSession('created-session', '/work/b');
-    await act(async () => {});
-    expect(latest!.getText()).toBe('original');
-    expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
-      true,
-    );
-    act(() => call[3]());
-  });
+  await call[4].retainDraftDuringSessionCreation!(
+    async (onSessionAllocated) => {
+      onSessionAllocated('created-session');
+      mounted.switchSession('created-session', '/work/b');
+      await act(async () => {});
+      expect(latest!.getText()).toBe('original');
+      expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+        true,
+      );
+      act(() => call[3]());
+    },
+  );
   expect(latest!.getText()).toBe('');
+});
+
+it('unrelated existing session keeps its draft during retry creation', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+      false,
+    );
+    expect(latest!.getText()).toBe('B draft');
+    expect(localStorage.getItem(getSessionDraftKey('existing-b'))).toBe(
+      'B draft',
+    );
+  });
+});
+it('late acceptance does not clear unrelated existing session draft', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    act(() => call[3]());
+    expect(latest!.getText()).toBe('B draft');
+  });
 });

@@ -694,6 +694,17 @@ export function reduceDaemonEventToTuiUpdates(
       ];
     }
 
+    case 'session_closed': {
+      const data = isRecord(event.data) ? event.data : {};
+      const reason =
+        data['persistenceUnconfirmed'] === true
+          ? 'Workspace runtime stopped; session persistence is unconfirmed'
+          : (getString(data['cause']) ??
+            getString(data['reason']) ??
+            'session_closed');
+      return terminalUpdates(event, reason);
+    }
+
     case 'session_died': {
       const reason =
         isRecord(event.data) && typeof event.data['reason'] === 'string'

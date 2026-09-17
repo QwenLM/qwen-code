@@ -226,3 +226,31 @@ describe('explicit workspace runtime stop', () => {
     expect((await stopping).state).toBe('stopped');
   });
 });
+
+it('cleanup requested during refused stop survives to last detach', async () => {
+  let refuse!: (error: Error) => void;
+  let pending = true;
+  const close = vi.fn(async () => {
+    if (pending) {
+      pending = false;
+      return new Promise<Record<string, unknown>>((_, reject) => {
+        refuse = reject;
+      });
+    }
+    return { closed: true };
+  });
+  const { bridge, channels } = setup(close);
+  const owner = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+  const attacher = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+  expect(owner.sessionId).toBe(attacher.sessionId);
+  const stop = bridge.stopWorkspaceRuntime!(confirmation(bridge));
+  await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(
+    await bridge.killSession(owner.sessionId, { requireZeroAttaches: true }),
+  ).toBe(false);
+  expect(channels[0].killed).toBe(false);
+  refuse(new RequestError(-32603, 'flush refused'));
+  expect((await stop).state).toBe('incomplete');
+  await bridge.detachClient(attacher.sessionId, attacher.clientId);
+  expect(bridge.sessionCount).toBe(0);
+});

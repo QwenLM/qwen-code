@@ -10,7 +10,10 @@ import type {
   BridgeRuntimeStopResult,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { WorkspaceRuntimeStopError } from '@qwen-code/acp-bridge/bridgeErrors';
-import { readCronTasks } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
+import {
+  readCronTasks,
+  taskHasLegacyCondition,
+} from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -126,7 +129,7 @@ export function registerWorkspaceRuntimeStopRoutes(
           readCronTasks(runtime.workspaceCwd),
         );
         enabledTaskCount = tasks.filter(
-          (task) => task.enabled !== false,
+          (task) => task.enabled !== false && !taskHasLegacyCondition(task),
         ).length;
         if (enabledTaskCount > 0) reasons.push('enabled_scheduled_tasks');
       } catch {
