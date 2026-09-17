@@ -9628,7 +9628,14 @@ export class Config {
     bus: MessageBus,
   ): void {
     try {
-      listener(bus);
+      // An async function is assignable to this listener type, and it runs
+      // from inside initialize(), so a rejection must be handled here too.
+      const result: unknown = listener(bus);
+      if (result instanceof Promise) {
+        result.catch((error: unknown) => {
+          this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+        });
+      }
     } catch (error) {
       this.debugLogger.debug(`MessageBus observer failed: ${error}`);
     }

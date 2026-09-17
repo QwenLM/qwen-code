@@ -1056,6 +1056,17 @@ describe('Server Config (config.ts)', () => {
       expect(other).toHaveBeenCalledTimes(1);
     });
 
+    it('handles a rejection from an async listener', async () => {
+      const config = new Config({ ...baseParams });
+      const rejection = Promise.reject(new Error('async observer broke'));
+      const catchSpy = vi.spyOn(rejection, 'catch');
+      config.onMessageBusChange(() => rejection);
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(catchSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('lets a listener dispose itself while it is notified', () => {
       const config = new Config({ ...baseParams });
       const calls: string[] = [];
