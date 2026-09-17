@@ -147,6 +147,14 @@ export type DaemonUiContentPart =
   | {
       kind: 'resource';
       uri: string;
+      /**
+       * Display name from the ACP resource link. ACP marks `name` required on
+       * `resource_link` content, but defensively optional here so a malformed
+       * peer cannot crash normalization — callers fall back to the URI.
+       */
+      name?: string;
+      /** Byte size when the peer reported one (ACP `ResourceLink.size`). */
+      size?: number;
       mediaType?: string;
       description?: string;
     };
@@ -234,10 +242,21 @@ export function extractContentPart(
     const uri =
       typeof value['uri'] === 'string' ? (value['uri'] as string) : undefined;
     if (!uri) return undefined;
-    const mediaType =
-      typeof value['mediaType'] === 'string'
-        ? (value['mediaType'] as string)
+    const name =
+      typeof value['name'] === 'string' ? (value['name'] as string) : undefined;
+    const size =
+      typeof value['size'] === 'number' && Number.isFinite(value['size'])
+        ? (value['size'] as number)
         : undefined;
+    // ACP spells the field `mimeType` on ResourceLink; `mediaType` is kept
+    // for peers that follow the SDK's image-content naming.
+    const mediaType =
+      (typeof value['mediaType'] === 'string'
+        ? (value['mediaType'] as string)
+        : undefined) ??
+      (typeof value['mimeType'] === 'string'
+        ? (value['mimeType'] as string)
+        : undefined);
     const description =
       typeof value['description'] === 'string'
         ? (value['description'] as string)
@@ -245,6 +264,8 @@ export function extractContentPart(
     return {
       kind: 'resource',
       uri,
+      ...(name ? { name } : {}),
+      ...(size !== undefined ? { size } : {}),
       ...(mediaType ? { mediaType } : {}),
       ...(description ? { description } : {}),
     };
