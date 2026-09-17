@@ -31,6 +31,7 @@ import {
   type TrustPrecedenceRule,
 } from '../config/trust-precedence.js';
 import { publishPendingCompileCache } from '../config/compile-cache.js';
+import { captureEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 
@@ -262,6 +263,7 @@ export function loadServeFastPathEnvironment(
   settings: ServeFastPathSettings,
   startDir: string = process.cwd(),
 ): void {
+  captureEnvironmentBeforeLoad();
   const userLevelPaths = getUserLevelEnvPathsFastPath();
   const envFilePaths = findEnvFilesFastPath(settings, startDir, userLevelPaths);
   const rejectedLoaderKeys: string[] = [];

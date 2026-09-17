@@ -290,6 +290,7 @@ import {
   registerWorkspaceGitBranchRoutes,
   registerWorkspaceQualifiedGitBranchRoutes,
 } from './routes/workspace-git-branches.js';
+import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -691,6 +692,7 @@ export interface ServeAppDeps {
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  modelSelectionBaseEnv?: Readonly<NodeJS.ProcessEnv>;
   runtimePlatform?: NodeJS.Platform;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
@@ -2490,6 +2492,11 @@ export function createServeApp(
     sendBridgeError,
     mutate,
   });
+  registerWorkspaceQualifiedGitRemotesRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
@@ -2926,6 +2933,8 @@ export function createServeApp(
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      env: primaryRuntimeEffectiveEnv,
+      baseEnv: deps.modelSelectionBaseEnv ?? daemonEnvAtBoot,
       isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,

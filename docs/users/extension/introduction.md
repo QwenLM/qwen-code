@@ -431,6 +431,8 @@ Only a workflow that declares `whenToUse` is listed for the model, together with
 
 In the interactive UI, `/gcp:deep-research` starts the workflow directly. In headless mode and over ACP, the same command asks the model to run it by name, and the approval follows.
 
+To let the model start your extension's workflows without letting it write and run scripts of its own, deploy with [`tools.workflowNameOnly`](../configuration/settings.md) (or `QWEN_CODE_WORKFLOW_NAME_ONLY=1`) and allow the workflows by name, for example `Workflow(name:gcp:deep-research)`. The lock makes every run the model starts addressable by such a rule; it does not approve anything by itself, so keep asking for names you have not allowed.
+
 Discovery is deliberately narrow:
 
 - Only `.js` files directly inside each directory are read; subdirectories are ignored.
