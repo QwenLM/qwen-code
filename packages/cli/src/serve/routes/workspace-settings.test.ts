@@ -1068,6 +1068,10 @@ describe('web-shell settings alias drift', () => {
       (m) => m[1]!,
     );
 
+    // A second stable ID for one control is invisible to the two membership
+    // checks below, and once published it cannot be removed without breaking
+    // a host that adopted it.
+    expect(aliased.length).toBe(new Set(aliased).size);
     expect(rendered.filter((key) => !aliased.includes(key))).toEqual([]);
     expect(aliased.filter((key) => !rendered.includes(key))).toEqual([]);
   });

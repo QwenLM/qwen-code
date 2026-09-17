@@ -34964,6 +34964,62 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it('keeps a settings fast picker excludable across an /auth command', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    // /auth takes over only the Add Model surface, so the fast picker's
+    // settings key must stay armed and the exclusion must still close it.
+    testState.prompt = '/auth';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    rerender({ settings: { excludeItems: ['setting:fast-model'] } });
+    await flush();
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not close a settings fast picker when /auth launches without an exclusion', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    testState.prompt = '/auth';
+    await clickSubmit(container);
+    await flush();
+    // The command opens the auth dialog over the picker without closing it, so
+    // the close in the exclusion case above must come from the exclusion.
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+  });
+
   function armVoiceWorkspacePicker() {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {

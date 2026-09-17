@@ -80,14 +80,18 @@ describe('visual capture contracts', () => {
     expect(sources.length).toBeGreaterThan(5);
   });
 
-  it('keeps both navigation helpers freezing the clock before they navigate', () => {
+  it('keeps every navigation helper freezing the clock before it navigates', () => {
     // `freezeWallClock` runs only implicitly, and nothing in the visuals suite
     // reads the page clock -- so dropping the call, or moving it after
     // `page.goto`, leaves every test green while timestamped captures silently
     // resume drifting between the base and head passes.
     const harness = readFileSync(join(VISUALS_DIR, 'harness.ts'), 'utf8');
 
-    for (const helper of ['gotoSession', 'gotoNewSession']) {
+    for (const helper of [
+      'gotoSession',
+      'gotoNewSession',
+      'gotoSettingsHarness',
+    ]) {
       const body = harness.slice(
         harness.indexOf(`export async function ${helper}(`),
       );

@@ -18,16 +18,15 @@ import {
   toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
-  type MockDaemonController,
   type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
   completeReplay,
   fillComposer,
-  freezeWallClock,
   gotoNewSession,
   gotoSession,
+  gotoSettingsHarness,
   installScenario,
   resolveBaseURL,
   submitLocalCommand,
@@ -153,7 +152,9 @@ function createSettingsPanelScenario(
       key: 'output.showTimestamps',
       type: 'boolean',
       label: 'Show Timestamps',
-      category: 'Output',
+      // The real schema files this under General; the panel must render the
+      // category set a daemon actually serves.
+      category: 'General',
       requiresRestart: false,
       default: false,
       values: { effective: false },
@@ -191,46 +192,15 @@ function createSettingsPanelScenario(
   });
 }
 
-async function gotoSettingsHarness(
-  page: Page,
-  scenario: WebShellDaemonScenario,
-  daemon: MockDaemonController,
-  theme: VisualTheme,
-  exclude: readonly string[] = [],
-): Promise<void> {
-  await freezeWallClock(page);
-  const params = new URLSearchParams({ theme, sessionId: scenario.sessionId });
-  if (exclude.length > 0) params.set('exclude', exclude.join(','));
-  await page.goto(`/e2e/settings-harness.html?${params.toString()}`);
-  await expect(
-    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
-  ).toBeVisible();
-  // The harness paints the <html> theme class from the same ?theme= param, so
-  // it cannot mislabel. The shell's own theme must agree with the filename:
-  // the app root carries a plain `dark` literal only in the dark theme. The
-  // last bare root is the app; the session provider's loading placeholder is
-  // also a bare [data-web-shell-root].
-  const rootClass = await page
-    .locator('[data-web-shell-root]:not([data-web-shell-gate])')
-    .last()
-    .getAttribute('class');
-  expect(rootClass?.split(/\s+/).includes('dark')).toBe(theme === 'dark');
-  await completeReplay(
-    page,
-    daemon,
-    scenario.sessionId,
-    scenario.events.length,
-  );
-}
-
 async function openSettingsPanel(page: Page): Promise<void> {
   await submitLocalCommand(page, '/settings');
-  await expect(
-    page.getByRole('navigation', { name: 'Settings' }),
-  ).toBeVisible();
-  // The category nav renders from builtin items before the daemon settings
-  // arrive; gate on a seeded row so the capture never races the fetch.
-  await expect(page.getByText('Auto-update', { exact: true })).toBeVisible();
+  const nav = page.getByRole('navigation', { name: 'Settings' });
+  await expect(nav).toBeVisible();
+  // Rows render only for the active category, and which category is active
+  // follows the fixture's descriptor order — gate on a descriptor-derived nav
+  // button instead, which renders for every group. Only a General descriptor
+  // creates one, so this still cannot resolve before the settings fetch lands.
+  await expect(nav.getByRole('button', { name: /^General/ })).toBeVisible();
 }
 
 for (const theme of THEMES) {
@@ -1448,7 +1418,7 @@ for (const theme of THEMES) {
       await openSettingsPanel(page);
 
       const nav = page.getByRole('navigation', { name: 'Settings' });
-      await expect(nav.getByRole('button', { name: /^Output/ })).toBeVisible();
+      await expect(nav.getByRole('button', { name: /^UI/ })).toBeVisible();
       await expect(nav.getByRole('button', { name: /^Tools/ })).toBeVisible();
       await nav.getByRole('button', { name: /^Model/ }).click();
       await expect(page.getByText('Fast Model', { exact: true })).toBeVisible();
@@ -1479,11 +1449,14 @@ for (const theme of THEMES) {
       ]);
       await openSettingsPanel(page);
 
-      // Excluded rows vanish, and categories left with nothing visible — here
-      // Output and Tools — drop out of the nav entirely.
+      // Excluded rows vanish, and a category left with nothing visible —
+      // here Tools — drops out of the nav entirely.
       const nav = page.getByRole('navigation', { name: 'Settings' });
-      await expect(nav.getByRole('button', { name: /^Output/ })).toHaveCount(0);
       await expect(nav.getByRole('button', { name: /^Tools/ })).toHaveCount(0);
+      // Rows render only for the active category, so the chat-width absence
+      // is observable only after opening UI — pin the category itself first.
+      await nav.getByRole('button', { name: /^UI/ }).click();
+      await expect(page.getByText('Theme', { exact: true })).toBeVisible();
       await expect(page.getByText('Chat width', { exact: true })).toHaveCount(
         0,
       );
