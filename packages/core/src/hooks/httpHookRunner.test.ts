@@ -498,6 +498,175 @@ describe('HttpHookRunner', () => {
     });
   });
 
+  describe('outcome', () => {
+    const jsonResponse = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+
+    /** A fetch that only settles when its request signal aborts. */
+    const hangUntilAborted = () =>
+      mockFetch.mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise((_, reject) => {
+            init.signal?.addEventListener('abort', () =>
+              reject(init.signal?.reason),
+            );
+          }),
+      );
+
+    it('reports a non-2xx response as a non-blocking error without failing the hook', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.error?.message).toContain('500');
+    });
+
+    it('keeps a non-2xx response non-blocking', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.continue).toBe(true);
+      expect(result.success).toBe(true);
+    });
+
+    it('reports its own timeout as timeout when the caller did not abort', async () => {
+      hangUntilAborted();
+      const controller = new AbortController();
+
+      const result = await httpRunner.execute(
+        createMockConfig({ timeout: 0.02 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+
+      expect(result.outcome).toBe('timeout');
+      expect(result.success).toBe(true);
+      expect(result.error?.message).toContain('20ms');
+    });
+
+    it('reports a caller abort during the request as cancelled', async () => {
+      hangUntilAborted();
+      const controller = new AbortController();
+
+      const execution = httpRunner.execute(
+        createMockConfig({ timeout: 60 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+      controller.abort();
+      const result = await execution;
+
+      expect(result.outcome).toBe('cancelled');
+      expect(result.success).toBe(true);
+    });
+
+    it('reports a connection failure as a non-blocking error carrying the fetch error', async () => {
+      const connectionError = new TypeError('fetch failed');
+      mockFetch.mockRejectedValueOnce(connectionError);
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.error).toBe(connectionError);
+    });
+
+    it('reports a 2xx deny as blocking while the hook still succeeds', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ decision: 'deny', reason: 'Blocked by policy' }),
+      );
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('blocking');
+    });
+
+    it('reports a plain 2xx response as success', async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ continue: true }));
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('success');
+    });
+
+    it('lets a PreToolUse permission decision override the generic decision, as progress reporting does', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          decision: 'deny',
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+          },
+        }),
+      );
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('success');
+    });
+
+    it('reports a caller abort before the request as cancelled', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+
+      expect(result.outcome).toBe('cancelled');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('reports a URL outside the allowlist as a failed non-blocking error', async () => {
+      const result = await httpRunner.execute(
+        createMockConfig({ url: 'https://other.com/hook' }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.success).toBe(false);
+    });
+  });
+
   describe('resetOnceHooks', () => {
     it('should allow once hooks to execute again after reset', async () => {
       mockFetch.mockResolvedValue({

@@ -2973,4 +2973,67 @@ describe('HookRunner', () => {
       expect(spawnArgs[2].shell).toBe(false);
     });
   });
+
+  describe('outcome of results produced outside the runners', () => {
+    const asyncHook: HookConfig = {
+      type: HookType.Command,
+      command: 'background-job',
+      source: HooksConfigSource.Project,
+      async: true,
+    };
+
+    it('reports an unknown hook type as a non-blocking error', async () => {
+      const result = await hookRunner.executeHook(
+        { type: 'unknown' } as unknown as HookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('reports an async hook refused by the concurrency limit as a non-blocking error', async () => {
+      vi.spyOn(hookRunner['asyncRegistry'], 'canAcceptMore').mockReturnValue(
+        false,
+      );
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.isAsync).toBe(true);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('reports an async hook whose registration loses the race as a non-blocking error', async () => {
+      vi.spyOn(hookRunner['asyncRegistry'], 'register').mockReturnValue(null);
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.isAsync).toBe(true);
+    });
+
+    it('reports an async hook handed to the background as success', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess());
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('success');
+      expect(result.isAsync).toBe(true);
+      expect(result.success).toBe(true);
+    });
+  });
 });
