@@ -47,6 +47,24 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+// Lets a test pin the platform shell (e.g. cmd.exe) that a hook without its
+// own `shell` resolves to; unset, the real platform configuration is used.
+const shellConfigOverride = vi.hoisted(() => ({
+  current: undefined as
+    | import('../utils/shell-utils.js').ShellConfiguration
+    | undefined,
+}));
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () =>
+      shellConfigOverride.current ?? actual.getShellConfiguration(),
+  };
+});
+
 describe('HookRunner', () => {
   let hookRunner: HookRunner;
 
@@ -543,7 +561,139 @@ describe('HookRunner', () => {
     });
   });
 
+  describe('execution outcome', () => {
+    const commandHook: HookConfig = {
+      type: HookType.Command,
+      command: 'run-hook',
+      source: HooksConfigSource.Project,
+    };
+
+    it('reports success for exit code 0', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0, 'ok'));
+
+      const result = await hookRunner.executeHook(
+        commandHook,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('success');
+    });
+
+    it('reports a non-blocking error for exit code 1', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(1, '', 'oops'));
+
+      const result = await hookRunner.executeHook(
+        commandHook,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('reports blocking for exit code 2', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(2, '', 'no'));
+
+      const result = await hookRunner.executeHook(
+        commandHook,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('blocking');
+    });
+
+    it('reports a missing command as a non-blocking error with its exit code', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(
+          127,
+          '',
+          'bash: qwen-no-such-cmd-2f9a: command not found',
+        ),
+      );
+
+      const result = await hookRunner.executeHook(
+        { ...commandHook, command: 'qwen-no-such-cmd-2f9a' },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.exitCode).toBe(127);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.output?.systemMessage).toMatch(/^Warning: /);
+    });
+
+    it('reports a spawn error as a non-blocking error', async () => {
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const resultPromise = hookRunner.executeHook(
+        commandHook,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      mockProcess.emit('error', new Error('spawn failed'));
+      const result = await resultPromise;
+
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('reports a signal it did not send as a non-blocking error', async () => {
+      const mockProcess = createControllableMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const resultPromise = hookRunner.executeHook(
+        commandHook,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      mockProcess.emit('close', null);
+      const result = await resultPromise;
+
+      expect(result.error?.message).toBe('Hook killed by signal');
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+  });
+
   describe('executeHooksParallel', () => {
+    it('ends an async hook whose hand-off throws instead of rejecting the batch', async () => {
+      vi.spyOn(
+        hookRunner.getAsyncRegistry(),
+        'canAcceptMore',
+      ).mockImplementation(() => {
+        throw new Error('registry unavailable');
+      });
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo background',
+          async: true,
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const onHookStart = vi.fn();
+      const onHookEnd = vi.fn();
+
+      const results = await hookRunner.executeHooksParallel(
+        hookConfigs,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        onHookStart,
+        onHookEnd,
+      );
+
+      expect(onHookStart).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledWith(
+        hookConfigs[0],
+        expect.objectContaining({ success: false }),
+        0,
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].error?.message).toContain('registry unavailable');
+    });
+
     it('should execute multiple hooks in parallel', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
@@ -598,6 +748,11 @@ describe('HookRunner', () => {
 
       expect(onHookStart).toHaveBeenCalledTimes(1);
       expect(onHookEnd).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledWith(
+        hookConfigs[0],
+        expect.objectContaining({ success: true }),
+        0,
+      );
     });
 
     it('should chain UserPromptExpansion additional context into the next hook input', async () => {
@@ -908,6 +1063,11 @@ describe('HookRunner', () => {
 
       expect(onHookStart).toHaveBeenCalledTimes(1);
       expect(onHookEnd).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledWith(
+        hookConfigs[0],
+        expect.objectContaining({ success: true }),
+        0,
+      );
     });
   });
 
@@ -981,41 +1141,146 @@ describe('HookRunner', () => {
   });
 
   describe('expandCommand', () => {
-    it('should expand GEMINI_PROJECT_DIR placeholder', async () => {
+    const runAndGetSpawn = async (
+      hookConfig: HookConfig,
+      cwd: string,
+    ): Promise<{
+      executable: string;
+      command: string;
+      env: NodeJS.ProcessEnv;
+    }> => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
 
-      const hookConfig: HookConfig = {
-        type: HookType.Command,
-        command: 'echo $GEMINI_PROJECT_DIR',
-        source: HooksConfigSource.Project,
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd }),
+      );
+
+      const [executable, args, options] = mockSpawn.mock.calls[0];
+      return {
+        executable,
+        command: args[args.length - 1], // Last arg is the command
+        env: options.env,
       };
-      const input = createMockInput({ cwd: '/test/project' });
+    };
 
-      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+    it.each([
+      'echo $CLAUDE_PROJECT_DIR',
+      '"$QWEN_PROJECT_DIR/x.sh"',
+      "'$GEMINI_PROJECT_DIR'",
+    ])(
+      'passes bash command %s through verbatim for bash to read the environment',
+      async (hookCommand) => {
+        const cwd = '/home/u/my proj';
+        const { command, env } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command: hookCommand,
+            source: HooksConfigSource.Project,
+            shell: 'bash',
+          },
+          cwd,
+        );
 
-      // Verify spawn was called with expanded command
-      const spawnCall = mockSpawn.mock.calls[0];
-      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
-      expect(command).toContain('/test/project');
+        expect(command).toBe(hookCommand);
+        expect(env['QWEN_PROJECT_DIR']).toBe(cwd);
+        expect(env['CLAUDE_PROJECT_DIR']).toBe(cwd);
+        expect(env['GEMINI_PROJECT_DIR']).toBe(cwd);
+      },
+    );
+
+    it.each(['QWEN_PROJECT_DIR', 'CLAUDE_PROJECT_DIR', 'GEMINI_PROJECT_DIR'])(
+      'replaces a bare $%s with the quoted project directory for PowerShell',
+      async (variable) => {
+        const { command } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command: `& $${variable}/hook.ps1`,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          'C:\\Users\\u\\my proj',
+        );
+
+        expect(command).toBe("& 'C:\\Users\\u\\my proj'/hook.ps1");
+      },
+    );
+
+    it('doubles an apostrophe in the project directory for PowerShell', async () => {
+      const { command } = await runAndGetSpawn(
+        {
+          type: HookType.Command,
+          command: 'Write-Output $QWEN_PROJECT_DIR',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        "C:\\Users\\o'brien\\proj",
+      );
+
+      expect(command).toBe("Write-Output 'C:\\Users\\o''brien\\proj'");
     });
 
-    it('should expand CLAUDE_PROJECT_DIR placeholder for compatibility', async () => {
-      const mockProcess = createMockProcess(0, 'result');
-      mockSpawn.mockImplementation(() => mockProcess);
+    it('leaves $env:QWEN_PROJECT_DIR for PowerShell to read', async () => {
+      const { command } = await runAndGetSpawn(
+        {
+          type: HookType.Command,
+          command: 'Write-Output $env:QWEN_PROJECT_DIR',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        'C:\\Users\\u\\proj',
+      );
 
-      const hookConfig: HookConfig = {
-        type: HookType.Command,
-        command: 'echo $CLAUDE_PROJECT_DIR',
-        source: HooksConfigSource.Project,
+      expect(command).toBe('Write-Output $env:QWEN_PROJECT_DIR');
+    });
+
+    it.each([
+      'QWEN_PROJECT_DIRS',
+      'CLAUDE_PROJECT_DIRS',
+      'GEMINI_PROJECT_DIRS',
+    ])(
+      'does not rewrite a longer variable name $%s for PowerShell',
+      async (variable) => {
+        const { command } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command: `Write-Output $${variable}`,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          'C:\\Users\\u\\proj',
+        );
+
+        expect(command).toBe(`Write-Output $${variable}`);
+      },
+    );
+
+    it('replaces all three variables with the quoted project directory for cmd', async () => {
+      shellConfigOverride.current = {
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
       };
-      const input = createMockInput({ cwd: '/test/project' });
+      try {
+        const { executable, command } = await runAndGetSpawn(
+          {
+            type: HookType.Command,
+            command:
+              '$QWEN_PROJECT_DIR\\hooks\\check.cmd && echo $CLAUDE_PROJECT_DIR $GEMINI_PROJECT_DIR',
+            source: HooksConfigSource.Project,
+          },
+          'C:\\Users\\u\\my proj',
+        );
 
-      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
-
-      const spawnCall = mockSpawn.mock.calls[0];
-      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
-      expect(command).toContain('/test/project');
+        expect(executable).toBe('cmd.exe');
+        expect(command).toBe(
+          '"C:\\Users\\u\\my proj"\\hooks\\check.cmd && echo "C:\\Users\\u\\my proj" "C:\\Users\\u\\my proj"',
+        );
+      } finally {
+        shellConfigOverride.current = undefined;
+      }
     });
 
     it('should not modify command without placeholders', async () => {
@@ -1185,8 +1450,50 @@ describe('HookRunner', () => {
         createMockInput({ hook_event_name: HookEventName.UserPromptSubmit }),
       );
 
-      expect(result.output?.hookSpecificOutput).toBeUndefined();
-      expect(result.output?.systemMessage).toBe(malformed);
+      expect(result.output).toBeUndefined();
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.error?.message).toBe('Hook output is not valid JSON');
+    });
+
+    it('should treat truncated JSON on stdout as an error, not context', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0, '{"decision": '));
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'echo truncated',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.UserPromptSubmit,
+        createMockInput({ hook_event_name: HookEventName.UserPromptSubmit }),
+      );
+
+      expect(result.output).toBeUndefined();
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.error?.message).toBe('Hook output is not valid JSON');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('should still block on exit code 2 when stderr starts like broken JSON', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(2, '', '{"reason": '),
+      );
+
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'exit 2',
+          source: HooksConfigSource.Project,
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('blocking');
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('{"reason":');
     });
 
     it('should strip terminal escapes from promoted context and keep newlines', async () => {
@@ -2120,6 +2427,7 @@ describe('HookRunner', () => {
       const result = await resultPromise;
 
       expect(result.error?.message).toBe('Hook execution cancelled (aborted)');
+      expect(result.outcome).toBe('cancelled');
       expect(killSpy.mock.calls).toContainEqual([-mockProcess.pid, 'SIGTERM']);
       expect(killSpy.mock.calls).toContainEqual([-mockProcess.pid, 'SIGKILL']);
     });
@@ -2180,6 +2488,7 @@ describe('HookRunner', () => {
       const result = await resultPromise;
 
       expect(result.error?.message).toBe('Hook timed out after 0.1s');
+      expect(result.outcome).toBe('timeout');
       expect(killSpy.mock.calls).toContainEqual([-mockProcess.pid, 'SIGTERM']);
     });
 

@@ -47,6 +47,31 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }) {
 }
 
 describe('convertOutcomeToMcpResult', () => {
+  it('keeps recovery details ahead of a large stack and inside the output budget', () => {
+    const result = convertOutcomeToMcpResult(
+      outcome({
+        status: 'error',
+        error: {
+          name: 'ComputerUseError',
+          message: 'Verification failed'.repeat(10000),
+          code: 'verification_failed',
+          details:
+            "{ action: { performed: true }, verification: { reason: 'value_mismatch' } }",
+          stack: 'stack '.repeat(10000),
+        },
+        events: [{ type: 'text', kind: 'write', text: 'noise '.repeat(10000) }],
+      }),
+    );
+    const text = textOf(result);
+    expect(result.isError).toBe(true);
+    expect(text).toContain('Code: verification_failed');
+    expect(text).toContain('performed: true');
+    expect(text).toContain('value_mismatch');
+    expect(estimateTextTokenUnits(text)).toBeLessThanOrEqual(
+      MAX_MODEL_TEXT_TOKENS * TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+    );
+  });
+
   it('maps write text to a text content block, no isError on ok', () => {
     const result = convertOutcomeToMcpResult(
       outcome({

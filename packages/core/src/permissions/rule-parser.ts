@@ -233,6 +233,38 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ImageGen: 'image_gen',
   ImageGenTool: 'image_gen',
 
+  // Omni media tools
+  omni_downsample_image: 'omni_downsample_image',
+  DownsampleImage: 'omni_downsample_image',
+  omni_downscale_video: 'omni_downscale_video',
+  DownscaleVideo: 'omni_downscale_video',
+  omni_downsample_audio: 'omni_downsample_audio',
+  DownsampleAudio: 'omni_downsample_audio',
+  omni_extract_keyframes: 'omni_extract_keyframes',
+  ExtractKeyframes: 'omni_extract_keyframes',
+  omni_extract_audio: 'omni_extract_audio',
+  ExtractAudio: 'omni_extract_audio',
+  omni_clip_video: 'omni_clip_video',
+  ClipVideo: 'omni_clip_video',
+  omni_convert_image: 'omni_convert_image',
+  ConvertImage: 'omni_convert_image',
+  omni_transcribe_audio: 'omni_transcribe_audio',
+  TranscribeAudio: 'omni_transcribe_audio',
+  omni_clip_image: 'omni_clip_image',
+  ClipImage: 'omni_clip_image',
+  omni_clip_audio: 'omni_clip_audio',
+  ClipAudio: 'omni_clip_audio',
+  omni_caption_image: 'omni_caption_image',
+  CaptionImage: 'omni_caption_image',
+  omni_caption_audio: 'omni_caption_audio',
+  CaptionAudio: 'omni_caption_audio',
+  omni_ocr_image: 'omni_ocr_image',
+  OcrImage: 'omni_ocr_image',
+  omni_understand_video_segments: 'omni_understand_video_segments',
+  UnderstandVideoSegments: 'omni_understand_video_segments',
+  omni_recall_media_memory: 'omni_recall_media_memory',
+  RecallMediaMemory: 'omni_recall_media_memory',
+
   // Tool search tool
   tool_search: 'tool_search',
   ToolSearch: 'tool_search',
@@ -1531,6 +1563,19 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Whether a deny entry covers a tool name, as a subagent's tool filter judges
+ * it: an MCP tool matches server-level, wildcard and exact MCP patterns (see
+ * {@link matchesMcpPattern}); every other tool matches only its exact name.
+ * One predicate for every place that applies a deny list to a tool pool, so the
+ * declaration filter and the callers that predict it cannot disagree.
+ */
+export function matchesToolPattern(pattern: string, toolName: string): boolean {
+  return toolName.startsWith('mcp__')
+    ? matchesMcpPattern(pattern, toolName)
+    : pattern === toolName;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

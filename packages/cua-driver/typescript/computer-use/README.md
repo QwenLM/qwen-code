@@ -10,14 +10,17 @@ connected driver's inventory. It does not infer the target from the CLI or Node
 host and does not capture the desktop. Missing or invalid platform metadata
 raises `driver_platform_unavailable`; update the driver and SDK before continuing.
 
-The single [Computer Use Skill](./SKILL.md) routes to one platform resource:
+The single [Computer Use Skill](./SKILL.md) includes the Linux workflow and routes
+macOS and Windows to one additional platform resource:
 
 - [macOS](./references/macos.md): App handles, compact app state and text operations.
-- [Windows/Linux](./references/windows-linux.md): existing exact-window targeting.
+- [Windows](./references/windows-linux.md): existing exact-window targeting.
+- [Linux](./SKILL.md#linux-computer-use): exact-window targeting with automatic input delivery.
 
-Skill resources stay beside the entrypoint on the CLI host. Read the selected
-resource relative to the Skill's displayed base directory, even when the driver
-controls another machine. After changing connections, query the platform again.
+On macOS and Windows, read the selected resource relative to the Skill's displayed
+base directory on the CLI host, even when the driver controls another machine.
+Linux needs only the fixed `computer-use/SKILL.md` entrypoint. After changing
+connections, query the platform again.
 
 ## App workflow
 
@@ -189,7 +192,14 @@ Actions that support input delivery resolve their mode in this order:
 
 1. the action's explicit `deliveryMode`;
 2. `QWEN_CUA_SDK_DEFAULT_DELIVERY_MODE` (`background` or `foreground`);
-3. `background`.
+3. the connected platform's default: Linux permits guarded focus preparation;
+   Windows and the macOS exact-window compatibility API retain `background`.
+
+On Linux, ordinary callers omit delivery options. The facade passes the existing
+`foreground` permission ceiling internally, allowing the native driver to choose
+semantic or target-addressed input and prepare exact-window focus when needed.
+This uses the connected platform, not the Node host OS. Explicit overrides remain
+available to legacy programmatic clients.
 
 The resolved value is passed to the typed driver for every supported action.
 Use the environment default when a whole isolated process, such as a test
