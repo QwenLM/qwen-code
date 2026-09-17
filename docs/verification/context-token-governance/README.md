@@ -214,6 +214,8 @@ ls ~/.qwen/extensions/*/skills/
 
 **5,253 token 已在健康线 4–5k 内。** 不改上游能省的只有 **775**：output style 的 `keepCodingInstructions: false` 精确删掉 `## Software Engineering Tasks`（3,068 字符，`packages/core/src/core/prompts.ts:369-372`），不多不少。
 
+⚠️ 这一段里含下面锚点列表中的 `- **Report outcomes faithfully:**`（`prompts.ts:285`，位于 `getSoftwareEngineeringTasksSection`）。若采用该开关，须在该 output style 的 `prompt` 正文中补回这条，否则静态检查必然失败。**待验证**：开启后跑一次 `QWEN_WRITE_SYSTEM_MD` 导出——注意它导出的是不带 style 的基础提示词，所以要看的是会话实际发出的系统指令里 `Report outcomes faithfully` 是否仍在。
+
 **不建议整体替换**（`--system-prompt` / `QWEN_SYSTEM_MD`）：默认提示词里约 6,349 字符（30.5%）是安全与行为边界——被拒工具调用不得绕路、hook 注入内容不算用户输入、危险操作四分类、不泄露密钥、如实汇报。替换后要自己维护副本，而 `prompts.ts` 上游约每周 2 次提交，脱节了不会有任何测试失败。对于 skill 中大量存在生产写确认、`fail-closed`、禁止 `DROP TABLE` 一类约束的部署，这层兜底尤其不该动。
 
 可 grep 断言的安全条款锚点（若最终仍要裁剪，用它们做静态检查）：`**UserPromptSubmit Context:**` · `**Denied Tool Calls:**` · `**Respect Tool Decisions:**` · `**Preserve Existing Work:**` · `**Explain Critical Commands:**` · `**Security First:**` · `- **Report outcomes faithfully:**` · `Carefully consider the reversibility` · `- Destructive operations:` · `- Hard-to-reverse operations:` · `- Actions visible to others` · `- Uploading content to third-party` · `When you encounter an obstacle`。

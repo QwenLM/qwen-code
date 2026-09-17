@@ -144,6 +144,10 @@
 
 延迟工具的清单会以 `名字 + 描述首行（截断到 160 字符）` 注入 prelude（`environmentContext.ts:131-142`），所以工具命名和描述首行要能自解释；另有 `searchHint` 字段（`tools.ts:252`）可改善 ToolSearch 关键词召回，且不占常驻 token。
 
+**不需要意图分类器。** ToolSearch 本身就是模型驱动的按需加载，揭示结果在会话内复用、压缩后保留（`client.ts` 的 `resetChat` 注释：只有 `/clear` 清空），延迟工具提醒就是兜底。若上线后 `tool_search` 调用率超过 §6 的盈亏线，退路是让部署后端在**创建会话时**按入口场景（文件分析 / SQL 查询等）设置 `tools.visible`：会话级、零路由开销，也不会在会话中途打掉缓存。
+
+**常驻工具的描述精简（可选，收益小）。** 延迟工具揭示前不占 token，所以只有白名单内的工具值得精简。白名单生效后最大的常驻项是 `run_shell_command`（1,495）：其描述（`shell.ts` 的 `getShellToolDescription`）大半是开发场景示例（dev server、build watcher、`mongod`/`redis-server`、`npm install`、`git push`）和 good/bad 代码块，可换成一两个数据处理示例；**要保留**的是调用约定——超时与 `is_background`、用 `task_stop` 而非按进程名 kill、引号与命令串联、优先专用文件工具、避免 `cd`，删了会直接表现为调用失败。实现上沿用已有写法：`AgentTool.updateDescriptionAndSchema` 已经按 `isAgentTeamEnabled()` / `isTodoWriteEnabled()` 条件拼装描述，给少数大工具加一个由开关控制的精简变体即可，不要在部署侧整段覆盖描述（和替换系统提示词一样会与上游脱节）。目前没有对应 issue。
+
 ### 步骤 3：extension 上下文文件迁移（0 代码，低风险）
 
 extension 的内容按性质分三层：
@@ -160,7 +164,22 @@ extension 的内容按性质分三层：
 
 不改上游的话，唯一合法的按段选择机制是 output style 的 `keepCodingInstructions: false`，它精确删掉 `## Software Engineering Tasks`（3,068 字符，`prompts.ts:369-372`），**不多不少**。20,801 → 17,733，约 -15%。
 
+⚠️ **这一段里有一条安全条款。** `## Software Engineering Tasks` 由 `getSoftwareEngineeringTasksSection` 生成，其中包含 `**Report outcomes faithfully:**`（`prompts.ts:285`，不得把失败说成成功、不得隐瞒没做的验证）——它正是 §8 静态检查锚点之一。用这个开关时，要在该 output style 自己的 `prompt` 正文里补回这一条（output style 的 `prompt` 渲染在 `# Output Style: <name>` 下，项目级 style 放 `.qwen/output-styles/`，见 #10761）。
+
+各段体积（非 git、非沙箱快照，字符）供 #12032 参考：`Using Your Tools` 4,012 · `Core Mandates` 3,334 · `Examples` 3,240 · `Software Engineering Tasks` 3,043 · `Executing actions with care` 3,042 · `Tone and Style` 1,030 · `Communicating With the User` 632 · `Final Reminder` 603 · `Security and Safety Rules` 535 · `Outside of Sandbox` 361 · `New Applications` 195 · `Interaction Details` 158；在 git 仓库中另有 git 段约 1.9k。注意 `**Respect Tool Decisions:**` 也不在安全段里，而在 `Using Your Tools` 中——按段整删同样会带走它。
+
 **不建议整体替换**（`--system-prompt` / `QWEN_SYSTEM_MD`）：默认提示词里约 6,349 字符（30.5%）是安全与行为边界，替换后要自己维护副本，而 `prompts.ts` 上游约每周 2 次提交，脱节了没有任何测试会失败。正确的方向是 #12032——让提示词按常驻工具集装配，砍工具时提示词自动跟着缩。
+
+若仍要替换，还有几件不显眼的事：
+
+- **只能按进程生效。** `Config.systemPrompt` 是只读字段，只能由 `--system-prompt` 或 SDK 传入；没有 settings 键，daemon/ACP 也没有按会话设置主提示词的参数（`serve/acp-http/dispatch.ts` 里的 `systemPrompt` 属于子 agent 的增改接口）。只对某一类会话生效就需要独立进程池，回滚要重启或切流量。
+- **`QWEN_SYSTEM_MD` 坑更多。** 相对路径（包括默认的 `.qwen/system.md`）按进程工作目录解析；文件缺失直接抛 `missing system prompt file`，会话起不来而不是回退；每次重建系统指令都重读文件，会话中改文件会改变提示词并打掉缓存；它作用于所有 `getCoreSystemPrompt` 调用方（含 Arena），而 `--system-prompt` 只作用于主会话。
+- **动态装配随之消失。** 交互模式说明、output style 层及其每轮提醒（`resolveMainSessionOutputStyle` 在替换时返回 `undefined`）、`QWEN_SYSTEM_IDENTITY_MD`、`todo_write`/code mode 变体、按模型区分的工具调用示例（`getToolCallExamples`）都不再生成。仍会追加的是上下文文件、`appendSystemPrompt`、git status、auto-memory，以及放在消息里的每轮提醒（plan mode、延迟工具清单）。
+- **起点要用真实默认值。** 用 `QWEN_WRITE_SYSTEM_MD=<path>` 按部署的模型与模式导出一次再删减，并记录所基于的默认提示词哈希，升级时重新导出 diff。
+
+### 回滚
+
+步骤 1–3 都是配置或内容：改回文件即可，新会话按 settings 文件指纹重新读取（见交接文档 §2.3），无需重启 daemon。output style 切回默认即可。只有 `--system-prompt` 需要重启进程。
 
 ---
 
@@ -225,7 +244,7 @@ extension 的内容按性质分三层：
 分三层，从便宜到贵，每层通过再做下一层。
 
 **第 1 层 · 静态检查（秒级，可进 CI）**
-- 若做了提示词裁剪：安全条款关键句逐条 grep。可 grep 的锚点包括 `**UserPromptSubmit Context:**`、`**Denied Tool Calls:**`、`**Respect Tool Decisions:**`、`**Security First:**`、`Carefully consider the reversibility`、`- Destructive operations:` 等。
+- 若做了提示词裁剪：安全条款关键句逐条 grep。可 grep 的锚点包括 `**UserPromptSubmit Context:**`、`**Denied Tool Calls:**`、`**Respect Tool Decisions:**`、`**Security First:**`、`**Report outcomes faithfully:**`、`Carefully consider the reversibility`、`- Destructive operations:` 等。用 `keepCodingInstructions: false` 时 `**Report outcomes faithfully:**` 必然检查失败，除非已在 output style 正文补回（见步骤 4）。
 - 提示词与工具描述中出现的工具名，必须都在当前声明的工具集中。
 - 记录裁剪版基于哪个上游版本生成，升级时 diff 默认提示词。
 
@@ -233,6 +252,7 @@ extension 的内容按性质分三层：
 - 任务集：真实会话抽 100–200 条，按类型分层（纯问答、文件处理、Shell、数据查询、多步任务），每类 ≥20 条；另备 10–20 条安全用例（危险命令、伪装成用户指令的 hook 文本、被拒后是否绕路）。
 - 跑法：headless 模式对同一任务集跑新旧配置，模型与温度固定，每条跑 3 次以估噪声。
 - 指标：空载成本 · 每任务总 input token · 缓存命中/未命中与实际计费 · 工具召回率 · `tool_search` 调用率（即"路由遗漏比例"）· 坏调用率（相对路径、未声明工具名、参数校验失败）· 任务成功率 · 安全用例通过率（必须 100%）。
+- 埋点缺口：OTel 属性 `qwen-code.context.usage` 目前只有分类合计。`context-usage-snapshot.ts` 的 `estimateToolCategories` 本来就逐个遍历声明，扩展为输出**每个工具的 token、声明的工具数、加载原因**（常驻 / `tool_search` 揭示 / 预算预加载 / 历史回放 / `tools.visible`），`tool_search` 调用率与"每会话揭示次数 ≤ 2"这条运营线就能直接从线上遥测读，而不用解析会话记录。目前没有对应 issue。
 
 **第 3 层 · 线上灰度（天级）**
 - 独立进程池跑新配置，切 5–10% 流量，指标同第 2 层，另加重试率与负反馈。一周无异常再放量。
