@@ -941,6 +941,8 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
 
+**Blocking cap**: consecutive blocking decisions are counted per prompt and keep counting across tool round trips, so a hook that blocks on every check ends the turn after `stopHookBlockingCap` blocks (default 8; `QWEN_CODE_STOP_HOOK_BLOCK_CAP` overrides it for one run). The count and `stop_hook_active` share the same record: both restart when the stop is allowed, when you steer or send new input, when a turn is retried, when a goal turn starts, and when the turn ends abnormally. In non-interactive text mode, Stop hook messages and cap warnings are written to stderr; JSON output is unchanged.
+
 **Example Output**:
 
 ```json
@@ -1507,7 +1509,7 @@ Run `/hooks` to browse the configured hooks. Opening the interactive menu reload
 
 Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
 
-This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `hooks.disableAllHooks`, `hooks.stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected.
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Project hooks load only in a trusted folder, and bare or safe mode loads no hooks. Hooks registered at runtime by skills or the SDK are not affected.
 
 ## Hook Execution
 
