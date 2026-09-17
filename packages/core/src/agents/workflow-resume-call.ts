@@ -35,14 +35,15 @@ export interface WorkflowResumeTarget {
   /** Preserve background execution when the current surface accepts it. */
   resumeInBackground?: boolean;
   /**
-   * The saved or extension workflow the run came from, when it came from one.
-   * Read only when `nameOnly` is set.
+   * The name this run can be resumed by: set by the runner only when the name
+   * resolved, when the run started, to the very script it ran. Read only when
+   * `nameOnly` is set.
    */
-  workflowName?: string;
+  resumeName?: string;
   /**
    * The session runs named workflows only (`tools.workflowNameOnly`), where a
    * `scriptPath` call is refused. The resume call then names the workflow, and
-   * a run with no name has none the model could make.
+   * a run without a `resumeName` has none the model could make.
    */
   nameOnly?: boolean;
 }
@@ -80,13 +81,13 @@ export function hasUninlinableResumeArgs(
 /**
  * The resume call for this run, or `null` when there is none to offer: no
  * script on disk to resume from (an inline script that could not be
- * persisted), or, in a name-only session, no workflow name to resume by.
+ * persisted), or, in a name-only session, no name that leads back to it.
  */
 export function buildResumeCall(target: WorkflowResumeTarget): string | null {
   let source: string;
   if (target.nameOnly) {
-    if (!target.workflowName) return null;
-    source = `name: ${JSON.stringify(stripAnsiAndControl(target.workflowName))}`;
+    if (!target.resumeName) return null;
+    source = `name: ${JSON.stringify(stripAnsiAndControl(target.resumeName))}`;
   } else {
     if (!target.scriptPath) return null;
     source = `scriptPath: ${JSON.stringify(stripAnsiAndControl(target.scriptPath))}`;

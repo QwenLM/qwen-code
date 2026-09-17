@@ -236,20 +236,23 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.workflowName).toBe('audit');
   });
 
-  // tools.workflowNameOnly reaches a running script: nesting by path is
-  // refused like a scriptPath call, and nesting by name still resolves.
-  it('refuses a nested workflow({scriptPath}) in a name-only session', async () => {
-    for (const nameOnly of [true, false]) {
+  // A model call in a name-only session refuses nesting by path; the Workflow
+  // tool asks for that per call, so a host's own run — same session, no flag —
+  // nests freely. Any other malformed ref reaches the resolver untouched.
+  it('refuses a nested workflow({scriptPath}) only for a call that asks it to', async () => {
+    const nested = {
+      name: 'audit',
+      scriptPath: '/saved/audit.js',
+      script: "return 'nested';",
+      savedWorkflowName: 'audit',
+    };
+    for (const restrict of [true, false]) {
       const { config, registry } = configWithRegistry();
-      Object.assign(config, { isWorkflowNameOnly: () => nameOnly });
+      // Locked either way: the flag, not the session, decides.
+      Object.assign(config, { isWorkflowNameOnly: () => true });
       stubStorage(config, await makeStorageRoot());
       resolveSavedWorkflowScriptMock.mockReset();
-      resolveSavedWorkflowScriptMock.mockResolvedValue({
-        name: 'audit',
-        scriptPath: '/saved/audit.js',
-        script: "return 'nested';",
-        savedWorkflowName: 'audit',
-      });
+      resolveSavedWorkflowScriptMock.mockResolvedValue(nested);
 
       const byPath = await WorkflowRunner.start({
         config,
@@ -257,21 +260,21 @@ describe('WorkflowRunner', () => {
         args: undefined,
         signal: new AbortController().signal,
         dispatch: async () => 'unused',
+        ...(restrict ? { restrictNestedScriptPaths: true } : {}),
       });
       const pathSettlement = await byPath.completion;
-      if (nameOnly) {
+      if (restrict) {
         expect(pathSettlement.ok).toBe(false);
         expect(!pathSettlement.ok && pathSettlement.message).toContain(
           "workflow({scriptPath}): this session restricts workflows to named workflows (tools.workflowNameOnly) — nest with workflow('<name>') instead.",
         );
         expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
-        expect(registry.get(byPath.runId)?.nameOnly).toBe(true);
       } else {
         expect(pathSettlement.ok && pathSettlement.outcome.result).toBe(
           'nested',
         );
-        expect(registry.get(byPath.runId)).not.toHaveProperty('nameOnly');
       }
+      expect(registry.get(byPath.runId)).not.toHaveProperty('resumeName');
 
       const byName = await WorkflowRunner.start({
         config,
@@ -279,6 +282,7 @@ describe('WorkflowRunner', () => {
         args: undefined,
         signal: new AbortController().signal,
         dispatch: async () => 'unused',
+        ...(restrict ? { restrictNestedScriptPaths: true } : {}),
       });
       const nameSettlement = await byName.completion;
       expect(nameSettlement.ok && nameSettlement.outcome.result).toBe('nested');
@@ -287,6 +291,83 @@ describe('WorkflowRunner', () => {
         config,
       );
     }
+  });
+
+  it('leaves a malformed nested ref to the resolver under the restriction', async () => {
+    const { config } = configWithRegistry();
+    stubStorage(config, await makeStorageRoot());
+    resolveSavedWorkflowScriptMock.mockReset();
+    resolveSavedWorkflowScriptMock.mockRejectedValue(
+      new Error(
+        'workflow() expects a workflow name (string) or {scriptPath: string}.',
+      ),
+    );
+
+    const handle = await WorkflowRunner.start({
+      config,
+      script: 'return await workflow(42);',
+      args: undefined,
+      signal: new AbortController().signal,
+      dispatch: async () => 'unused',
+      restrictNestedScriptPaths: true,
+    });
+    const settlement = await handle.completion;
+
+    expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(42, config);
+    expect(!settlement.ok && settlement.message).toContain(
+      'workflow() expects a workflow name',
+    );
+    expect(!settlement.ok && settlement.message).not.toContain(
+      'tools.workflowNameOnly',
+    );
+  });
+
+  // The name a locked session resumes by must lead back to the script that
+  // ran. The runner checks once, as the run starts.
+  it('records a resume name only when the name resolves to the script that ran', async () => {
+    const root = await makeStorageRoot();
+    const ran = path.join(root, 'audit.js');
+    const other = path.join(root, 'other-audit.js');
+    await fs.writeFile(ran, "return 'ran';", 'utf8');
+    await fs.writeFile(other, "return 'other';", 'utf8');
+
+    const start = async (nameOnly: boolean, resolvesTo: string) => {
+      const { config, registry } = configWithRegistry();
+      Object.assign(config, { isWorkflowNameOnly: () => nameOnly });
+      stubStorage(config, root);
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue({
+        name: 'audit',
+        scriptPath: resolvesTo,
+        script: "return 'ran';",
+        savedWorkflowName: 'audit',
+      });
+      const handle = await WorkflowRunner.start({
+        config,
+        scriptPath: ran,
+        loadScript: async () => ({
+          name: 'audit',
+          scriptPath: ran,
+          script: "return 'ran';",
+          savedWorkflowName: 'audit',
+        }),
+        args: undefined,
+        signal: new AbortController().signal,
+        dispatch: async () => 'unused',
+      });
+      await handle.completion;
+      return registry.get(handle.runId);
+    };
+
+    expect((await start(true, ran))?.resumeName).toBe('audit');
+    expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(
+      'audit',
+      expect.anything(),
+    );
+    expect((await start(true, other))?.resumeName).toBeUndefined();
+    const unlocked = await start(false, ran);
+    expect(unlocked?.resumeName).toBeUndefined();
+    expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
   });
 
   async function generatedReview(script: string) {

@@ -127,7 +127,15 @@ export function buildWorkflowKeywordPrefix(
   if (!detectWorkflowKeyword(text)) return null;
   let surface: WorkflowAuthoringSurface | undefined;
   let revealWorkflowTool = false;
+  // Read on its own, before anything below can throw: in a name-only session
+  // the steering sentence itself changes, so losing the lock would tell the
+  // model to write a script the tool then refuses.
   let nameOnly = false;
+  try {
+    nameOnly = config.isWorkflowNameOnly?.() === true;
+  } catch {
+    nameOnly = false;
+  }
   try {
     const registry = config.getToolRegistry?.();
     const toolNames = registry?.getAllToolNames?.();
@@ -144,10 +152,9 @@ export function buildWorkflowKeywordPrefix(
       | WorkflowTool
       | undefined;
     surface = tool?.authoringSurface ?? resolveWorkflowAuthoringSurface(config);
-    nameOnly = tool?.nameOnly ?? config.isWorkflowNameOnly?.() === true;
   } catch {
-    // The steering sentence does not depend on the surface; losing only the
-    // closing sentences is the right degradation.
+    // The steering sentence depends on the lock, read above, not on the
+    // surface; losing only the closing sentences is the right degradation.
     surface = undefined;
   }
   return `<system-reminder>\n${buildWorkflowSteeringNotice(surface, { revealWorkflowTool, nameOnly })}\n</system-reminder>\n\n`;

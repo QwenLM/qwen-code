@@ -282,6 +282,11 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     /** This session's failure hint, from the tool's recorded description shape. */
     private readonly authoringHint: string | null,
     private readonly workflowName?: string,
+    /**
+     * Started by the host through `buildSessionOwnedBackground`, not by a
+     * model or client call. The name-only lock does not reach such a run.
+     */
+    private readonly sessionOwned = false,
   ) {
     super(params);
   }
@@ -537,6 +542,9 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         resumeFromRunId: this.params.resumeFromRunId,
         dispatch: this.toolOptions.dispatch,
         runInBackground,
+        ...(!this.sessionOwned && this.config.isWorkflowNameOnly?.() === true
+          ? { restrictNestedScriptPaths: true }
+          : {}),
         onUpdate:
           !runInBackground && updateOutput
             ? (entry) => safeEmitUpdate(updateOutput, entry)
@@ -855,10 +863,13 @@ function buildRunTrailer(
     scriptPath: handle.scriptPath,
     args,
     ...(config.isWorkflowNameOnly?.() === true
-      ? { nameOnly: true, workflowName: entry?.workflowName }
+      ? { nameOnly: true, resumeName: entry?.resumeName }
       : {}),
   });
   if (resume && includeResume) {
+    // A name-only resume call is built from the name, not the path, so the
+    // path is read only when the run has one.
+    const scriptPath = handle.scriptPath;
     // An extension's file is third-party and an extension update replaces
     // it, so the copy has to land somewhere the user owns.
     // Same test as the registry's recovery advice: a qualified run name, or a
@@ -866,12 +877,13 @@ function buildRunTrailer(
     const isExtensionWorkflow =
       (entry?.workflowName !== undefined &&
         parseExtensionWorkflowName(entry.workflowName) !== null) ||
-      findActiveExtensionWorkflowByPath(config, handle.scriptPath!) !==
-        undefined;
+      (scriptPath !== undefined &&
+        findActiveExtensionWorkflowByPath(config, scriptPath) !== undefined);
     const pathAdvice = isExtensionWorkflow
       ? "this reads an extension's workflow file; copy it into .qwen/workflows before making a run-specific change"
       : entry?.workflowName ||
-          !isGeneratedWorkflowScriptPath(config, handle.scriptPath!)
+          (scriptPath !== undefined &&
+            !isGeneratedWorkflowScriptPath(config, scriptPath))
         ? 'this reads the saved workflow; copy it before making a run-specific change'
         : 'edit that generated copy first if the script needs to change';
     const journalAdvice = handle.journalPath
@@ -1497,6 +1509,49 @@ export const WORKFLOW_NAME_ONLY_SECTION = `**Named workflows only**
 
 This session restricts this tool to named workflows. Call it as \`{ name, args }\` with the name of a saved or extension workflow; \`script\` and \`scriptPath\` are refused, and a running script cannot nest \`workflow({ scriptPath })\`. Do not write a workflow script in this session. To resume a failed run, pass the same \`name\` and \`args\` with \`resumeFromRunId\`.`;
 
+/**
+ * `text` with each `[from, to]` replaced. Used to derive the name-only
+ * description from the shared one; a test holds that no script-path advice
+ * survives, so an edit that breaks a `from` fails there, not in a session.
+ */
+function withReplacements(
+  text: string,
+  replacements: ReadonlyArray<readonly [string, string]>,
+): string {
+  return replacements.reduce(
+    (current, [from, to]) => current.split(from).join(to),
+    text,
+  );
+}
+
+/**
+ * The decision and runtime text of a name-only session: the same rules and
+ * limits, without the sentences that send the model to a script path or to
+ * editing a persisted script, which that session refuses.
+ */
+const WORKFLOW_TOOL_DECISION_NAME_ONLY = withReplacements(
+  WORKFLOW_TOOL_DECISION,
+  [
+    [
+      "reached through `name`, `workflow('<name>')` or `scriptPath`.",
+      "reached through `name` or `workflow('<name>')`.",
+    ],
+  ],
+);
+const WORKFLOW_TOOL_RUNTIME_NAME_ONLY = withReplacements(
+  WORKFLOW_TOOL_RUNTIME,
+  [
+    [
+      "; `scriptPath` additionally accepts an active extension's workflow file or a path inside the generated-scripts root (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project runtime dir, not the project tree); any other path is refused.",
+      '.',
+    ],
+    [
+      ' (an inline script is persisted, so a resume edits that file rather than re-sending the source)',
+      '',
+    ],
+  ],
+);
+
 /** Appended to the pointer when a `tools.eager` allowlist defers the Skill tool. */
 const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
 
@@ -1543,7 +1598,10 @@ export function buildWorkflowToolDescription(
   // A name-only session runs no script the model writes, so no shape carries
   // the authoring reference or a pointer to it.
   if (options.nameOnly) {
-    return `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_NAME_ONLY_SECTION}\n\n${runtime}`;
+    const lockedRuntime = size
+      ? `${WORKFLOW_TOOL_RUNTIME_NAME_ONLY}\n\n${size}`
+      : WORKFLOW_TOOL_RUNTIME_NAME_ONLY;
+    return `${WORKFLOW_TOOL_DECISION_NAME_ONLY}\n\n${WORKFLOW_NAME_ONLY_SECTION}\n\n${lockedRuntime}`;
   }
   const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${runtime}\n\n${WORKFLOW_AUTHORING_POINTER}`;
   switch (surface) {
@@ -1674,15 +1732,26 @@ function isScriptAuthoredByThisCall(
   }
 }
 
+/** Whether a call carries an inline script, as validation counts one. */
+function hasInlineScript(params: WorkflowParams): boolean {
+  return typeof params.script === 'string' && params.script.length > 0;
+}
+
+/** Whether a call carries a script path, as validation counts one. */
+function hasScriptPath(params: WorkflowParams): boolean {
+  return typeof params.scriptPath === 'string' && params.scriptPath.length > 0;
+}
+
 /**
- * The script-bearing fields a call carries, which a name-only session refuses.
- * Presence is what counts, not whether the value would validate: an empty
- * `script` is still an attempt to run one.
+ * The script sources a call carries, which a name-only session refuses. They
+ * are counted the way validation counts them, so a field validation would
+ * ignore — an empty `scriptPath` beside a `name` — does not refuse a call
+ * that runs by name.
  */
 function describeUnnamedWorkflowSources(params: WorkflowParams): string[] {
   const refused: string[] = [];
-  if (params.script !== undefined) refused.push('script');
-  if (params.scriptPath !== undefined) refused.push('scriptPath');
+  if (hasInlineScript(params)) refused.push('script');
+  if (hasScriptPath(params)) refused.push('scriptPath');
   return refused;
 }
 
@@ -1702,13 +1771,6 @@ export class WorkflowTool extends BaseDeclarativeTool<
    * with the description the model is holding.
    */
   readonly authoringSurface: WorkflowAuthoringSurface;
-
-  /**
-   * Whether this session runs named workflows only (`tools.workflowNameOnly`),
-   * read once with the description and schema it shapes. The keyword reminder
-   * reads it from here for the same reason it reads `authoringSurface`.
-   */
-  readonly nameOnly: boolean;
 
   constructor(
     private readonly config: Config,
@@ -1737,7 +1799,6 @@ export class WorkflowTool extends BaseDeclarativeTool<
       /* canUpdateOutput */ true,
     );
     this.authoringSurface = surface;
-    this.nameOnly = nameOnly;
   }
 
   /**
@@ -1749,7 +1810,9 @@ export class WorkflowTool extends BaseDeclarativeTool<
   override build(
     params: WorkflowParams,
   ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
-    if (this.nameOnly) {
+    // The lock is the Config's, fixed for the session, so this reads the same
+    // value the description and schema above were built from.
+    if (this.config.isWorkflowNameOnly?.() === true) {
       const refused = describeUnnamedWorkflowSources(params);
       if (refused.length > 0) {
         throw new Error(
@@ -1779,6 +1842,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
       { ...params, run_in_background: true },
       buildWorkflowAuthoringHint(this.authoringSurface),
       workflowName,
+      /* sessionOwned */ true,
     );
   }
 
@@ -1792,10 +1856,8 @@ export class WorkflowTool extends BaseDeclarativeTool<
         ? error.message
         : 'Invalid workflow sourceRef.';
     }
-    const hasScript =
-      typeof params.script === 'string' && params.script.length > 0;
-    const hasPath =
-      typeof params.scriptPath === 'string' && params.scriptPath.length > 0;
+    const hasScript = hasInlineScript(params);
+    const hasPath = hasScriptPath(params);
     const hasName = typeof params.name === 'string' && params.name.length > 0;
     // Exactly one source: inline `script` (LLM authoring), `scriptPath` (a
     // saved-workflow slash command or a generated script), or `name` (a saved

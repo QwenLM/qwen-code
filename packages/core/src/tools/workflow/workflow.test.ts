@@ -2947,7 +2947,6 @@ describe('WorkflowTool — name-only sessions', () => {
     [{ script: 'return 1' }, 'script'],
     [{ scriptPath: '/proj/.qwen/workflows/audit.js' }, 'scriptPath'],
     [{ script: 'return 1', resumeFromRunId: 'wf_0123' }, 'script'],
-    [{ script: '' }, 'script'],
     [{ name: 'audit', scriptPath: '/w/a.js' }, 'scriptPath'],
   ])('refuses %j, naming %s', (params, field) => {
     const tool = new WorkflowTool(lockedConfig());
@@ -2969,6 +2968,19 @@ describe('WorkflowTool — name-only sessions', () => {
         scriptPath: '/w/a.js',
       } as never),
     ).toThrow('Not allowed here: script, scriptPath.');
+  });
+
+  // The lock counts a source the way validation does, so a field validation
+  // ignores cannot refuse a call that would run by name.
+  it.each([
+    [{ name: 'audit', scriptPath: '' }],
+    [{ name: 'audit', script: '' }],
+  ])('accepts %j as the named call validation reads it as', (params) => {
+    const locked = new WorkflowTool(lockedConfig());
+    const unlocked = new WorkflowTool(fakeConfig());
+    expect(locked.build(params as never).getDescription()).toBe(
+      unlocked.build(params as never).getDescription(),
+    );
   });
 
   it('accepts a name, and a name resuming a run', () => {
@@ -3003,7 +3015,6 @@ describe('WorkflowTool — name-only sessions', () => {
 
   it('describes the lock and points at no authoring reference', () => {
     const tool = new WorkflowTool(lockedConfig());
-    expect(tool.nameOnly).toBe(true);
     expect(tool.authoringSurface).toBe('withheld');
     expect(tool.description).toContain(WORKFLOW_NAME_ONLY_SECTION);
     expect(tool.description).toContain('**Only on an explicit request**');
@@ -3034,49 +3045,115 @@ describe('WorkflowTool — name-only sessions', () => {
     }
   });
 
+  // The shared decision and runtime text send the model to `scriptPath` and
+  // to editing a persisted script; a locked session refuses both, so only the
+  // lock section may mention a script path there.
+  it('carries no script-path advice outside the lock section', () => {
+    const locked = new WorkflowTool(lockedConfig()).description;
+    const rest = locked.replace(WORKFLOW_NAME_ONLY_SECTION, '');
+    expect(rest).not.toContain('scriptPath');
+    expect(rest).not.toContain('edits that file');
+    expect(rest).toContain("reached through `name` or `workflow('<name>')`.");
+    expect(rest).toContain('`workflow(nameOrRef, args?)`');
+    // The replaced sentences are real text in the unlocked description, so a
+    // wording edit there fails here instead of leaving advice behind.
+    const open = new WorkflowTool(fakeConfig()).description;
+    expect(open).toContain(
+      "reached through `name`, `workflow('<name>')` or `scriptPath`.",
+    );
+    expect(open).toContain('`scriptPath` additionally accepts');
+    expect(open).toContain('a resume edits that file');
+  });
+
   it('leaves an unlocked session exactly as it was', () => {
     const unlocked = new WorkflowTool({
       ...fakeConfig(),
       isWorkflowNameOnly: () => false,
     } as unknown as Config);
     const baseline = new WorkflowTool(fakeConfig());
-    expect(unlocked.nameOnly).toBe(false);
     expect(unlocked.description).toBe(baseline.description);
     expect(unlocked.schema).toEqual(baseline.schema);
     expect(unlocked.authoringSurface).toBe(baseline.authoringSurface);
     expect(() => unlocked.build({ script: 'return 1' })).not.toThrow();
   });
 
-  // The host is not the model: ACP run-script, run-saved, retry and rerun go
-  // through buildSessionOwnedBackground and must keep working under the lock.
-  it("runs the host's own script-backed runs", async () => {
-    const runtimeDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'workflow-name-only-host-'),
+  async function hostSession() {
+    const runtimeDir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-name-only-host-')),
     );
+    const storage = new Storage(path.join(runtimeDir, 'project'), runtimeDir);
+    const workflowsDir = storage.getProjectWorkflowsDir();
+    await fs.mkdir(path.join(workflowsDir, 'sub'), { recursive: true });
     const registry = new WorkflowRunRegistry();
-    registry.setCompletionCallback(vi.fn());
+    registry.setNameOnly(true);
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
     const config = lockedConfig({
-      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
+      storage,
       isInteractive: () => false,
       getWorkflowRunRegistry: () => registry,
       getSkipWorkflowUsageWarning: () => true,
     });
+    const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
+    const run = async (
+      params: Parameters<WorkflowTool['buildSessionOwnedBackground']>[0],
+      workflowName?: string,
+    ) => {
+      const result = await tool
+        .buildSessionOwnedBackground(params, workflowName)
+        .execute(new AbortController().signal);
+      await registry.getHandle(result.workflowRunId!)?.completion;
+      return registry.get(result.workflowRunId!)!;
+    };
+    return { runtimeDir, workflowsDir, registry, completion, tool, run };
+  }
 
+  // The host is not the model: ACP run-script, run-saved, retry and rerun go
+  // through buildSessionOwnedBackground and must keep working under the lock,
+  // nested workflow({ scriptPath }) included.
+  it("runs the host's own script-backed runs, nesting by path included", async () => {
+    const { runtimeDir, workflowsDir, tool, run } = await hostSession();
     try {
-      const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
+      const inner = path.join(workflowsDir, 'inner.js');
+      await fs.writeFile(inner, "return 'inner-ran';", 'utf8');
       expect(() =>
         tool.buildSessionOwnedBackground({ scriptPath: '/w/a.js' }),
       ).not.toThrow();
-      const result = await tool
-        .buildSessionOwnedBackground({ script: `return { status: 'ready' };` })
-        .execute(new AbortController().signal);
+      const entry = await run({
+        script: `return await workflow({ scriptPath: ${JSON.stringify(inner)} });`,
+      });
+      expect(entry.status).toBe('completed');
+      expect(entry.result).toBe('inner-ran');
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
 
-      expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
-      await vi.waitFor(() =>
-        expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
+  // A name recorded from a path does not always lead back to that path: a
+  // file in a subdirectory gets its basename as a name no lookup resolves.
+  // Only a name that resolves to the script that ran may be offered.
+  it('offers a resume by name only when the name leads back to the script that ran', async () => {
+    const { runtimeDir, workflowsDir, completion, run } = await hostSession();
+    try {
+      const failing = "throw new Error('boom');";
+      const top = path.join(workflowsDir, 'audit.js');
+      const nested = path.join(workflowsDir, 'sub', 'report.js');
+      await fs.writeFile(top, failing, 'utf8');
+      await fs.writeFile(nested, failing, 'utf8');
+
+      const matched = await run({ scriptPath: top }, 'audit');
+      expect(matched.resumeName).toBe('audit');
+      expect(completion.mock.calls[0][1] as string).toContain(
+        `Resume: Workflow({ name: "audit", resumeFromRunId: "${matched.runId}" })`,
       );
-      expect(registry.get(result.workflowRunId!)?.nameOnly).toBe(true);
-      await registry.getHandle(result.workflowRunId!)?.completion;
+
+      const unmatched = await run({ scriptPath: nested }, 'report');
+      expect(unmatched.resumeName).toBeUndefined();
+      const text = completion.mock.calls[1][1] as string;
+      expect(text).toContain(
+        'This session runs named workflows only, and this run cannot be resumed by name, so only whoever started it can retry it.',
+      );
+      expect(text).not.toContain('Workflow({');
     } finally {
       await fs.rm(runtimeDir, { recursive: true, force: true });
     }
@@ -3269,6 +3346,32 @@ describe('WorkflowTool — saved workflows by name', () => {
         expect(trailer).toContain(
           `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "`,
         );
+      }
+    }
+  });
+
+  // The lock reaches a nested call only when the model started the run.
+  it('refuses a nested workflow({scriptPath}) in a run the model started by name', async () => {
+    const inner = await saveWorkflow('inner', "return 'inner-ran';");
+    await saveWorkflow(
+      'outer',
+      `return await workflow({ scriptPath: ${JSON.stringify(inner)} });`,
+    );
+    for (const nameOnly of [true, false]) {
+      const invocation = new WorkflowTool(
+        Object.assign(nameConfig(), { isWorkflowNameOnly: () => nameOnly }),
+      ).build({ name: 'outer' });
+      await invocation.getDefaultPermission();
+      const text = JSON.stringify(
+        (await invocation.execute(new AbortController().signal)).llmContent,
+      );
+      if (nameOnly) {
+        expect(text).toContain(
+          'this session restricts workflows to named workflows',
+        );
+        expect(text).not.toContain('inner-ran');
+      } else {
+        expect(text).toContain('inner-ran');
       }
     }
   });

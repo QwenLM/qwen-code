@@ -5,6 +5,8 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import {
   logWorkflowRun,
@@ -92,6 +94,39 @@ export interface WorkflowRunnerOptions {
    * author (a saved workflow), where "fix the script" would be wrong advice.
    */
   authoringHint?: string;
+  /**
+   * Refuse `workflow({ scriptPath })` inside the script. Set for a call the
+   * model made in a name-only session (`tools.workflowNameOnly`); a run the
+   * host starts itself is not the model's and is left unrestricted.
+   */
+  restrictNestedScriptPaths?: boolean;
+}
+
+/**
+ * The name a name-only session may resume this run by: the run's workflow
+ * name, but only when that name resolves now to the script this run executes.
+ * A name recorded from a path in a subdirectory, one a same-named project
+ * workflow shadows, or one a retry carried over to an inline copy would send a
+ * resume to a different script, or to none.
+ */
+async function resolveResumeName(
+  config: Config,
+  workflowName: string | undefined,
+  scriptPath: string | undefined,
+): Promise<string | undefined> {
+  if (!workflowName || !scriptPath) return undefined;
+  const canonical = (file: string): Promise<string> =>
+    fs.realpath(file).catch(() => path.resolve(file));
+  try {
+    const resolved = await resolveSavedWorkflowScript(workflowName, config);
+    const [byName, ran] = await Promise.all([
+      canonical(resolved.scriptPath),
+      canonical(scriptPath),
+    ]);
+    return byName === ran ? workflowName : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export type WorkflowRunSettlement =
@@ -374,6 +409,10 @@ export class WorkflowRunner {
         scriptPath = persisted ?? undefined;
         persistedInlineScript = persisted !== null;
       }
+      const resumeName =
+        config.isWorkflowNameOnly?.() === true
+          ? await resolveResumeName(config, workflowName, scriptPath)
+          : undefined;
       assertStartNotCancelled();
       const dispatch =
         options.dispatch ??
@@ -419,7 +458,7 @@ export class WorkflowRunner {
           ...(options.authoringHint && !workflowName
             ? { authoringHint: options.authoringHint }
             : {}),
-          ...(config.isWorkflowNameOnly?.() === true ? { nameOnly: true } : {}),
+          ...(resumeName ? { resumeName } : {}),
           args: options.args,
           ...(options.resumeFromRunId
             ? {
@@ -582,11 +621,14 @@ export class WorkflowRunner {
             emitter,
             budget,
             resolveSavedWorkflow: async (ref) => {
-              // A name-only session runs no script it cannot name, and that
-              // holds for a nested call as much as for the Workflow tool.
+              // A model call in a name-only session runs no script it cannot
+              // name, nested or not. Any other malformed ref falls through to
+              // the resolver's own type error.
               if (
-                typeof ref !== 'string' &&
-                config.isWorkflowNameOnly?.() === true
+                options.restrictNestedScriptPaths === true &&
+                typeof ref === 'object' &&
+                ref !== null &&
+                'scriptPath' in ref
               ) {
                 throw new Error(
                   "workflow({scriptPath}): this session restricts workflows to named workflows (tools.workflowNameOnly) — nest with workflow('<name>') instead.",

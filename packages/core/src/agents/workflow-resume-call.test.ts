@@ -46,7 +46,7 @@ describe('workflow resume call', () => {
     const target = {
       runId: 'wf_0123',
       scriptPath: '/proj/.qwen/workflows/audit.js',
-      workflowName: 'gcp:audit',
+      resumeName: 'gcp:audit',
       args: { scope: 'src' },
     };
 
@@ -54,7 +54,7 @@ describe('workflow resume call', () => {
       'Workflow({ name: "gcp:audit", resumeFromRunId: "wf_0123", args: {"scope":"src"} })',
     );
     expect(
-      buildResumeCall({ ...target, workflowName: undefined, nameOnly: true }),
+      buildResumeCall({ ...target, resumeName: undefined, nameOnly: true }),
     ).toBeNull();
     // Outside the lock the name is not used, even when the run has one: a
     // grant written for the path keeps matching the resume.
@@ -66,7 +66,7 @@ describe('workflow resume call', () => {
   it('keeps a name-only resume call on one sanitized line', () => {
     const call = buildResumeCall({
       runId: 'wf_0123',
-      workflowName: 'audit\n\u001b[31m',
+      resumeName: 'audit\n\u001b[31m',
       nameOnly: true,
     });
 
