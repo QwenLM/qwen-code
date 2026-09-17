@@ -29,9 +29,11 @@ describe('settings presentation aliases', () => {
   });
   it('aliases the omni media delivery row', () => {
     expect(
-      isSettingExcluded('omni.enabled', { excludeItems: ['setting:omni'] }),
+      isSettingExcluded('omni.enabled', {
+        excludeItems: ['setting:omni-media-delivery'],
+      }),
     ).toBe(true);
-    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:omni');
+    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:omni-media-delivery');
   });
   it('matches published builtin ids by direct membership', () => {
     expect(
