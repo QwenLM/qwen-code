@@ -52,6 +52,7 @@ const SETTING_KEYS = {
   'setting:scheduled-tasks': 'experimental.cron',
   'setting:session-writer-lease': 'experimental.sessionWriterLease',
   'setting:agent-team': 'experimental.agentTeam',
+  'setting:omni-media-delivery': 'omni.enabled',
   'setting:artifacts': 'experimental.artifact',
   'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
   'setting:voice-model': 'voiceModel',
