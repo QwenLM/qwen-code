@@ -77,6 +77,7 @@ export function WorkspaceSelector({
   const [tooltipOpen, setTooltipOpen] = useState(false);
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
+  const pointerDismissedRef = useRef(false);
   const selected = workspaces.find((workspace) =>
     selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
@@ -98,12 +99,11 @@ export function WorkspaceSelector({
       <DropdownMenu
         open={menuOpen}
         onOpenChange={(open) => {
+          if (open) pointerDismissedRef.current = false;
           menuOpenRef.current = open;
           setMenuOpen(open);
-          if (open) {
-            suppressTooltipRef.current = true;
-            setTooltipOpen(false);
-          }
+          suppressTooltipRef.current = true;
+          setTooltipOpen(false);
         }}
       >
         <Tooltip
@@ -127,7 +127,6 @@ export function WorkspaceSelector({
                   }
                 }}
                 onPointerLeave={() => {
-                  suppressTooltipRef.current = false;
                   setTooltipOpen(false);
                 }}
                 onBlur={() => {
@@ -148,7 +147,23 @@ export function WorkspaceSelector({
           </TooltipTrigger>
           <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
-        <DropdownMenuContent align="start" className="min-w-56">
+        <DropdownMenuContent
+          align="start"
+          className="min-w-56"
+          onPointerDownCapture={() => {
+            pointerDismissedRef.current = true;
+          }}
+          onKeyDownCapture={() => {
+            pointerDismissedRef.current = false;
+          }}
+          onPointerDownOutside={() => {
+            pointerDismissedRef.current = true;
+          }}
+          onCloseAutoFocus={(event) => {
+            if (pointerDismissedRef.current) event.preventDefault();
+            pointerDismissedRef.current = false;
+          }}
+        >
           <DropdownMenuRadioGroup
             value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
@@ -195,7 +210,14 @@ export function WorkspaceSelector({
                   <FolderPlusIcon />
                   {t('sidebar.newWorkspace')}
                 </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
+                <DropdownMenuSubContent
+                  onPointerDownCapture={() => {
+                    pointerDismissedRef.current = true;
+                  }}
+                  onKeyDownCapture={() => {
+                    pointerDismissedRef.current = false;
+                  }}
+                >
                   {scratchSupported && (
                     <DropdownMenuItem onSelect={onCreateScratch}>
                       {t('sidebar.startFromScratch')}

@@ -135,6 +135,9 @@ class SendMessageInvocation extends BaseToolInvocation<
       // Addresses this tool would keep in-process must never be handed
       // back to the model as a peer address, bare.
       isReserved: (address) => isInProcessRecipient(address, teamFile),
+      // Which of this process's records is the sender. Matters only for a
+      // process hosting several sessions; the default covers the rest.
+      slot: this.config.getSessionRegistrySlot(),
     });
 
     switch (outcome.kind) {
@@ -293,14 +296,24 @@ class SendMessageInvocation extends BaseToolInvocation<
       // compatible runtime is not retained across session restore, so the
       // persisted transcript remains the cold fallback for resumable agents.
       if (entry.status === 'completed') {
-        const continued = registry.continueResidentAgent(
+        const continuation = registry.continueResidentAgent(
           this.params.task_id,
           this.params.message,
         );
-        if (continued) {
+        if (continuation === 'continued') {
           return {
             llmContent: `Background task "${this.params.task_id}" continued on its existing runtime with your message as the next instruction.`,
             returnDisplay: `Continued ${entry.description}`,
+          };
+        }
+        if (continuation === 'capacity_wait') {
+          return {
+            llmContent: `Error: Background task "${this.params.task_id}" is waiting for background-agent capacity.`,
+            returnDisplay: 'Task is waiting for capacity.',
+            error: {
+              message: `Background-agent capacity unavailable: ${this.params.task_id}`,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
           };
         }
 
@@ -359,7 +372,7 @@ class SendMessageInvocation extends BaseToolInvocation<
       }
 
       return {
-        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary.`,
+        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary. There is no inline reply: whatever it does with your message shows up in its completion notification for this task_id. Do not relaunch the task while waiting.`,
         returnDisplay: `Message queued for ${entry.description}`,
       };
     }

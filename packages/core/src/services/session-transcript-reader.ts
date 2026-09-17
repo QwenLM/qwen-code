@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  restoreSessionSources,
+  type SessionSourcesRestoreState,
+} from './session-sources.js';
+
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -258,7 +263,7 @@ export interface SessionRestoreReplayPage {
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
 
-export interface SessionRuntimeResumeState {
+export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
@@ -293,7 +298,8 @@ export interface SessionRestoreProjection {
   replay?: SessionRestoreReplayPage;
 }
 
-export interface SessionLiveRestoreProjection {
+export interface SessionLiveRestoreProjection
+  extends SessionSourcesRestoreState {
   sessionId: string;
   startTime: string;
   lastUpdated: string;
@@ -375,6 +381,7 @@ interface TranscriptIndex {
   leafUuid: string;
   firstRecordUuid: string;
   physicalRecords: PhysicalRecordHint[];
+  sourceReadComplete: boolean;
   runtimeUuids: string[];
   replayUuids: string[];
   navigationTurns: TranscriptNavigationTurnHint[];
@@ -1968,6 +1975,7 @@ async function buildIndex(params: {
   >();
   let sequence = 0;
   const physicalRecords: PhysicalRecordHint[] = [];
+  let sourceReadComplete = true;
   let leafUuid: string | undefined;
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
@@ -1981,9 +1989,15 @@ async function buildIndex(params: {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
         let fragmentIndex = 0;
-        for (const value of jsonl.parseLineTolerant<unknown>(text, filePath)) {
+        const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
+          text,
+          filePath,
+        );
+        sourceReadComplete &&= parsed.complete;
+        for (const value of parsed.records) {
           const record = validateTranscriptRecord(value).record;
           if (!record) {
+            sourceReadComplete = false;
             continue;
           }
           if (firstRecordUuid === undefined) {
@@ -2219,6 +2233,7 @@ async function buildIndex(params: {
     leafUuid,
     firstRecordUuid,
     physicalRecords,
+    sourceReadComplete,
     runtimeUuids,
     replayUuids,
     navigationTurns,
@@ -2784,6 +2799,12 @@ export class SessionTranscriptReader {
           )
         : [],
     );
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const metadataSet = new Set(
@@ -2871,6 +2892,7 @@ export class SessionTranscriptReader {
           );
         }
       }
+      if (record.uuid === sourcesUuid) sourceRecords.push(record);
       if (artifactSet.has(record.uuid)) artifacts.add(record);
       if (goalEvidenceSet.has(record.uuid)) {
         goalCheckpointAccumulator?.capture(record);
@@ -2933,7 +2955,8 @@ export class SessionTranscriptReader {
                 metadataSet.has(record.uuid) ||
                 uiTelemetrySet.has(record.uuid) ||
                 fileHistorySet.has(record.uuid) ||
-                artifactSet.has(record.uuid);
+                artifactSet.has(record.uuid) ||
+                record.uuid === sourcesUuid;
               if (needsDeferredDispatch) {
                 if (
                   record.uuid === index.firstRecordUuid &&
@@ -2997,7 +3020,11 @@ export class SessionTranscriptReader {
           const preReadSet = new Set(preReadUuids);
           readContext.preloadedRecords = deferredPreReadRecords;
           const remainingUuids = Array.from(
-            new Set([...selectedRuntimeUuids, ...artifactUuids]),
+            new Set([
+              ...selectedRuntimeUuids,
+              ...artifactUuids,
+              ...(sourcesUuid ? [sourcesUuid] : []),
+            ]),
           ).filter(
             (uuid) => !preReadSet.has(uuid) || deferredPreReadRecords.has(uuid),
           );
@@ -3115,6 +3142,9 @@ export class SessionTranscriptReader {
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }
         : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       goalRecords,
       ...(goalRecovery.selectedGoalRecovery.sourceUuid
@@ -3219,6 +3249,12 @@ export class SessionTranscriptReader {
         ? undefined
         : replaySelection.index.replayUuids[goalStatePosition];
     const goalStateSet = new Set(goalStateUuid ? [goalStateUuid] : []);
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const selectedRuntimeUuids = index.runtimeUuids.filter(
@@ -3240,6 +3276,7 @@ export class SessionTranscriptReader {
     const selectedReadSet = new Set([
       ...selectedRuntimeUuids,
       ...artifactUuids,
+      ...(sourcesUuid ? [sourcesUuid] : []),
     ]);
     const selectedReadsStartedAt = performance.now();
     try {
@@ -3265,6 +3302,7 @@ export class SessionTranscriptReader {
             const normalized = normalizeGoalRecoveryRecord(record);
             if (normalized) goalRecords.push(normalized);
           }
+          if (record.uuid === sourcesUuid) sourceRecords.push(record);
           if (artifactSet.has(record.uuid)) artifacts.add(record);
         },
       );
@@ -3308,6 +3346,9 @@ export class SessionTranscriptReader {
       startTime: index.restoreStartTime,
       lastUpdated: index.lastUpdated,
       ...(replay ? { replay } : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       ...(goalRecords.length > 0 ? { goalRecords } : {}),
       ...(replayGoalRecoverySourceUuid

@@ -230,6 +230,7 @@ function serializeWorkflowTask(
     })),
     agentsDispatched: entry.agentsDispatched,
     agentsCompleted: entry.agentsCompleted,
+    agentsRespawned: entry.agentsRespawned ?? 0,
     tokensSpent: entry.tokensSpent,
     tokenBudgetTotal: entry.tokenBudgetTotal,
     recentLogs: [...entry.recentLogs],
@@ -277,6 +278,7 @@ function serializeWorkflowSnapshot(
     })),
     agentsDispatched: snapshot.agentsDispatched,
     agentsCompleted: snapshot.agentsCompleted,
+    agentsRespawned: snapshot.agentsRespawned ?? 0,
     tokensSpent: snapshot.tokensSpent,
     tokenBudgetTotal: snapshot.tokenBudgetTotal,
     recentLogs: [...snapshot.recentLogs],
@@ -490,7 +492,18 @@ export async function buildSessionAgentsStatus(
   const teamManager = config.getTeamManager?.();
   if (teamManager) {
     const team = teamManager.getTeamFile();
-    const tasks = await listTasks(team.name);
+    // `listTasks` deliberately throws on anything but ENOENT so a leader
+    // never mistakes an unreadable board for an empty one — it has already
+    // logged the reason by the time it does. Here that must not propagate:
+    // the shared-task label is decoration on top of team rows this route can
+    // still render, and letting it escape would fail the whole agents
+    // snapshot (subagents and background tasks included) for the session.
+    let tasks: Awaited<ReturnType<typeof listTasks>>;
+    try {
+      tasks = await listTasks(team.name);
+    } catch {
+      tasks = [];
+    }
     for (const member of team.members) {
       const agent = teamManager.getAgentFromBackend(member.agentId);
       if (!agent) continue;

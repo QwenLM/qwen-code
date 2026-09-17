@@ -90,7 +90,7 @@ A response reports:
 - stable-element support;
 - a closed resynchronization reason when full output is required.
 
-The caller, not cua-driver, selects the base revision. Missing, expired, foreign, or incompatible bases produce a full response. The driver never guesses whether a revision reached a model.
+The immediate native caller, not cua-driver, selects the base revision. The high-level `ComputerUse` facade is that caller: it keeps one cursor per exact window and never exposes cursor management to model code. Missing, expired, foreign, or incompatible bases produce a full response.
 
 ## Stable identity and diff correctness
 
@@ -122,7 +122,7 @@ Provider invalidation, truncation, subtree read failure, target ambiguity, or fa
 
 The JavaScript wrapper exposes a small Computer Use API while directly using the generated TypeScript cua-driver SDK. It hides raw low-level constructors and arbitrary tool dispatch from its public surface, but it does not depend on Qwen Code.
 
-The observation API returns the revision ID and accepts an explicit base revision ID on the next call. The caller owns that state. Actions consume opaque element tokens returned by the driver. The wrapper does not compute a second semantic diff or invent element identity.
+The observation API automatically uses the last successful revision for the same PID and window. The first observation, a new driver generation, an unsupported lineage, or an explicit one-shot `disableDiff` request returns a full tree. Incomplete captures receive one bounded default retry and remain observation-only if they cannot recover. Revision and lineage identifiers stay inside the wrapper; callers receive the observation mode, optional resync reason, current AX payload, screenshot, and a nested diagnostics object without cursor values. Actions consume opaque element tokens returned by the driver. The wrapper does not compute a second semantic diff or invent element identity.
 
 The wrapper must run in a standalone Node.js integration test before Stage 3 begins.
 

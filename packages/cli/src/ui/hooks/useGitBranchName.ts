@@ -5,7 +5,10 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
+import {
+  resolveBranchName,
+  watchRepoBranch,
+} from '@qwen-code/qwen-code-core/utils/gitDirect.js';
 
 /**
  * Polling interval (ms) for the branch-name fallback. `fs.watch` on the

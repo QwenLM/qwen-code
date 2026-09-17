@@ -35,6 +35,7 @@ import {
   NativeLspService,
   isBareMode,
   isTruthy,
+  parsePositiveIntegerEnv,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
@@ -89,7 +90,9 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
+import { sandboxCommand } from '../commands/sandbox.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -100,12 +103,15 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
+  validateGoalCheckpointTimeoutSeconds,
+  validateGoalMaxActiveMinutes,
+  validateGoalMaxTurns,
   validateGoalTokenBudget,
   validateMaxToolCalls,
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
-import { resolveSkillSettings } from './skill-settings.js';
+import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -859,6 +865,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(hooksCommand)
     // Register Channel subcommands
     .command(channelCommand)
+    .command(boardCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
@@ -866,7 +873,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register update command
-    .command(updateCommand);
+    .command(updateCommand)
+    // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
+    .command(sandboxCommand);
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -898,7 +907,9 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
-      result._[0] === 'update')
+      result._[0] === 'board' ||
+      result._[0] === 'update' ||
+      result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
@@ -1022,7 +1033,8 @@ function resolveModelFallbacks(
  * Resolve the built-in WebSearch tool settings, with env overrides taking
  * precedence over `tools.webSearch` (mirroring the QWEN_SANDBOX_IMAGE
  * pattern): ENABLE_WEB_SEARCH for the flag, WEB_SEARCH_MODEL for the model
- * selector, WEB_SEARCH_EXTRACTOR for page reading.
+ * selector, WEB_SEARCH_EXTRACTOR for page reading, WEB_SEARCH_TIMEOUT_MS for
+ * the per-search budget, WEB_SEARCH_MAX_PER_SESSION for the per-session cap.
  *
  * Env-only backend: WEB_SEARCH_BASE_URL mirrors a modelProviders entry's
  * baseUrl for environments that cannot write settings.json; the API key
@@ -1045,6 +1057,19 @@ function resolveWebSearchSettings(
     envExtractor !== undefined
       ? isTruthy(envExtractor)
       : webSearch?.webExtractor;
+  // A non-numeric or non-positive override is ignored rather than zeroing the
+  // budget; the core resolver applies the default and the cap.
+  const envTimeoutMs = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_TIMEOUT_MS'],
+    0,
+  );
+  const timeoutMs = envTimeoutMs > 0 ? envTimeoutMs : webSearch?.timeoutMs;
+  const envMaxPerSession = parsePositiveIntegerEnv(
+    process.env['WEB_SEARCH_MAX_PER_SESSION'],
+    0,
+  );
+  const maxPerSession =
+    envMaxPerSession > 0 ? envMaxPerSession : webSearch?.maxPerSession;
   const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
     ? process.env['WEB_SEARCH_API_KEY']?.trim()
@@ -1055,11 +1080,21 @@ function resolveWebSearchSettings(
     enabled === undefined &&
     model === undefined &&
     webExtractor === undefined &&
-    baseUrl === undefined
+    baseUrl === undefined &&
+    timeoutMs === undefined &&
+    maxPerSession === undefined
   ) {
     return undefined;
   }
-  return { enabled, model, webExtractor, baseUrl, apiKeyEnv };
+  return {
+    enabled,
+    model,
+    webExtractor,
+    baseUrl,
+    apiKeyEnv,
+    timeoutMs,
+    maxPerSession,
+  };
 }
 
 /**
@@ -1097,6 +1132,38 @@ function resolveGoalTokenBudget(settings: Settings): number | undefined {
   if (fromSettings === undefined) return undefined;
   try {
     return validateGoalTokenBudget(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalMaxTurns(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxTurns;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxTurns(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
+  const fromSettings: unknown = settings.model?.goalMaxActiveMinutes;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalMaxActiveMinutes(fromSettings);
+  } catch (err) {
+    throw new Error(`settings.json: ${(err as Error).message}`);
+  }
+}
+
+function resolveGoalCheckpointTimeoutSeconds(
+  settings: Settings,
+): number | undefined {
+  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
+  if (fromSettings === undefined) return undefined;
+  try {
+    return validateGoalCheckpointTimeoutSeconds(fromSettings);
   } catch (err) {
     throw new Error(`settings.json: ${(err as Error).message}`);
   }
@@ -1277,6 +1344,24 @@ export function buildEnabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
   return () => resolveSkillSettings(loadedSettings).enabledNames;
+}
+
+export function buildSkillSettingsListsProvider(merged: {
+  skills?: {
+    enabled?: unknown;
+    defaultDisabled?: unknown;
+    disabled?: unknown;
+  };
+}): () => {
+  enabled: ReadonlySet<string>;
+  defaultDisabled: ReadonlySet<string>;
+  hardDisabled: ReadonlySet<string>;
+} {
+  return () => ({
+    enabled: normalizeSkillNames(merged.skills?.enabled),
+    defaultDisabled: normalizeSkillNames(merged.skills?.defaultDisabled),
+    hardDisabled: normalizeSkillNames(merged.skills?.disabled),
+  });
 }
 
 /**
@@ -2161,6 +2246,10 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     enabledSkillNamesProvider:
       bareMode || safeMode ? undefined : enabledSkillNamesProvider,
+    skillSettingsListsProvider:
+      bareMode || safeMode
+        ? undefined
+        : buildSkillSettingsListsProvider(settings),
     terminalImageRenderSupportProvider: interactive
       ? async () => {
           const { getTerminalImageRenderSupport } = await import(
@@ -2187,6 +2276,8 @@ export async function loadCliConfig(
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
+    codeModeOnly:
+      !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2270,6 +2361,9 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     goalTokenBudget: resolveGoalTokenBudget(settings),
+    goalMaxTurns: resolveGoalMaxTurns(settings),
+    goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
+    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2391,8 +2485,12 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    // Bare and safe mode must switch the tool off explicitly: `undefined`
+    // means "derive it" now that WebSearch is opt-out.
     webSearch:
-      bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
+      bareMode || safeMode
+        ? { enabled: false }
+        : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
@@ -2460,6 +2558,18 @@ export async function loadCliConfig(
   };
 
   const config = new Config(configParams);
+
+  // Load the selected transport only when an external subagent is requested.
+  config.setExternalAgentExecutor({
+    create: (params) =>
+      params.spec.kind === 'codex'
+        ? import('../external-agents/codex-subagent-executor.js').then(
+            (module) => module.codexExternalAgentExecutor.create(params),
+          )
+        : import('../external-agents/acp-subagent-executor.js').then((module) =>
+            module.acpExternalAgentExecutor.create(params),
+          ),
+  });
 
   if (lspEnabled) {
     try {

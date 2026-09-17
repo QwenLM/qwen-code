@@ -32,9 +32,12 @@ import { t } from '../../i18n/index.js';
 type ExportFormat = {
   extension: string;
   displayName: string;
+  // Required for the same reason as `ExportFormatDefinition.render` in
+  // serve/server/session-export.ts: HTML projects from the original records,
+  // and the remaining formatters ignore this argument.
   format: (
     sessionData: ExportSessionData,
-    records?: readonly unknown[],
+    records: readonly unknown[],
   ) => string;
 };
 
@@ -320,10 +323,7 @@ async function exportSessionAction(
       config,
     );
 
-    const content = exportFormat.format(
-      normalizedData,
-      exportFormat.extension === 'html' ? conversation.messages : undefined,
-    );
+    const content = exportFormat.format(normalizedData, conversation.messages);
 
     if (target.outputDirKind === 'custom') {
       try {

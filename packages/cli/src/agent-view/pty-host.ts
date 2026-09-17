@@ -33,6 +33,7 @@ export interface AgentViewPtySpawnOptions {
   rows: number;
   env: Record<string, string>;
   handleFlowControl: boolean;
+  useConptyDll: boolean;
 }
 
 export interface AgentViewPtyDisposable {
@@ -349,6 +350,10 @@ export async function launchAgentViewPtyHost(
     rows: launch.terminal.rows,
     env: workerEnv,
     handleFlowControl: false,
+    // Windows: the inbox ConPTY backend orphans a `conhost.exe --headless`
+    // per natural worker exit (microsoft/node-pty#965); the bundled backend
+    // releases its host reference right after spawn. Mirrors #11497 / #11352.
+    useConptyDll: process.platform === 'win32',
   });
   let inputDecoder = new StringDecoder('utf8');
 

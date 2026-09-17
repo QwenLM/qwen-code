@@ -1,105 +1,260 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
-import { build as viteBuild } from 'vite';
-import { buildConfig } from './esbuild.config.mjs';
-import prettier from 'prettier';
+import { findUnexpectedImportMeta } from './import-meta-guard.mjs';
+import { TRANSCRIPT_CSS_ENTRY_FILTER } from './transcript-css-entry.mjs';
 
-const require = createRequire(import.meta.url);
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
 const assetsDistDir = join(assetsDir, 'dist');
 const generatedDir = join(assetsDir, '..', 'generated');
-const webuiDir = join(assetsDir, '..', '..', '..', 'webui');
 await mkdir(generatedDir, { recursive: true });
+await rm(assetsDistDir, { recursive: true, force: true });
 await mkdir(assetsDistDir, { recursive: true });
+await rm(join(generatedDir, 'exportHtmlTemplate.ts'), { force: true });
 
-const templateModulePath = join(generatedDir, 'exportHtmlTemplate.ts');
 const documentTemplateModulePath = join(
   generatedDir,
   'exportTranscriptDocumentTemplate.ts',
 );
-const reactUmdVersion = '18.2.0';
-const reactDomUmdVersion = '18.2.0';
 const exportTranscriptMaxBlocks = 1_000;
 const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
-const { version: exportTranscriptRendererVersion } = JSON.parse(
-  await readFile(join(assetsDir, '..', '..', 'package.json'), 'utf8'),
-);
+// Since #9812 the renderer is no longer inlined into each export: the document
+// loads one version-pinned, SRI-protected asset from unpkg. That moved the cost
+// rather than removing it — the same bytes are now downloaded the first time
+// anyone opens an exported file, on a path that must fail closed, so the size
+// still needs a ceiling. Mirrors the hard bundle-size assertions in
+// packages/sdk-typescript/scripts/build.js.
+// Before #11031 was fixed, the document entry imported the @qwen-code/web-shell
+// package root and pulled the full interactive shell into that asset:
+// 19,523,259 runtime bytes.
+//
+// A byte cap alone is a weak ratchet — it only catches growth, and only once
+// it is large. The structural guard below (FORBIDDEN_DOCUMENT_INPUTS) is the
+// real one: it names the module graphs that must never reach an export and
+// fails with the reason. Keep both.
+//
+// Re-measure and lower these two constants after any change to the document
+// entry's dependencies:
+//   cd packages/web-templates && node src/export-html/build.mjs
+// (the build prints `Document export renderer JS is N bytes`.)
+//
+// Since #11478 the web-shell component stylesheet is no longer inside the
+// renderer JS: the build lifts the `__qwenWebShellCss` literal out into
+// `export-transcript-document.css` (loaded via a <link>), so these constants
+// budget the JS bundle alone — the asset a browser must download, parse and
+// compile before the transcript renders. The CSS is a separate, parallel,
+// year-cached asset and is logged rather than budgeted.
+//
+// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved
+// out, by the Lint & Static lane on this branch. Before the split that lane
+// measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d — the
+// measurement #11372 raised these two constants for, and which this branch
+// supersedes because the CSS it counted is no longer in the JS. Keep the
+// warning close to the measurement and the hard ceiling close above it: a cap
+// left far above the measurement is a ratchet with enough slack for a whole
+// dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;
 
-// Build the @qwen-code/webui viewer as a UMD bundle from webui sources and
-// inline it into the template below. The exported HTML must stay
-// self-contained: @qwen-code/webui is not published as part of the release
-// flow, and resolving it from a CDN at view time would retroactively change
-// how every already-generated export renders. Building it here (instead of
-// reading packages/webui/dist) keeps the template build independent of
-// webui's own output and prevents a stale dist directory from changing the
-// generated export.
-const webuiDistDir = join(assetsDistDir, 'webui');
-await viteBuild({
-  configFile: false,
-  root: webuiDir,
-  logLevel: 'warn',
-  css: {
-    postcss: {
-      plugins: [
-        require('tailwindcss')({
-          presets: [require(join(webuiDir, 'tailwind.preset.cjs'))],
-          content: [join(webuiDir, 'src', '**', '*.{ts,tsx}')],
-        }),
-        require('autoprefixer'),
-      ],
-    },
+// Modules that must not be reachable from the document entry, checked against
+// the esbuild metafile inputs after the bundle is produced.
+const FORBIDDEN_DOCUMENT_INPUTS = [
+  {
+    pattern: /(^|\/)node_modules\/(shiki|@shikijs)\//,
+    why:
+      'Shiki is unreachable in document mode (CodeBlock renders plain <pre>) ' +
+      'and its Oniguruma WASM engine is blocked by the export CSP; it is ' +
+      'resolved to src/document-shiki-stub.ts by the strip plugin below.',
   },
-  build: {
-    outDir: webuiDistDir,
-    emptyOutDir: true,
-    minify: true,
-    sourcemap: false,
-    cssCodeSplit: false,
-    lib: {
-      entry: join(webuiDir, 'src', 'index.ts'),
-      name: 'QwenCodeWebUI',
-      formats: ['umd'],
-      fileName: () => 'index.umd.js',
-    },
-    rollupOptions: {
-      external: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'],
-      output: {
-        globals: {
-          react: 'React',
-          'react-dom': 'ReactDOM',
-          'react-dom/client': 'ReactDOM',
-          'react/jsx-runtime': 'ReactJSXRuntime',
-        },
-        assetFileNames: 'styles.[ext]',
+  {
+    pattern: /web-shell\/dist\/index\.js$/,
+    why:
+      'The @qwen-code/web-shell package root drags the interactive shell ' +
+      '(App, daemon providers, editor/terminal chrome) into every export. ' +
+      'Import @qwen-code/web-shell/transcript instead (#11031).',
+  },
+  {
+    pattern: /(^|\/)node_modules\/(echarts|zrender)\//,
+    why:
+      'The chart runtime is only reachable through the `?? () => import("echarts")` ' +
+      'default inside @datafe-open/markdown-chart-echarts, which Web Shell never ' +
+      'takes (MarkdownChartRenderer always passes a loadECharts). IIFE output ' +
+      'cannot code-split, so that dead dynamic import was flattened in; it is ' +
+      'resolved to src/document-echarts-stub.ts by the strip plugin below.',
+  },
+  {
+    pattern: /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\//,
+    why:
+      'Exported transcripts render a ```mermaid fence as a plain <pre>, the ' +
+      'same degradation CodeBlock already applies to syntax highlighting in ' +
+      'document mode (#11091). Mermaid and its graph dependencies were the ' +
+      'largest remaining input at ~6 MB pre-minify; `mermaid` is resolved to ' +
+      'src/document-mermaid-stub.ts by the strip plugin below, and its two ' +
+      'heaviest transitive graphs are named here too so neither can return ' +
+      'through another path — the same shape as the echarts/zrender rule.',
+  },
+  {
+    pattern: /(^|\/)node_modules\/(codemirror|@codemirror)\//,
+    why:
+      'A read-only export has no composer. CodeMirror last reached it through ' +
+      'three composer-tag getters that UserMessage imported from ' +
+      'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
+      'is editor-free. Import from there, not from the composer hook.',
+  },
+];
+
+// `shiki` and `@shikijs/*` are replaced wholesale rather than marked external:
+// the renderer asset is a single IIFE bundle, so an external specifier would
+// simply fail to resolve in the browser. See src/document-shiki-stub.ts for why
+// this is dead code in an export.
+const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
+const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
+const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');
+const stripDocumentDeadModules = {
+  name: 'strip-document-dead-modules',
+  setup(build) {
+    build.onResolve({ filter: /^(shiki|@shikijs)(\/|$)/ }, () => ({
+      path: documentShikiStub,
+    }));
+    build.onResolve({ filter: /^echarts(\/|$)/ }, () => ({
+      path: documentEchartsStub,
+    }));
+    build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
+      path: documentMermaidStub,
+    }));
+  },
+};
+
+// The web-shell transcript entry carries its scoped component stylesheet as a
+// `const __qwenWebShellCss="…"` literal that injectCssModules
+// (packages/web-shell/vite.lib.config.ts) prepends to the chunk, plus a
+// one-line runtime injection that appends a <style> to document.head. The
+// document no longer wants either: it loads the stylesheet through a
+// nonce-bearing <link> in document-index.html, so this plugin lifts the literal
+// into a standalone CSS asset and hands the bundler the rest. The strip is
+// keyed to the generated shape (the CSS-constant line followed by the
+// runtime-injection line); if injectCssModules changes shape, the build fails
+// here rather than shipping a renderer that both links and injects the same
+// ~2.3 MB stylesheet. That duplicate would slip past both guards further down:
+// the document nonces every <style> created through document.createElement (the
+// shim in document-index.html), so the CSP admits the injected copy instead of
+// blocking it, and re-adding only the 367-byte injection line keeps the bundle
+// inside DOCUMENT_RUNTIME_WARNING_BYTES and MAX_DOCUMENT_RUNTIME_BYTES. So this
+// throw is the only guard on that path — and the createElement shim is what the
+// shipped renderer's own <style> injection still depends on.
+const extractedTranscriptCss = { css: undefined };
+const extractTranscriptCss = {
+  name: 'extract-transcript-css',
+  setup(build) {
+    build.onLoad(
+      // Separators and the `transcript\.js$` tail are both load-bearing; see
+      // transcript-css-entry.mjs (extracted so the match is unit-testable
+      // without running this build).
+      { filter: TRANSCRIPT_CSS_ENTRY_FILTER },
+      async (args) => {
+        const source = await readFile(args.path, 'utf8');
+        const cssMatch = source.match(
+          /^const __qwenWebShellCss=("(?:[^"\\]|\\.)*");\n/,
+        );
+        if (!cssMatch) {
+          throw new Error(
+            'Web Shell transcript entry is missing its injected component CSS ' +
+              'constant; the injectCssModules shape may have changed.',
+          );
+        }
+        const css = JSON.parse(cssMatch[1]);
+        const afterConstant = source.slice(cssMatch[0].length);
+        const injectionEnd = afterConstant.indexOf('\n');
+        if (
+          injectionEnd === -1 ||
+          !afterConstant.startsWith('if(typeof document!=="undefined"')
+        ) {
+          throw new Error(
+            'Web Shell transcript CSS runtime-injection line is missing or moved.',
+          );
+        }
+        extractedTranscriptCss.css = css;
+        return {
+          contents: afterConstant.slice(injectionEnd + 1),
+          loader: 'js',
+        };
       },
-    },
+    );
   },
-});
-const webuiJs = (await readFile(join(webuiDistDir, 'index.umd.js'), 'utf8'))
-  // Escape for inlining into a <script> block, mirroring the CLI's
-  // escapeJsonForHtml: a literal "</script" would terminate the tag.
-  .replace(/<\/script/gi, '<\\/script');
-// The bundle inevitably contains `<!--` (markdown-it's HTML regexes). If a
-// `<script` byte ever appears after it, HTML5 script-data double-escaping
-// swallows the rest of the template — fail the build instead of every export.
-if (/<script/i.test(webuiJs)) {
+};
+const { version: exportTranscriptRendererPackageVersion } = JSON.parse(
+  await readFile(
+    join(assetsDir, '..', '..', '..', '..', 'package.json'),
+    'utf8',
+  ),
+);
+const rendererVersionPlaceholder = '__QWEN_RENDERER_BUILD_ID__';
+
+// Source builds may delegate generated documents to a version that already
+// publishes both renderer assets. All three values are required; CI serves the
+// local assets and intentionally leaves delegation disabled.
+const rendererDelegateIdentity =
+  process.env.QWEN_EXPORT_RENDERER_IDENTITY?.trim() || undefined;
+const rendererDelegateIntegrity =
+  process.env.QWEN_EXPORT_RENDERER_INTEGRITY?.trim() || undefined;
+const rendererDelegateCssIntegrity =
+  process.env.QWEN_EXPORT_RENDERER_CSS_INTEGRITY?.trim() || undefined;
+if (Boolean(rendererDelegateIdentity) !== Boolean(rendererDelegateIntegrity)) {
   throw new Error(
-    'webui UMD bundle contains a <script sequence; refusing to inline.',
+    'QWEN_EXPORT_RENDERER_IDENTITY and QWEN_EXPORT_RENDERER_INTEGRITY must be set together: ' +
+      'the URL is derived from the identity and the SRI hash pins that same asset, ' +
+      'so one without the other produces a document that always fails closed.',
   );
 }
-const webuiCss = await readFile(join(webuiDistDir, 'styles.css'), 'utf8');
+if (
+  Boolean(rendererDelegateIdentity) !== Boolean(rendererDelegateCssIntegrity)
+) {
+  throw new Error(
+    'QWEN_EXPORT_RENDERER_CSS_INTEGRITY must be set together with the renderer delegation: ' +
+      'a delegated renderer points the JS and CSS at the same published version, ' +
+      'so the CSS SRI hash must describe that published asset too.',
+  );
+}
+if (
+  rendererDelegateIdentity &&
+  !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?\+[0-9a-f]{16}$/.test(
+    rendererDelegateIdentity,
+  )
+) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_IDENTITY must look like <semver>+<16 hex build id>; got ${rendererDelegateIdentity}. ` +
+      'It is interpolated into the renderer URL, so it is validated rather than trusted.',
+  );
+}
+if (
+  rendererDelegateIntegrity &&
+  !/^sha384-[A-Za-z0-9+/]{64}={0,2}$/.test(rendererDelegateIntegrity)
+) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_INTEGRITY must be a sha384- base64 digest; got ${rendererDelegateIntegrity}.`,
+  );
+}
+if (
+  rendererDelegateCssIntegrity &&
+  !/^sha384-[A-Za-z0-9+/]{64}={0,2}$/.test(rendererDelegateCssIntegrity)
+) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_CSS_INTEGRITY must be a sha384- base64 digest; got ${rendererDelegateCssIntegrity}.`,
+  );
+}
 
-const buildResult = await build(buildConfig);
 const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
   bundle: true,
   minify: true,
   write: false,
-  outdir: join(assetsDistDir, 'document'),
+  metafile: true,
+  plugins: [stripDocumentDeadModules, extractTranscriptCss],
+  outfile: join(assetsDistDir, 'export-transcript-document.js'),
   platform: 'browser',
   format: 'iife',
   target: ['chrome120'],
@@ -108,7 +263,7 @@ const documentBuildResult = await build({
   define: {
     'process.env.NODE_ENV': '"production"',
     __EXPORT_TRANSCRIPT_RENDERER_VERSION__: JSON.stringify(
-      exportTranscriptRendererVersion,
+      rendererVersionPlaceholder,
     ),
     __EXPORT_TRANSCRIPT_MAX_BLOCKS__: String(exportTranscriptMaxBlocks),
     __EXPORT_TRANSCRIPT_MAX_ENVELOPE_BYTES__: String(
@@ -117,15 +272,23 @@ const documentBuildResult = await build({
   },
 });
 
-const jsBundle = buildResult.outputFiles.find((file) =>
-  file.path.endsWith('.js'),
+// esbuild lowers import.meta to {} under iife, and the export document
+// evaluates the bundle top-level, so any stray import.meta read (e.g.
+// import.meta.env) would throw in every exported file. Tolerate exactly the
+// deliberate guarded read inside the prebuilt web-shell transcript entry and
+// fail on anything else. No logLevel/logOverride here: silencing the warning
+// class would also hide every other warning this build emits, and
+// logOverride 'silent' would empty result.warnings and vacate this check.
+const unexpectedImportMeta = findUnexpectedImportMeta(
+  documentBuildResult.warnings,
 );
-const cssBundle = buildResult.outputFiles.find((file) =>
-  file.path.endsWith('.css'),
-);
-if (!jsBundle) {
-  throw new Error('Failed to generate inline script bundle.');
+if (unexpectedImportMeta.length > 0) {
+  throw new Error(
+    'export-transcript-document build: unexpected import.meta use in ' +
+      unexpectedImportMeta.join(', '),
+  );
 }
+
 const documentJsBundle = documentBuildResult.outputFiles.find((file) =>
   file.path.endsWith('.js'),
 );
@@ -135,20 +298,103 @@ const documentCssBundle = documentBuildResult.outputFiles.find((file) =>
 if (!documentJsBundle || !documentCssBundle) {
   throw new Error('Failed to generate document export bundles.');
 }
-const documentJs = documentJsBundle.text
-  .trim()
-  .replace(/<\/script/gi, '<\\/script')
-  .replace(/<script/gi, (match) => `\\x3c${match.slice(1)}`);
-if (/<script/i.test(documentJs)) {
+if (!extractedTranscriptCss.css) {
   throw new Error(
-    'Document export bundle contains a <script sequence; refusing to inline.',
+    'Failed to extract the Web Shell transcript stylesheet: the ' +
+      'extract-transcript-css plugin never matched dist/transcript.js.',
+  );
+}
+// Re-measuring the budget should not require editing this file. The size line
+// below says *how much*; this says *what of*, which is the question a
+// regression actually raises.
+const documentInputs = documentBuildResult.metafile.inputs;
+const inputBytesByPackage = new Map();
+for (const [input, { bytes }] of Object.entries(documentInputs)) {
+  const match = input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//);
+  const key = match ? match[1] : 'first-party';
+  inputBytesByPackage.set(key, (inputBytesByPackage.get(key) ?? 0) + bytes);
+}
+const topInputs = [...inputBytesByPackage]
+  .sort(([, left], [, right]) => right - left)
+  .slice(0, 8)
+  .map(([name, bytes]) => `${name} ${bytes}`)
+  .join(', ');
+console.log(`Document export top inputs (pre-minify bytes): ${topInputs}`);
+if (process.env.EXPORT_HTML_METAFILE) {
+  await writeFile(
+    process.env.EXPORT_HTML_METAFILE,
+    JSON.stringify(documentBuildResult.metafile),
+  );
+  console.log(
+    `Document export metafile written to ${process.env.EXPORT_HTML_METAFILE}`,
   );
 }
 
-const css = cssBundle
-  ? cssBundle.text
-  : await readFile(join(srcDir, 'styles.css'), 'utf8');
-const htmlTemplate = await readFile(join(srcDir, 'index.html'), 'utf8');
+const forbiddenInputs = Object.keys(documentInputs)
+  .map((input) => ({
+    input,
+    rule: FORBIDDEN_DOCUMENT_INPUTS.find(({ pattern }) => pattern.test(input)),
+  }))
+  .filter((entry) => entry.rule);
+if (forbiddenInputs.length > 0) {
+  const reasons = [...new Set(forbiddenInputs.map(({ rule }) => rule.why))];
+  const examples = forbiddenInputs.slice(0, 5).map(({ input }) => `  ${input}`);
+  throw new Error(
+    `The document export bundle reached ${forbiddenInputs.length} forbidden input(s):\n` +
+      `${examples.join('\n')}\n` +
+      `${reasons.map((why) => `- ${why}`).join('\n')}`,
+  );
+}
+
+const documentRendererJsBytes = Buffer.byteLength(documentJsBundle.text);
+const transcriptCssBytes = Buffer.byteLength(extractedTranscriptCss.css);
+console.log(
+  `Document export renderer JS is ${documentRendererJsBytes} bytes; ` +
+    `component CSS moved to export-transcript-document.css is ${transcriptCssBytes} bytes`,
+);
+if (documentRendererJsBytes > MAX_DOCUMENT_RUNTIME_BYTES) {
+  throw new Error(
+    `Document export renderer JS is ${documentRendererJsBytes} bytes; expected <= ${MAX_DOCUMENT_RUNTIME_BYTES}. ` +
+      'Every reader of an exported file downloads and compiles this asset before the ' +
+      'transcript renders; import only what the transcript needs ' +
+      '(see packages/web-shell/client/transcript.ts) or raise the budget deliberately.',
+  );
+}
+if (documentRendererJsBytes > DOCUMENT_RUNTIME_WARNING_BYTES) {
+  console.warn(
+    `Document export renderer JS exceeds the ${DOCUMENT_RUNTIME_WARNING_BYTES}-byte warning threshold`,
+  );
+}
+const rendererBuildId = createHash('sha256')
+  .update(documentJsBundle.contents)
+  .digest('hex')
+  .slice(0, 16);
+const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${rendererBuildId}`;
+if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
+  throw new Error('Document renderer build identity placeholder is missing.');
+}
+// Delegation changes generated documents, not the identity of this asset.
+const documentJs = documentJsBundle.text.replaceAll(
+  rendererVersionPlaceholder,
+  localRendererVersion,
+);
+const exportTranscriptRendererVersion =
+  rendererDelegateIdentity ?? localRendererVersion;
+const documentRendererUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererVersion.split('+')[0]}/export-transcript-document.js`;
+const documentRendererIntegrity =
+  rendererDelegateIntegrity ??
+  `sha384-${createHash('sha384').update(documentJs).digest('base64')}`;
+const documentRendererCssUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererVersion.split('+')[0]}/export-transcript-document.css`;
+const documentRendererCssIntegrity =
+  rendererDelegateCssIntegrity ??
+  `sha384-${createHash('sha384').update(extractedTranscriptCss.css).digest('base64')}`;
+if (rendererDelegateIdentity) {
+  console.log(
+    `Document export delegates its renderer to ${documentRendererUrl} ` +
+      `(this build's own asset is ${localRendererVersion})`,
+  );
+}
+
 const faviconSvg = await readFile(join(srcDir, 'favicon.svg'), 'utf8');
 const faviconData = encodeURIComponent(faviconSvg.trim());
 const documentTemplate = await readFile(
@@ -156,36 +402,23 @@ const documentTemplate = await readFile(
   'utf8',
 );
 
-// Function-form replacers: the bundles are untrusted replacement content,
-// and a string replacement would interpret `$&`/`$'`/`` $` `` sequences in
-// them as substitution patterns, corrupting the inlined code.
-const htmlOutput = htmlTemplate
-  .replace('__INLINE_CSS__', () => css.trim())
-  .replace('__INLINE_SCRIPT__', () => jsBundle.text.trim())
-  .replace('__WEBUI_UMD_JS__', () => webuiJs.trim())
-  .replace('__WEBUI_CSS__', () => webuiCss.trim())
-  .replaceAll('__REACT_UMD_VERSION__', reactUmdVersion)
-  .replaceAll('__REACT_DOM_UMD_VERSION__', reactDomUmdVersion)
-  .replace('__FAVICON_SVG__', () => faviconSvg.trim())
-  .replace('__FAVICON_DATA__', () => faviconData);
+// Function-form replacers preserve `$&`/`$'`/`` $` `` sequences in generated
+// CSS instead of interpreting them as replacement patterns.
 const documentHtmlOutput = documentTemplate
   .replace('__DOCUMENT_INLINE_CSS__', () => documentCssBundle.text.trim())
-  .replace('__DOCUMENT_INLINE_SCRIPT__', () => documentJs)
+  .replace('__DOCUMENT_RENDERER_URL__', () => documentRendererUrl)
+  .replace('__DOCUMENT_RENDERER_INTEGRITY__', () => documentRendererIntegrity)
+  .replace('__DOCUMENT_RENDERER_CSS_URL__', () => documentRendererCssUrl)
+  .replace(
+    '__DOCUMENT_RENDERER_CSS_INTEGRITY__',
+    () => documentRendererCssIntegrity,
+  )
   .replace('__FAVICON_DATA__', () => faviconData);
 
 // A dropped or renamed .replace() above would otherwise still exit 0 and
 // ship a template that throws at view time.
-const residualPlaceholder =
-  /__(INLINE_CSS|INLINE_SCRIPT|WEBUI_UMD_JS|WEBUI_CSS|FAVICON_SVG|FAVICON_DATA)__/.exec(
-    htmlOutput,
-  );
-if (residualPlaceholder) {
-  throw new Error(
-    `Unreplaced placeholder ${residualPlaceholder[0]} in export HTML template.`,
-  );
-}
 const documentResidualPlaceholder =
-  /__(DOCUMENT_INLINE_CSS|DOCUMENT_INLINE_SCRIPT|FAVICON_DATA)__/.exec(
+  /__(DOCUMENT_INLINE_CSS|DOCUMENT_RENDERER_URL|DOCUMENT_RENDERER_INTEGRITY|DOCUMENT_RENDERER_CSS_URL|DOCUMENT_RENDERER_CSS_INTEGRITY|FAVICON_DATA)__/.exec(
     documentHtmlOutput,
   );
 if (documentResidualPlaceholder) {
@@ -194,16 +427,6 @@ if (documentResidualPlaceholder) {
   );
 }
 
-const templateModule = `/**
- * @license
- * Copyright 2025 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
- *
- * This HTML template is code-generated; do not edit manually.
- */
-
-export const HTML_TEMPLATE = ${JSON.stringify(htmlOutput)};
-`;
 const documentTemplateModule = `/**
  * @license
  * Copyright 2025 Qwen Team
@@ -220,16 +443,13 @@ export const EXPORT_TRANSCRIPT_RENDERER_LIMITS = Object.freeze({
 });
 `;
 
-const formattedTemplateModule = await prettier.format(templateModule, {
-  parser: 'typescript',
-  singleQuote: true,
-  semi: true,
-  trailingComma: 'all',
-  printWidth: 80,
-  tabWidth: 2,
-});
-
-await writeFile(join(assetsDistDir, 'index.html'), htmlOutput);
 await writeFile(join(assetsDistDir, 'document.html'), documentHtmlOutput);
-await writeFile(templateModulePath, formattedTemplateModule);
+await writeFile(
+  join(assetsDistDir, 'export-transcript-document.js'),
+  documentJs,
+);
+await writeFile(
+  join(assetsDistDir, 'export-transcript-document.css'),
+  extractedTranscriptCss.css,
+);
 await writeFile(documentTemplateModulePath, documentTemplateModule);

@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react';
-import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
+import {
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  type GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { formatRuntime } from '../utils/formatRuntime';
+import { formatContextTokens } from '../utils/formatTokenCount';
 import { canResumeGoal } from '../utils/goalGate';
 import styles from './GoalStatusStrip.module.css';
 
@@ -29,6 +33,20 @@ export function getGoalActiveTimeMs(
   );
 }
 
+export function getGoalTokenLabel(
+  goal: NonNullable<GoalSnapshotV2['goal']>,
+  t: ReturnType<typeof useI18n>['t'],
+): string | undefined {
+  if (goal.tokensUsed === undefined || goal.tokensUsed <= 0) return undefined;
+  const used = formatContextTokens(goal.tokensUsed);
+  return goal.tokenBudget === undefined
+    ? t('goal.tokens', { used })
+    : t('goal.tokensOfBudget', {
+        used,
+        budget: formatContextTokens(goal.tokenBudget),
+      });
+}
+
 export function GoalStatusStrip({
   snapshot,
   busy = false,
@@ -51,6 +69,17 @@ export function GoalStatusStrip({
 
   const canPause = goal.status === 'active';
   const canResume = canResumeGoal(goal);
+  const tokenLabel = getGoalTokenLabel(goal, t);
+  // A stall streak shows here whatever the status, where a daemon-session user
+  // is already looking -- including on a Goal the breaker stopped, which the
+  // terminal footer pill labels by its status instead. The failure text itself
+  // is left to the Goals dialog, which has room for it.
+  const checkpointStalls = goal.checkpointStalls ?? 0;
+  // Kept as the tooltip too: on a narrow pane the label is ellipsized.
+  const checkpointLabel = t('goal.checkpointStalled', {
+    count: checkpointStalls,
+    limit: GOAL_CHECKPOINT_STALL_LIMIT,
+  });
 
   return (
     <div
@@ -73,6 +102,30 @@ export function GoalStatusStrip({
         <span className={styles.elapsed} data-testid="goal-active-elapsed">
           {formatRuntime(getGoalActiveTimeMs(snapshot, now))}
         </span>
+        {tokenLabel ? (
+          <>
+            <span className={styles.separator} aria-hidden="true">
+              ·
+            </span>
+            <span className={styles.elapsed} data-testid="goal-active-tokens">
+              {tokenLabel}
+            </span>
+          </>
+        ) : null}
+        {checkpointStalls > 0 ? (
+          <>
+            <span className={styles.separator} aria-hidden="true">
+              ·
+            </span>
+            <span
+              className={styles.checkpoint}
+              title={checkpointLabel}
+              data-testid="goal-checkpoint-stalls"
+            >
+              {checkpointLabel}
+            </span>
+          </>
+        ) : null}
       </div>
       <div className={styles.actions}>
         <button

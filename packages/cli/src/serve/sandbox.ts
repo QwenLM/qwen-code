@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { exec, execSync, spawn, type ChildProcess } from 'node:child_process';
+import {
+  exec,
+  execSync,
+  spawn,
+  spawnSync,
+  type ChildProcess,
+} from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -14,13 +20,15 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'node:util';
-import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import {
-  FatalSandboxError,
-  Storage,
-  isSubpath,
-  resolveBundleDir,
-} from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  SandboxConfig,
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
+import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { parseSandboxImageName } from '../utils/sandboxImageName.js';
@@ -218,6 +226,485 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
   return ['bash', '-c', args.join(' ')];
 }
 
+/** How the confined process reaches the network. Mirrors the seatbelt profile
+ * matrix (permissive/restrictive × closed/open/proxied) without adding a new
+ * profile vocabulary. */
+export type SandboxNetworkMode = 'open' | 'closed' | 'proxied';
+
+const VALID_SANDBOX_NETWORK_MODES: readonly SandboxNetworkMode[] = [
+  'open',
+  'closed',
+  'proxied',
+];
+
+export function resolveSandboxNetworkMode(
+  env: NodeJS.ProcessEnv = process.env,
+): SandboxNetworkMode {
+  // A non-empty value naming no mode is a typo on a hard-deny switch:
+  // pattern-matching only `closed` would fall through to the LEAST restrictive
+  // mode, silently dropping the confinement the operator asked for (D4).
+  // Reject it like the sibling sandbox-command switch does.
+  const requested = env['QWEN_SANDBOX_NET']?.toLowerCase().trim();
+  if (
+    requested &&
+    !VALID_SANDBOX_NETWORK_MODES.includes(requested as SandboxNetworkMode)
+  ) {
+    throw new FatalSandboxError(
+      `Invalid QWEN_SANDBOX_NET '${env['QWEN_SANDBOX_NET']}'. Must be one of ${VALID_SANDBOX_NETWORK_MODES.join(', ')}.`,
+    );
+  }
+  // An explicit `closed` is a hard deny and outranks a configured proxy: the
+  // caller asked for no network, and honoring the proxy instead would hand back
+  // the egress they just switched off.
+  if (requested === 'closed') {
+    return 'closed';
+  }
+  if (requested === 'proxied' && !env['QWEN_SANDBOX_PROXY_COMMAND']?.trim()) {
+    throw new FatalSandboxError(
+      'QWEN_SANDBOX_NET=proxied requires QWEN_SANDBOX_PROXY_COMMAND.',
+    );
+  }
+  return env['QWEN_SANDBOX_PROXY_COMMAND'] ? 'proxied' : 'open';
+}
+
+// git answers in single-digit milliseconds here; the cap only exists so a
+// wedged filesystem cannot stall the sandbox hop indefinitely.
+const GIT_ROOT_PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * The git directories a checkout needs on top of its worktree. In a worktree
+ * `.git` is a file pointing elsewhere, so the index, HEAD, reflogs, and objects
+ * all live outside the workspace — binding only the workspace leaves every
+ * `git add`/`commit`/`stash` failing with EROFS.
+ *
+ * Returns nothing for a non-repo cwd, and never throws: a missing git or an
+ * unreadable repo simply contributes no roots.
+ */
+export function resolveGitWritableRoots(cwd: string): string[] {
+  const read = (gitArgs: string[]): string | undefined => {
+    try {
+      const result = spawnSync('git', gitArgs, {
+        cwd,
+        env: gitEnv(),
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: GIT_ROOT_PROBE_TIMEOUT_MS,
+      });
+      if (result.status !== 0) {
+        return undefined;
+      }
+      const value = result.stdout?.trim();
+      return value ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  try {
+    const topLevel = read(['rev-parse', '--show-toplevel']);
+    const gitDirValue = read(['rev-parse', '--absolute-git-dir']);
+    const commonDirValue = read(['rev-parse', '--git-common-dir']);
+    if (!topLevel || !gitDirValue || !commonDirValue) {
+      return [];
+    }
+    const targetDir = fs.realpathSync(topLevel);
+    const currentDir = fs.realpathSync(cwd);
+    if (currentDir !== targetDir && !isSubpath(targetDir, currentDir)) {
+      return [];
+    }
+    const gitEntry = path.join(targetDir, '.git');
+    const entryStat = fs.lstatSync(gitEntry);
+    const gitDir = fs.realpathSync(path.resolve(cwd, gitDirValue));
+    const commonDir = fs.realpathSync(path.resolve(cwd, commonDirValue));
+    if (entryStat.isDirectory()) {
+      return fs.realpathSync(gitEntry) === gitDir && commonDir === gitDir
+        ? [gitDir, commonDir]
+        : [];
+    }
+    if (!entryStat.isFile()) {
+      return [];
+    }
+    // A gitfile is workspace-controlled. Require the common repository's
+    // worktree registration and its reverse pointer before granting writes.
+    const registration = path.join(
+      commonDir,
+      'worktrees',
+      path.basename(gitDir),
+    );
+    const backPointerPath = path.join(gitDir, 'gitdir');
+    if (gitDir !== registration || !fs.lstatSync(backPointerPath).isFile()) {
+      return [];
+    }
+    const backPointer = fs.readFileSync(backPointerPath, 'utf8').trim();
+    return fs.realpathSync(path.resolve(gitDir, backPointer)) === gitEntry
+      ? [gitDir, commonDir]
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Canonicalizes bind roots and drops the ones bwrap would choke on. Order is
+ * preserved so the caller's precedence (workspace first) survives.
+ *
+ * `realpathSync` matters for correctness, not tidiness: the kernel compares
+ * resolved paths, so an unresolved symlink would grant a path the confined
+ * process never actually writes through. The seatbelt branch canonicalizes for
+ * the same reason.
+ */
+export function normalizeWritableRoots(
+  candidates: readonly string[],
+): string[] {
+  const homeDir = fs.realpathSync(os.homedir());
+  const resolved: string[] = [];
+  for (const candidate of candidates) {
+    let real: string;
+    try {
+      real = fs.realpathSync(candidate);
+    } catch {
+      // bwrap fails the entire launch on a missing bind source, so a root that
+      // is not there is dropped instead of turning startup into an error.
+      continue;
+    }
+    if (real === homeDir || isSubpath(real, homeDir)) {
+      throw new FatalSandboxError(
+        `Refusing sandbox writable root '${real}': the home directory ('${homeDir}') and its ancestors must stay read-only.`,
+      );
+    }
+    if (
+      resolved.some(
+        (existing) => existing === real || isSubpath(existing, real),
+      )
+    ) {
+      continue;
+    }
+    resolved.push(real);
+  }
+  return resolved;
+}
+
+/** The workspace root plus every path the confined process must still be able
+ * to write. Returned together because the caller needs both the roots and the
+ * canonical target dir, and resolving twice could disagree. */
+export interface BwrapWritableRoots {
+  targetDir: string;
+  roots: string[];
+  /** Paths re-bound read-only on top of a writable root (must follow the
+   * writable bind in argv order to stack). */
+  readOnlyOverrides: string[];
+}
+
+/**
+ * Resolves the writable roots for an in-place Linux confinement: the same set
+ * the Seatbelt permissive profile grants, except global gitconfig, plus the
+ * git directories a worktree checkout keeps outside its workspace.
+ *
+ * Shared by the sandbox hop and `qwen sandbox` so the two derive their roots
+ * the same way. They can still differ in what they feed in: the hop passes the
+ * live workspace directories, while the subcommand only sees the ones settings
+ * declare.
+ */
+export function resolveBwrapWritableRoots(
+  includedDirs: readonly string[] = [],
+): BwrapWritableRoots {
+  // mkdir before realpath: realpathSync throws on a missing directory, and a
+  // custom QWEN_HOME / QWEN_RUNTIME_DIR may not exist on first run. Same
+  // ordering the seatbelt branch uses.
+  const qwenDir = Storage.getGlobalQwenDir();
+  const runtimeDir = Storage.getRuntimeBaseDir();
+  fs.mkdirSync(qwenDir, { recursive: true });
+  fs.mkdirSync(runtimeDir, { recursive: true });
+
+  const targetDir = fs.realpathSync(process.cwd());
+  const homeDir = os.homedir();
+  // A non-recursive create handles the usual missing ~/.cache leaf without
+  // entering Node's recursive mkdir retry loop on an uncreatable procfs path.
+  // Missing parents leave the optional cache root out of the bind set.
+  const cacheDir =
+    process.env['XDG_CACHE_HOME'] || path.join(homeDir, '.cache');
+  try {
+    fs.mkdirSync(cacheDir);
+  } catch {
+    // Leave it to the drop below.
+  }
+
+  const roots = normalizeWritableRoots([
+    targetDir,
+    os.tmpdir(),
+    cacheDir,
+    qwenDir,
+    runtimeDir,
+    ...resolveGitWritableRoots(targetDir),
+    path.join(homeDir, '.npm'),
+  ]);
+
+  // Extra workspace directories get a stricter floor than the built-in roots:
+  // they can arrive from workspace-scope settings (`context.includeDirectories`,
+  // admitted by default with folder trust off), so repository content could
+  // name `~/.ssh` — or a sibling checkout carrying a `.git` — and have it
+  // bound read-write. Anything resolving inside the home directory is refused;
+  // directories already covered by a trusted root (the workspace itself, the
+  // cache/runtime dirs) stay admitted.
+  const realHomeDir = fs.realpathSync(homeDir);
+  const extras: string[] = [];
+  for (const dir of includedDirs) {
+    let real: string;
+    try {
+      real = fs.realpathSync(dir);
+    } catch {
+      // Same rule as the built-ins: a root that is not there is dropped
+      // instead of turning startup into an error.
+      continue;
+    }
+    if (roots.some((root) => isSubpath(root, real))) {
+      continue;
+    }
+    if (isSubpath(realHomeDir, real)) {
+      throw new FatalSandboxError(
+        `Refusing sandbox writable root '${real}': additional workspace directories inside the home directory must stay read-only.`,
+      );
+    }
+    extras.push(real);
+  }
+
+  // The QWEN_DIR `.env` is operator-trusted execution input (backend
+  // selection, network mode, the host-side proxy command) that every later
+  // launch re-reads, and QWEN_DIR itself must stay writable — so the file
+  // gets a read-only bind layered over the writable root, keeping a confined
+  // process from rewriting this environment input. Other QWEN_DIR settings
+  // and managed update files remain writable and can affect later host runs.
+  const qwenEnvFile = path.join(qwenDir, '.env');
+  let protectedEnvFile: string;
+  try {
+    try {
+      // Reserve the missing path too, without truncating existing settings.
+      fs.writeFileSync(qwenEnvFile, '', { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    const stat = fs.lstatSync(qwenEnvFile);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error('Expected a regular file with a single link.');
+    }
+    protectedEnvFile = fs.realpathSync(qwenEnvFile);
+  } catch (error) {
+    throw new FatalSandboxError(
+      `Cannot protect sandbox configuration '${qwenEnvFile}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  return {
+    targetDir,
+    roots: normalizeWritableRoots([...roots, ...extras]),
+    readOnlyOverrides: [protectedEnvFile],
+  };
+}
+
+/** Options for {@link buildBwrapArgs}, split out so the unit tests can drive
+ * argv construction without touching the real filesystem or environment. */
+export interface BwrapArgsOptions {
+  writableRoots: readonly string[];
+  targetDir: string;
+  networkMode: SandboxNetworkMode;
+  cliArgs: readonly string[];
+  readOnlyOverrides: readonly string[];
+}
+
+/**
+ * Builds the bwrap argv. Deliberately absent:
+ *
+ * - `--unshare-pid` / `--proc`: qwen-code arbitrates cross-process ownership by
+ *   PID through records shared in `~/.qwen`, and a namespace-local PID written
+ *   there reads as *alive* to a host-side `process.kill(pid, 0)` (host PID 2 is
+ *   root-owned `kthreadd`, so the check answers EPERM, not ESRCH). That turns a
+ *   dead owner into one that never appears dead.
+ * - `--tmpfs /tmp`: it would mask `/tmp/.X11-unix` and `/tmp/ssh-*\/agent.*`,
+ *   costing GUI launches and ssh-agent auth, while `os.tmpdir()` is already a
+ *   writable root.
+ */
+export function buildBwrapArgs(options: BwrapArgsOptions): string[] {
+  const args = [
+    // Recursive, so /proc /sys /run come along read-only and Node keeps the
+    // /proc it needs without a fresh (writable) procfs instance.
+    '--ro-bind',
+    '/',
+    '/',
+    '--dev',
+    '/dev',
+    '--die-with-parent',
+  ];
+  if (options.networkMode === 'closed') {
+    args.push('--unshare-net');
+  }
+  for (const root of options.writableRoots) {
+    args.push('--bind', root, root);
+  }
+  // Read-only overlays follow the writable binds so they stack on top of the
+  // root they carve out of (bwrap applies mounts in argv order).
+  for (const override of options.readOnlyOverrides) {
+    args.push('--ro-bind', override, override);
+  }
+  args.push('--chdir', options.targetDir, '--');
+  args.push(...options.cliArgs);
+  return args;
+}
+
+export function buildBwrapEnv(
+  networkMode: SandboxNetworkMode,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    SANDBOX: 'bwrap',
+    SANDBOX_ENFORCEMENT: 'full',
+  };
+  // `shouldAttemptBrowserLaunch()` decides on Linux purely by the presence of
+  // these three. Left set, an OAuth login would xdg-open a browser as a
+  // confined child that cannot write its own profile directory, failing in a
+  // way that reads like an auth bug; dropping them makes the existing
+  // print-the-URL path deterministic and the user opens the link on the host.
+  delete env['DISPLAY'];
+  delete env['WAYLAND_DISPLAY'];
+  delete env['MIR_SOCKET'];
+  if (networkMode === 'proxied') {
+    const proxy =
+      env['HTTPS_PROXY'] ||
+      env['https_proxy'] ||
+      env['HTTP_PROXY'] ||
+      env['http_proxy'] ||
+      'http://localhost:8877';
+    env['HTTPS_PROXY'] =
+      env['https_proxy'] =
+      env['HTTP_PROXY'] =
+      env['http_proxy'] =
+        proxy;
+    const noProxy = env['NO_PROXY'] || env['no_proxy'];
+    if (noProxy) env['NO_PROXY'] = env['no_proxy'] = noProxy;
+  }
+  return env;
+}
+
+export function runBwrap(
+  options: BwrapArgsOptions,
+  env: NodeJS.ProcessEnv = buildBwrapEnv(options.networkMode),
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let proxyProcess: ChildProcess | undefined;
+    let sandboxProcess: ChildProcess | undefined;
+    let finished = false;
+    let stdinPaused = false;
+    const readiness = new AbortController();
+    const signalSandbox = (signal: NodeJS.Signals) => {
+      if (sandboxProcess?.pid) {
+        try {
+          process.kill(-sandboxProcess.pid, signal);
+        } catch {
+          // The sandbox group may already have exited.
+        }
+      }
+    };
+    const stopProxy = () => {
+      if (proxyProcess?.pid) {
+        try {
+          process.kill(-proxyProcess.pid, 'SIGTERM');
+        } catch {
+          // The proxy may already have exited.
+        }
+      }
+    };
+    const finish = (error: Error | null, code = 1) => {
+      if (finished) return;
+      finished = true;
+      readiness.abort();
+      process.removeListener('exit', stopProxy);
+      process.removeListener('SIGINT', onSigint);
+      process.removeListener('SIGTERM', onSigterm);
+      process.removeListener('SIGWINCH', onSigwinch);
+      proxyProcess?.removeListener('error', proxyError);
+      proxyProcess?.removeListener('close', proxyClosed);
+      if (error) signalSandbox('SIGTERM');
+      stopProxy();
+      if (stdinPaused) process.stdin.resume();
+      if (error) reject(error);
+      else resolve(code);
+    };
+    const forwardSignal = (signal: 'SIGINT' | 'SIGTERM') => {
+      if (finished) return;
+      if (sandboxProcess?.pid) signalSandbox(signal);
+      else finish(null, signal === 'SIGINT' ? 130 : 143);
+    };
+    const onSigint = () => forwardSignal('SIGINT');
+    const onSigterm = () => forwardSignal('SIGTERM');
+    const onSigwinch = () => signalSandbox('SIGWINCH');
+    const proxyError = (error: Error) =>
+      finish(new FatalSandboxError(`Sandbox proxy failed: ${error.message}`));
+    const proxyClosed = (code: number | null, signal: NodeJS.Signals | null) =>
+      finish(
+        new FatalSandboxError(
+          `Sandbox proxy exited with code ${code}, signal ${signal}`,
+        ),
+      );
+    const launch = () => {
+      if (finished) return;
+      try {
+        process.stdin.pause();
+        stdinPaused = true;
+        sandboxProcess = spawn('bwrap', buildBwrapArgs(options), {
+          stdio: 'inherit',
+          env,
+          // A separate session removes the host controlling terminal. Keep
+          // bwrap and its payload in one group so signals reach both.
+          detached: true,
+        });
+        sandboxProcess.once('error', (error) => finish(error));
+        sandboxProcess.once('close', (code, signal) =>
+          finish(
+            null,
+            code ??
+              (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1),
+          ),
+        );
+      } catch (error) {
+        finish(error as Error);
+      }
+    };
+    process.on('SIGINT', onSigint);
+    process.on('SIGTERM', onSigterm);
+    process.on('SIGWINCH', onSigwinch);
+    if (options.networkMode !== 'proxied') {
+      launch();
+      return;
+    }
+    try {
+      // Note: CodeQL flags this as js/shell-command-injection-from-environment.
+      // This is intentional - CLI tool executes user-provided proxy commands.
+      proxyProcess = spawn('bash', ['-c', env['QWEN_SANDBOX_PROXY_COMMAND']!], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      });
+      proxyProcess.once('error', proxyError);
+      proxyProcess.once('close', proxyClosed);
+      // Proxy stdout is piped but not forwarded — it disrupts ink rendering.
+      proxyProcess.stderr?.on('data', (data) =>
+        writeStderrLine(data.toString()),
+      );
+      process.once('exit', stopProxy);
+      const proxy = env['HTTPS_PROXY'] || 'http://localhost:8877';
+      writeStderrLine('waiting for proxy to start ...');
+      void execAsync(
+        `until curl --noproxy '*' --max-time 0.25 -s -o /dev/null ${quote([proxy])}; do sleep 0.25; done`,
+        {
+          signal: readiness.signal,
+          timeout: 30_000,
+        },
+      ).then(launch, proxyError);
+    } catch (error) {
+      proxyError(error as Error);
+    }
+  });
+}
+
 export async function start_sandbox(
   config: SandboxConfig,
   nodeArgs: string[] = [],
@@ -387,6 +874,37 @@ export async function start_sandbox(
     });
   }
 
+  if (config.command === 'bwrap') {
+    if (process.env['BUILD_SANDBOX']) {
+      throw new FatalSandboxError('Cannot BUILD_SANDBOX when using bwrap');
+    }
+    const networkMode = resolveSandboxNetworkMode();
+    writeStderrLine(`using bwrap (network: ${networkMode}) ...`);
+    const {
+      targetDir,
+      roots: writableRoots,
+      readOnlyOverrides,
+    } = resolveBwrapWritableRoots(
+      cliConfig ? cliConfig.getWorkspaceContext().getDirectories() : [],
+    );
+    const nodeOptions = [
+      childEnv?.['NODE_OPTIONS'] ?? process.env['NODE_OPTIONS'],
+      ...(process.env['DEBUG'] ? ['--inspect-brk'] : []),
+      ...nodeArgs,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const env = buildBwrapEnv(networkMode, { ...process.env, ...childEnv });
+    if (nodeOptions) env['NODE_OPTIONS'] = nodeOptions;
+    if (process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
+      env['ELECTRON_RUN_AS_NODE'] = '1';
+    }
+    return runBwrap(
+      { writableRoots, targetDir, networkMode, cliArgs, readOnlyOverrides },
+      env,
+    );
+  }
+
   writeStderrLine(`hopping into sandbox (command: ${config.command}) ...`);
 
   // determine full path for qwen-code to distinguish linked vs installed setting
@@ -399,6 +917,15 @@ export async function start_sandbox(
   const isCustomProjectSandbox = fs.existsSync(projectSandboxDockerfile);
 
   const image = config.image;
+  // `image` is optional on SandboxConfig because the in-place backends never
+  // pull one; `loadSandboxConfig` only emits a container command together with
+  // an image. Fail loudly rather than handing `undefined` to the runtime, where
+  // it would stringify into an "undefined" image reference.
+  if (!image) {
+    throw new FatalSandboxError(
+      `Sandbox command '${config.command}' requires an image`,
+    );
+  }
   const workdir = path.resolve(process.cwd());
   const containerWorkdir = getContainerPath(workdir);
 

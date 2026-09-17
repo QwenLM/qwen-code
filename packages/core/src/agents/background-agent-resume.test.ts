@@ -23,6 +23,7 @@ import {
 } from './agent-transcript.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
+import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
 import { getCurrentAgentDepth } from './runtime/agent-context.js';
 import { AgentHeadless } from './runtime/agent-headless.js';
@@ -459,6 +460,74 @@ describe('BackgroundAgentResumeService', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    'persisted',
+    'definition',
+    'legacy-model',
+    'legacy-flags',
+    'codex-persisted',
+    'codex-definition',
+  ] as const)(
+    'blocks cold external resume using %s provenance',
+    async (provenance) => {
+      const sessionId = 'session-external';
+      const agentId = 'external-agent';
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+        agentId,
+        agentType: 'researcher',
+        description: 'External task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: new Date().toISOString(),
+        status: 'running',
+        ...(provenance === 'persisted' ? { executor: 'acp' as const } : {}),
+        ...(provenance === 'codex-persisted'
+          ? { executor: 'codex' as const }
+          : {}),
+        ...(provenance === 'legacy-model'
+          ? { model: 'external-acp:claude' }
+          : {}),
+        ...(provenance === 'legacy-flags'
+          ? { persistedCliFlags: { model: 'external-acp:claude' } }
+          : {}),
+      });
+      fs.writeFileSync(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        JSON.stringify({
+          uuid: 'u1',
+          sessionId,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'External task' }] },
+        }) + '\n',
+      );
+      const { service, subagentManager } = createService();
+      if (provenance === 'definition' || provenance === 'codex-definition') {
+        subagentManager.loadSubagent.mockResolvedValue({
+          name: 'researcher',
+          color: 'cyan',
+          model: undefined,
+          approvalMode: undefined,
+          executor: {
+            kind: provenance === 'codex-definition' ? 'codex' : 'acp',
+            command: 'native-agent',
+          },
+        } as Awaited<ReturnType<typeof subagentManager.loadSubagent>>);
+      }
+      const recovered = await service.loadPausedBackgroundAgents(sessionId);
+      expect(recovered[0]?.resumeBlockedReason).toContain(
+        'External subagent session cannot be restored',
+      );
+      expect(await service.resumeBackgroundAgent(agentId)).toBeUndefined();
+      // Recheck provenance at execution time, not only during discovery.
+      recovered[0]!.resumeBlockedReason = undefined;
+      expect(await service.resumeBackgroundAgent(agentId)).toBeUndefined();
+      expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+        'External subagent session cannot be restored',
+      );
+      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    },
+  );
+
   it('preserves model on recovered paused agents for per-model caps', async () => {
     const sessionId = 'session-model';
     const agentId = 'agent-model';
@@ -629,6 +698,55 @@ describe('BackgroundAgentResumeService', () => {
       resumeBlockedReason: 'Subagent "deleted-agent" is no longer available.',
     });
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('deleted-agent');
+  });
+
+  it('keeps a paused agent listed when its same-named definition now fails the executor guard (R12-3)', async () => {
+    const sessionId = 'session-executor-refusal';
+    const agentId = 'agent-executor-refusal';
+    writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+      agentId,
+      agentType: 'researcher',
+      description:
+        'Background task whose same-named definition now fails to load',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, agentId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'task' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service, subagentManager } = createService();
+    // The R10-2/R11 executor refusal makes loadSubagent THROW for a same-named
+    // file that failed to load. resolveResumeTarget must convert that throw into
+    // the existing "unavailable" shape so discovery keeps the row listed with a
+    // resumeBlockedReason — otherwise the per-sidecar catch swallows it into a
+    // debug-only warning and the row vanishes from /tasks. Removing the try/catch
+    // turns this red (recovered is empty).
+    subagentManager.loadSubagent.mockRejectedValue(
+      new SubagentError(
+        'Agent file /test/project/.qwen/agents/researcher.md has an invalid executor block: it declares an executor but failed to load.',
+        SubagentErrorCode.INVALID_CONFIG,
+        'researcher',
+      ),
+    );
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.resumeBlockedReason).toContain(
+      'invalid executor block',
+    );
   });
 
   it('keeps paused tasks resumable when they only carry a stale lastError', async () => {
@@ -3059,7 +3177,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('cancelled');
   });
 
-  it('drops usage-only assistant records while preserving tool history and pending user text', async () => {
+  it('drops unfinished nested calls and readiness markers while preserving stable history', async () => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -3150,6 +3268,44 @@ describe('BackgroundAgentResumeService', () => {
           type: 'user',
           message: { role: 'user', parts: [{ text: 'and another thing' }] },
         }),
+        JSON.stringify({
+          uuid: 'a2',
+          parentUuid: 'u2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.600Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'still working' }] },
+        }),
+        JSON.stringify({
+          uuid: 'u3',
+          parentUuid: 'a2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.700Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'one final constraint' }] },
+        }),
+        JSON.stringify({
+          uuid: 'nested-call',
+          timestamp: '2026-04-20T00:00:00.800Z',
+          parentUuid: 'u3',
+          sessionId,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'nested', name: 'agent', args: {} } },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'nested-state',
+          timestamp: '2026-04-20T00:00:00.900Z',
+          parentUuid: 'nested-call',
+          sessionId,
+          type: 'system',
+          subtype: 'agent_session_ready',
+          systemPayload: { callId: 'nested', subagentSessionReady: true },
+        }),
       ].join('\n') + '\n',
       'utf8',
     );
@@ -3230,6 +3386,8 @@ describe('BackgroundAgentResumeService', () => {
             },
             { role: 'model', parts: [{ text: 'working' }] },
             { role: 'user', parts: [{ text: 'and another thing' }] },
+            { role: 'model', parts: [{ text: 'still working' }] },
+            { role: 'user', parts: [{ text: 'one final constraint' }] },
           ],
         },
       }),
@@ -3338,9 +3496,13 @@ describe('BackgroundAgentResumeService', () => {
       oldSessionMtime.getTime(),
     );
 
-    expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
-      true,
-    );
+    expect(
+      registry.continueResidentAgent(
+        agentId,
+        'tighten the summary',
+        'delivery-2',
+      ),
+    ).toBe('continued');
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
@@ -3348,14 +3510,23 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
     const hotContextArg = execute.mock.calls[1]?.[0];
-    expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
+    expect(hotContextArg?.get('task_prompt')).toBeUndefined();
+    expect(hotContextArg?.get('external_inputs_override')).toEqual([
+      {
+        kind: 'message',
+        text: 'tighten the summary',
+        deliveryId: 'delivery-2',
+      },
+    ]);
     expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
     expect(dispose).not.toHaveBeenCalled();
 
     registry.reset();
 
     expect(dispose).toHaveBeenCalledTimes(1);
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(
+      'not_completed',
+    );
   });
 
   it("clears the previous incarnation's stats and activities when cold-reviving", async () => {
@@ -3660,7 +3831,7 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe('fallback');
     expect(dispose).toHaveBeenCalledOnce();
   });
 

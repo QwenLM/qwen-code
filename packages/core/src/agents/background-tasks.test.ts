@@ -15,6 +15,7 @@ import {
   type AgentTaskRegistration,
   type BackgroundApproval,
   type BackgroundTaskEntry,
+  type ResidentAgentContinuationResult,
   type ResidentBackgroundAgent,
 } from './background-tasks.js';
 import {
@@ -30,7 +31,11 @@ import {
   type AgentApprovalRequestEvent,
 } from './runtime/agent-events.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -96,6 +101,24 @@ function makeWaitingEvent(
 }
 
 describe('notification emission and agent context (#7156)', () => {
+  it('omits the internal agent type from the notification card label', () => {
+    const registry = new BackgroundTaskRegistry();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(
+      makeRegistration('bg-1', {
+        description: 'Explore: Check Node.js requirements',
+        subagentType: 'Explore',
+      }),
+    );
+
+    registry.complete('bg-1', 'done');
+
+    expect(callback.mock.calls[0]![2]).toMatchObject({
+      label: 'Check Node.js requirements',
+    });
+  });
+
   it('captures the Todo work-chain owner at registration', () => {
     const registry = new BackgroundTaskRegistry();
     const entry = todoWorkChainContext.run('work-chain-1', () =>
@@ -104,6 +127,52 @@ describe('notification emission and agent context (#7156)', () => {
 
     expect(entry.todoWorkChainId).toBe('work-chain-1');
   });
+
+  it('retains the launching execution when completion runs in another context', () => {
+    const registry = new BackgroundTaskRegistry();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    const entry = promptIdContext.run('fallback-turn', () =>
+      runWithInvocationContext(
+        { version: 1, sessionId: 'parent-session', promptId: 'launch-turn' },
+        () => registry.register(makeRegistration('bg-origin')),
+      ),
+    );
+
+    promptIdContext.run('later-turn', () =>
+      registry.complete(entry.id, 'done'),
+    );
+
+    expect(entry.sourceTurnId).toBe('launch-turn');
+    expect(callback.mock.calls[0]![2]).toMatchObject({
+      sourceTurnId: 'launch-turn',
+    });
+  });
+
+  it('captures an automatic execution without an RPC invocation context', () => {
+    const registry = new BackgroundTaskRegistry();
+    const entry = runWithInvocationContext(undefined, () =>
+      promptIdContext.run('automatic-turn', () =>
+        registry.register(makeRegistration('bg-automatic')),
+      ),
+    );
+
+    expect(entry.sourceTurnId).toBe('automatic-turn');
+  });
+
+  it.each([undefined, 'persisted-origin'])(
+    'preserves restored execution metadata %s instead of guessing its owner',
+    (sourceTurnId) => {
+      const registry = new BackgroundTaskRegistry();
+      const entry = promptIdContext.run('restore-turn', () =>
+        registry.register(makeRegistration('bg-restored', { sourceTurnId }), {
+          preserveNotificationState: true,
+        }),
+      );
+
+      expect(entry.sourceTurnId).toBe(sourceTurnId);
+    },
+  );
 
   // A background agent's terminal transition fires inside its own
   // AsyncLocalStorage frame, and ALS context follows every async
@@ -279,7 +348,7 @@ describe('BackgroundTaskRegistry', () => {
       overrides: Partial<ResidentBackgroundAgent> = {},
     ): ResidentBackgroundAgent {
       return {
-        continue: vi.fn(() => true),
+        continue: vi.fn(() => 'continued' as const),
         dispose: vi.fn(),
         ...overrides,
       };
@@ -291,14 +360,22 @@ describe('BackgroundTaskRegistry', () => {
       registry.registerResidentAgent('resident-1', resident);
 
       expect(registry.continueResidentAgent('resident-1', 'too early')).toBe(
-        false,
+        'not_completed',
       );
 
       registry.complete('resident-1', 'first result');
-      expect(registry.continueResidentAgent('resident-1', 'keep going')).toBe(
-        true,
-      );
-      expect(resident.continue).toHaveBeenCalledWith('keep going');
+      expect(
+        registry.continueResidentAgent(
+          'resident-1',
+          'keep going',
+          'delivery-1',
+        ),
+      ).toBe('continued');
+      expect(resident.continue).toHaveBeenCalledWith({
+        kind: 'message',
+        text: 'keep going',
+        deliveryId: 'delivery-1',
+      });
 
       const staleHandle = makeResident();
       expect(registry.unregisterResidentAgent('resident-1', staleHandle)).toBe(
@@ -310,7 +387,7 @@ describe('BackgroundTaskRegistry', () => {
       expect(resident.dispose).not.toHaveBeenCalled();
       expect(
         registry.continueResidentAgent('resident-1', 'after unregister'),
-      ).toBe(false);
+      ).toBe('fallback');
     });
 
     it('disposes a replaced resident without letting its stale handle remove the replacement', () => {
@@ -459,7 +536,7 @@ describe('BackgroundTaskRegistry', () => {
       registry.register(makeRegistration('cancelled-completion'));
       const resident = makeResident();
       registry.registerResidentAgent('cancelled-completion', resident);
-      let continuation: boolean | undefined;
+      let continuation: ResidentAgentContinuationResult | undefined;
       registry.setNotificationCallback(() => {
         continuation = registry.continueResidentAgent(
           'cancelled-completion',
@@ -470,7 +547,7 @@ describe('BackgroundTaskRegistry', () => {
       registry.cancel('cancelled-completion');
       registry.complete('cancelled-completion', 'finished while cancelling');
 
-      expect(continuation).toBe(false);
+      expect(continuation).toBe('fallback');
       expect(resident.continue).not.toHaveBeenCalled();
       expect(resident.dispose).toHaveBeenCalledOnce();
     });
@@ -879,6 +956,24 @@ describe('BackgroundTaskRegistry', () => {
 
       expect(registry.get('paused-1')).toBeDefined();
       expect(registry.get('bg-2')?.status).toBe('running');
+    });
+
+    it('does not count idle resident runtimes as claimed slots', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      for (const agentId of ['resident-1', 'resident-2', 'resident-3']) {
+        registry.register(makeRegistration(agentId));
+        registry.complete(agentId, 'done');
+        registry.registerResidentAgent(agentId, {
+          continue: vi.fn(() => 'continued' as const),
+          dispose: vi.fn(),
+        });
+      }
+
+      expect(registry.canStartBackgroundAgent()).toBe(true);
+      expect(() => registry.register(makeRegistration('next'))).not.toThrow();
     });
 
     it('queues waiters until a background slot is released', async () => {
@@ -1849,7 +1944,7 @@ describe('BackgroundTaskRegistry', () => {
     it('disposes a resident runtime when its terminal entry is evicted', () => {
       registry.register(makeRegisteredEntry('resident-oldest', 0));
       const resident = {
-        continue: vi.fn(() => true),
+        continue: vi.fn(() => 'continued' as const),
         dispose: vi.fn(),
       };
       registry.registerResidentAgent('resident-oldest', resident);
@@ -2080,6 +2175,21 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.drainMessages('test-1')).toEqual([]);
     });
 
+    it('refuses messages to running one-shot agents', () => {
+      registry.register({
+        agentId: 'one-shot',
+        description: 'Codex task',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/one-shot.jsonl',
+        resumeBlockedReason: 'Start a new task.',
+      });
+      expect(registry.queueExternalInput('one-shot', 'continue')).toBe(false);
+      expect(registry.drainMessages('one-shot')).toEqual([]);
+    });
+
     it('resolves empty when the wait signal is aborted', async () => {
       registry.register({
         agentId: 'test-1',
@@ -2234,6 +2344,9 @@ describe('BackgroundTaskRegistry', () => {
       expect(callback.mock.calls[0]![1]).toContain(
         '<all-terminal>false</all-terminal>',
       );
+      expect(callback.mock.calls[0]![2]).toMatchObject({
+        label: 'spawned',
+      });
     });
 
     it('counts a top-level reserved background launch as remaining', () => {

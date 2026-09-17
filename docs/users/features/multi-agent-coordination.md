@@ -18,6 +18,14 @@ The leader creates a team, assigns up to three independent workstreams, and uses
 
 If Agent Team is disabled, `/coordinate` can still use ordinary foreground agents for read-only parallel investigation. That fallback is delegation, not a collaborating team: the workers report only to the leader.
 
+## See who is working
+
+While a team is active, its teammates appear in the roster the CLI already shows below the composer, alongside ordinary background subagents. Each row carries the teammate's name in its assigned color, the shared task it currently owns, its state, and elapsed time. Pressing Enter on a teammate row opens that teammate's existing Agent View tab rather than the background-task detail view.
+
+Idle is reported as its own state, distinct from completed: an idle teammate has finished its current task and is waiting for the next one, so it can still be given work. A completed, failed, or cancelled teammate stays visible briefly so a terminal outcome is not missed.
+
+The same team state reaches Web Shell when the session runs under `qwen serve`: teammates appear in the environment sidebar and the session workflow view with their current shared task and state. Web Shell shows team rows as status only — teammate conversations stay in the CLI's Agent View tabs. Teammate tool approvals do surface in Web Shell, labelled with the teammate that asked, and answering one there releases or rejects that teammate's tool call.
+
 ## Choosing the right multi-agent mode
 
 | Mode                          | Use it for                                                      | Communication                      | Workspace behavior                                          |

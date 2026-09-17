@@ -629,6 +629,36 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
     return resultDisplay;
   }
 
+  if (
+    typeof resultDisplay === 'object' &&
+    resultDisplay !== null &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'ask_user_question_answers'
+  ) {
+    if (
+      typeof resultDisplay.text !== 'string' ||
+      !Array.isArray(resultDisplay.answers) ||
+      !resultDisplay.answers.every(
+        (entry) =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          typeof entry.question === 'string' &&
+          typeof entry.answer === 'string',
+      )
+    ) {
+      return resultDisplay;
+    }
+
+    return {
+      ...resultDisplay,
+      text: compactString(resultDisplay.text, purpose),
+      answers: resultDisplay.answers.map(({ question, answer }) => ({
+        question: compactString(question, purpose),
+        answer: compactString(answer, purpose),
+      })),
+    } as T;
+  }
+
   if (isFileDiffDisplay(resultDisplay)) {
     return compactFileDiff(resultDisplay, purpose) as T;
   }

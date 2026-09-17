@@ -5,11 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  AgentStatus,
-  type SwarmTask,
-  type TeamManager,
-} from '@qwen-code/qwen-code-core';
+import { AgentStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import type { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
+import type { SwarmTask } from '@qwen-code/qwen-code-core/agents/team/types.js';
 import { buildTeamAgentRosterEntries } from './use-team-agent-roster.js';
 
 describe('buildTeamAgentRosterEntries', () => {

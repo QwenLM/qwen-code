@@ -402,6 +402,34 @@ describe('GitlabChannel', () => {
       expect(mockApi.Issues.show).toHaveBeenCalled();
     });
 
+    it('dispatches provider-generated assignment todos', async () => {
+      const configured = makeConfig({
+        action_prompt_template: {
+          mentioned: 'Mentioned: %description%',
+          assigned: 'Assigned: %description%',
+        },
+      });
+      channel = new TestableGitlabChannel(
+        'test-gitlab',
+        configured,
+        makeBridge(),
+      );
+      await initWithoutLoop();
+
+      const todo = makeTodo({
+        action_name: 'assigned',
+        target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+      });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
+      mockApi.Issues.show.mockResolvedValueOnce({
+        description: 'Please fix this',
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.text).toContain('Please fix this');
+    });
+
     it('skips todo authored by bot', async () => {
       await initWithoutLoop();
 

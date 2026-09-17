@@ -33,9 +33,8 @@ if (!existsSync(join(root, 'node_modules'))) {
 // build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
-// --cli-only: skip packages not needed by the CLI bundle. Web UI and Web
-// Shell still build because the self-contained HTML export bundles their
-// document renderer through web-templates.
+// --cli-only: skip packages not needed by the CLI bundle. Web Shell still
+// builds because the HTML export publishes its document renderer with npm.
 const cliOnly = process.argv.includes('--cli-only');
 
 // Build in dependency order:
@@ -45,12 +44,11 @@ const cliOnly = process.argv.includes('--cli-only');
 // 4. audio-capture (native microphone backend used by cli)
 // 5. acp-bridge (depends on core - used by cli)
 // 6. sdk (build-time devDep on acp-bridge for shared constants, used by cli channel worker)
-// 7. webui (shared UI components - used by web-shell and vscode companion)
-// 8. web-shell (document renderer used by web-templates)
-// 9. web-templates (embeddable web templates - used by cli)
-// 10. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
-// 11. vscode-ide-companion (depends on webui)
-// 12. external-context integrations (private Qwen extensions)
+// 7. web-shell (document renderer used by web-templates)
+// 8. web-templates (embeddable web templates - used by cli)
+// 9. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
+// 10. vscode-ide-companion
+// 11. external-context integrations (private Qwen extensions)
 const buildOrder = [
   'packages/core',
   'packages/channels/base',
@@ -70,7 +68,6 @@ const buildOrder = [
   'packages/node-repl',
   'packages/acp-bridge',
   'packages/sdk-typescript',
-  'packages/webui',
   'packages/web-shell',
   'packages/web-templates',
   'packages/cli',

@@ -83,8 +83,7 @@ an HTTP daemon. See the
 | `packages/core`                                                                                                  | UI-independent agent orchestration, model-provider integration, prompt and context construction, tool registration and execution, permissions, sessions, memory, telemetry, and shared services. |
 | `packages/acp-bridge`                                                                                            | ACP channel lifecycle, session multiplexing, event delivery, permission mediation, process spawning, and the filesystem seam shared by daemon and adapter hosts.                                 |
 | `packages/sdk-typescript`                                                                                        | Programmatic process execution through `query()` plus HTTP/SSE clients and transcript projection for `qwen serve`.                                                                               |
-| `packages/webui`                                                                                                 | Shared React components and the daemon React adapter built on the TypeScript SDK.                                                                                                                |
-| `packages/web-shell`                                                                                             | The terminal-style browser UI built on `packages/webui` and the daemon SDK.                                                                                                                      |
+| `packages/web-shell`                                                                                             | The browser UI and daemon React adapter built on the TypeScript SDK.                                                                                                                             |
 | `packages/web-templates`                                                                                         | Web templates packaged as embeddable JavaScript and CSS strings.                                                                                                                                 |
 | `packages/audio-capture`                                                                                         | Native microphone capture for voice input.                                                                                                                                                       |
 | `packages/channels`                                                                                              | The shared channel runtime and platform adapters for messaging services.                                                                                                                         |
@@ -111,8 +110,8 @@ of the interactive, headless, ACP, daemon, channel, or maintenance flows.
 Presentation remains outside the core runtime:
 
 - the Ink TUI renders local interactive sessions;
-- `packages/webui` adapts daemon state to React providers and hooks;
-- `packages/web-shell` provides the browser terminal experience;
+- `packages/web-shell` adapts daemon state to React providers and hooks and
+  provides the browser experience;
 - IDE and channel packages translate host-specific events into shared client or
   bridge contracts.
 
@@ -153,8 +152,8 @@ The TypeScript SDK exposes two client styles:
 - `query()` starts and controls a Qwen Code process for programmatic local use;
 - daemon clients communicate with `qwen serve` over HTTP and SSE.
 
-`packages/webui` builds a React state layer on the daemon client, and
-`packages/web-shell` builds the browser UI on that state layer. Other clients,
+`packages/web-shell` builds a React state layer and browser UI on the daemon
+client. Other clients,
 including IDE integrations and daemon-managed channels, reuse the same SDK and
 event contracts instead of importing server implementation code.
 
