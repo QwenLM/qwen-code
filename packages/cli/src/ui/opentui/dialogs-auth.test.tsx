@@ -608,7 +608,8 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
   }
 
   /** The step titles the wizard walks through from the API key to the review. */
@@ -660,9 +661,9 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await typeBatchedThenEnter('https://x.test');
     // A stale empty URL fell back to the protocol default without an error, so
     // the wizard advanced and saved the endpoint nobody typed.
-    expect(screen.getByText(/Step 3\/6 · API Key/)).toBeTruthy();
+    expect(screen.getByText(/Step 4\/7 · API Key/)).toBeTruthy();
     await runToReviewStep();
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     expect(document.body.textContent).toContain('"baseUrl": "https://x.test"');
     expect(document.body.textContent).not.toContain('api.openai.com');
   });
@@ -685,8 +686,14 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
       await press('return'); // models → advancedConfig
       await press('return'); // advancedConfig → review
       await press('return'); // review → save
-      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
-      expect(build.mock.calls[0]?.[1]?.apiKey).toBe('sk-test');
+      // The review step builds the plan again for its preview, so the submit
+      // count is the install call; the key it carried must be the burst alone.
+      await vi.waitFor(() =>
+        expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1),
+      );
+      const keys = build.mock.calls.map((call) => call[1]?.apiKey);
+      expect(keys).toContain('sk-test');
+      expect(keys).not.toContain('sk-testZ');
     } finally {
       build.mockRestore();
     }
@@ -708,8 +715,14 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
       });
       await press('return'); // advancedConfig → review
       await press('return'); // review → save
-      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['mod']);
+      await vi.waitFor(() =>
+        expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1),
+      );
+      const ids = build.mock.calls.map((call) =>
+        JSON.stringify(call[1]?.modelIds),
+      );
+      expect(ids).toContain('["mod"]');
+      expect(ids).not.toContain('["modZ"]');
     } finally {
       build.mockRestore();
     }
@@ -871,7 +884,8 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
   }
 
   /** Walk to the advanced-config step with the context-window row focused. */
@@ -958,7 +972,7 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(focusedField()).toEqual({ text: 'https:// ', cell: ' ' });
     // the edited value, not the typed one, is what the step submits
     await press('return');
-    expect(screen.getByText(/Step 3\/6 · API Key/)).toBeTruthy();
+    expect(screen.getByText(/Step 4\/7 · API Key/)).toBeTruthy();
   });
 
   it('sends ctrl+E to the end of a pasted value and bare End to its own line', async () => {
@@ -1016,7 +1030,7 @@ describe('caret editing in dialog text fields (#107)', () => {
     await typeText('7');
     expect(focusedField()).toEqual({ text: '129734', cell: '3' });
     await press('return');
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     expect(document.body.textContent).toContain('"contextWindowSize": 129734');
   });
 
