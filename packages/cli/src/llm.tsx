@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   AuthType,
   type ChatRecord,
@@ -1219,6 +1220,7 @@ export async function main() {
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.
+        prepareFileWatchersForProcessExit();
         await runExitCleanup();
       }
       process.exit(0);

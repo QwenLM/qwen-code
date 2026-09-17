@@ -2699,3 +2699,49 @@ describe('workflow status guards', () => {
     },
   );
 });
+
+// The registry keeps the first large-run warning and nothing after it: the flag
+// tells the user a run grew past what was expected, once, while it can still
+// be stopped.
+describe('WorkflowRunRegistry.onSizeWarning', () => {
+  const warning = {
+    axis: 'agents' as const,
+    scheduledAgents: 16,
+    totalTokens: 0,
+    projectedTokens: 1_120_000,
+    agentCap: 15,
+    tokenCap: 1_500_000,
+    capFromGuideline: true,
+    at: 1_700_000_000_500,
+  };
+
+  it('records the first warning, logs it and notifies, and ignores later ones', () => {
+    const r = new WorkflowRunRegistry();
+    const changes = vi.fn();
+    r.setStatusChangeCallback(changes);
+    const entry = r.register(reg('wf_size'));
+    changes.mockClear();
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(true);
+    expect(r.get(entry.runId)?.sizeWarning).toEqual(warning);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toBe(
+      '[size] Large workflow: 16 agents scheduled (warning threshold 15, from the size guideline) — /workflows to stop.',
+    );
+    expect(changes).toHaveBeenCalled();
+
+    expect(
+      r.onSizeWarning(entry.runId, { ...warning, scheduledAgents: 40 }),
+    ).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning?.scheduledAgents).toBe(16);
+  });
+
+  it('does not flag a run that has already settled, or one it does not know', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_settled'));
+    r.complete(entry.runId, [], 1_700_000_001_000);
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning).toBeUndefined();
+    expect(r.onSizeWarning('wf_unknown', warning)).toBe(false);
+  });
+});

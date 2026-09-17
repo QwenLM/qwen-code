@@ -2851,6 +2851,7 @@ describe('DaemonClient', () => {
 
       await expect(
         client.getSessionTranscriptPage('with/slash', {
+          compactedReplayMode: 'summary',
           cursor: 'cur 1',
           limit: 2,
           clientId: 'client-1',
@@ -2858,7 +2859,7 @@ describe('DaemonClient', () => {
       ).resolves.toEqual(body);
 
       expect(calls[0]).toMatchObject({
-        url: 'http://daemon/session/with%2Fslash/transcript?cursor=cur+1&limit=2',
+        url: 'http://daemon/session/with%2Fslash/transcript?compactedReplayMode=summary&cursor=cur+1&limit=2',
         method: 'GET',
         headers: {
           authorization: 'Bearer secret',
@@ -4164,6 +4165,7 @@ describe('DaemonClient', () => {
       const session = await client.loadSession('s-1', {
         workspaceCwd: '/work/a',
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
         timeoutMs: 0,
       });
 
@@ -4173,6 +4175,7 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         cwd: '/work/a',
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
       });
       expect(calls[0]?.signal).toBeNull();
     });
@@ -4225,6 +4228,7 @@ describe('DaemonClient', () => {
         workspaceCwd: '/w',
         historyPageSize: 100,
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
       });
 
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/resume');
@@ -6386,12 +6390,13 @@ describe('DaemonClient', () => {
       const result = await client.enqueueMidTurnMessage(
         's-1',
         'also check tests',
-        { messageId: 'client-mid-1' },
+        { messageId: 'client-mid-1', eventDetailMode: 'summary' },
       );
       expect(result).toEqual({ accepted: true, messageId: 'mid-1' });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        eventDetailMode: 'summary',
         message: 'also check tests',
         messageId: 'client-mid-1',
       });
@@ -10753,6 +10758,68 @@ describe('DaemonClient', () => {
       });
 
       expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
+    });
+  });
+
+  describe('sessionWorkflowTaskAction', () => {
+    it('sends the start input of a run-script call', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          changed: true,
+          status: 'running',
+          taskId: 'wf_compiled1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sessionWorkflowTaskAction(
+          's/1',
+          'definition-7',
+          'run-script',
+          'client-9',
+          {
+            script: 'return 1',
+            args: { question: 'which tables grew?' },
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        ),
+      ).resolves.toEqual({
+        changed: true,
+        status: 'running',
+        taskId: 'wf_compiled1',
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/tasks/definition-7/workflow-action',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        action: 'run-script',
+        script: 'return 1',
+        args: { question: 'which tables grew?' },
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-9');
+    });
+
+    // A daemon that predates start input must see exactly the body it knows.
+    it('sends the action alone when there is no start input', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { changed: true, status: 'running' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.sessionWorkflowTaskAction('s-1', 'wf-1', 'rerun');
+      await client.sessionWorkflowTaskAction(
+        's-1',
+        'deep-review',
+        'run-saved',
+        undefined,
+        {},
+      );
+
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ action: 'rerun' });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({ action: 'run-saved' });
     });
   });
 });

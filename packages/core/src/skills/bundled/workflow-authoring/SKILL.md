@@ -48,7 +48,9 @@ the script body can read it. Fields outside that list are dropped. The
 approval dialog prints the name, the description, and each phase title with
 its `detail` as a one-line explanation beside it: give every phase a `detail`,
 because for a run that may dispatch hundreds of agents it is what the user
-reads before approving.
+reads before approving. In a workflow an extension ships, `whenToUse` also lists
+the workflow for the model to start when a request matches it; leave it out and
+the workflow runs only when someone asks for it by name.
 
 Injected globals, and nothing else:
 
@@ -61,7 +63,7 @@ Injected globals, and nothing else:
   invalid arguments.
 - `pipeline(items, ...stages)` — run each item through the stages
   independently. See **Default to `pipeline()`**.
-- `workflow(nameOrRef, args?)` — run a saved workflow inline. See **Saved
+- `workflow(nameOrRef, args?, { stepId }?)` — run a saved workflow inline. See **Saved
   workflows and workflow()**.
 - `args` — the structured value the caller passed, or `undefined`.
 - `budget` — `{ total, spent(), remaining() }`. See **Scaling to the token
@@ -74,9 +76,10 @@ has already been admitted, counted against the caps, and spent — with its
 result discarded.
 
 A script must be deterministic so a resume replays the same call sequence.
-`Math.random()` throws, and so does all of `Date` — `new Date()`,
+`Math.random()` throws, and so does all of `Date` — `Date()`, `new Date()`,
 `Date.now()`, `Date.parse()` and `Date.UTC()` alike. Pass timestamps in via
-`args`, or stamp the result after the workflow returns.
+`args`, or stamp the result after the workflow returns. A script that calls any
+of them is refused before it starts, so none of its agents runs first.
 
 Scripts run in a `node:vm` sandbox with no filesystem, shell, network, or
 environment access. All I/O happens through the prompts you give the agents, so
@@ -84,11 +87,11 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
+`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools?, tools? })`
 
-- `label` (string) — the name shown in the run views and the failures list.
-  Make it unique per dispatch: a failure line carries only the label and the
-  error, so two failed dispatches that share a label cannot be told apart.
+- `stepId` (string, ≤128 chars) — optional caller node ID; does not affect caching. Also accepted in `workflow()` options.
+- `label` (string) — display name in run views and failures.
+  Make it unique per dispatch to distinguish failures.
 - `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
   would: this dispatch and every dispatch issued after it are attributed to that
   phase. It is not scoped to the one call, so in a fan-out open phases with
@@ -164,13 +167,26 @@ say explicitly what each one should read and whether it may edit files.
   because it would have no way to return its result. The resume cache key
   depends on which tools are denied, not on their order or duplicates, and not
   on whether a built-in tool is named by its tool name or its display name.
+- `tools` (string[]) — the only tools this agent may be given; it narrows and
+  never brings back a tool the floor below or a deny takes away. Name tools
+  exactly: a built-in by tool or display name, an MCP tool by the name the model
+  sees (`mcp__<server>__<tool>`). Patterns (`'*'`, `mcp__<server>`,
+  `mcp__<server>__*`), `exec` and an empty list reject the call; in code mode
+  the agent keeps `exec`, which can call only the listed tools. An entry that
+  names no tool, such as `'Bash'`, resolves the call to null with the reason
+  recorded, and so does a list that shares no tool with the `agentType`'s own
+  allowlist or whose every tool is denied. A `schema` agent is also given
+  `structured_output`. A correctly named tool this session does not have, or one
+  no subagent may use (such as `todo_write`), is simply not given, as with an
+  `agentType` allowlist. Built-in spellings, order and duplicates do not change
+  the resume key; other spellings do.
 
 Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
-EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType`. A
-subagent therefore cannot fan out further and cannot ask anyone anything: the
-script owns all fan-out, and every ambiguity has to be resolved in the prompt
-it is given. Never ask a subagent to spawn its own verifiers — dispatch them
-from the script.
+EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType` or
+their `tools`. A subagent therefore cannot fan out further and cannot ask anyone
+anything: the script owns all fan-out, and every ambiguity has to be resolved in
+the prompt it is given. Never ask a subagent to spawn its own verifiers —
+dispatch them from the script.
 
 ## What agent() returns
 
@@ -221,6 +237,15 @@ at its index.
 - Tokens: a token target or cap may be in effect — read `budget.total`
   (`null` = uncapped) before committing to a large fan-out, because once it is
   reached every further `agent()` call is refused.
+- Size guideline: the tool description states the session's guideline — small
+  (5 agents), medium (15, the default) or large (50) — or none when the user
+  set it to unrestricted. It is advisory: follow it unless the user's prompt
+  calls for a different scale. A running workflow that schedules more agents
+  than the guideline (25 when unrestricted) or projects past ~1.5M output
+  tokens is flagged to the user as a large workflow; it is not stopped.
+- The user can steer size from the prompt ("use a small workflow, 5 agents
+  max") or with the Dynamic Workflow Size setting. A change made mid-session
+  arrives as a reminder that replaces the guideline in the description.
 
 ## Default to `pipeline()`
 
@@ -268,9 +293,9 @@ truncation reads as full coverage, which is worse than a smaller honest result.
 
 ## Saved workflows and workflow()
 
-`workflow(nameOrRef, args?)` runs a saved workflow inline under this run's caps
-and nests one level only — a workflow reached through `workflow()` cannot call
-`workflow()` itself, and doing so throws.
+`workflow(nameOrRef, args?, { stepId }?)` shares this run's caps. Calls have
+individual traces grouping their agents. It nests one level only;
+a nested `workflow()` call throws.
 
 It takes one of two forms. `workflow('<name>')` resolves a name against
 `<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
@@ -286,8 +311,7 @@ inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
 other thunk rejection — with no agent dispatched and nothing in the failures
 list — so null-check a `workflow()` result too.
 
-To create or edit a saved workflow, use the `workflow-creator` skill — it owns
-the file layout, naming rules, and the save round-trip.
+Use the `workflow-creator` skill to create or edit saved workflows.
 
 ## Resume and diagnostics
 
